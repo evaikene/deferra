@@ -1,0 +1,19 @@
+CompileFlags:
+  Add: [-xc++, -std=c++17, -Wall, -Wno-missing-prototypes]
+  Remove: [-mno-direct-extern-access]
+  CompilationDatabase: Ancestors
+Diagnostics:
+  MissingIncludes: None
+  UnusedIncludes: Strict
+  ClangTidy:
+    Add: [performance*, modernize*, readability*, bugprone*]
+    CheckOptions:
+      readability-implicit-bool-conversion.AllowPointerConditions: true
+    Remove: [
+      readability-function-cognitive-complexity,
+      readability-convert-member-functions-to-static,
+      modernize-use-nodiscard,
+      modernize-avoid-c-arrays,
+      readability-identifier-length,
+      bugprone-easily-swappable-parameters
+    ]
