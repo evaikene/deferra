@@ -4,3 +4,8 @@ find_package(Catch2 CONFIG REQUIRED)
 set(TARGET "object-test")
 add_executable(${TARGET} object-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+
+# Signal test
+set(TARGET "signal-test")
+add_executable(${TARGET} signal-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)

@@ -3,15 +3,12 @@
 
 #include <cassert>
 
-namespace df::core {
+namespace jb::core {
 
 Object::Object(Object* parent)
-    : _d(std::make_unique<priv::ObjectData>())
+    : _d(std::make_shared<priv::ObjectData>())
 {
-    if (parent) {
-        _d->parent = parent;
-        _d->parent->_d->add_child(this);
-    }
+    set_parent(parent);
 }
 
 Object::~Object()
@@ -24,6 +21,36 @@ Object::~Object()
         // child object will remove itself from our list in the destructor
         delete _d->children.back();
     }
+
+    // release private data and invalidate token
+    _d.reset();
+
+    // emit the `destroyed` signal
+    // the token is already gone and no signal can be delivered back to this
+    // object.
+    destroyed.emit();
+}
+
+void Object::delete_later()
+{
+    assert(event_loop());
+
+    auto tok = token();
+    event_loop()->post([this, tok]() -> void {
+        if (auto alive = tok.lock()) {
+            delete this;
+        }
+    });
+}
+
+auto Object::token() const -> std::weak_ptr<priv::ObjectToken>
+{
+    return _d;
+}
+
+auto Object::event_loop() const -> EventLoop*
+{
+    return _d->thread_ctx->event_loop();
 }
 
 void Object::set_parent(Object* parent)
@@ -42,4 +69,4 @@ void Object::set_parent(Object* parent)
     }
 }
 
-} // namespace df::core
+} // namespace jb::core
