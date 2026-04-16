@@ -4,16 +4,21 @@ message("** Setting up ${TARGET}")
 
 # Public headers exposed to library users
 set(HDRS
+    connectable.hpp
+    event_loop.hpp
     object.hpp
+    signal.hpp
 )
 
 # Private headers not exposed to library users
 set(PRIV_HDRS
+    object_priv.hpp
     thread_context.hpp
 )
 
 # Library source files
 set(SRCS
+    event_loop.cpp
     object.cpp
     thread_context.cpp
 )

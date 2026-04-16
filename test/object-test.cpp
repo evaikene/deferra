@@ -4,24 +4,26 @@
 #undef protected
 #undef private
 
-#include "object_priv.hpp"
+#include "event_loop.hpp"
+#include "object_priv.hpp" // IWYU pragma: keep for accessing Object private data
 #include "thread_context.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 namespace {
-    
+
 int object_counter = 0;
 
-class Testable : public df::core::Object {
+/// Testable class that counts the number of existing instances.
+class Testable : public jb::core::Object {
 public:
 
     explicit Testable(Testable* parent = nullptr)
-        : df::core::Object(parent)
+        : jb::core::Object(parent)
     {
         ++object_counter;
     }
-    
+
     ~Testable() override
     {
         --object_counter;
@@ -30,23 +32,26 @@ public:
 
 } // anonymous namespace
 
-TEST_CASE("constructors", "[Object]")
+TEST_CASE("Object basics", "[core]")
 {
     // default constructor
     {
         object_counter = 0;
 
         auto* obj = new Testable();
+        auto token = obj->token();
 
         REQUIRE(obj->_d->parent == nullptr);
         REQUIRE(obj->_d->children.empty());
-        REQUIRE(obj->_d->thread_ctx == df::core::ThreadCtx::current());
+        REQUIRE(obj->_d->thread_ctx == jb::core::ThreadCtx::current());
+        REQUIRE(token.lock());
 
         delete obj;
+        REQUIRE(!token.lock());
 
         REQUIRE(object_counter == 0);
     }
-    
+
     // constructor with a parent
     {
         object_counter = 0;
@@ -163,5 +168,45 @@ TEST_CASE("constructors", "[Object]")
         delete parent;
 
         REQUIRE(object_counter == 0);
+    }
+
+    // `destroyed` signal
+    {
+        object_counter = 0;
+
+        // create receiver and object to be destroyed
+        auto* receiver = new jb::core::Object;
+        auto* obj = new Testable;
+        bool destroyed = false;
+        obj->destroyed.connect(receiver, [&destroyed]() -> void {
+            destroyed = true;
+        });
+
+        // destroy the object and check the signal is emitted
+        delete obj;
+        REQUIRE(destroyed);
+
+        delete receiver;
+    }
+
+    // `delete_later` method
+    {
+        object_counter = 0;
+
+        jb::core::EventLoop event_loop;
+        jb::core::ThreadCtx::current()->set_event_loop(&event_loop);
+
+        auto* obj = new Testable;
+        REQUIRE_NOTHROW(obj->delete_later());
+
+        // object should not be deleted until the event loop processes events
+        REQUIRE(object_counter == 1);
+
+        // processing events should delete the object
+        event_loop.process_events();
+        REQUIRE(object_counter == 0);
+
+        // cleanup
+        jb::core::ThreadCtx::current()->set_event_loop(nullptr);
     }
 }

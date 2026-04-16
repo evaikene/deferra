@@ -1,16 +1,17 @@
 #pragma once
 
+#include "connectable.hpp"
 #include "object.hpp"
 #include "thread_context.hpp"
 
 #include <cassert>
 #include <vector>
 
-namespace df::core::priv {
+namespace jb::core::priv {
 
-struct ObjectData {
-    
-    /// Thread affinity (never NULL)
+struct ObjectData : public ObjectToken {
+
+    /// Thread affinity (never nullptr)
     ThreadCtx const* thread_ctx = ThreadCtx::current();
 
     /// Optional parent
@@ -38,7 +39,7 @@ struct ObjectData {
     {
         // only children within the same thread can be added
         assert(thread_ctx == child->_d->thread_ctx);
-    
+
         if (find_child(child) != children.cend()) {
             return; // already in the list
         }
@@ -57,4 +58,4 @@ struct ObjectData {
     }
 };
 
-} // namespace df::core::priv
+} // namespace jb::core::priv
