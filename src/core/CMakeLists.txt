@@ -4,6 +4,7 @@ message("** Setting up ${TARGET}")
 
 # Public headers exposed to library users
 set(HDRS
+    application.hpp
     connectable.hpp
     event_loop.hpp
     object.hpp
@@ -18,6 +19,7 @@ set(PRIV_HDRS
 
 # Library source files
 set(SRCS
+    application.cpp
     event_loop.cpp
     object.cpp
     thread_context.cpp

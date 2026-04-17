@@ -9,3 +9,8 @@ target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 set(TARGET "signal-test")
 add_executable(${TARGET} signal-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+
+# Application test
+set(TARGET "application-test")
+add_executable(${TARGET} application-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
