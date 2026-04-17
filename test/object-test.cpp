@@ -4,7 +4,7 @@
 #undef protected
 #undef private
 
-#include "event_loop.hpp"
+#include "application.hpp"
 #include "object_priv.hpp" // IWYU pragma: keep for accessing Object private data
 #include "thread_context.hpp"
 
@@ -193,8 +193,7 @@ TEST_CASE("Object basics", "[core]")
     {
         object_counter = 0;
 
-        jb::core::EventLoop event_loop;
-        jb::core::ThreadCtx::current()->set_event_loop(&event_loop);
+        jb::core::Application app{0, nullptr};
 
         auto* obj = new Testable;
         REQUIRE_NOTHROW(obj->delete_later());
@@ -203,10 +202,7 @@ TEST_CASE("Object basics", "[core]")
         REQUIRE(object_counter == 1);
 
         // processing events should delete the object
-        event_loop.process_events();
+        app.process_events();
         REQUIRE(object_counter == 0);
-
-        // cleanup
-        jb::core::ThreadCtx::current()->set_event_loop(nullptr);
     }
 }

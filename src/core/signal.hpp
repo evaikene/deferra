@@ -32,22 +32,18 @@ public:
     /// @param[in] type The connection type (default: Auto)
     void connect(Connectable* receiver, Slot slot, ConnectionType type = ConnectionType::Auto)
     {
-        auto* target_event_loop = receiver ? receiver->event_loop() : nullptr;
+        assert(type != ConnectionType::Queued || (receiver && receiver->event_loop()));
 
-        assert(type != ConnectionType::Queued || receiver != nullptr);
-        assert(type != ConnectionType::Queued || target_event_loop != nullptr);
-
-        Entry entry;
-        entry.receiver = receiver;
+        auto c      = std::make_shared<Connection>();
+        c->receiver = receiver;
         if (receiver) {
-            entry.token             = receiver->token();
-            entry.target_event_loop = target_event_loop;
+            c->token = receiver->token();
         }
-        entry.slot = std::move(slot);
-        entry.type = type;
+        c->slot = std::move(slot);
+        c->type = type;
 
-        std::lock_guard lock{_entries_mx};
-        _entries.push_back(std::move(entry));
+        std::lock_guard lock{_connections_mx};
+        _connections.push_back(std::move(c));
     }
 
     /// Disconnect from the signal
@@ -59,13 +55,14 @@ public:
     /// connected multiple times.
     void disconnect(Connectable* receiver, Slot slot)
     {
-        std::lock_guard lock(_entries_mx);
-        _entries.erase(std::remove_if(_entries.begin(),
-                                      _entries.end(),
-                                      [receiver, &slot](Entry const& e) -> auto {
-                                          return e.receiver == receiver && e.slot.target_type() == slot.target_type();
-                                      }),
-                       _entries.end());
+        std::lock_guard lock(_connections_mx);
+        _connections.erase(std::remove_if(_connections.begin(),
+                                          _connections.end(),
+                                          [receiver, &slot](ConnectionPtr const& e) -> auto {
+                                              return e->receiver == receiver &&
+                                                     e->slot.target_type() == slot.target_type();
+                                          }),
+                           _connections.end());
     }
 
     /// Disconnect from the signal
@@ -74,85 +71,107 @@ public:
     /// Disconnects all the connections matching the receiver.
     void disconnect(Connectable* receiver)
     {
-        std::lock_guard lock(_entries_mx);
-        _entries.erase(std::remove_if(_entries.begin(),
-                                      _entries.end(),
-                                      [receiver](Entry const& e) -> auto { return e.receiver == receiver; }),
-                       _entries.end());
+        std::lock_guard lock(_connections_mx);
+        _connections.erase(
+            std::remove_if(_connections.begin(),
+                           _connections.end(),
+                           [receiver](ConnectionPtr const& e) -> auto { return e->receiver == receiver; }),
+            _connections.end());
     }
 
+    /// Emit the signal with the given arguments
     void emit(Args... args)
     {
         auto* sender_event_loop = ThreadCtx::current()->event_loop();
 
-        std::lock_guard lock(_entries_mx);
+        // cleanup connections with destroyed receivers before emitting
+        cleanup_connections();
 
-        auto it = _entries.begin();
-        while (it != _entries.end()) {
+        // make a snapshot of the connections to call them outside the lock
+        Connections connections;
+        {
+            std::lock_guard lock(_connections_mx);
+            connections = _connections;
+        }
 
-            // ensure the receiver is still alive
-            if (it->receiver) {
-                auto token = it->token.lock();
+        // call or post the slots for all the connections
+        for (auto const& e : connections) {
+
+            // double-check that the receiver is still alive
+            if (e->receiver) {
+                auto token = e->token.lock();
                 if (!token) {
-                    it = _entries.erase(it);
                     continue;
                 }
             }
 
             // detect connection type and call or post the slot
-            if (resolve_type(*it, sender_event_loop) == ConnectionType::Direct) {
-                it->slot(args...);
+            if (resolve_type(*e, sender_event_loop) == ConnectionType::Direct) {
+                e->slot(args...);
             }
             else {
-                post_queued_signal(*it, args...);
+                post_queued_signal(*e, args...);
             }
-
-            ++it;
         }
     }
 
 private:
 
-    struct Entry {
+    struct Connection {
         Connectable*                     receiver = nullptr;
         std::weak_ptr<priv::ObjectToken> token;
-        EventLoop*                       target_event_loop = nullptr;
         Slot                             slot;
         ConnectionType                   type = ConnectionType::Auto;
     };
 
-    static auto resolve_type(Entry const& e, EventLoop* sender_event_loop) -> ConnectionType
+    using ConnectionPtr = std::shared_ptr<Connection>;
+    using Connections   = std::vector<ConnectionPtr>;
+
+    static auto resolve_type(Connection const& e, EventLoop* sender_event_loop) -> ConnectionType
     {
         if (e.type != ConnectionType::Auto) {
             return e.type;
         }
-        if (e.target_event_loop == nullptr || e.target_event_loop == sender_event_loop) {
+        auto* target_event_loop = e.receiver ? e.receiver->event_loop() : nullptr;
+        if (target_event_loop == nullptr || target_event_loop == sender_event_loop) {
             return ConnectionType::Direct;
         }
         return ConnectionType::Queued;
     }
 
-    void queue_task(EventLoop* event_loop, std::function<void()> task);
-
-    void post_queued_signal(Entry const& e, Args... args)
+    void post_queued_signal(Connection const& e, Args... args)
     {
-        assert(e.target_event_loop);
+        auto* target_event_loop = e.receiver ? e.receiver->event_loop() : nullptr;
 
-        auto* receiver = e.receiver;
+        assert(e.receiver && target_event_loop);
+
+        auto*                            receiver = e.receiver;
         std::weak_ptr<priv::ObjectToken> token;
         if (receiver) {
             token = e.token;
         }
-        auto slot  = e.slot;
-        e.target_event_loop->post([receiver, token = std::move(token), slot = std::move(slot), args...]() mutable -> void {
-            if (!receiver || token.lock()) {
-                slot(args...);
-            }
-        });
+        auto slot = e.slot;
+        target_event_loop->post(
+            [receiver, token = std::move(token), slot = std::move(slot), args...]() mutable -> void {
+                if (!receiver || token.lock()) {
+                    slot(args...);
+                }
+            });
     }
 
-    std::vector<Entry> _entries;
-    std::mutex         _entries_mx;
+    void cleanup_connections()
+    {
+        // remove connections with receivers that have been destroyed
+        std::lock_guard lock(_connections_mx);
+        _connections.erase(
+            std::remove_if(_connections.begin(),
+                           _connections.end(),
+                           [](ConnectionPtr const& e) -> auto { return e->receiver && !e->token.lock(); }),
+            _connections.end());
+    }
+
+    std::vector<std::shared_ptr<Connection>> _connections;
+    std::mutex                               _connections_mx;
 };
 
 } // namespace jb::core
