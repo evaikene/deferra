@@ -1,10 +1,11 @@
 #pragma once
 
-#include "event_loop.hpp"
 #include "object.hpp"
 #include "signal.hpp"
 
 namespace jb::core {
+
+class EventThread;
 
 /// Main application class.
 ///
@@ -13,7 +14,7 @@ namespace jb::core {
 ///
 /// There should be only one instance of this class in the application and it
 /// should be created on the main thread before any other threads are started.
-class Application : public EventLoop, public Object {
+class Application : public Object {
 public:
 
     /// Returns the global application instance
@@ -28,13 +29,24 @@ public:
     /// Destructor
     ~Application() override;
 
+    /// Returns the event thread this application is running on
+    auto thread() const -> EventThread* { return _event_loop.get(); }
+
     /// Runs the application event loop until quit is signaled to quit
     /// @return Exit code (0 for success, non-zero for failure)
     auto exec() -> int;
 
+    /// Processes all pending events in the event loop without blocking
+    /// @return True if the event loop is still running; false if it has been quit
+    auto process_events() -> bool;
+
     /// Signals the application to quit with the given exit code
     /// @param[in] exit_code Exit code to quit with (default: 0)
     void quit(int exit_code = 0);
+
+    /// Returns the exit code of the application after it has finished executing
+    /// @return Exit code of the application
+    auto exit_code() const -> int { return _exit_code; }
 
     //--- SIGNALS ---
 
@@ -48,9 +60,10 @@ private:
 
     static Application* s_instance;
 
-    int          _argc      = 0;
-    char const** _argv      = nullptr;
-    int          _exit_code = 0;
+    int                          _argc      = 0;
+    char const**                 _argv      = nullptr;
+    int                          _exit_code = 0;
+    std::unique_ptr<EventThread> _event_loop;
 };
 
 } // namespace jb::core

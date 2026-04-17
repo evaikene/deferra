@@ -8,6 +8,8 @@
 
 namespace jb::core {
 
+struct ThreadCtx;
+
 class EventLoop {
 public:
 
@@ -36,7 +38,13 @@ public:
     void run();
 
     /// Returns true if the event loop is running, false otherwise
+    ///
+    /// This method is thread-safe
     auto is_running() const -> bool { return _running.load(std::memory_order_relaxed); }
+
+    /// Returns the thread context this event loop is running on
+    /// @return Thread context this event loop is running on
+    auto thread_ctx() const -> ThreadCtx const* { return _thread_ctx.load(std::memory_order_relaxed); }
 
     /// Signals the event loop to quit
     ///
@@ -57,6 +65,7 @@ protected:
     std::mutex              _queue_mx;
     std::condition_variable _queue_cv;
     std::atomic_bool        _running{false};
+    std::atomic<ThreadCtx*> _thread_ctx;
 };
 
 } // namespace jb::core

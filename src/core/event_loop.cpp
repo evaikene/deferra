@@ -1,8 +1,14 @@
 #include "event_loop.hpp"
 
+#include "thread_context.hpp"
+
+#include <cassert>
+
 namespace jb::core {
 
-EventLoop::EventLoop() = default;
+EventLoop::EventLoop()
+    : _thread_ctx(ThreadCtx::current())
+{}
 
 EventLoop::~EventLoop() = default;
 
@@ -24,36 +30,43 @@ void EventLoop::quit()
 
 void EventLoop::run()
 {
+    // set the thread context for this event loop
+    auto* orig_ctx = _thread_ctx.load(std::memory_order_relaxed);
+    _thread_ctx.store(ThreadCtx::current(), std::memory_order_relaxed);
+
     _running.store(true, std::memory_order_relaxed);
     while (_running.load(std::memory_order_relaxed)) {
         Task task;
         {
             std::unique_lock lock(_queue_mx);
             _queue_cv.wait(lock, [this] () -> bool {
-                return !_queue.empty() || !_running.load(std::memory_order_relaxed);
+                return !_queue.empty();
             });
-            if (!_running.load(std::memory_order_relaxed) && _queue.empty()) {
-                break;
-            }
             task = std::move(_queue.front());
             _queue.pop();
         }
         task();
     }
+
+    // drain the queue to ensure all posted tasks are processed before exiting
+    process_events();
+
+    // restore the original thread context (if any)
+    _thread_ctx.store(orig_ctx, std::memory_order_relaxed);
 }
 
 auto EventLoop::process_events() -> bool
 {
-    _running.store(true, std::memory_order_relaxed);
+    assert(_thread_ctx.load(std::memory_order_relaxed) == ThreadCtx::current());
+    if (_thread_ctx.load(std::memory_order_relaxed) != ThreadCtx::current()) {
+        return false; // can only be called from the thread running the event loop
+    }
 
-    // empty the queue first to allow new tasks to be posted while processing
+    // use a local copy for processing so that the event queue can be unlocked
     std::queue<Task> tasks;
     {
         std::lock_guard lock{_queue_mx};
-        while (!_queue.empty()) {
-            tasks.push(std::move(_queue.front()));
-            _queue.pop();
-        }
+        tasks.swap(_queue);
     }
 
     // process the tasks outside the lock to allow new tasks to be posted while processing

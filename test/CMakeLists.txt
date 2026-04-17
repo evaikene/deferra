@@ -14,3 +14,8 @@ target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 set(TARGET "application-test")
 add_executable(${TARGET} application-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+
+# Threaded event loop test
+set(TARGET "event-thread-test")
+add_executable(${TARGET} event-thread-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)

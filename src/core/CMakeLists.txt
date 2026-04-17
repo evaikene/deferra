@@ -7,6 +7,7 @@ set(HDRS
     application.hpp
     connectable.hpp
     event_loop.hpp
+    event_thread.hpp
     object.hpp
     signal.hpp
 )
@@ -21,7 +22,9 @@ set(PRIV_HDRS
 set(SRCS
     application.cpp
     event_loop.cpp
+    event_thread.cpp
     object.cpp
+    signal.cpp
     thread_context.cpp
 )
 

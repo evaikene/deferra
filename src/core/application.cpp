@@ -1,5 +1,7 @@
 #include "application.hpp"
 
+#include "event_loop.hpp"
+#include "event_thread.hpp"
 #include "thread_context.hpp"
 
 #include <cassert>
@@ -11,11 +13,13 @@ Application* Application::s_instance = nullptr;
 Application::Application(int argc, char const* argv[])
     : _argc(argc)
     , _argv(argv)
+    , _event_loop(std::make_unique<EventThread>())
 {
     assert(s_instance == nullptr);
 
     s_instance = this;
-    ThreadCtx::current()->set_event_loop(this);
+    ThreadCtx::current()->set_event_loop(_event_loop->as_event_loop());
+    set_event_loop(_event_loop->as_event_loop());
 }
 
 Application::~Application()
@@ -27,16 +31,21 @@ Application::~Application()
 auto Application::exec() -> int
 {
     about_to_start.emit();
-    EventLoop::run();
+    _event_loop->as_event_loop()->run();
     about_to_quit.emit();
 
     return _exit_code;
 }
 
+auto Application::process_events() -> bool
+{
+    return _event_loop->as_event_loop()->process_events();
+}
+
 void Application::quit(int exit_code)
 {
     _exit_code = exit_code;
-    EventLoop::quit();
+    _event_loop->quit();
 }
 
 } // namespace jb::core
