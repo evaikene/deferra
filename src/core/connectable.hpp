@@ -26,7 +26,7 @@ public:
     /// Expires before any member of the derived class is destroyed.
     [[nodiscard]] virtual auto token() const -> std::weak_ptr<priv::ObjectToken> = 0;
 
-    /// The event loop of the thread this object lives on.
+    /// The event loop this object lives on.
     virtual auto event_loop() const -> EventLoop* = 0;
 };
 

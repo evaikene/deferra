@@ -12,7 +12,10 @@ namespace jb::core::priv {
 struct ObjectData : public ObjectToken {
 
     /// Thread affinity (never nullptr)
-    ThreadCtx const* thread_ctx = ThreadCtx::current();
+    jb::core::ThreadCtx const* thread_ctx = jb::core::ThreadCtx::current();
+
+    /// Event loop this object lives on (can be nullptr if not set)
+    EventLoop* event_loop = jb::core::ThreadCtx::current()->event_loop();
 
     /// Optional parent
     Object* parent = nullptr;

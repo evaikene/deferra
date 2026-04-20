@@ -25,7 +25,7 @@ TEST_CASE("Main Application", "[core]")
 
         // Thread context should have the application event loop set
         auto* thread_ctx = ThreadCtx::current();
-        REQUIRE(thread_ctx->event_loop() == &app);
+        REQUIRE(thread_ctx->event_loop() == app.event_loop());
     }
 
     REQUIRE(Application::instance() == nullptr);

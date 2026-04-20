@@ -5,21 +5,24 @@
 #undef private
 
 #include "application.hpp"
+#include "event_thread.hpp"
 #include "object_priv.hpp" // IWYU pragma: keep for accessing Object private data
 #include "thread_context.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
+using namespace jb::core;
+
 namespace {
 
-int object_counter = 0;
+std::atomic<int> object_counter{0};
 
 /// Testable class that counts the number of existing instances.
-class Testable : public jb::core::Object {
+class Testable : public Object {
 public:
 
     explicit Testable(Testable* parent = nullptr)
-        : jb::core::Object(parent)
+        : Object(parent)
     {
         ++object_counter;
     }
@@ -43,7 +46,7 @@ TEST_CASE("Object basics", "[core]")
 
         REQUIRE(obj->_d->parent == nullptr);
         REQUIRE(obj->_d->children.empty());
-        REQUIRE(obj->_d->thread_ctx == jb::core::ThreadCtx::current());
+        REQUIRE(obj->_d->thread_ctx == ThreadCtx::current());
         REQUIRE(token.lock());
 
         delete obj;
@@ -204,5 +207,50 @@ TEST_CASE("Object basics", "[core]")
         // processing events should delete the object
         app.process_events();
         REQUIRE(object_counter == 0);
+    }
+
+    // `move_to_thread` method
+    {
+        object_counter = 0;
+
+        // default event loop
+        Application app{0, nullptr};
+
+        auto* thread = new EventThread;
+        auto* obj = new Testable;
+        auto* child = new Testable{obj};
+
+        // moving the child to a different thread should fail because it has a parent
+        REQUIRE_FALSE(child->move_to_thread(thread));
+
+        // move object and all the children to the thread
+        REQUIRE(obj->move_to_thread(thread));
+
+        // moving the object again should still succeed, because the threaded event loop is not running yet
+        REQUIRE(obj->move_to_thread(app.thread()));
+        REQUIRE(obj->move_to_thread(thread));
+
+        // run the threaded event loop
+        thread->exec(true);
+
+        // moving the object should now fail
+        REQUIRE_FALSE(obj->move_to_thread(app.thread()));
+
+        // verify the object's event loop is the one from the thread, not the main thread
+        REQUIRE(obj->event_loop() != app.thread()->as_event_loop());
+        REQUIRE(obj->event_loop() == thread->as_event_loop());
+        REQUIRE(child->event_loop() == thread->as_event_loop());
+
+        // let the threaded event loop delete the object
+        obj->delete_later();
+
+        // stop the threaded event loop and wait for it to finish
+        thread->quit();
+        thread->wait();
+
+        REQUIRE(object_counter == 0);
+
+        // cleanup
+        delete thread;
     }
 }
