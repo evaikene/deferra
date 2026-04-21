@@ -19,3 +19,8 @@ target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 set(TARGET "event-thread-test")
 add_executable(${TARGET} event-thread-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+
+# Shared data test
+set(TARGET "shared-data-test")
+add_executable(${TARGET} shared-data-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)

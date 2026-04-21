@@ -9,6 +9,7 @@ set(HDRS
     event_loop.hpp
     event_thread.hpp
     object.hpp
+    shared_data.hpp
     signal.hpp
 )
 
