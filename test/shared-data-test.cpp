@@ -1,8 +1,4 @@
-#define private public
-#define protected public
 #include "shared_data.hpp"
-#undef protected
-#undef private
 
 #include <catch2/catch_test_macros.hpp>
 

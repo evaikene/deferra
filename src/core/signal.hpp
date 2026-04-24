@@ -105,6 +105,13 @@ public:
                        _entries.end());
     }
 
+    /// Returns the number of connections currently connected to the signal
+    auto connection_count() const -> std::size_t
+    {
+        std::lock_guard lock(_entries_mx);
+        return _entries.size();
+    }
+
     /// Emit the signal with the given arguments
     void emit(Args... args)
     {
@@ -202,7 +209,7 @@ private:
 
     inline static std::atomic<connection_id_t> s_next_id;
     std::vector<std::shared_ptr<Entry>> _entries;
-    std::mutex                          _entries_mx;
+    mutable std::mutex                  _entries_mx;
 };
 
 } // namespace jb::core

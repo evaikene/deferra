@@ -1,8 +1,4 @@
-#define private public
-#define protected public
 #include "event_thread.hpp"
-#undef protected
-#undef private
 
 #include "application.hpp"
 #include "thread_context.hpp"
