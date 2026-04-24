@@ -1,8 +1,4 @@
-#define private public
-#define protected public
 #include "object.hpp"
-#undef protected
-#undef private
 
 #include "application.hpp"
 #include "event_thread.hpp"
@@ -44,9 +40,9 @@ TEST_CASE("Object basics", "[core]")
         auto* obj = new Testable();
         auto token = obj->token();
 
-        REQUIRE(obj->_d->parent == nullptr);
-        REQUIRE(obj->_d->children.empty());
-        REQUIRE(obj->_d->thread_ctx == ThreadCtx::current());
+        REQUIRE(obj->parent() == nullptr);
+        REQUIRE(obj->children().empty());
+        REQUIRE(obj->thread_ctx() == ThreadCtx::current());
         REQUIRE(token.lock());
 
         delete obj;
@@ -62,9 +58,9 @@ TEST_CASE("Object basics", "[core]")
         auto* parent = new Testable();
         auto* child = new Testable(parent);
 
-        REQUIRE(child->_d->parent == parent);
-        REQUIRE(parent->_d->children.size() == 1);
-        REQUIRE(parent->_d->children.back() == child);
+        REQUIRE(child->parent() == parent);
+        REQUIRE(parent->children().size() == 1);
+        REQUIRE(parent->children().back() == child);
 
         delete parent;
 
@@ -79,9 +75,9 @@ TEST_CASE("Object basics", "[core]")
         auto* child = new Testable();
 
         child->set_parent(parent);
-        REQUIRE(child->_d->parent == parent);
-        REQUIRE(parent->_d->children.size() == 1);
-        REQUIRE(parent->_d->children.back() == child);
+        REQUIRE(child->parent() == parent);
+        REQUIRE(parent->children().size() == 1);
+        REQUIRE(parent->children().back() == child);
 
         delete parent;
 
@@ -99,9 +95,9 @@ TEST_CASE("Object basics", "[core]")
         auto* child = new Testable();
 
         child->set_parent(parent);
-        REQUIRE(child->_d->parent == parent);
-        REQUIRE(parent->_d->children.size() == 2);
-        REQUIRE(parent->_d->children.back() == child);
+        REQUIRE(child->parent() == parent);
+        REQUIRE(parent->children().size() == 2);
+        REQUIRE(parent->children().back() == child);
 
         delete parent;
 
@@ -116,8 +112,8 @@ TEST_CASE("Object basics", "[core]")
         auto* child = new Testable(parent);
 
         child->set_parent(nullptr);
-        REQUIRE(child->_d->parent == nullptr);
-        REQUIRE(parent->_d->children.empty());
+        REQUIRE(child->parent() == nullptr);
+        REQUIRE(parent->children().empty());
 
         delete parent;
         delete child;
@@ -141,8 +137,8 @@ TEST_CASE("Object basics", "[core]")
         }
 
         child->set_parent(nullptr);
-        REQUIRE(child->_d->parent == nullptr);
-        REQUIRE(parent->_d->children.size() == 2);
+        REQUIRE(child->parent() == nullptr);
+        REQUIRE(parent->children().size() == 2);
 
         delete parent;
         delete child;
@@ -166,7 +162,7 @@ TEST_CASE("Object basics", "[core]")
         }
 
         delete child;
-        REQUIRE(parent->_d->children.size() == 2);
+        REQUIRE(parent->children().size() == 2);
 
         delete parent;
 

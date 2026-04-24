@@ -1,8 +1,4 @@
-#define private public
-#define protected public
 #include "application.hpp"
-#undef protected
-#undef private
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -20,8 +16,6 @@ TEST_CASE("Main Application", "[core]")
 
         Application app{argc, argv};
         REQUIRE(Application::instance() != nullptr);
-        REQUIRE(app._argc == argc);
-        REQUIRE(app._argv == argv);
 
         // Thread context should have the application event loop set
         auto* thread_ctx = ThreadCtx::current();

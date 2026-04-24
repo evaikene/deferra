@@ -1,8 +1,4 @@
-#define private   public
-#define protected public
 #include "signal.hpp"
-#undef protected
-#undef private
 
 #include "application.hpp"
 #include "event_thread.hpp"
@@ -136,7 +132,7 @@ TEST_CASE("Queued signal-slot connection", "[core]")
         obj->incremented.connect(receiver, &Testable::incremented_slot, ConnectionType::Queued);
 
         // Signal should have 3 connections
-        REQUIRE(obj->incremented._entries.size() == 3);
+        REQUIRE(obj->incremented.connection_count() == 3);
 
         // incrementing the testable should NOT call slots yet
         REQUIRE(obj->inc() == 1);
@@ -160,7 +156,7 @@ TEST_CASE("Queued signal-slot connection", "[core]")
         REQUIRE(lambda_value == 2);
 
         // Signal should have no connections left
-        REQUIRE(obj->incremented._entries.empty());
+        REQUIRE(obj->incremented.connection_count() == 0);
 
         delete obj;
     }
@@ -180,7 +176,7 @@ TEST_CASE("Disconnecting signal-slot connections", "[core]")
     auto c2 = obj->incremented.connect(receiver, slot);
 
     // Signal should have 2 connections
-    REQUIRE(obj->incremented._entries.size() == 2);
+    REQUIRE(obj->incremented.connection_count() == 2);
 
     // incrementing the testable should call slots and update values
     REQUIRE(obj->inc() == 1);
@@ -193,7 +189,7 @@ TEST_CASE("Disconnecting signal-slot connections", "[core]")
     obj->incremented.disconnect(c2);
 
     // Signal should have no connections left
-    REQUIRE(obj->incremented._entries.empty());
+    REQUIRE(obj->incremented.connection_count() == 0);
 
     // incrementing the testable should no longer call the disconnected slots
     REQUIRE(obj->inc() == 3);
