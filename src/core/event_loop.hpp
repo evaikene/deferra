@@ -7,11 +7,30 @@
 #include <atomic>
 #include <mutex>
 #include <queue>
+#include <unordered_map>
 
 namespace jb::core {
 
 struct ThreadCtx;
 
+/// EventLoop is a single-threaded event loop that supports posting tasks, timers,
+/// and file descriptor watches.
+///
+/// EventLoop class is not meant to be used directly by most users. Instead, it is used
+/// internally by Application and EventThread classes. However, it can be used directly
+/// in some cases where a custom event loop is needed. It provides a simple and efficient
+/// way to run an event loop on a single thread.
+///
+/// Threading contract:
+///
+/// * post() and quit() are thread-safe and may be called from any thread.
+/// * All other methods (timers, fd watching) MUST be called from the thread that
+///   owns this loop - i.e. the thread currently inside run().
+/// * To schedule a timer or watch an fd from another thread, wrap the call
+///   in post():
+///     loop.post([&loop, fd] {
+///         loop.watch_fd(fd, FdEvent::Read, ...);
+///     });
 class EventLoop {
 public:
 
@@ -32,23 +51,47 @@ public:
     /// @param[in] delay Delay after which the task will be executed
     /// @param[in] task Task to post
     /// @return Timer handle
+    ///
+    /// This method is NOT thread-safe and must be called from the thread running the event loop.
     auto post_delayed(Duration delay, Task task) -> TimerHandle;
 
     /// Post a task that will be executed at the given time point
     /// @param[in] when Time point at which the task will be executed
     /// @param[in] task Task to post
     /// @return Timer handle
+    ///
+    /// This method is NOT thread-safe and must be called from the thread running the event loop.
     auto post_at(TimePoint when, Task task) -> TimerHandle;
 
     /// Post a repeating task that will be executed repeatedly at the given interval
     /// @param[in] interval Interval at which the task will be executed
     /// @param[in] task Task to post
     /// @return Timer handle
+    ///
+    /// This method is NOT thread-safe and must be called from the thread running the event loop.
     auto post_repeating(Duration interval, Task task) -> TimerHandle;
 
     /// Cancels a timer by its handle. If the timer is already executed or cancelled, this is a no-op.
     /// @param[in] handle Timer handle to cancel
+    ///
+    /// This method is NOT thread-safe and must be called from the thread running the event loop.
     void cancel_timer(TimerHandle handle);
+
+    /// Add a file descriptor to be monitored for the specified events. The callback
+    /// will be called when the events are ready.
+    /// @param[in] fd File descriptor to monitor
+    /// @param[in] events Events to monitor (read/write)
+    /// @param[in] callback Callback to call when the events are ready
+    /// @return Watch handle that can be used to remove the watch later
+    ///
+    /// This method is NOT thread-safe and must be called from the thread running the event loop.
+    auto watch_fd(int fd, FdEvents events, FdCallback callback) -> FdWatch;
+
+    /// Remove a file descriptor watch by its handle
+    /// @param[in] handle Watch handle to remove
+    ///
+    /// This method is NOT thread-safe and must be called from the thread running the event loop.
+    void unwatch_fd(FdWatch handle);
 
     /// Runs the event loop until quit is signaled
     ///
@@ -61,11 +104,13 @@ public:
 
     /// Returns true if the event loop is running, false otherwise
     ///
-    /// This method is thread-safe
+    /// This method is thread-safe and can be called from any thread.
     auto is_running() const -> bool { return _running.load(std::memory_order_relaxed); }
 
     /// Returns the thread context this event loop is running on
     /// @return Thread context this event loop is running on
+    ///
+    /// This method is thread-safe and can be called from any thread.
     auto thread_ctx() const -> ThreadCtx const* { return _thread_ctx.load(std::memory_order_relaxed); }
 
     /// Signals the event loop to quit
@@ -74,29 +119,47 @@ public:
     /// the event loop to quit.
     void quit();
 
-    /// Processes queued tasks
-    /// @return true if the event loop is still running, false if it has been
-    /// signaled to quit.
+    /// Processes specified events until there are no more events to process
+    /// @param[in] flags Events to process (tasks, timers, watchers)
+    /// @return true if the event loop is still running, false if it has been signaled to quit.
     ///
-    /// This method can be used to run the event loop manually. All the queued tasks
-    /// will be called in the context of the calling thread.
-    auto process_events() -> bool;
+    /// This method is NOT thread-safe and must be called from the thread running the event loop.
+    auto process_events(EventFlags flags) -> bool;
+
+    /// Processes specified events for `ms` milliseconds, or until there are no more events
+    /// to process, whichever comes first.
+    /// @param[in] flags Events to process (tasks, timers, watchers)
+    /// @param[in] ms Maximum time to process events in milliseconds (negative means no timeout)
+    /// @return true if the event loop is still running, false if it has been signaled to quit.
+    ///
+    /// The `ms` timeout applies only to fd events. If `EventFlag::Watchers` is not set in `flags`,
+    /// then `ms` is ignored and this method behaves the same as `process_events(flags)`.
+    ///
+    /// This method is NOT thread-safe and must be called from the thread running the event loop.
+    auto process_events(EventFlags flags, int ms) -> bool;
 
 private:
 
-    std::unique_ptr<priv::Backend> _backend;
-    std::queue<Task>               _task_queue;
-    std::mutex                     _task_queue_mx;
-
-    priv::TimerHeap _timers;
-
-    std::atomic_bool           _running{false};
-    std::atomic<std::uint32_t> _next_watch_id{1};
+    struct WatchEntry {
+        FdCallback callback;
+        FdEvents   events;
+    };
 
     std::atomic<ThreadCtx*> _thread_ctx;
+    std::atomic_bool        _running{false};
 
-    auto compute_timeout_ms() -> int;
-    void dispatch_fd(priv::ReadyEvent& ev) const;
+    // Cross-thread inbox - thread-safe
+    std::queue<Task> _task_queue;
+    std::mutex       _task_queue_mx;
+
+    // Loop-thread-only state - NOT thread-safe
+    std::unique_ptr<priv::Backend>      _backend;
+    priv::TimerHeap                     _timers;
+    std::unordered_map<int, WatchEntry> _watchers;
+
+    auto assert_on_loop_thread() const -> bool;
+    auto compute_timeout_ms(int max_timeout_ms) -> int;
+    void dispatch_fd(priv::ReadyEvent const& ev) const;
     void drain_task_queue();
 };
 

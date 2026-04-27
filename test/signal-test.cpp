@@ -142,7 +142,7 @@ TEST_CASE("Queued signal-slot connection", "[core]")
         REQUIRE(receiver->captured_value == 0);
 
         // processing events should call the queued slots and update values
-        app.process_events();
+        app.process_events(EventFlag::Tasks);
         REQUIRE(captured_value == 2);
         REQUIRE(lambda_value == 2);
         REQUIRE(receiver->captured_value == 2);
@@ -151,7 +151,7 @@ TEST_CASE("Queued signal-slot connection", "[core]")
 
         // after the receiver is deleted, slots should no longer be called
         REQUIRE(obj->inc() == 3);
-        app.process_events();
+        app.process_events(EventFlag::Tasks);
         REQUIRE(captured_value == 2);
         REQUIRE(lambda_value == 2);
 

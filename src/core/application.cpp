@@ -37,9 +37,14 @@ auto Application::exec() -> int
     return _exit_code;
 }
 
-auto Application::process_events() -> bool
+auto Application::process_events(EventFlags flags) -> bool
 {
-    return _event_loop->as_event_loop()->process_events();
+    return _event_loop->as_event_loop()->process_events(flags);
+}
+
+auto Application::process_events(EventFlags flags, int ms) -> bool
+{
+    return _event_loop->as_event_loop()->process_events(flags, ms);
 }
 
 void Application::quit(int exit_code)
