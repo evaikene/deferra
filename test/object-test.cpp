@@ -201,7 +201,7 @@ TEST_CASE("Object basics", "[core]")
         REQUIRE(object_counter == 1);
 
         // processing events should delete the object
-        app.process_events();
+        app.process_events(EventFlag::Tasks);
         REQUIRE(object_counter == 0);
     }
 

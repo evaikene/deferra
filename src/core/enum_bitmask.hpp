@@ -20,7 +20,7 @@ public:
 
     constexpr enum_bitmask() noexcept = default;
 
-    constexpr explicit enum_bitmask(E f) noexcept
+    constexpr enum_bitmask(E f) noexcept
         : _value{static_cast<U>(f)}
     {}
 

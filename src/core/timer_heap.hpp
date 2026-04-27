@@ -3,10 +3,7 @@
 #include "event_loop_types.hpp"
 
 #include <algorithm>
-#include <atomic>
-#include <mutex>
 #include <optional>
-#include <queue>
 #include <unordered_set>
 #include <vector>
 
@@ -35,7 +32,6 @@ public:
     /// avoid reallocations if the number of timers is known in advance.
     void reserve(std::size_t count)
     {
-        std::lock_guard lock{_mx};
         _heap.reserve(count);
     }
 
@@ -43,26 +39,21 @@ public:
     auto start(Task cb, TimePoint deadline, Duration interval = {}) -> TimerHandle
     {
         auto id = _next_id++;
-        {
-            std::lock_guard lock{_mx};
-            push_heap({id, std::move(cb), deadline, interval});
-            _timers.insert(id);
-        }
+        push_heap({id, std::move(cb), deadline, interval});
+        _timers.insert(id);
+
         return {id};
     }
 
     /// Cancel a timer by its handle. If the timer is already executed or cancelled, this is a no-op.
     void cancel(TimerHandle h)
     {
-        std::lock_guard lock{_mx};
         _timers.erase(h.id);
     }
 
     /// Returns the deadline of the next live timer, or nullopt
     auto next_deadline() -> std::optional<TimePoint>
     {
-        std::lock_guard lock{_mx};
-
         while (!_heap.empty()) {
             if (!discard_cancelled_top()) {
                 return std::nullopt;
@@ -78,56 +69,40 @@ public:
     /// Pop and invoke all the timers whose deadline <= now
     void fire_expired(TimePoint now)
     {
-        // collect all the expired timers in a separate queue to minimize the time we hold the lock
-        std::queue<TimerEntry> local;
-        {
-            std::lock_guard lock{_mx};
-
-            while (true) {
-                if (!discard_cancelled_top()) {
-                    break;
-                }
-
-                auto const& top = _heap.front();
-                if (top.deadline > now) {
-                    break;
-                }
-
-                local.push(pop_heap());
+        // fire all the expired timers
+        while (true) {
+            if (!discard_cancelled_top()) {
+                break;
             }
-        }
 
-        // fire the expired timers without holding the lock
-        while (!local.empty()) {
-            auto entry = std::move(local.front());
-            local.pop();
+            // check for deadline
+            auto const& top = _heap.front();
+            if (top.deadline > now) {
+                break;
+            }
 
-            entry.callback(); // fire
+            // pop the entry and fire it
+            auto entry = pop_heap();
+            entry.callback();
 
-            bool repeating_timer = entry.interval.count() > 0;
-            {
-                std::lock_guard lock{_mx};
-                repeating_timer &= (_timers.count(entry.id) > 0);
-                if (!repeating_timer) {
-                    _timers.erase(entry.id);
-                }
-                else {
-                    // repeating: re-arm relative to original deadline
-                    entry.deadline += entry.interval;
-
-                    _timers.insert(entry.id);
-                    push_heap(std::move(entry));
-                }
+            // check for repeating timers that were not cancelled by the callback
+            bool repeating_timer = (entry.interval.count() > 0) && (_timers.count(entry.id) > 0);
+            if (repeating_timer) {
+                // re-arm relative to the original deadline
+                entry.deadline += entry.interval;
+                push_heap(std::move(entry));
+            }
+            else {
+                _timers.erase(entry.id);
             }
         }
     }
 
 private:
 
-    mutable std::mutex                    _mx;
     std::vector<TimerEntry>               _heap;
     std::unordered_set<TimerHandle::id_t> _timers;
-    std::atomic<TimerHandle::id_t>        _next_id{1};
+    TimerHandle::id_t                     _next_id{1};
 
     /// Discard cancelled timers from the top of the heap.
     /// @return true if there are any live timers left after discarding.

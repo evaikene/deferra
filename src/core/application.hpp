@@ -1,5 +1,6 @@
 #pragma once
 
+#include "event_loop_types.hpp"
 #include "object.hpp"
 #include "signal.hpp"
 
@@ -36,9 +37,24 @@ public:
     /// @return Exit code (0 for success, non-zero for failure)
     auto exec() -> int;
 
-    /// Processes all pending events in the event loop without blocking
-    /// @return True if the event loop is still running; false if it has been quit
-    auto process_events() -> bool;
+    /// Processes specified events until there are no more events to process
+    /// @param[in] flags Events to process (tasks, timers, watchers)
+    /// @return true if the event loop is still running, false if it has been signaled to quit.
+    ///
+    /// This method is NOT thread-safe and must be called from the thread running the event loop.
+    auto process_events(EventFlags flags) -> bool;
+
+    /// Processes specified events for `ms` milliseconds, or until there are no more events
+    /// to process, whichever comes first.
+    /// @param[in] flags Events to process (tasks, timers, watchers)
+    /// @param[in] ms Maximum time to process events in milliseconds (negative means no timeout)
+    /// @return true if the event loop is still running, false if it has been signaled to quit.
+    ///
+    /// The `ms` timeout applies only to fd events. If `EventFlag::Watchers` is not set in `flags`,
+    /// then `ms` is ignored and this method behaves the same as `process_events(flags)`.
+    ///
+    /// This method is NOT thread-safe and must be called from the thread running the event loop.
+    auto process_events(EventFlags flags, int ms) -> bool;
 
     /// Signals the application to quit with the given exit code
     /// @param[in] exit_code Exit code to quit with (default: 0)
