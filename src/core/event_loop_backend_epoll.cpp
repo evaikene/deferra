@@ -87,7 +87,7 @@ public:
                 continue; // not a user event
             }
 
-            out[written++] = { fd, from_epoll(events[i].events) };
+            out[written++] = { .fd=fd, .events=from_epoll(events[i].events) };
         }
 
         return written;

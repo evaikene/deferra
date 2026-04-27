@@ -39,7 +39,7 @@ public:
     auto start(Task cb, TimePoint deadline, Duration interval = {}) -> TimerHandle
     {
         auto id = _next_id++;
-        push_heap({id, std::move(cb), deadline, interval});
+        push_heap({.id=id, .callback=std::move(cb), .deadline=deadline, .interval=interval});
         _timers.insert(id);
 
         return {id};
@@ -86,7 +86,7 @@ public:
             entry.callback();
 
             // check for repeating timers that were not cancelled by the callback
-            bool repeating_timer = (entry.interval.count() > 0) && (_timers.count(entry.id) > 0);
+            bool repeating_timer = (entry.interval.count() > 0) && (_timers.contains(entry.id));
             if (repeating_timer) {
                 // re-arm relative to the original deadline
                 entry.deadline += entry.interval;
@@ -110,7 +110,7 @@ private:
     {
         while (!_heap.empty()) {
             auto const& top = _heap.front();
-            if (_timers.count(top.id) > 0) {
+            if (_timers.contains(top.id)) {
                 break;
             }
 
@@ -123,12 +123,12 @@ private:
     void push_heap(TimerEntry&& e)
     {
         _heap.push_back(std::move(e));
-        std::push_heap(_heap.begin(), _heap.end(), EarliestDeadline{});
+        std::ranges::push_heap(_heap, EarliestDeadline{});
     }
 
     auto pop_heap() -> TimerEntry
     {
-        std::pop_heap(_heap.begin(), _heap.end(), EarliestDeadline{});
+        std::ranges::pop_heap(_heap, EarliestDeadline{});
         auto e = std::move(_heap.back());
         _heap.pop_back();
 

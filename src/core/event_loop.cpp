@@ -73,7 +73,7 @@ auto EventLoop::watch_fd(int fd, FdEvents events, FdCallback callback) -> FdWatc
         return {};
     }
 
-    _watchers[fd] = { std::move(callback), events };
+    _watchers[fd] = { .callback=std::move(callback), .events=events };
     _backend->add_fd(fd, events);
 
     return { fd };
@@ -104,7 +104,7 @@ void EventLoop::run()
 
     _running.store(true, std::memory_order_relaxed);
 
-    while (process_events(EventFlags{EventFlag::All})) {}
+    while (process_events(EventFlag::All)) {}
 
     // drain the queue one more time to ensure all the posted tasks are processed before exiting
     drain_task_queue();
