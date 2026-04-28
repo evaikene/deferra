@@ -93,6 +93,8 @@ TEST_CASE("Timer one-shot fires only once", "[core][timer]")
     std::this_thread::sleep_for(30ms);
     app.process_events(EventFlag::Timers);
     REQUIRE(count == 1);
+    REQUIRE_FALSE(t.is_active());
+    REQUIRE_FALSE(t.handle());
 
     std::this_thread::sleep_for(30ms);
     app.process_events(EventFlag::Timers);

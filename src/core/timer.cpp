@@ -43,13 +43,14 @@ void Timer::start()
     }
 
     // start the timer with the current interval and repeating settings
-    if (_repeating) {
+    if (_repeating && _interval.count() > 0) {
         _handle = event_loop()->post_repeating(_interval, [this]() -> void {
             timeout();
         });
     }
     else {
         _handle = event_loop()->post_delayed(_interval, [this]() -> void {
+            _handle = TimerHandle{};
             timeout();
         });
     }
