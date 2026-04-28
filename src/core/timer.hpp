@@ -9,7 +9,7 @@ namespace jb::core {
 /// Timer class that can be used to schedule a callback to be called after a certain
 /// amount of time has passed.
 ///
-/// Timer object use the event loop of the thread they are created in to schedule
+/// Timer objects use the event loop of the thread they are created in to schedule
 /// the timer events. Therefore, a Timer object must be created in a thread that has
 /// an event loop running, like the main Application thread or an EventThread thread.
 ///
@@ -49,9 +49,12 @@ public:
     ///
     /// Changing the repeating flag does not affect the timer's active state.
     /// If the timer is active, it will continue to run with the new repeating setting.
+    ///
+    /// Interval must be set to a value greater than zero for the repeating setting
+    /// to have any effect.
     void set_repeating(bool repeating) { _repeating = repeating; }
 
-    /// Starts the timer uwing the current interval and repeating settings.
+    /// Starts the timer using the current interval and repeating settings.
     /// If the timer is already active, it will be restarted with the current settings.
     void start();
 
