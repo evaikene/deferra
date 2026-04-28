@@ -33,17 +33,21 @@ using FdCallback = std::function<void(int fd, FdEvents events)>;
 
 /// fd watch handle
 struct FdWatch {
-    int fd{-1}; // file descriptor being watched
+    static constexpr int kInvalid{-1};
 
-    explicit operator bool() const noexcept { return fd >= 0; }
+    int fd{kInvalid}; // file descriptor being watched
+
+    explicit operator bool() const noexcept { return fd > kInvalid; }
 };
 
 /// Timer handle
 struct TimerHandle {
     using id_t = std::uint64_t;
-    id_t id{0}; // unique timer ID (zero means invalid timer)
+    static constexpr id_t kInvalid{0};
 
-    explicit operator bool() const noexcept { return id > 0; }
+    id_t id{kInvalid}; // unique timer ID (zero means invalid timer)
+
+    explicit operator bool() const noexcept { return id != kInvalid; }
 };
 
 } // namespace jb::core

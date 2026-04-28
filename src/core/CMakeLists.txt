@@ -13,6 +13,7 @@ set(HDRS
     object.hpp
     shared_data.hpp
     signal.hpp
+    timer.hpp
 )
 
 # Private headers not exposed to library users
@@ -31,6 +32,7 @@ set(SRCS
     object.cpp
     signal.cpp
     thread_context.cpp
+    timer.cpp
 )
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
