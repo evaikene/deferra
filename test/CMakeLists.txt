@@ -43,3 +43,9 @@ set(TARGET "event-loop-test")
 add_executable(${TARGET} event-loop-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# Timer test
+set(TARGET "timer-test")
+add_executable(${TARGET} timer-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
