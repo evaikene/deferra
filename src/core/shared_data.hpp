@@ -51,7 +51,7 @@ protected:
 /// Copies are cheap with refcount bump; mutations through one pointer are visible
 /// to all other pointers sharing the same data. The `detach()` method allows to
 /// create a unique copy of the data when needed.
-template <typename T, typename = std::enable_if_t<std::is_base_of_v<SharedData, T>>>
+template <typename T> requires std::is_base_of_v<SharedData, T>
 class ExplicitlySharedDataPointer {
 public:
     using Type    = T;
@@ -252,7 +252,8 @@ void swap(ExplicitlySharedDataPointer<T>& a, ExplicitlySharedDataPointer<T>& b) 
 }
 
 /// Helper function to create an `ExplicitlySharedDataPointer`
-template <typename T, typename... Args, typename = std::enable_if_t<std::is_base_of_v<SharedData, T>>>
+template <typename T, typename... Args>
+    requires std::is_base_of_v<SharedData, T>
 auto make_explicitly_shared(Args&&... args) noexcept(std::is_nothrow_constructible_v<std::decay_t<T>, T&&>)
     -> ExplicitlySharedDataPointer<T>
 {
