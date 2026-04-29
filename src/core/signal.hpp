@@ -68,13 +68,11 @@ public:
     /// @param[in] fn The member function to connect
     /// @param[in] type The connection type (default: Auto)
     /// @return Connection object representing the connection
-    template <typename Receiver,
-              typename Member,
-              typename = std::enable_if_t<std::is_base_of_v<Connectable, Receiver>>,
-              typename = std::enable_if_t<std::is_invocable_v<Member, Receiver*, Args...>>>
+    template <typename Receiver, typename Member>
+        requires std::is_base_of_v<Connectable, Receiver>&& std::is_invocable_v<Member, Receiver*, Args...>
     auto connect(Receiver* receiver, Member fn, ConnectionType type = ConnectionType::Auto) -> Connection
     {
-        auto slot = [receiver, fn = std::move(fn)](Args... args) -> auto { (receiver->*fn)(args...); };
+        auto slot = [receiver, fn = std::move(fn)](Args... args) -> void { std::invoke(fn, receiver, args...); };
         return connect(receiver, std::move(slot), type);
     }
 

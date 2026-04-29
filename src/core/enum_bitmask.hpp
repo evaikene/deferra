@@ -6,7 +6,7 @@
 namespace jb::core {
 
 /// Type-safe bitmask wrapper for strongly-typed enums.
-template <typename E, typename = std::enable_if_t<std::is_enum_v<E>>>
+template <typename E> requires std::is_enum_v<E>
 class enum_bitmask {
     using U = std::make_unsigned_t<std::underlying_type_t<E>>;
 
