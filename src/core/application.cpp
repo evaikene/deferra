@@ -2,6 +2,7 @@
 
 #include "event_loop.hpp"
 #include "event_thread.hpp"
+#include "logging.hpp"
 #include "thread_context.hpp"
 
 #include <cassert>
@@ -15,7 +16,12 @@ Application::Application(int argc, char const* argv[])
     , _argv(argv)
     , _event_loop(std::make_unique<EventThread>())
 {
+    // enforce singleton
     assert(s_instance == nullptr);
+    if (s_instance) {
+        log_error("Application instance already exists");
+        return;
+    }
 
     s_instance = this;
     ThreadCtx::current()->set_event_loop(_event_loop->as_event_loop());
@@ -24,6 +30,13 @@ Application::Application(int argc, char const* argv[])
 
 Application::~Application()
 {
+    // enforce singleton
+    assert(s_instance == this);
+    if (s_instance != this) {
+        log_error("Application instance mismatch");
+        return;
+    }
+
     ThreadCtx::current()->set_event_loop(nullptr);
     s_instance = nullptr;
 }

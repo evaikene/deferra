@@ -49,3 +49,9 @@ set(TARGET "timer-test")
 add_executable(${TARGET} timer-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# Logging test
+set(TARGET "logging-test")
+add_executable(${TARGET} logging-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)

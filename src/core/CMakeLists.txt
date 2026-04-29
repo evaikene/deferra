@@ -2,6 +2,9 @@ set(TARGET core)
 
 message("** Setting up ${TARGET}")
 
+# Find {fmt}
+find_package(fmt CONFIG REQUIRED)
+
 # Public headers exposed to library users
 set(HDRS
     application.hpp
@@ -10,6 +13,7 @@ set(HDRS
     event_loop.hpp
     event_loop_types.hpp
     event_thread.hpp
+    logging.hpp
     object.hpp
     shared_data.hpp
     signal.hpp
@@ -29,6 +33,7 @@ set(SRCS
     application.cpp
     event_loop.cpp
     event_thread.cpp
+    logging.cpp
     object.cpp
     signal.cpp
     thread_context.cpp
@@ -60,4 +65,4 @@ target_sources(${TARGET}
 
 target_compile_features(${TARGET} PUBLIC cxx_std_20)
 
-target_link_libraries(${TARGET})
+target_link_libraries(${TARGET} PUBLIC fmt::fmt)
