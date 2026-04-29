@@ -1,0 +1,4 @@
+# Session-specific / personal files
+settings.local.json
+# Claude's auto-memory files (if you don't want these tracked)
+# memory.json
