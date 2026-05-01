@@ -25,7 +25,7 @@ Application::Application(int argc, char const* argv[])
 
     s_instance = this;
     ThreadCtx::current()->set_event_loop(_event_loop->as_event_loop());
-    set_event_loop(_event_loop->as_event_loop());
+    move_to_thread(_event_loop.get());
 }
 
 Application::~Application()
@@ -43,9 +43,9 @@ Application::~Application()
 
 auto Application::exec() -> int
 {
-    about_to_start.emit();
+    emit(about_to_start);
     _event_loop->as_event_loop()->run();
-    about_to_quit.emit();
+    emit(about_to_quit);
 
     return _exit_code;
 }

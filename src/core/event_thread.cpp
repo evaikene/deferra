@@ -50,13 +50,13 @@ void EventThread::start()
         auto* ctx = ThreadCtx::current();
         ctx->set_event_loop(_event_loop.get());
 
-        about_to_start.emit();
+        emit(about_to_start);
 
         // run the event loop until quit is signaled
         _event_loop->run();
 
         // signal that the thread has finished running
-        about_to_quit.emit();
+        emit(about_to_quit);
 
         // cleanup
         ctx->set_event_loop(nullptr);

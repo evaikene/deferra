@@ -8,6 +8,11 @@
 
 namespace jb::core {
 
+auto EventLoop::current() noexcept -> EventLoop*
+{
+    return ThreadCtx::current()->event_loop();
+}
+
 EventLoop::EventLoop()
     : _thread_ctx(ThreadCtx::current())
     , _backend(priv::make_backend())

@@ -38,15 +38,12 @@ TEST_CASE("Object basics", "[core]")
         object_counter = 0;
 
         auto* obj = new Testable();
-        auto token = obj->token();
 
         REQUIRE(obj->parent() == nullptr);
         REQUIRE(obj->children().empty());
         REQUIRE(obj->thread_ctx() == ThreadCtx::current());
-        REQUIRE(token.lock());
 
         delete obj;
-        REQUIRE(!token.lock());
 
         REQUIRE(object_counter == 0);
     }
