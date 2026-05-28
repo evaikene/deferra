@@ -1,64 +1,59 @@
 #pragma once
 
-#include "connectable.hpp"
-#include "object.hpp"
-#include "thread_context.hpp"
+#include "connection.hpp"
 
-#include <cassert>
+#include <atomic>
+#include <memory>
+#include <mutex>
 #include <vector>
 
-namespace jb::core::priv {
+namespace jb::core {
 
-struct ObjectData : public ObjectToken {
+class EventLoop;
+class Object;
+class ThreadCtx;
 
-    /// Thread affinity (never nullptr)
-    jb::core::ThreadCtx const* thread_ctx = jb::core::ThreadCtx::current();
+namespace priv {
 
-    /// Event loop this object lives on (can be nullptr if not set)
-    EventLoop* event_loop = jb::core::ThreadCtx::current()->event_loop();
-
-    /// Optional parent
-    Object* parent = nullptr;
-
-    /// Optional children
-    std::vector<Object*> children;
-
-    /// Finds a child
-    /// @param[in] child The child object
-    /// @return Iterator to the child when found
-    auto find_child(Object* child) const -> std::vector<Object*>::const_iterator
-    {
-        for (auto it = children.cbegin(); it != children.cend(); ++it) {
-            if (*it == child) {
-                return it;
-            }
-        }
-        return children.cend();
-    }
-
-    /// Adds a child
-    /// @param[in] child The child object
-    void add_child(Object* child)
-    {
-        // only children within the same thread can be added
-        assert(thread_ctx == child->_d->thread_ctx);
-
-        if (find_child(child) != children.cend()) {
-            return; // already in the list
-        }
-        children.push_back(child);
-    }
-
-    /// Removes a child
-    /// @param[in] child The child object
-    void remove_child(Object* child)
-    {
-        auto it = find_child(child);
-        if (it == children.cend()) {
-            return;
-        }
-        children.erase(it);
-    }
+/// Internal Object lifetime tracking
+struct ObjectLifetime {
+    std::atomic_bool alive{true};
+    std::atomic_bool delete_later_pending{false};
 };
 
-} // namespace jb::core::priv
+/// Internal state for Object
+///
+/// Subclass private structs inherit from this (directly or transitively):
+///
+/// @code
+/// struct MyWidgetPrivate : jb::core::priv::ObjectPrivate {
+///     int extra_field = 0;
+/// };
+/// @endcode
+///
+/// Object always deletes this struct via `delete _d`, so the virtual destructor
+/// ensures the most-derived type is correctly destroyed.
+struct ObjectPrivate {
+    /// Parent in the ownership tree
+    Object* parent = nullptr;
+
+    /// Direct children (insertion order)
+    std::vector<Object*> children;
+
+    /// Event loop this object lives on with thread affinity
+    EventLoop* event_loop = nullptr;
+
+    /// Lifetime tracking for object deletion
+    std::shared_ptr<ObjectLifetime> lifetime = std::make_shared<ObjectLifetime>();
+
+    /// Connections where this object is the *receiver*
+    /// Stored as weak_ptrs so that the Signal (sender side) can also let them
+    /// expire naturally. On destruction, Object deactivates them all.
+    std::mutex                                 connections_mx;
+    std::vector<std::weak_ptr<ConnectionBase>> connections;
+
+    virtual ~ObjectPrivate() = default;
+};
+
+} // namespace priv
+} // namespace jb::core

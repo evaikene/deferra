@@ -5,8 +5,6 @@
 #include "logging.hpp"
 #include "thread_context.hpp"
 
-#include <cassert>
-
 namespace jb::core {
 
 Application* Application::s_instance = nullptr;
@@ -17,23 +15,21 @@ Application::Application(int argc, char const* argv[])
     , _event_loop(std::make_unique<EventThread>())
 {
     // enforce singleton
-    assert(s_instance == nullptr);
     if (s_instance) {
-        log_error("Application instance already exists");
+        log_fatal("Application instance already exists");
         return;
     }
 
     s_instance = this;
     ThreadCtx::current()->set_event_loop(_event_loop->as_event_loop());
-    set_event_loop(_event_loop->as_event_loop());
+    move_to_thread(_event_loop.get());
 }
 
 Application::~Application()
 {
     // enforce singleton
-    assert(s_instance == this);
     if (s_instance != this) {
-        log_error("Application instance mismatch");
+        log_fatal("Application instance mismatch");
         return;
     }
 
@@ -43,9 +39,9 @@ Application::~Application()
 
 auto Application::exec() -> int
 {
-    about_to_start.emit();
+    emit(about_to_start);
     _event_loop->as_event_loop()->run();
-    about_to_quit.emit();
+    emit(about_to_quit);
 
     return _exit_code;
 }

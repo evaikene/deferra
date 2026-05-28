@@ -8,7 +8,7 @@ find_package(fmt CONFIG REQUIRED)
 # Public headers exposed to library users
 set(HDRS
     application.hpp
-    connectable.hpp
+    connection.hpp
     enum_bitmask.hpp
     event_loop.hpp
     event_loop_types.hpp
@@ -24,6 +24,7 @@ set(HDRS
 set(PRIV_HDRS
   event_loop_backend.hpp
     object_priv.hpp
+    signal_priv.hpp
     thread_context.hpp
     timer_heap.hpp
 )
@@ -35,7 +36,6 @@ set(SRCS
     event_thread.cpp
     logging.cpp
     object.cpp
-    signal.cpp
     thread_context.cpp
     timer.cpp
 )

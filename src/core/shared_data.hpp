@@ -212,25 +212,11 @@ public:
         return a._d == b._d;
     }
 
-    /// Compares this pointer with another pointer for inequality. Two pointers are
-    /// considered not equal if they point to different data (i.e., they do not share the same data pointer).
-    friend auto operator!=(ExplicitlySharedDataPointer const& a, ExplicitlySharedDataPointer const& b) noexcept -> bool
-    {
-        return a._d != b._d;
-    }
-
     /// Compares this pointer with nullptr for equality. The pointer is considered equal
     /// to nullptr if it is empty (i.e., it holds a null data pointer).
     friend auto operator==(ExplicitlySharedDataPointer const& p, std::nullptr_t) noexcept -> bool
     {
         return p._d == nullptr;
-    }
-
-    /// Compares this pointer with nullptr for inequality. The pointer is considered not equal
-    /// to nullptr if it is not empty (i.e., it holds a non-null data pointer).
-    friend auto operator!=(ExplicitlySharedDataPointer const& p, std::nullptr_t) noexcept -> bool
-    {
-        return p._d != nullptr;
     }
 
 private:

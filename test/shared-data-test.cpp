@@ -59,14 +59,14 @@ TEST_CASE("ExplicitlySharedDataPointer default constructor", "[core]")
     TestData::instances = 0;
     {
         TestPtr p;
-        REQUIRE_FALSE(static_cast<bool>(p));
-        REQUIRE(!p);
-        REQUIRE(p.get() == nullptr);
-        REQUIRE(p.use_count() == 0);
-        REQUIRE_FALSE(p.unique());
-        REQUIRE(p == nullptr);
+        CHECK_FALSE(static_cast<bool>(p));
+        CHECK(!p);
+        CHECK(p.get() == nullptr);
+        CHECK(p.use_count() == 0);
+        CHECK_FALSE(p.unique());
+        CHECK(p == nullptr);
     }
-    REQUIRE(TestData::instances.load() == 0);
+    CHECK(TestData::instances.load() == 0);
 }
 
 TEST_CASE("ExplicitlySharedDataPointer constructor from raw pointer", "[core]")
@@ -74,15 +74,15 @@ TEST_CASE("ExplicitlySharedDataPointer constructor from raw pointer", "[core]")
     TestData::instances = 0;
     {
         auto p = TestPtr(new TestData(kMagicNumber, "test"));
-        REQUIRE(p);
+        CHECK(p);
         REQUIRE(p.get() != nullptr);
-        REQUIRE(p->value == kMagicNumber);
-        REQUIRE(p->name == "test");
-        REQUIRE(p.use_count() == 1);
-        REQUIRE(p.unique());
-        REQUIRE(TestData::instances.load() == 1);
+        CHECK(p->value == kMagicNumber);
+        CHECK(p->name == "test");
+        CHECK(p.use_count() == 1);
+        CHECK(p.unique());
+        CHECK(TestData::instances.load() == 1);
     }
-    REQUIRE(TestData::instances.load() == 0);
+    CHECK(TestData::instances.load() == 0);
 }
 
 TEST_CASE("Make ExplicitlySharedDataPointer with forward arguments", "[core]")
@@ -90,15 +90,15 @@ TEST_CASE("Make ExplicitlySharedDataPointer with forward arguments", "[core]")
     TestData::instances = 0;
     {
         auto p = make_explicitly_shared<TestData>(kMagicNumber, std::string{"test"});
-        REQUIRE(p);
+        CHECK(p);
         REQUIRE(p.get() != nullptr);
-        REQUIRE(p->value == kMagicNumber);
-        REQUIRE(p->name == "test");
-        REQUIRE(p.use_count() == 1);
-        REQUIRE(p.unique());
-        REQUIRE(TestData::instances.load() == 1);
+        CHECK(p->value == kMagicNumber);
+        CHECK(p->name == "test");
+        CHECK(p.use_count() == 1);
+        CHECK(p.unique());
+        CHECK(TestData::instances.load() == 1);
     }
-    REQUIRE(TestData::instances.load() == 0);
+    CHECK(TestData::instances.load() == 0);
 }
 
 TEST_CASE("ExplicitlySharedDataPointer copy constructor", "[core]")
@@ -107,15 +107,15 @@ TEST_CASE("ExplicitlySharedDataPointer copy constructor", "[core]")
     auto p1 = make_explicitly_shared<TestData>(1, "a");
     {
         TestPtr p2{p1}; // NOLINT(performance-unnecessary-copy-initialization)
-        REQUIRE(p1.get() == p2.get());
-        REQUIRE(p1.use_count() == 2);
-        REQUIRE(p2.use_count() == 2);
-        REQUIRE_FALSE(p1.unique());
-        REQUIRE(TestData::instances.load() == 1);
+        CHECK(p1.get() == p2.get());
+        CHECK(p1.use_count() == 2);
+        CHECK(p2.use_count() == 2);
+        CHECK_FALSE(p1.unique());
+        CHECK(TestData::instances.load() == 1);
     }
-    REQUIRE(p1.use_count() == 1);
-    REQUIRE(p1.unique());
-    REQUIRE(TestData::instances.load() == 1);
+    CHECK(p1.use_count() == 1);
+    CHECK(p1.unique());
+    CHECK(TestData::instances.load() == 1);
 }
 
 TEST_CASE("Mutating shared data through one pointer affects all pointers sharing the same data", "[core]")
@@ -127,9 +127,9 @@ TEST_CASE("Mutating shared data through one pointer affects all pointers sharing
     p2->value = kMagicNumber;
     p2->name = "changed";
 
-    REQUIRE(p1->value == kMagicNumber);
-    REQUIRE(p1->name == "changed");
-    REQUIRE(p1.get() == p2.get());
+    CHECK(p1->value == kMagicNumber);
+    CHECK(p1->name == "changed");
+    CHECK(p1.get() == p2.get());
 }
 
 TEST_CASE("Move construction transfers ownership", "[core]")
@@ -139,12 +139,12 @@ TEST_CASE("Move construction transfers ownership", "[core]")
     auto* raw = p1.get();
 
     TestPtr p2{std::move(p1)};
-    REQUIRE_FALSE(static_cast<bool>(p1));
-    REQUIRE(p1.get() == nullptr);
-    REQUIRE(p2);
-    REQUIRE(p2.get() == raw);
-    REQUIRE(p2.use_count() == 1);
-    REQUIRE(TestData::instances.load() == 1);
+    CHECK_FALSE(static_cast<bool>(p1));
+    CHECK(p1.get() == nullptr);
+    CHECK(p2);
+    CHECK(p2.get() == raw);
+    CHECK(p2.use_count() == 1);
+    CHECK(TestData::instances.load() == 1);
 }
 
 TEST_CASE("Copy assignment releases previous target", "[core]")
@@ -155,25 +155,25 @@ TEST_CASE("Copy assignment releases previous target", "[core]")
 
     p2 = p1;
 
-    REQUIRE(TestData::instances.load() == 1); // p2's old data was released
-    REQUIRE(p1.get() == p2.get());
-    REQUIRE(p1.use_count() == 2);
-    REQUIRE(p2.use_count() == 2);
-    REQUIRE(p1->value == 1);
-    REQUIRE(p2->value == 1);
+    CHECK(TestData::instances.load() == 1); // p2's old data was released
+    CHECK(p1.get() == p2.get());
+    CHECK(p1.use_count() == 2);
+    CHECK(p2.use_count() == 2);
+    CHECK(p1->value == 1);
+    CHECK(p2->value == 1);
 }
 
 TEST_CASE("Self-assignment is safe", "[core]")
 {
     auto p = make_explicitly_shared<TestData>(1, "a");
-    REQUIRE(p.use_count() == 1);
+    CHECK(p.use_count() == 1);
 
     auto& alias = p;
     p = alias;
 
-    REQUIRE(p);
-    REQUIRE(p->value == 1);
-    REQUIRE(p.use_count() == 1);
+    CHECK(p);
+    CHECK(p->value == 1);
+    CHECK(p.use_count() == 1);
 }
 
 TEST_CASE("Assignment from raw pointer", "[core]")
@@ -183,15 +183,15 @@ TEST_CASE("Assignment from raw pointer", "[core]")
     TestPtr p = make_explicitly_shared<TestData>(1, "initial");
 
     p = new TestData{2, "raw"};
-    REQUIRE(p);
-    REQUIRE(p->value == 2);
-    REQUIRE(p.use_count() == 1);
-    REQUIRE(TestData::instances.load() == 1);
+    CHECK(p);
+    CHECK(p->value == 2);
+    CHECK(p.use_count() == 1);
+    CHECK(TestData::instances.load() == 1);
 
     p = nullptr;
 
-    REQUIRE_FALSE(static_cast<bool>(p));
-    REQUIRE(TestData::instances.load() == 0);
+    CHECK_FALSE(static_cast<bool>(p));
+    CHECK(TestData::instances.load() == 0);
 }
 
 TEST_CASE("Release and optionally adopt a new pointer with reset()", "[core]")
@@ -199,17 +199,17 @@ TEST_CASE("Release and optionally adopt a new pointer with reset()", "[core]")
     TestData::instances = 0;
 
     auto p = make_explicitly_shared<TestData>(1, "a");
-    REQUIRE(TestData::instances.load() == 1);
+    CHECK(TestData::instances.load() == 1);
 
     p.reset();
-    REQUIRE_FALSE(static_cast<bool>(p));
-    REQUIRE(TestData::instances.load() == 0);
+    CHECK_FALSE(static_cast<bool>(p));
+    CHECK(TestData::instances.load() == 0);
 
     p.reset(new TestData{2, "b"});
-    REQUIRE(p);
-    REQUIRE(p->value == 2);
-    REQUIRE(p.use_count() == 1);
-    REQUIRE(TestData::instances.load() == 1);
+    CHECK(p);
+    CHECK(p->value == 2);
+    CHECK(p.use_count() == 1);
+    CHECK(TestData::instances.load() == 1);
 }
 
 TEST_CASE("Exchange two pointers with swap()", "[core]")
@@ -221,16 +221,16 @@ TEST_CASE("Exchange two pointers with swap()", "[core]")
 
     SECTION("member swap") {
         p1.swap(p2);
-        REQUIRE(p1.get() == raw2);
-        REQUIRE(p2.get() == raw1);
-        REQUIRE(p1->value == 2);
-        REQUIRE(p2->value == 1);
+        CHECK(p1.get() == raw2);
+        CHECK(p2.get() == raw1);
+        CHECK(p1->value == 2);
+        CHECK(p2->value == 1);
     }
 
     SECTION("free-function swap") {
         std::swap(p1, p2);
-        REQUIRE(p1.get() == raw2);
-        REQUIRE(p2.get() == raw1);
+        CHECK(p1.get() == raw2);
+        CHECK(p2.get() == raw1);
     }
 }
 
@@ -243,16 +243,16 @@ TEST_CASE("detach() on a unique pointer is no-op", "[core]")
 
     p.detach();
 
-    REQUIRE(p.get() == before);
-    REQUIRE(p.use_count() == 1);
-    REQUIRE(TestData::instances.load() == 1);
+    CHECK(p.get() == before);
+    CHECK(p.use_count() == 1);
+    CHECK(TestData::instances.load() == 1);
 }
 
 TEST_CASE("detach() on a null pointer is no-op", "[core]")
 {
     TestPtr p;
     p.detach();
-    REQUIRE_FALSE(static_cast<bool>(p));
+    CHECK_FALSE(static_cast<bool>(p));
 }
 
 TEST_CASE("detach() on a shared pointer creates a private copy", "[core]")
@@ -262,25 +262,25 @@ TEST_CASE("detach() on a shared pointer creates a private copy", "[core]")
     auto p1 = make_explicitly_shared<TestData>(1, "original");
 
     auto p2 = p1; // NOLINT(performance-unnecessary-copy-initialization)
-    REQUIRE(p1.use_count() == 2);
-    REQUIRE(TestData::instances.load() == 1);
+    CHECK(p1.use_count() == 2);
+    CHECK(TestData::instances.load() == 1);
 
     p2.detach();
 
-    REQUIRE(p1.get() != p2.get());
-    REQUIRE(p1.use_count() == 1);
-    REQUIRE(p2.use_count() == 1);
-    REQUIRE(TestData::instances.load() == 2);
+    CHECK(p1.get() != p2.get());
+    CHECK(p1.use_count() == 1);
+    CHECK(p2.use_count() == 1);
+    CHECK(TestData::instances.load() == 2);
 
     // copied data must be preserved
-    REQUIRE(p2->value == p1->value);
-    REQUIRE(p2->name == p1->name);
+    CHECK(p2->value == p1->value);
+    CHECK(p2->name == p1->name);
 
     // mutating p2 must not affect p1
     p2->value = kMagicNumber;
     p2->name = "changed";
-    REQUIRE(p1->value == 1);
-    REQUIRE(p1->name == "original");
+    CHECK(p1->value == 1);
+    CHECK(p1->name == "original");
 }
 
 TEST_CASE("Comparison operators", "[core]")
@@ -290,23 +290,23 @@ TEST_CASE("Comparison operators", "[core]")
     auto p3 = make_explicitly_shared<TestData>(1, "a"); // equal content but different data pointer
     TestPtr null;
 
-    REQUIRE(p1 == p2);
-    REQUIRE_FALSE(p1 != p2);
-    REQUIRE(p1 != p3);
-    REQUIRE_FALSE(p1 == p3);
-    REQUIRE(null == nullptr);
-    REQUIRE_FALSE(null != nullptr);
-    REQUIRE(p1 != nullptr);
-    REQUIRE_FALSE(p1 == nullptr);
+    CHECK(p1 == p2);
+    CHECK_FALSE(p1 != p2);
+    CHECK(p1 != p3);
+    CHECK_FALSE(p1 == p3);
+    CHECK(null == nullptr);
+    CHECK_FALSE(null != nullptr);
+    CHECK(p1 != nullptr);
+    CHECK_FALSE(p1 == nullptr);
 }
 
 TEST_CASE("Dereference operators", "[core]")
 {
     auto p = make_explicitly_shared<TestData>(1, "a");
-    REQUIRE((*p).value == 1);
-    REQUIRE((*p).name == "a");
-    REQUIRE(p->value == 1);
-    REQUIRE(p->name == "a");
+    CHECK((*p).value == 1);
+    CHECK((*p).name == "a");
+    CHECK(p->value == 1);
+    CHECK(p->name == "a");
 }
 
 TEST_CASE("Nested scopes track refcount correctly", "[core]")
@@ -314,20 +314,20 @@ TEST_CASE("Nested scopes track refcount correctly", "[core]")
     TestData::instances = 0;
     {
         auto p1 = make_explicitly_shared<TestData>(1, "a");
-        REQUIRE(p1.use_count() == 1);
+        CHECK(p1.use_count() == 1);
         {
             auto p2 = p1; // NOLINT(performance-unnecessary-copy-initialization)
-            REQUIRE(p1.use_count() == 2);
+            CHECK(p1.use_count() == 2);
             {
                 auto p3 = p1; // NOLINT(performance-unnecessary-copy-initialization)
-                REQUIRE(p1.use_count() == 3);
+                CHECK(p1.use_count() == 3);
             }
-            REQUIRE(p1.use_count() == 2);
+            CHECK(p1.use_count() == 2);
         }
-        REQUIRE(p1.use_count() == 1);
-        REQUIRE(TestData::instances.load() == 1);
+        CHECK(p1.use_count() == 1);
+        CHECK(TestData::instances.load() == 1);
     }
-    REQUIRE(TestData::instances.load() == 0);
+    CHECK(TestData::instances.load() == 0);
 }
 
 TEST_CASE("Concurrent copies and destructions are race-free", "[core][thread]")
@@ -375,8 +375,8 @@ TEST_CASE("Concurrent copies and destructions are race-free", "[core][thread]")
         t.join();
     }
 
-    REQUIRE(shared.use_count() == 1);
-    REQUIRE(TestData::instances.load() == 1);
+    CHECK(shared.use_count() == 1);
+    CHECK(TestData::instances.load() == 1);
 }
 
 TEST_CASE("detach() in one thread is isolated from readers in another", "[core][thread]")
@@ -385,7 +385,7 @@ TEST_CASE("detach() in one thread is isolated from readers in another", "[core][
 
     auto p1 = make_explicitly_shared<TestData>(kMagicNumber, "orig");
     auto p2 = p1; // NOLINT(performance-unnecessary-copy-initialization)
-    REQUIRE(p1.use_count() == 2);
+    CHECK(p1.use_count() == 2);
 
     constexpr int iters = 10'000;
 
@@ -410,13 +410,13 @@ TEST_CASE("detach() in one thread is isolated from readers in another", "[core][
 
     // p1 keeps reading its own data
     for (int i = 0; i < iters; ++i) {
-        REQUIRE(p1->value == kMagicNumber);
-        REQUIRE(p1->name == "orig");
+        CHECK(p1->value == kMagicNumber);
+        CHECK(p1->name == "orig");
     }
 
     t.join(); // explicit join
-    REQUIRE(p1.get() != p2.get());
-    REQUIRE(p1->value == kMagicNumber);
+    CHECK(p1.get() != p2.get());
+    CHECK(p1->value == kMagicNumber);
 
-    REQUIRE(TestData::instances.load() == 2);
+    CHECK(TestData::instances.load() == 2);
 }

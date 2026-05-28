@@ -15,26 +15,26 @@ TEST_CASE("Event Thread", "[core]")
     // Construction and destructions
     auto* event_thread = new EventThread;
 
-    // threaded event loop object itself should belong to the current thread context
-    REQUIRE(event_thread->thread_ctx() == ThreadCtx::current());
+    // threaded event loop object itself should still belong to the current thread context
+    CHECK(event_thread->thread_ctx() == ThreadCtx::current());
 
-    // threaded event loop object itself should use the main event loop
-    REQUIRE(event_thread->event_loop() == app.thread()->as_event_loop());
+    // threaded event loop object itself should use the same event loop it implements
+    CHECK(event_thread->event_loop() == event_thread->as_event_loop());
 
     // event loop it implements should be different from the main event loop
-    REQUIRE(event_thread->as_event_loop() != app.thread()->as_event_loop());
+    CHECK(event_thread->as_event_loop() != app.event_loop());
 
     // run the event loop
-    REQUIRE_NOTHROW(event_thread->exec(true));
-    REQUIRE(event_thread->is_running());
+    CHECK_NOTHROW(event_thread->exec(true));
+    CHECK(event_thread->is_running());
 
     // event loop should now have a different thread context
-    REQUIRE(event_thread->as_event_loop()->thread_ctx() != ThreadCtx::current());
+    CHECK(event_thread->thread_ctx() != ThreadCtx::current());
 
     // quit the event loop with an exit code
-    REQUIRE_NOTHROW(event_thread->quit(1));
-    REQUIRE_NOTHROW(event_thread->wait());
-    REQUIRE(event_thread->exit_code() == 1);
+    CHECK_NOTHROW(event_thread->quit(1));
+    CHECK_NOTHROW(event_thread->wait());
+    CHECK(event_thread->exit_code() == 1);
 
     delete event_thread;
 }

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "connectable.hpp"
+#include "event_loop.hpp"
 #include "signal.hpp"
 
 #include <memory>
@@ -8,24 +8,71 @@
 namespace jb::core {
 
 class EventThread;
-
 class ThreadCtx;
+
 namespace priv {
-struct ObjectData;
+struct ObjectPrivate; // Defined in object_priv.hpp
 } // namespace priv
 
-/// Base for all the objects
-class Object : public Connectable {
+ /// Root base class for all objects that participate in the signal-slot
+ /// system and the parent-ownership tree.
+ ///
+ /// Parent-child ownership:
+ ///
+ /// Passing a non-null @p parent to the constructor transfers lifetime ownership.
+ /// When the parent is deleted, it recursively deletes all its children. Children
+ /// can also be explicitly deleted before their parent; the destructor unlinks
+ /// itself automatically.
+ ///
+ /// Signals:
+ ///
+ /// Subclasses declare public `Signal<Args...>` members and emit them via the
+ /// protected `emit()` method.
+ ///
+ /// @code
+ /// class Button : public jb::core::Object {
+ /// public:
+ ///     jb::core::Signal<> clicked;
+ ///     void press() { emit(clicked); }
+ /// };
+ /// @endcode
+ ///
+ /// Pimpl pattern:
+ ///
+ /// Subclasses that need private state follow the two-constructor convention so
+ /// that Object handles allocation. Object always deletes the private struct;
+ /// subclasses must not delete it.
+ ///
+ /// @code
+ /// MyWidget::MyWidget(Object* parent)
+ ///     : Object(*new priv::MyWidgetPrivate(), parent)
+ /// {}
+ /// @endcode
+ ///
+ /// `Object` always deletes the private struct; subclasses must not delete it.
+ ///
+ /// Thread affinity:
+ ///
+ /// Each Object records ThreadCtx and EventLoop at construction time. These values
+ /// govern Auto-connection dispatch and can be changed by `move_to_thread()`.
+ /// Object must be deleted in the thread it currently lives on.
+ ///
+ /// Lifetime rules:
+ ///
+ /// - Parent-owned Objects must be heap-allocated
+ /// - Objects are non-copyable and non-movable
+ /// - Never hold a raw pointer to parent-owned Objects past the parent's destruction.
+class Object {
 public:
 
-    /// Constructor
-    /// @param[in] parent Optional parent
+    /// Constructs a root Object with its own ObjectPrivate
+    /// @param[in] parent Optional parent that will own this object
     ///
     /// Note that `parent` must be created in the same thread as this object.
     explicit Object(Object* parent = nullptr);
 
     /// Destructor
-    ~Object() override;
+    virtual ~Object();
 
     /// Objects are not copyable nor movable
     Object(Object const&)                    = delete;
@@ -33,44 +80,44 @@ public:
     auto operator=(Object const&) -> Object& = delete;
     auto operator=(Object&&) -> Object&      = delete;
 
-    /// Returns the thread context this object was created in
-    /// @return Thread context this object was created in
-    auto thread_ctx() const -> ThreadCtx const*;
+    /// Returns the parent of this Object
+    /// @return Parent of this Object (can be nullptr if no parent)
+    [[nodiscard]] auto parent() const -> Object*;
 
-    /// Returns the event loop this object lives on
-    /// @return Event loop this object lives on (can be nullptr if not set)
-    auto event_loop() const -> EventLoop* override;
+    /// Re-parents this Object
+    /// @param[in] parent New parent
+    /// @return True if the parent was changed successfully; false otherwise
+    ///
+    /// Removes this Object from the old parent's child list and appends it to
+    /// the new parent's. Pass nullptr to make this a root Object.
+    ///
+    /// If `parent` is not null, inherits the new parent's event loop.
+    ///
+    /// Note that `parent` must be created in the same thread as this Object.
+    auto set_parent(Object* parent) -> bool;
 
-    /// Returns the parent of this object
-    /// @return Parent of this object (can be nullptr if no parent)
-    auto parent() const -> Object*;
-
-    /// Returns a list of this object's children
+    /// Returns a list of this object's children in insertion order
     /// @return List of this object's children
-    auto children() const -> std::vector<Object*> const&;
+    [[nodiscard]] auto children() const noexcept -> std::vector<Object*> const&;
 
-    /// Schedules the object for deletion. The object will be deleted by the
+    /// Returns the thread context this Object lives in
+    /// @return Thread context this Object lives in
+    [[nodiscard]] auto thread_ctx() const noexcept -> ThreadCtx const*;
+
+    /// Returns the EventLoop this object is associated with
+    /// @return EventLoop this object is associated with (can be nullptr if not set)
+    ///
+    /// nullptr is returned when the Object was created before any EventLoop
+    /// was running on its thread (e.g. a static or very-early Object).
+    [[nodiscard]] auto event_loop() const noexcept -> EventLoop*;
+
+    /// Schedules the Object for deletion. The Object will be deleted by the
     /// event loop of the thread this object lives on. If called from a different
     /// thread, the deletion will be scheduled on the object's thread.
     ///
     /// NOTE: The object MUST have an event loop set on its thread for this method
     /// to work.
     void delete_later();
-
-    /// Returns a weak reference to this object's token
-    /// @return Weak reference to the token
-    ///
-    /// The token is used to track the lifetime of the object and can be used to
-    /// safely access the object from other threads. The token is valid as long
-    /// as the object exists and becomes invalid when the object is destroyed.
-    [[nodiscard]] auto token() const -> std::weak_ptr<priv::ObjectToken> override;
-
-    /// Sets or changes the parent
-    /// @param[in] parent New parent
-    /// @return True if the parent was changed successfully; false otherwise
-    ///
-    /// The parent must have been created in the same thread as this object.
-    auto set_parent(Object* parent) -> bool;
 
     /// Moves the object all its children to the event loop of the specified thread
     /// @param[in] event_thread Event thread to move to
@@ -91,20 +138,59 @@ public:
 
 protected:
 
-    /// Sets the event loop this object lives on.
-    void set_event_loop(EventLoop* event_loop);
+     /// Constructor for subclasses that supply their own private data.
+     /// @param[in] dd  Reference to a heap-allocated struct that inherits (directly
+     ///                or transitively) from priv::ObjectPrivate. Object takes ownership;
+     ///                do NOT delete @p dd elsewhere.
+     /// @param[in] parent Optional parent
+     explicit Object(priv::ObjectPrivate& dd, Object* parent = nullptr);
 
-    /// Moves a parented object to the event loop of the specified thread
-    /// @param[in] parent Parent of the object to move
-    /// @param[in] event_thread Event thread to move to
-    void move_to_thread(Object* parent, EventThread* event_thread);
+     /// Emit @p signal with the given arguments.
+     ///
+     /// Invokes all connected slots, dispatching Direct connections inline and
+     /// posting Queued connections to their receiver's EventLoop.
+     ///
+     /// This overload handles Signal<Args...> with one or more parameters.
+     /// The non-arg specialisation below handles Signal<>.
+     template<typename... Args>
+     void emit(Signal<Args...>& signal, Args... args)
+     {
+         signal.emit(this, args...);
+     }
+
+     /// Emit a zero-argument signal
+     void emit(Signal<>& signal)
+     {
+         signal.emit(this);
+     }
+
+     /// Returns a pointer to the private data
+     /// Subclasses downcast this to their concrete private data type.
+     [[nodiscard]] auto d_ptr() noexcept -> void*;
+     [[nodiscard]] auto d_ptr() const noexcept -> void const*;
 
 private:
 
-    friend struct priv::ObjectData;
+    /// Grant all Signal specialisations access to register_connection()
+    template <typename...> friend class Signal;
 
-    /// d-ptr with private data (also used as the lifetime token)
-    std::shared_ptr<priv::ObjectData> _d;
+    /// Called by Signal<Args...>::connect() to register a connection record
+    void register_connection(std::shared_ptr<priv::ConnectionBase> const& conn);
+
+    /// Shared init called by both constructors
+    void init_common(Object* parent);
+
+    /// Internal move implementation; called by move_to_thread() after sanity checks
+    auto move_to_thread_impl(EventThread* event_thread) -> bool;
+
+    /// Internal helper to recursively move this object and its children to a new event loop
+    void move_to_event_loop(EventLoop* new_loop);
+
+    /// d-ptr with private data; owned; always non-null; deleted in ~Object()
+    priv::ObjectPrivate* _d{nullptr};
 };
 
 } // namespace jb::core
+
+// Signal method implementations
+#include "signal_priv.hpp" // IWYU pragma: keep for private Signal implementations

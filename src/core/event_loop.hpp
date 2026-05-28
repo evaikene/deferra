@@ -34,6 +34,10 @@ struct ThreadCtx;
 class EventLoop {
 public:
 
+    /// Returns the EventLoop instance running in the current thread
+    /// @return EventLoop instance (can be nullptr if none are running)
+    static auto current() noexcept -> EventLoop*;
+
     /// Constructor
     EventLoop();
 

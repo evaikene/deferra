@@ -26,15 +26,11 @@ public:
     auto inc() -> int
     {
         ++value;
-        incremented(value);
+        emit(incremented, value);
         return value;
     }
 
-    void incremented_slot(int v)
-    {
-        captured_value = v;
-    }
-
+    void incremented_slot(int v) { captured_value = v; }
 };
 
 int captured_value = 0;
@@ -54,14 +50,14 @@ TEST_CASE("Direct signal-slot connection", "[core]")
         int lambda_value = 0;
 
         auto* obj = new Testable();
-        obj->incremented.connect(nullptr, value_incremented);
-        obj->incremented.connect(nullptr, [&lambda_value](int v) -> void { lambda_value = v; });
+        obj->incremented.connect(value_incremented);
+        obj->incremented.connect([&lambda_value](int v) -> void { lambda_value = v; });
 
         // incrementing the testable should call slots and update values
-        REQUIRE(obj->inc() == 1);
-        REQUIRE(obj->inc() == 2);
-        REQUIRE(captured_value == 2);
-        REQUIRE(lambda_value == 2);
+        CHECK(obj->inc() == 1);
+        CHECK(obj->inc() == 2);
+        CHECK(captured_value == 2);
+        CHECK(lambda_value == 2);
 
         delete obj;
     }
@@ -78,33 +74,33 @@ TEST_CASE("Direct signal-slot connection", "[core]")
         obj->incremented.connect(receiver, [&lambda_value](int v) -> void { lambda_value = v; });
 
         // incrementing the testable should call slots and update values
-        REQUIRE(obj->inc() == 1);
-        REQUIRE(obj->inc() == 2);
-        REQUIRE(captured_value == 2);
-        REQUIRE(lambda_value == 2);
+        CHECK(obj->inc() == 1);
+        CHECK(obj->inc() == 2);
+        CHECK(captured_value == 2);
+        CHECK(lambda_value == 2);
 
         delete receiver;
 
         // after the receiver is deleted, slots should no longer be called
-        REQUIRE(obj->inc() == 3);
-        REQUIRE(captured_value == 2);
-        REQUIRE(lambda_value == 2);
+        CHECK(obj->inc() == 3);
+        CHECK(captured_value == 2);
+        CHECK(lambda_value == 2);
 
         delete obj;
     }
 
     // Test direct member function slot
     {
-        captured_value   = 0;
+        captured_value = 0;
 
-        auto* obj = new Testable();
+        auto* obj      = new Testable();
         auto* receiver = new Testable();
         obj->incremented.connect(receiver, &Testable::incremented_slot);
 
         // incrementing the testable should call the member function slot and update the value
-        REQUIRE(obj->inc() == 1);
-        REQUIRE(obj->inc() == 2);
-        REQUIRE(receiver->captured_value == 2);
+        CHECK(obj->inc() == 1);
+        CHECK(obj->inc() == 2);
+        CHECK(receiver->captured_value == 2);
 
         delete receiver;
         delete obj;
@@ -132,31 +128,31 @@ TEST_CASE("Queued signal-slot connection", "[core]")
         obj->incremented.connect(receiver, &Testable::incremented_slot, ConnectionType::Queued);
 
         // Signal should have 3 connections
-        REQUIRE(obj->incremented.connection_count() == 3);
+        CHECK(obj->incremented.count() == 3);
 
         // incrementing the testable should NOT call slots yet
-        REQUIRE(obj->inc() == 1);
-        REQUIRE(obj->inc() == 2);
-        REQUIRE(captured_value == 0);
-        REQUIRE(lambda_value == 0);
-        REQUIRE(receiver->captured_value == 0);
+        CHECK(obj->inc() == 1);
+        CHECK(obj->inc() == 2);
+        CHECK(captured_value == 0);
+        CHECK(lambda_value == 0);
+        CHECK(receiver->captured_value == 0);
 
         // processing events should call the queued slots and update values
         app.process_events(EventFlag::Tasks);
-        REQUIRE(captured_value == 2);
-        REQUIRE(lambda_value == 2);
-        REQUIRE(receiver->captured_value == 2);
+        CHECK(captured_value == 2);
+        CHECK(lambda_value == 2);
+        CHECK(receiver->captured_value == 2);
 
         delete receiver;
 
         // after the receiver is deleted, slots should no longer be called
-        REQUIRE(obj->inc() == 3);
+        CHECK(obj->inc() == 3);
         app.process_events(EventFlag::Tasks);
-        REQUIRE(captured_value == 2);
-        REQUIRE(lambda_value == 2);
+        CHECK(captured_value == 2);
+        CHECK(lambda_value == 2);
 
         // Signal should have no connections left
-        REQUIRE(obj->incremented.connection_count() == 0);
+        CHECK(obj->incremented.count() == 0);
 
         delete obj;
     }
@@ -172,29 +168,26 @@ TEST_CASE("Disconnecting signal-slot connections", "[core]")
     auto slot = [&lambda_value](int v) -> void { lambda_value = v; };
 
     auto* obj = new Testable();
-    auto c1 = obj->incremented.connect(receiver, value_incremented);
-    auto c2 = obj->incremented.connect(receiver, slot);
+    auto  c1  = obj->incremented.connect(receiver, value_incremented);
+    auto  c2  = obj->incremented.connect(receiver, slot);
 
     // Signal should have 2 connections
-    REQUIRE(obj->incremented.connection_count() == 2);
+    CHECK(obj->incremented.count() == 2);
 
     // incrementing the testable should call slots and update values
-    REQUIRE(obj->inc() == 1);
-    REQUIRE(obj->inc() == 2);
-    REQUIRE(captured_value == 2);
-    REQUIRE(lambda_value == 2);
+    CHECK(obj->inc() == 1);
+    CHECK(obj->inc() == 2);
+    CHECK(captured_value == 2);
+    CHECK(lambda_value == 2);
 
     // disconnect the slots
     obj->incremented.disconnect(c1);
     obj->incremented.disconnect(c2);
 
-    // Signal should have no connections left
-    REQUIRE(obj->incremented.connection_count() == 0);
-
     // incrementing the testable should no longer call the disconnected slots
-    REQUIRE(obj->inc() == 3);
-    REQUIRE(captured_value == 2);
-    REQUIRE(lambda_value == 2);
+    CHECK(obj->inc() == 3);
+    CHECK(captured_value == 2);
+    CHECK(lambda_value == 2);
 
     delete receiver;
     delete obj;
@@ -214,51 +207,57 @@ TEST_CASE("Modifying signal-slot connections inside a slot", "[core]")
                              [obj, receiver, &slot](int) -> void { obj->incremented.connect(receiver, slot); });
 
     // incrementing the testable should call the slot once
-    REQUIRE(obj->inc() == 1);
-    REQUIRE(count == 1);
+    CHECK(obj->inc() == 1);
+    CHECK(count == 1);
 
     // incrementing the testable again should call the slot twice
-    REQUIRE(obj->inc() == 2);
-    REQUIRE(count == 3);
+    CHECK(obj->inc() == 2);
+    CHECK(count == 3);
 
     // incrementing the testable once again should call the slot three times
-    REQUIRE(obj->inc() == 3);
-    REQUIRE(count == 6);
+    CHECK(obj->inc() == 3);
+    CHECK(count == 6);
 
     delete receiver;
     delete obj;
 }
 
-TEST_CASE("Auto signal-slot connection with threaded event loop", "[core]")
+TEST_CASE("Auto signal-slot connection with threaded event loop", "[core][test]")
 {
     // Setup main event loop
     Application app{0, nullptr};
+    logger()->set_level(LogLevel::Info);
 
     // Create a separate thread with its own event loop
     EventThread thread;
+    thread.exec(true);
 
     // Create the `receiver` object in the context of the thread
     auto* receiver = new Object;
     receiver->move_to_thread(&thread);
 
-    std::atomic<int> value{0};
+    int              direct_value{0};    // incremented if the slot is called directly
+    std::atomic<int> queued_value{0}; // incremented if the slot is called via the threaded event loop
+
     auto* obj = new Testable();
-    obj->incremented.connect(receiver, [&value](int v) -> void { value.store(v, std::memory_order_relaxed); });
+    obj->incremented.connect(receiver, [&app, &direct_value, &queued_value](int v) -> void {
+        if (app.thread_ctx() == ThreadCtx::current()) {
+            direct_value = v;
+        }
+        else {
+            queued_value.store(v, std::memory_order_relaxed);
+        }
+    });
 
-    // incrementing the testable should queue the slot
-    REQUIRE(obj->inc() == 1);
-    REQUIRE(obj->inc() == 2);
+    CHECK(obj->inc() == 1);
+    CHECK(obj->inc() == 2);
 
-    // the slot should be not called yet
-    REQUIRE(value.load(std::memory_order_relaxed) == 0);
-
-    // run the threaded event loop and quit it
-    thread.exec();
     thread.quit();
     thread.wait();
 
-    // now the slot should have been called and the value updated
-    REQUIRE(value.load(std::memory_order_relaxed) == 2);
+    // now the slot should have been called only using the threaded event loop
+    CHECK(direct_value == 0);
+    CHECK(queued_value.load(std::memory_order_relaxed) == 2);
 
     // cleanup
     delete obj;

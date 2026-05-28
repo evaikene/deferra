@@ -13,9 +13,9 @@ TEST_CASE("Timer initial state", "[core][timer]")
     Application app{0, nullptr};
 
     Timer t;
-    REQUIRE_FALSE(t.is_active());
-    REQUIRE_FALSE(t.is_repeating());
-    REQUIRE_FALSE(t.handle());
+    CHECK_FALSE(t.is_active());
+    CHECK_FALSE(t.is_repeating());
+    CHECK_FALSE(t.handle());
 }
 
 TEST_CASE("Timer start activates the timer", "[core][timer]")
@@ -24,8 +24,8 @@ TEST_CASE("Timer start activates the timer", "[core][timer]")
 
     Timer t;
     t.start(100ms);
-    REQUIRE(t.is_active());
-    REQUIRE(t.handle());
+    CHECK(t.is_active());
+    CHECK(t.handle());
     t.stop();
 }
 
@@ -35,11 +35,11 @@ TEST_CASE("Timer stop deactivates the timer", "[core][timer]")
 
     Timer t;
     t.start(100ms);
-    REQUIRE(t.is_active());
+    CHECK(t.is_active());
 
     t.stop();
-    REQUIRE_FALSE(t.is_active());
-    REQUIRE_FALSE(t.handle());
+    CHECK_FALSE(t.is_active());
+    CHECK_FALSE(t.handle());
 }
 
 TEST_CASE("Timer stop on inactive timer is a no-op", "[core][timer]")
@@ -47,8 +47,8 @@ TEST_CASE("Timer stop on inactive timer is a no-op", "[core][timer]")
     Application app{0, nullptr};
 
     Timer t;
-    REQUIRE_NOTHROW(t.stop());
-    REQUIRE_FALSE(t.is_active());
+    CHECK_NOTHROW(t.stop());
+    CHECK_FALSE(t.is_active());
 }
 
 TEST_CASE("Timer one-shot fires timeout signal after deadline", "[core][timer]")
@@ -57,13 +57,13 @@ TEST_CASE("Timer one-shot fires timeout signal after deadline", "[core][timer]")
 
     int count = 0;
     Timer t;
-    t.timeout.connect(nullptr, [&count]() -> void { ++count; });
+    t.timeout.connect([&count]() -> void { ++count; });
     t.start(10ms);
 
     std::this_thread::sleep_for(30ms);
     app.process_events(EventFlag::Timers);
 
-    REQUIRE(count == 1);
+    CHECK(count == 1);
 }
 
 TEST_CASE("Timer one-shot does not fire before deadline", "[core][timer]")
@@ -72,12 +72,12 @@ TEST_CASE("Timer one-shot does not fire before deadline", "[core][timer]")
 
     int count = 0;
     Timer t;
-    t.timeout.connect(nullptr, [&count]() -> void { ++count; });
+    t.timeout.connect([&count]() -> void { ++count; });
     t.start(100ms);
 
     app.process_events(EventFlag::Timers);
 
-    REQUIRE(count == 0);
+    CHECK(count == 0);
     t.stop();
 }
 
@@ -87,18 +87,18 @@ TEST_CASE("Timer one-shot fires only once", "[core][timer]")
 
     int count = 0;
     Timer t;
-    t.timeout.connect(nullptr, [&count]() -> void { ++count; });
+    t.timeout.connect([&count]() -> void { ++count; });
     t.start(10ms);
 
     std::this_thread::sleep_for(30ms);
     app.process_events(EventFlag::Timers);
-    REQUIRE(count == 1);
-    REQUIRE_FALSE(t.is_active());
-    REQUIRE_FALSE(t.handle());
+    CHECK(count == 1);
+    CHECK_FALSE(t.is_active());
+    CHECK_FALSE(t.handle());
 
     std::this_thread::sleep_for(30ms);
     app.process_events(EventFlag::Timers);
-    REQUIRE(count == 1);
+    CHECK(count == 1);
 }
 
 TEST_CASE("Timer repeating fires timeout signal multiple times", "[core][timer]")
@@ -108,17 +108,17 @@ TEST_CASE("Timer repeating fires timeout signal multiple times", "[core][timer]"
     int count = 0;
     Timer t;
     t.set_repeating(true);
-    t.timeout.connect(nullptr, [&count]() -> void { ++count; });
+    t.timeout.connect([&count]() -> void { ++count; });
     t.start(10ms);
 
     std::this_thread::sleep_for(15ms);
     app.process_events(EventFlag::Timers);
-    REQUIRE(count >= 1);
-    REQUIRE(t.is_active());
+    CHECK(count >= 1);
+    CHECK(t.is_active());
 
     std::this_thread::sleep_for(15ms);
     app.process_events(EventFlag::Timers);
-    REQUIRE(count >= 2);
+    CHECK(count >= 2);
 
     t.stop();
 }
@@ -134,7 +134,7 @@ TEST_CASE("Timer repeating remains active after firing", "[core][timer]")
     std::this_thread::sleep_for(30ms);
     app.process_events(EventFlag::Timers);
 
-    REQUIRE(t.is_active());
+    CHECK(t.is_active());
     t.stop();
 }
 
@@ -144,13 +144,13 @@ TEST_CASE("Timer start with interval overload", "[core][timer]")
 
     int count = 0;
     Timer t;
-    t.timeout.connect(nullptr, [&count]() -> void { ++count; });
+    t.timeout.connect([&count]() -> void { ++count; });
     t.start(10ms);
 
     std::this_thread::sleep_for(30ms);
     app.process_events(EventFlag::Timers);
 
-    REQUIRE(count == 1);
+    CHECK(count == 1);
 }
 
 TEST_CASE("Timer set_interval changes the interval", "[core][timer]")
@@ -159,12 +159,12 @@ TEST_CASE("Timer set_interval changes the interval", "[core][timer]")
 
     int count = 0;
     Timer t;
-    t.timeout.connect(nullptr, [&count]() -> void { ++count; });
+    t.timeout.connect([&count]() -> void { ++count; });
     t.set_interval(100ms);
     t.start();
 
     app.process_events(EventFlag::Timers);
-    REQUIRE(count == 0);
+    CHECK(count == 0);
 
     t.stop();
 }
@@ -175,18 +175,18 @@ TEST_CASE("Timer set_interval on active timer restarts it", "[core][timer]")
 
     int count = 0;
     Timer t;
-    t.timeout.connect(nullptr, [&count]() -> void { ++count; });
+    t.timeout.connect([&count]() -> void { ++count; });
     t.start(100ms);
-    REQUIRE(t.is_active());
+    CHECK(t.is_active());
 
     // Change to a short interval — timer restarts from now
     std::this_thread::sleep_for(20ms);
     t.set_interval(10ms);
-    REQUIRE(t.is_active());
+    CHECK(t.is_active());
 
     std::this_thread::sleep_for(30ms);
     app.process_events(EventFlag::Timers);
-    REQUIRE(count == 1);
+    CHECK(count == 1);
 }
 
 TEST_CASE("Timer start restarts an already active timer", "[core][timer]")
@@ -195,7 +195,7 @@ TEST_CASE("Timer start restarts an already active timer", "[core][timer]")
 
     int count = 0;
     Timer t;
-    t.timeout.connect(nullptr, [&count]() -> void { ++count; });
+    t.timeout.connect([&count]() -> void { ++count; });
     t.start(50ms);
 
     // Restart the timer before it fires — deadline resets
@@ -205,11 +205,11 @@ TEST_CASE("Timer start restarts an already active timer", "[core][timer]")
     // Only 20ms elapsed since restart, timer should not have fired
     std::this_thread::sleep_for(20ms);
     app.process_events(EventFlag::Timers);
-    REQUIRE(count == 0);
+    CHECK(count == 0);
 
     std::this_thread::sleep_for(40ms);
     app.process_events(EventFlag::Timers);
-    REQUIRE(count == 1);
+    CHECK(count == 1);
 }
 
 TEST_CASE("Timer destructor stops the timer", "[core][timer]")
@@ -219,14 +219,14 @@ TEST_CASE("Timer destructor stops the timer", "[core][timer]")
     int count = 0;
     {
         Timer t;
-        t.timeout.connect(nullptr, [&count]() -> void { ++count; });
+        t.timeout.connect([&count]() -> void { ++count; });
         t.start(50ms);
         REQUIRE(t.is_active());
     } // destructor stops the timer
 
     std::this_thread::sleep_for(70ms);
     app.process_events(EventFlag::Timers);
-    REQUIRE(count == 0);
+    CHECK(count == 0);
 }
 
 TEST_CASE("Timer set_repeating does not affect active state", "[core][timer]")
@@ -235,13 +235,13 @@ TEST_CASE("Timer set_repeating does not affect active state", "[core][timer]")
 
     Timer t;
     t.start(100ms);
-    REQUIRE(t.is_active());
+    CHECK(t.is_active());
 
     t.set_repeating(true);
-    REQUIRE(t.is_active());
+    CHECK(t.is_active());
 
     t.set_repeating(false);
-    REQUIRE(t.is_active());
+    CHECK(t.is_active());
 
     t.stop();
 }

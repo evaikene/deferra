@@ -69,13 +69,13 @@ struct LoggerGuard {
 
 TEST_CASE("log_level_name returns correct strings", "[core][logging]")
 {
-    REQUIRE(log_level_name(LogLevel::Fatal)   == "FATAL");
-    REQUIRE(log_level_name(LogLevel::Error)   == "ERROR");
-    REQUIRE(log_level_name(LogLevel::Warning) == "WARN");
-    REQUIRE(log_level_name(LogLevel::Info)    == "INFO");
-    REQUIRE(log_level_name(LogLevel::Debug1)  == "DBG1");
-    REQUIRE(log_level_name(LogLevel::Debug2)  == "DBG2");
-    REQUIRE(log_level_name(LogLevel::Debug3)  == "DBG3");
+    CHECK(log_level_name(LogLevel::Fatal)   == "FATAL");
+    CHECK(log_level_name(LogLevel::Error)   == "ERROR");
+    CHECK(log_level_name(LogLevel::Warning) == "WARN");
+    CHECK(log_level_name(LogLevel::Info)    == "INFO");
+    CHECK(log_level_name(LogLevel::Debug1)  == "DBG1");
+    CHECK(log_level_name(LogLevel::Debug2)  == "DBG2");
+    CHECK(log_level_name(LogLevel::Debug3)  == "DBG3");
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ TEST_CASE("log_level_name returns correct strings", "[core][logging]")
 TEST_CASE("Logger default level is Warning", "[core][logging]")
 {
     CaptureLogger lg;
-    REQUIRE(lg.level() == LogLevel::Warning);
+    CHECK(lg.level() == LogLevel::Warning);
 }
 
 TEST_CASE("Logger is_enabled respects threshold", "[core][logging]")
@@ -93,25 +93,25 @@ TEST_CASE("Logger is_enabled respects threshold", "[core][logging]")
     CaptureLogger lg;
     lg.set_level(LogLevel::Info);
 
-    REQUIRE(lg.is_enabled(LogLevel::Fatal));
-    REQUIRE(lg.is_enabled(LogLevel::Error));
-    REQUIRE(lg.is_enabled(LogLevel::Warning));
-    REQUIRE(lg.is_enabled(LogLevel::Info));
-    REQUIRE_FALSE(lg.is_enabled(LogLevel::Debug1));
-    REQUIRE_FALSE(lg.is_enabled(LogLevel::Debug2));
-    REQUIRE_FALSE(lg.is_enabled(LogLevel::Debug3));
+    CHECK(lg.is_enabled(LogLevel::Fatal));
+    CHECK(lg.is_enabled(LogLevel::Error));
+    CHECK(lg.is_enabled(LogLevel::Warning));
+    CHECK(lg.is_enabled(LogLevel::Info));
+    CHECK_FALSE(lg.is_enabled(LogLevel::Debug1));
+    CHECK_FALSE(lg.is_enabled(LogLevel::Debug2));
+    CHECK_FALSE(lg.is_enabled(LogLevel::Debug3));
 }
 
 TEST_CASE("Logger set_level updates threshold", "[core][logging]")
 {
     CaptureLogger lg;
     lg.set_level(LogLevel::Debug3);
-    REQUIRE(lg.level() == LogLevel::Debug3);
-    REQUIRE(lg.is_enabled(LogLevel::Debug3));
+    CHECK(lg.level() == LogLevel::Debug3);
+    CHECK(lg.is_enabled(LogLevel::Debug3));
 
     lg.set_level(LogLevel::Fatal);
-    REQUIRE(lg.level() == LogLevel::Fatal);
-    REQUIRE_FALSE(lg.is_enabled(LogLevel::Error));
+    CHECK(lg.level() == LogLevel::Fatal);
+    CHECK_FALSE(lg.is_enabled(LogLevel::Error));
 }
 
 // ---------------------------------------------------------------------------
@@ -120,25 +120,25 @@ TEST_CASE("Logger set_level updates threshold", "[core][logging]")
 
 TEST_CASE("logger() returns non-null", "[core][logging]")
 {
-    REQUIRE(logger() != nullptr);
+    CHECK(logger() != nullptr);
 }
 
 TEST_CASE("set_logger installs a custom logger", "[core][logging]")
 {
     LoggerGuard g;
-    REQUIRE(logger() == g.cap);
+    CHECK(logger() == g.cap);
 }
 
 TEST_CASE("set_logger nullptr restores the default ConsoleLogger", "[core][logging]")
 {
     {
         LoggerGuard g;
-        REQUIRE(logger() == g.cap);
+        CHECK(logger() == g.cap);
     }
     // destructor called set_logger(nullptr)
     auto lg = logger();
-    REQUIRE(lg != nullptr);
-    REQUIRE(dynamic_cast<ConsoleLogger*>(lg.get()) != nullptr);
+    CHECK(lg != nullptr);
+    CHECK(dynamic_cast<ConsoleLogger*>(lg.get()) != nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -158,14 +158,14 @@ TEST_CASE("Log functions route to the correct level", "[core][logging]")
     log_dbg3("d3");
 
     auto recs = g.cap->records();
-    REQUIRE(recs.size() == 7);
-    REQUIRE(recs[0].level == LogLevel::Fatal);
-    REQUIRE(recs[1].level == LogLevel::Error);
-    REQUIRE(recs[2].level == LogLevel::Warning);
-    REQUIRE(recs[3].level == LogLevel::Info);
-    REQUIRE(recs[4].level == LogLevel::Debug1);
-    REQUIRE(recs[5].level == LogLevel::Debug2);
-    REQUIRE(recs[6].level == LogLevel::Debug3);
+    CHECK(recs.size() == 7);
+    CHECK(recs[0].level == LogLevel::Fatal);
+    CHECK(recs[1].level == LogLevel::Error);
+    CHECK(recs[2].level == LogLevel::Warning);
+    CHECK(recs[3].level == LogLevel::Info);
+    CHECK(recs[4].level == LogLevel::Debug1);
+    CHECK(recs[5].level == LogLevel::Debug2);
+    CHECK(recs[6].level == LogLevel::Debug3);
 }
 
 TEST_CASE("Log functions below threshold are suppressed", "[core][logging]")
@@ -176,12 +176,12 @@ TEST_CASE("Log functions below threshold are suppressed", "[core][logging]")
     log_dbg1("suppressed");
     log_dbg2("suppressed");
     log_dbg3("suppressed");
-    REQUIRE(g.cap->records().empty());
+    CHECK(g.cap->records().empty());
 
     log_warning("visible");
     log_error("visible");
     log_fatal("visible");
-    REQUIRE(g.cap->records().size() == 3);
+    CHECK(g.cap->records().size() == 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -195,8 +195,8 @@ TEST_CASE("Log functions format the message correctly", "[core][logging]")
     log_info("value={} str={}", 42, "hello");
 
     auto recs = g.cap->records();
-    REQUIRE(recs.size() == 1);
-    REQUIRE(recs[0].message == "value=42 str=hello");
+    CHECK(recs.size() == 1);
+    CHECK(recs[0].message == "value=42 str=hello");
 }
 
 TEST_CASE("Log functions capture source location", "[core][logging]")
@@ -206,9 +206,9 @@ TEST_CASE("Log functions capture source location", "[core][logging]")
     log_info("location test");
 
     auto recs = g.cap->records();
-    REQUIRE_FALSE(recs.empty());
-    REQUIRE(recs[0].line != 0);
-    REQUIRE(std::string_view{recs[0].file}.find("logging-test") != std::string_view::npos);
+    CHECK_FALSE(recs.empty());
+    CHECK(recs[0].line != 0);
+    CHECK(std::string_view{recs[0].file}.find("logging-test") != std::string_view::npos);
 }
 
 TEST_CASE("Log message timestamp is set", "[core][logging]")
@@ -229,8 +229,8 @@ TEST_CASE("Log message timestamp is set", "[core][logging]")
 
     set_logger(nullptr);
 
-    REQUIRE(tsl->ts >= before);
-    REQUIRE(tsl->ts <= after);
+    CHECK(tsl->ts >= before);
+    CHECK(tsl->ts <= after);
 }
 
 // ---------------------------------------------------------------------------
@@ -247,5 +247,5 @@ TEST_CASE("ConsoleLogger logs without throwing", "[core][logging]")
     msg.message   = "smoke test";
     msg.timestamp = std::chrono::system_clock::now();
 
-    REQUIRE_NOTHROW(cl.log(msg));
+    CHECK_NOTHROW(cl.log(msg));
 }
