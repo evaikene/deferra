@@ -73,6 +73,11 @@ struct LogMessage {
 /// Implementations are responsible for output (console, file, syslog, ...) and
 /// MUST be thread-safe - `log()` may be called concurrently from any thread
 /// without external synchronization.
+///
+/// The `abort_on_fatal_error` flag controls whether the process is aborted after
+/// logging a fatal message. This is false by default in release builds and true in
+/// debug builds, so that fatal messages are logged without aborting in release builds,
+/// but still abort in debug builds.
 class Logger {
 public:
 
@@ -95,11 +100,25 @@ public:
         return static_cast<std::uint8_t>(l) <= static_cast<std::uint8_t>(_level.load(std::memory_order_relaxed));
     }
 
+    /// Changes the behavior of `log()` on fatal messages. If true, the process is
+    /// aborted after logging a fatal message. Default is false in release builds and
+    /// true in debug builds.
+    void set_abort_on_fatal_error(bool v) noexcept { _abort_on_fatal_error = v; }
+
 protected:
     std::atomic<LogLevel> _level = LogLevel::Warning;
+#if defined(NDEBUG)
+    bool _abort_on_fatal_error{false};
+#else
+    bool _abort_on_fatal_error{true};
+#endif
 };
 
 /// Plain line-based logger writing to stderr. Thread-safe via an internal mutex.
+///
+/// This is the default logger used if no other logger is installed, so it is always
+/// available and can be used for early logging before `main()` / `Application` setup.
+///
 class ConsoleLogger final : public Logger {
 public:
 
@@ -107,6 +126,7 @@ public:
     ~ConsoleLogger() override = default;
 
     void log(LogMessage const& msg) override;
+
 };
 
 /// Returns the currently installed global logger (never nullptr).

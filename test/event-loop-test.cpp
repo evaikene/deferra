@@ -14,8 +14,8 @@ using namespace std::chrono_literals;
 TEST_CASE("EventLoop initial state", "[core][event_loop]")
 {
     EventLoop loop;
-    REQUIRE_FALSE(loop.is_running());
-    REQUIRE(loop.thread_ctx() == ThreadCtx::current());
+    CHECK_FALSE(loop.is_running());
+    CHECK(loop.thread_ctx() == ThreadCtx::current());
 }
 
 TEST_CASE("EventLoop process_events executes a posted task", "[core][event_loop]")
@@ -24,7 +24,7 @@ TEST_CASE("EventLoop process_events executes a posted task", "[core][event_loop]
     int counter = 0;
     loop.post([&counter]() -> void { ++counter; });
     loop.process_events(EventFlag::Tasks);
-    REQUIRE(counter == 1);
+    CHECK(counter == 1);
 }
 
 TEST_CASE("EventLoop process_events executes multiple tasks in order", "[core][event_loop]")
@@ -35,30 +35,30 @@ TEST_CASE("EventLoop process_events executes multiple tasks in order", "[core][e
     loop.post([&order]() -> void { order.push_back(2); });
     loop.post([&order]() -> void { order.push_back(3); });
     loop.process_events(EventFlag::Tasks);
-    REQUIRE(order == std::vector<int>{1, 2, 3});
+    CHECK(order == std::vector<int>{1, 2, 3});
 }
 
 TEST_CASE("EventLoop process_events returns false when loop is not running", "[core][event_loop]")
 {
     EventLoop loop;
-    REQUIRE_FALSE(loop.process_events(EventFlag::Tasks));
+    CHECK_FALSE(loop.process_events(EventFlag::Tasks));
 }
 
 TEST_CASE("EventLoop run and quit", "[core][event_loop][thread]")
 {
     EventLoop loop;
-    REQUIRE_FALSE(loop.is_running());
+    CHECK_FALSE(loop.is_running());
 
     std::thread t([&loop]() -> void { loop.run(); });
     while (!loop.is_running()) {
         std::this_thread::yield();
     }
 
-    REQUIRE(loop.is_running());
+    CHECK(loop.is_running());
     loop.quit();
     t.join();
 
-    REQUIRE_FALSE(loop.is_running());
+    CHECK_FALSE(loop.is_running());
 }
 
 TEST_CASE("EventLoop run executes tasks posted from another thread", "[core][event_loop][thread]")
@@ -76,7 +76,7 @@ TEST_CASE("EventLoop run executes tasks posted from another thread", "[core][eve
     loop.quit();
     t.join();
 
-    REQUIRE(counter.load() == 2);
+    CHECK(counter.load() == 2);
 }
 
 TEST_CASE("EventLoop quit processes remaining tasks before exiting", "[core][event_loop]")
@@ -92,7 +92,7 @@ TEST_CASE("EventLoop quit processes remaining tasks before exiting", "[core][eve
 
     loop.run();
 
-    REQUIRE(counter.load() == 3);
+    CHECK(counter.load() == 3);
 }
 
 TEST_CASE("EventLoop post_at in the past fires on next process_events", "[core][event_loop]")
@@ -101,7 +101,7 @@ TEST_CASE("EventLoop post_at in the past fires on next process_events", "[core][
     bool fired = false;
     loop.post_at(Clock::now() - 100ms, [&fired]() -> void { fired = true; });
     loop.process_events(EventFlag::Timers);
-    REQUIRE(fired);
+    CHECK(fired);
 }
 
 TEST_CASE("EventLoop post_delayed does not fire before deadline", "[core][event_loop]")
@@ -110,7 +110,7 @@ TEST_CASE("EventLoop post_delayed does not fire before deadline", "[core][event_
     bool fired = false;
     loop.post_delayed(50ms, [&fired]() -> void { fired = true; });
     loop.process_events(EventFlag::Timers);
-    REQUIRE_FALSE(fired);
+    CHECK_FALSE(fired);
 }
 
 TEST_CASE("EventLoop post_delayed fires after deadline", "[core][event_loop]")
@@ -121,7 +121,7 @@ TEST_CASE("EventLoop post_delayed fires after deadline", "[core][event_loop]")
 
     std::this_thread::sleep_for(30ms);
     loop.process_events(EventFlag::Timers);
-    REQUIRE(fired);
+    CHECK(fired);
 }
 
 TEST_CASE("EventLoop post_at fires after deadline", "[core][event_loop]")
@@ -132,7 +132,7 @@ TEST_CASE("EventLoop post_at fires after deadline", "[core][event_loop]")
 
     std::this_thread::sleep_for(30ms);
     loop.process_events(EventFlag::Timers);
-    REQUIRE(fired);
+    CHECK(fired);
 }
 
 TEST_CASE("EventLoop cancel_timer prevents a one-shot timer from firing", "[core][event_loop]")
@@ -145,7 +145,7 @@ TEST_CASE("EventLoop cancel_timer prevents a one-shot timer from firing", "[core
 
     std::this_thread::sleep_for(30ms);
     loop.process_events(EventFlag::Timers);
-    REQUIRE_FALSE(fired);
+    CHECK_FALSE(fired);
 }
 
 TEST_CASE("EventLoop cancel_timer on already-expired timer is a no-op", "[core][event_loop]")
@@ -155,9 +155,9 @@ TEST_CASE("EventLoop cancel_timer on already-expired timer is a no-op", "[core][
     auto h = loop.post_at(Clock::now() - 1ms, [&count]() -> void { ++count; });
 
     loop.process_events(EventFlag::Timers); // fires it
-    REQUIRE(count == 1);
+    CHECK(count == 1);
 
-    REQUIRE_NOTHROW(loop.cancel_timer(h)); // should not throw or crash
+    CHECK_NOTHROW(loop.cancel_timer(h)); // should not throw or crash
 }
 
 TEST_CASE("EventLoop post_repeating fires on each interval", "[core][event_loop]")
@@ -168,11 +168,11 @@ TEST_CASE("EventLoop post_repeating fires on each interval", "[core][event_loop]
 
     std::this_thread::sleep_for(15ms);
     loop.process_events(EventFlag::Timers);
-    REQUIRE(count >= 1);
+    CHECK(count >= 1);
 
     std::this_thread::sleep_for(15ms);
     loop.process_events(EventFlag::Timers);
-    REQUIRE(count >= 2);
+    CHECK(count >= 2);
 }
 
 TEST_CASE("EventLoop cancel_timer stops a repeating timer", "[core][event_loop]")
@@ -184,24 +184,24 @@ TEST_CASE("EventLoop cancel_timer stops a repeating timer", "[core][event_loop]"
     std::this_thread::sleep_for(25ms);
     loop.process_events(EventFlag::Timers);
     int count_after_first = count;
-    REQUIRE(count_after_first >= 1);
+    CHECK(count_after_first >= 1);
 
     loop.cancel_timer(h);
 
     std::this_thread::sleep_for(25ms);
     loop.process_events(EventFlag::Timers);
-    REQUIRE(count == count_after_first);
+    CHECK(count == count_after_first);
 }
 
 TEST_CASE("EventLoop watch_fd returns a valid handle", "[core][event_loop]")
 {
     EventLoop loop;
     int fds[2];
-    REQUIRE(pipe(fds) == 0);
+    CHECK(pipe(fds) == 0);
 
     auto h = loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, [](int, FdEvents) -> void {});
-    REQUIRE(h);
-    REQUIRE(h.fd == fds[0]);
+    CHECK(h);
+    CHECK(h.fd == fds[0]);
 
     loop.unwatch_fd(h);
     close(fds[0]);
@@ -212,7 +212,7 @@ TEST_CASE("EventLoop watch_fd callback fires when fd is readable", "[core][event
 {
     EventLoop loop;
     int fds[2];
-    REQUIRE(pipe(fds) == 0);
+    CHECK(pipe(fds) == 0);
 
     bool fired = false;
     loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, [&fired](int, FdEvents) -> void {
@@ -225,14 +225,14 @@ TEST_CASE("EventLoop watch_fd callback fires when fd is readable", "[core][event
 
     close(fds[0]);
     close(fds[1]);
-    REQUIRE(fired);
+    CHECK(fired);
 }
 
 TEST_CASE("EventLoop watch_fd callback receives correct fd and events", "[core][event_loop]")
 {
     EventLoop loop;
     int fds[2];
-    REQUIRE(pipe(fds) == 0);
+    CHECK(pipe(fds) == 0);
 
     int received_fd = -1;
     FdEvents received_events{};
@@ -248,15 +248,15 @@ TEST_CASE("EventLoop watch_fd callback receives correct fd and events", "[core][
 
     close(fds[0]);
     close(fds[1]);
-    REQUIRE(received_fd == fds[0]);
-    REQUIRE(received_events.test(FdEvent::Read));
+    CHECK(received_fd == fds[0]);
+    CHECK(received_events.test(FdEvent::Read));
 }
 
 TEST_CASE("EventLoop unwatch_fd prevents callback from firing", "[core][event_loop]")
 {
     EventLoop loop;
     int fds[2];
-    REQUIRE(pipe(fds) == 0);
+    CHECK(pipe(fds) == 0);
 
     int count = 0;
     auto h = loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, [&count](int, FdEvents) -> void {
@@ -270,14 +270,14 @@ TEST_CASE("EventLoop unwatch_fd prevents callback from firing", "[core][event_lo
 
     close(fds[0]);
     close(fds[1]);
-    REQUIRE(count == 0);
+    CHECK(count == 0);
 }
 
 TEST_CASE("EventLoop unwatch_fd stops a repeating watch", "[core][event_loop]")
 {
     EventLoop loop;
     int fds[2];
-    REQUIRE(pipe(fds) == 0);
+    CHECK(pipe(fds) == 0);
 
     int count = 0;
     auto h = loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, [&count](int, FdEvents) -> void {
@@ -287,7 +287,7 @@ TEST_CASE("EventLoop unwatch_fd stops a repeating watch", "[core][event_loop]")
     char byte = 'x';
     (void)write(fds[1], &byte, 1);
     loop.process_events(EventFlag::Watchers); // fires once
-    REQUIRE(count == 1);
+    CHECK(count == 1);
 
     char buf[1];
     (void)read(fds[0], buf, 1); // drain pipe so the fd is no longer readable
@@ -298,7 +298,7 @@ TEST_CASE("EventLoop unwatch_fd stops a repeating watch", "[core][event_loop]")
 
     close(fds[0]);
     close(fds[1]);
-    REQUIRE(count == 1);
+    CHECK(count == 1);
 }
 
 TEST_CASE("EventLoop watch_fd multiple fds fire independently", "[core][event_loop]")
@@ -306,8 +306,8 @@ TEST_CASE("EventLoop watch_fd multiple fds fire independently", "[core][event_lo
     EventLoop loop;
     int fds0[2];
     int fds1[2];
-    REQUIRE(pipe(fds0) == 0);
-    REQUIRE(pipe(fds1) == 0);
+    CHECK(pipe(fds0) == 0);
+    CHECK(pipe(fds1) == 0);
 
     int count0 = 0;
     int count1 = 0;
@@ -320,8 +320,8 @@ TEST_CASE("EventLoop watch_fd multiple fds fire independently", "[core][event_lo
 
     close(fds0[0]); close(fds0[1]);
     close(fds1[0]); close(fds1[1]);
-    REQUIRE(count0 >= 1);
-    REQUIRE(count1 == 0);
+    CHECK(count0 >= 1);
+    CHECK(count1 == 0);
 }
 
 TEST_CASE("EventLoop post is thread-safe under concurrent posters", "[core][event_loop][thread]")
@@ -352,5 +352,5 @@ TEST_CASE("EventLoop post is thread-safe under concurrent posters", "[core][even
     loop.quit();
     runner.join();
 
-    REQUIRE(counter.load() == kThreads * kTasksPerThread);
+    CHECK(counter.load() == kThreads * kTasksPerThread);
 }

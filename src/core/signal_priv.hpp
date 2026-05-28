@@ -1,28 +1,32 @@
 #pragma once
 
-// Internal header - not part of the public API
+// IWYU pragma: private include "object.hpp"
+//#include "object.hpp"
+
+// Internal header included only from object.hpp - not part of the public API
+// Do NOT include this file directly.
 
 #include "logging.hpp"
 
 #include <algorithm>
-#include <cassert>
 #include <type_traits>
 
 namespace jb::core {
 
 // Signal<Args...>::connect - member-function / callable-with-receiver slot
 
-template<typename... Args>
-template<typename Receiver, typename Slot>
+template <typename... Args>
+template <typename Receiver, typename Slot>
 auto Signal<Args...>::connect(Receiver* receiver, Slot&& slot, ConnectionType type) -> Connection
 {
-    assert(receiver != nullptr && "Signal::connect: receiver must not be null");
+    static_assert(std::is_base_of_v<Object, Receiver>,
+                  "Signal::connect: Receiver must be derived from Object");
     if (!receiver) {
-        log_error("Signal::connect: receiver must not be null");
+        log_fatal("Signal::connect: receiver must not be null");
         return {};
     }
 
-    auto conn = std::make_shared<TypedConn>();
+    auto conn           = std::make_shared<TypedConn>();
     conn->conn_type     = type;
     conn->receiver      = receiver;
     conn->receiver_loop = receiver->event_loop();
@@ -30,9 +34,7 @@ auto Signal<Args...>::connect(Receiver* receiver, Slot&& slot, ConnectionType ty
     if constexpr (std::is_member_function_pointer_v<std::decay_t<Slot>>) {
         // member-function pounter: bind the receiver so the stored function only
         // needs to be called with (Args...)
-        conn->slot = [r = receiver, s = std::forward<Slot>(slot)](Args... args) -> void {
-            (r->*s)(args...);
-        };
+        conn->slot = [r = receiver, s = std::forward<Slot>(slot)](Args... args) -> void { (r->*s)(args...); };
     }
     else {
         // already a free callable (lambda, std::function, etc.) - store directly
@@ -52,14 +54,14 @@ auto Signal<Args...>::connect(Receiver* receiver, Slot&& slot, ConnectionType ty
 }
 
 // Signal<Args...>::connect - context-free lambda (always Direct)
-template<typename... Args>
-template<typename Callable>
+template <typename... Args>
+template <typename Callable>
 auto Signal<Args...>::connect(Callable&& callable) -> Connection
 {
-    auto conn = std::make_shared<TypedConn>();
-    conn->slot = std::forward<Callable>(callable);
-    conn->conn_type = ConnectionType::Direct;
-    conn->receiver = nullptr;
+    auto conn           = std::make_shared<TypedConn>();
+    conn->slot          = std::forward<Callable>(callable);
+    conn->conn_type     = ConnectionType::Direct;
+    conn->receiver      = nullptr;
     conn->receiver_loop = nullptr;
 
     std::lock_guard<std::mutex> lock{_mx};
@@ -70,7 +72,7 @@ auto Signal<Args...>::connect(Callable&& callable) -> Connection
 
 // Signal<Args...>::disconnect
 
-template<typename... Args>
+template <typename... Args>
 void Signal<Args...>::disconnect(Connection const& conn) noexcept
 {
     if (auto p = conn._data.lock()) {
@@ -80,7 +82,7 @@ void Signal<Args...>::disconnect(Connection const& conn) noexcept
 
 // Signal<Args...>::disconnect_all
 
-template<typename... Args>
+template <typename... Args>
 void Signal<Args...>::disconnect_all() noexcept
 {
     std::lock_guard<std::mutex> lock{_mx};
@@ -92,7 +94,7 @@ void Signal<Args...>::disconnect_all() noexcept
 
 // Signal<Args...>::emit
 
-template<typename... Args>
+template <typename... Args>
 void Signal<Args...>::emit(Object* sender, Args... args)
 {
     //--- 1. snapshot the live connections under the lock
@@ -102,9 +104,11 @@ void Signal<Args...>::emit(Object* sender, Args... args)
     {
         std::lock_guard<std::mutex> lock{_mx};
 
-        std::erase_if(_connections, [](std::shared_ptr<TypedConn> const& c) -> bool {
-            return !c->active.load(std::memory_order_relaxed);
-        });
+        _connections.erase(
+            std::remove_if(_connections.begin(), _connections.end(), [](auto const& c) -> auto {
+                return !c->active.load(std::memory_order_relaxed);
+            }),
+            _connections.end());
         snapshot = _connections;
     }
 
@@ -129,7 +133,7 @@ void Signal<Args...>::emit(Object* sender, Args... args)
                 default: {
                     // direct when the sender and receiver share the same EventLoop,
                     // or when the receiver has no EventLoop (e.g. pre-Application).
-                    return (c->receiver_loop == nullptr) || (sender->event_loop() != c->receiver_loop);
+                    return !c->receiver_loop || (sender->event_loop() == c->receiver_loop);
                 }
             }
         }();
@@ -140,13 +144,11 @@ void Signal<Args...>::emit(Object* sender, Args... args)
         }
         else {
             // asynchronous: capture args by value and post to the receiver loop
-            c->receiver_loop->post(
-                [c, ...captured_args = args]() mutable -> auto {
-                    if (c->active.load(std::memory_order_acquire)) {
-                        c->invoke(captured_args...);
-                    }
+            c->receiver_loop->post([c, ...captured_args = args]() mutable -> auto {
+                if (c->active.load(std::memory_order_acquire)) {
+                    c->invoke(captured_args...);
                 }
-            );
+            });
         }
     }
 }

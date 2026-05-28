@@ -1,8 +1,8 @@
 #include "event_loop.hpp"
 
+#include "logging.hpp"
 #include "thread_context.hpp"
 
-#include <cassert>
 #include <chrono>
 #include <limits>
 
@@ -157,8 +157,11 @@ auto EventLoop::process_events(EventFlags flags, int ms) -> bool
 
 auto EventLoop::assert_on_loop_thread() const -> bool
 {
-    assert(_thread_ctx.load(std::memory_order_relaxed) == ThreadCtx::current());
-    return (_thread_ctx.load(std::memory_order_relaxed) == ThreadCtx::current());
+    auto const is_current_thread = _thread_ctx.load(std::memory_order_relaxed) == ThreadCtx::current();
+    if (!is_current_thread) {
+        log_fatal("EventLoop methods must be called from the thread running the event loop");
+    }
+    return is_current_thread;
 }
 
 auto EventLoop::compute_timeout_ms(int max_timeout_ms) -> int

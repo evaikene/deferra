@@ -3,6 +3,7 @@
 #include <fmt/chrono.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <mutex>
 
@@ -71,6 +72,10 @@ void ConsoleLogger::log(LogMessage const& msg)
                msg.location.line(),
                msg.message);
     std::fflush(stderr);
+
+    if (msg.level == LogLevel::Fatal && _abort_on_fatal_error) {
+        std::abort();
+    }
 }
 
 auto logger() -> std::shared_ptr<Logger>

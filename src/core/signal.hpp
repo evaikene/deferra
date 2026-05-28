@@ -1,6 +1,6 @@
 #pragma once
 
-#include "event_loop.hpp"
+#include "connection.hpp"
 #include "thread_context.hpp"
 
 #include <cassert>
@@ -11,65 +11,99 @@
 
 namespace jb::core {
 
-/// Type of signal-slot connection
-enum class ConnectionType : std::uint8_t {
-    Direct, ///< Call slot immediately on the emitting thread (like a direct function call)
-    Queued, ///< Post slot to the receiver's event loop
-    Auto,   ///< Direct if same thread, Queued otherwise
-};
+/// Forward declarations
+class Object;
+class EventLoop;
 
-using connection_id_t = std::uint64_t;
-
-/// Signal-slot connection
-/// Represent a signal-slot connection that can be stored and used to manage the
-/// connection (e.g., disconnecting).
-struct Connection {
-    connection_id_t id{0}; ///< Unique connection identifier (zero means invalid connection)
-
-    explicit operator bool() const noexcept { return id != 0; }
-};
-
+/// Type-safe, thread-aware signal for the signal-slot system.
+/// @tparam Args Parameter types of the signal; may be empty (Signal<>)
+///
+/// A Signal<Args...> is a value member of an Object subclass. Zero or more slots
+/// can be connected to it; emitting the signal calls all live slots.
+///
+/// Declaring signal:
+///
+/// @code
+/// class MyWorker : public jb::core::Object {
+/// public:
+///     Signal<>     started;
+///     Signal<int>  progress;
+///     Signal<bool> finished;
+/// };
+/// @endcode
+///
+/// Emitting (inside the owning class):
+///
+/// @code
+/// emit(started);
+/// emit(progress, 42);
+/// emit(finished, true);
+/// @endcode
+///
+/// Connecting from outside:
+///
+/// @code
+/// // Member-function slot (type checked at compile time)
+/// worker->progress.connect(ui, &ProgressBar::set_value);
+///
+/// // Lambda slot (always Direct)
+/// worker->finished.connect([](bool ok) {...});
+///
+/// // Explicit queued connection (cross-thread)
+/// worker->finished.connect(handler, &Handler::on_finished, ConnectionType::Queued);
+/// @endcode
+///
+/// Thread safety:
+///
+/// connect(), disconnect(), and disconnect_all() are protected by a mutex and
+/// thread-safe. Slot invocations themselves are not protected; each slot must guard
+/// its own mutable state.
+///
+/// Queued connections and copyability:
+///
+/// For Queued (cross-thread) delivery, all @p Args are captured by value and each
+/// argument type must therefore be copyable (or at least movable).
+///
 template <typename... Args>
 class Signal {
 public:
 
-     Signal() = default;
+    Signal() = default;
 
-     ~Signal() { disconnect_all(); }
- 
-     /// Connect to a member function of an Object-derived @p receiver.
-     /// @param[in] receiver Receiver object derived from Object
-     /// @param[in] slot Any callable compatible with `void(Args...)`
-     /// @param[in] type Connection type (default: Auto)
-     /// @return A connection handle
-     ///
-     /// The slot type is checked at compile time: it must be callable with `Args...`.
-     template <typename Receiver, typename Slot>
-    auto connect(Receiver& receiver, Slot&& slot, ConnectionType type = ConnectionType::Auto);
+    ~Signal() { disconnect_all(); }
 
-    /// Connect the signal to a member function directly
-    /// @param[in] receiver The receiver object for lifetime tracking (can be nullptr)
-    /// @param[in] fn The member function to connect
-    /// @param[in] type The connection type (default: Auto)
-    /// @return Connection object representing the connection
-    template <typename Receiver, typename Member>
-        requires std::is_base_of_v<Connectable, Receiver>&& std::is_invocable_v<Member, Receiver*, Args...>
-    auto connect(Receiver* receiver, Member fn, ConnectionType type = ConnectionType::Auto) -> Connection
-    {
-        auto slot = [receiver, fn = std::move(fn)](Args... args) -> void { std::invoke(fn, receiver, args...); };
-        return connect(receiver, std::move(slot), type);
-    }
+    /// Non-copyable. non-movable - signals are always members of Objects
+    Signal(Signal const&)                    = delete;
+    Signal(Signal&&)                         = delete;
+    auto operator=(Signal const&) -> Signal& = delete;
+    auto operator=(Signal&&) -> Signal&      = delete;
 
-    /// Disconnect the connection from the signal
-    /// @param[in] c The connection to disconnect
+    /// Connect to a member function of an Object-derived @p receiver.
+    /// @param[in] receiver Receiver object derived from Object
+    /// @param[in] slot Any callable compatible with `void(Args...)`
+    /// @param[in] type Connection type (default: Auto)
+    /// @return A connection handle; keep it to disconnect later
+    ///
+    /// The slot type is checked at compile time: it must be callable with
+    /// `Args...`.
+    ///
+    /// Typical use:
+    ///
+    /// @code
+    /// sig.connect(obj, &MyClass::my_slot);
+    /// // or with a capturing lambda to a method
+    /// sig.connect(obj, [obj]*int v) { obj->update(v); });
+    /// @endcode
+    ///
+    template <typename Receiver, typename Slot>
     auto connect(Receiver* receiver, Slot&& slot, ConnectionType type = ConnectionType::Auto) -> Connection;
 
-    /// Connect to a callable with no Object receiver.
+    /// Connect to a callable with no Object receiver
     /// @param[in] callable Any callable compatible with `void(Args...)`
-    /// @return A connection handle
+    /// @return A connection handle; keep it to disconnect later
     ///
     /// Lambda connections are always Direct: the callable is invoked in the emitting
-    /// thread.
+    /// thread. The ConnectionType parameter is intentionally absent.
     template <typename Callable>
     auto connect(Callable&& callable) -> Connection;
 
@@ -82,6 +116,13 @@ public:
 
     /// Deactivate all connections and clear the internal list.
     void disconnect_all() noexcept;
+
+    /// Returns the number of connections
+    auto count() const -> std::size_t
+    {
+        std::lock_guard lock(_mx);
+        return _connections.size();
+    }
 
 private:
 
@@ -97,7 +138,7 @@ private:
     struct TypedConn : priv::ConnectionBase {
         std::function<void(Args...)> slot;
         Object*                      receiver{nullptr};      ///< nullptr for lambda connections
-        EventLoop*                   receiver_loop{nullptr}; /// nullptr for Direct/lambda
+        EventLoop*                   receiver_loop{nullptr}; ///< nullptr for Direct/lambda
         ConnectionType               conn_type{ConnectionType::Auto};
 
         void invoke(Args... args)

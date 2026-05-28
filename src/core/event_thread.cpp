@@ -8,7 +8,9 @@ namespace jb::core {
 EventThread::EventThread(Object* parent)
     : Object(parent)
     , _event_loop(std::make_unique<EventLoop>())
-{}
+{
+    move_to_thread(this);
+}
 
 EventThread::~EventThread()
 {
@@ -37,8 +39,8 @@ void EventThread::exec(bool event_loop_running)
 void EventThread::start()
 {
     // ensure the thread is not already running
-    assert(!_thread);
     if (_thread) {
+        log_fatal("Event thread is already running");
         return;
     }
 
