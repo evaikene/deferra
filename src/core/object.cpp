@@ -23,7 +23,7 @@ Object::Object(priv::ObjectPrivate& dd, Object* parent)
 
 void Object::init_common(Object* parent)
 {
-    _d->event_loop = EventLoop::current();
+    _d->event_loop = parent ? parent->event_loop() : EventLoop::current();
 
     if (parent) {
         _d->parent = parent;
@@ -127,6 +127,9 @@ auto Object::set_parent(Object* parent) -> bool
 
     if (parent) {
         parent->_d->children.push_back(this);
+
+        // inherit event loop from new parent
+        move_to_event_loop(parent->event_loop());
     }
 
     return true;
@@ -197,6 +200,15 @@ auto Object::move_to_thread_impl(EventThread* event_thread) -> bool
     }
 
     return true;
+}
+
+void Object::move_to_event_loop(EventLoop* new_loop)
+{
+    _d->event_loop = new_loop;
+
+    for (auto* child : _d->children) {
+        child->move_to_event_loop(new_loop);
+    }
 }
 
 } // namespace jb::core

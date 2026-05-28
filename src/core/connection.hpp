@@ -9,16 +9,16 @@ namespace jb::core {
 /// Connection types
 /// Controls how a signal is delivered to a connected slot
 ///
-/// Auto -   Direct if sender are received share the same event loop;
+/// Auto -   Direct if sender are receiver share the same event loop;
 ///          Queued otherwise. This is the default.
-/// Direct - The slot is called synchronously in the emitting thread, regdardless
-///          of which event loop the received lives on.
+/// Direct - The slot is called synchronously in the emitting thread, regardless
+///          of which event loop the receiver lives on.
 /// Queued - The invocation is posted to the receiver's event loop and executed in
-///          the enxt time that loop processes events. Args must be copyable.
+///          the next time that loop processes events. Args must be copyable.
 enum class ConnectionType : std::uint8_t {
     Auto,   ///< Direct if same thread, Queued otherwise (default)
     Direct, ///< Always synchronous; invoked in the sender's thread
-    Queued, ///< Alsays asynchronous; posted to the receiver's event loop
+    Queued, ///< Always asynchronous; posted to the receiver's event loop
 };
 
 namespace priv {

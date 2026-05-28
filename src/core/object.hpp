@@ -91,6 +91,8 @@ public:
     /// Removes this Object from the old parent's child list and appends it to
     /// the new parent's. Pass nullptr to make this a root Object.
     ///
+    /// If `parent` is not null, inherits the new parent's event loop.
+    ///
     /// Note that `parent` must be created in the same thread as this Object.
     auto set_parent(Object* parent) -> bool;
 
@@ -138,9 +140,9 @@ protected:
 
      /// Constructor for subclasses that supply their own private data.
      /// @param[in] dd  Reference to a heap-allocated struct that inherits (directly
-     ///                or transitively) from priv::ObjectData. Object takes owbership;
+     ///                or transitively) from priv::ObjectData. Object takes ownership;
      ///                do NOT delete @p dd elsewhere.
-     /// @param[in] parent Optional paremt
+     /// @param[in] parent Optional parent
      explicit Object(priv::ObjectPrivate& dd, Object* parent = nullptr);
 
      /// Emit @p signal with the given arguments.
@@ -180,6 +182,9 @@ private:
 
     /// Internal move implementation; called by move_to_thread() after sanity checks
     auto move_to_thread_impl(EventThread* event_thread) -> bool;
+
+    /// Internal helper to recursively move this object and its children to a new event loop
+    void move_to_event_loop(EventLoop* new_loop);
 
     /// d-ptr with private data; owned; always non-null; deleted in ~Object()
     priv::ObjectPrivate* _d{nullptr};

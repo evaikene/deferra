@@ -1,7 +1,7 @@
 #pragma once
 
 // IWYU pragma: private include "object.hpp"
-//#include "object.hpp"
+#include "object.hpp"
 
 // Internal header included only from object.hpp - not part of the public API
 // Do NOT include this file directly.
@@ -29,10 +29,9 @@ auto Signal<Args...>::connect(Receiver* receiver, Slot&& slot, ConnectionType ty
     auto conn           = std::make_shared<TypedConn>();
     conn->conn_type     = type;
     conn->receiver      = receiver;
-    conn->receiver_loop = receiver->event_loop();
 
     if constexpr (std::is_member_function_pointer_v<std::decay_t<Slot>>) {
-        // member-function pounter: bind the receiver so the stored function only
+        // member-function pointer: bind the receiver so the stored function only
         // needs to be called with (Args...)
         conn->slot = [r = receiver, s = std::forward<Slot>(slot)](Args... args) -> void { (r->*s)(args...); };
     }
@@ -47,7 +46,7 @@ auto Signal<Args...>::connect(Receiver* receiver, Slot&& slot, ConnectionType ty
         _connections.push_back(conn);
     }
 
-    // let the receiver track this connection so it ca deactivate on death
+    // let the receiver track this connection so it can deactivate on death
     receiver->register_connection(conn);
 
     return Connection{conn};
@@ -62,7 +61,6 @@ auto Signal<Args...>::connect(Callable&& callable) -> Connection
     conn->slot          = std::forward<Callable>(callable);
     conn->conn_type     = ConnectionType::Direct;
     conn->receiver      = nullptr;
-    conn->receiver_loop = nullptr;
 
     std::lock_guard<std::mutex> lock{_mx};
     _connections.push_back(conn);
@@ -98,7 +96,7 @@ template <typename... Args>
 void Signal<Args...>::emit(Object* sender, Args... args)
 {
     //--- 1. snapshot the live connections under the lock
-    // We prune dead connections while holding the mutex, then release it vefore
+    // We prune dead connections while holding the mutex, then release it before
     // invoking any slot (re-entrancy: slots may connect/disconnect)
     std::vector<std::shared_ptr<TypedConn>> snapshot;
     {
@@ -118,7 +116,7 @@ void Signal<Args...>::emit(Object* sender, Args... args)
             continue; // deactivated between snapshot and now
         }
 
-        // determine whether to call incline (Direct) or post (Queued)
+        // determine whether to call inline (Direct) or post (Queued)
         auto const call_direct = [&]() -> bool {
             switch (c->conn_type) {
                 case ConnectionType::Direct: {
@@ -133,7 +131,8 @@ void Signal<Args...>::emit(Object* sender, Args... args)
                 default: {
                     // direct when the sender and receiver share the same EventLoop,
                     // or when the receiver has no EventLoop (e.g. pre-Application).
-                    return !c->receiver_loop || (sender->event_loop() == c->receiver_loop);
+                    auto* receiver_loop = c->receiver ? c->receiver->event_loop() : nullptr;
+                    return !receiver_loop || (sender->event_loop() == receiver_loop);
                 }
             }
         }();
@@ -144,7 +143,7 @@ void Signal<Args...>::emit(Object* sender, Args... args)
         }
         else {
             // asynchronous: capture args by value and post to the receiver loop
-            c->receiver_loop->post([c, ...captured_args = args]() mutable -> auto {
+            c->receiver->event_loop()->post([c, ...captured_args = args]() mutable -> auto {
                 if (c->active.load(std::memory_order_acquire)) {
                     c->invoke(captured_args...);
                 }

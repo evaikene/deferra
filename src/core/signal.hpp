@@ -138,7 +138,6 @@ private:
     struct TypedConn : priv::ConnectionBase {
         std::function<void(Args...)> slot;
         Object*                      receiver{nullptr};      ///< nullptr for lambda connections
-        EventLoop*                   receiver_loop{nullptr}; ///< nullptr for Direct/lambda
         ConnectionType               conn_type{ConnectionType::Auto};
 
         void invoke(Args... args)

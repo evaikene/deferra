@@ -46,7 +46,7 @@ struct ObjectPrivate {
     /// Lifetime tracking for object deletion
     std::shared_ptr<ObjectLifetime> lifetime = std::make_shared<ObjectLifetime>();
 
-    /// Connections where this object is the *received*
+    /// Connections where this object is the *receiver*
     /// Stored as weak_ptrs so that the Signal (sender side) can also let them
     /// expire naturally. On destruction, Object deactivates them all.
     std::mutex                                 connections_mx;
