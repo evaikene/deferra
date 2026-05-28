@@ -140,7 +140,7 @@ protected:
 
      /// Constructor for subclasses that supply their own private data.
      /// @param[in] dd  Reference to a heap-allocated struct that inherits (directly
-     ///                or transitively) from priv::ObjectData. Object takes ownership;
+     ///                or transitively) from priv::ObjectPrivate. Object takes ownership;
      ///                do NOT delete @p dd elsewhere.
      /// @param[in] parent Optional parent
      explicit Object(priv::ObjectPrivate& dd, Object* parent = nullptr);

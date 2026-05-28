@@ -236,7 +236,7 @@ TEST_CASE("Auto signal-slot connection with threaded event loop", "[core][test]"
     auto* receiver = new Object;
     receiver->move_to_thread(&thread);
 
-    int              direct_value{0};    // incremented if the slot is called direclty
+    int              direct_value{0};    // incremented if the slot is called directly
     std::atomic<int> queued_value{0}; // incremented if the slot is called via the threaded event loop
 
     auto* obj = new Testable();

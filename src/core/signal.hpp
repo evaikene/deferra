@@ -92,7 +92,7 @@ public:
     /// @code
     /// sig.connect(obj, &MyClass::my_slot);
     /// // or with a capturing lambda to a method
-    /// sig.connect(obj, [obj]*int v) { obj->update(v); });
+    /// sig.connect(obj, [obj](int v) { obj->update(v); });
     /// @endcode
     ///
     template <typename Receiver, typename Slot>

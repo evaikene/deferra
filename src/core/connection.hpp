@@ -9,7 +9,7 @@ namespace jb::core {
 /// Connection types
 /// Controls how a signal is delivered to a connected slot
 ///
-/// Auto -   Direct if sender are receiver share the same event loop;
+/// Auto -   Direct if sender and receiver share the same event loop;
 ///          Queued otherwise. This is the default.
 /// Direct - The slot is called synchronously in the emitting thread, regardless
 ///          of which event loop the receiver lives on.

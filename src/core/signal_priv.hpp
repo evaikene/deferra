@@ -1,7 +1,7 @@
 #pragma once
 
 // IWYU pragma: private include "object.hpp"
-#include "object.hpp"
+//#include "object.hpp"
 
 // Internal header included only from object.hpp - not part of the public API
 // Do NOT include this file directly.
@@ -143,7 +143,12 @@ void Signal<Args...>::emit(Object* sender, Args... args)
         }
         else {
             // asynchronous: capture args by value and post to the receiver loop
-            c->receiver->event_loop()->post([c, ...captured_args = args]() mutable -> auto {
+            auto* event_loop = c->receiver->event_loop();
+            if (!event_loop) {
+                log_error("Signal::emit: cannot post to receiver with no EventLoop");
+                continue;
+            }
+            event_loop->post([c, ...captured_args = args]() mutable -> auto {
                 if (c->active.load(std::memory_order_acquire)) {
                     c->invoke(captured_args...);
                 }
