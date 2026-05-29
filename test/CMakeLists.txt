@@ -20,6 +20,12 @@ add_executable(${TARGET} application-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Command line parser test
+set(TARGET "command-line-parser-test")
+add_executable(${TARGET} command-line-parser-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Threaded event loop test
 set(TARGET "event-thread-test")
 add_executable(${TARGET} event-thread-test.cpp)
