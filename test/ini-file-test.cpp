@@ -252,6 +252,18 @@ TEST_CASE("INI file rejects recursive includes", "[core][ini]")
     CHECK_FALSE(ini.error().empty());
 }
 
+TEST_CASE("INI file reports the file path for parse errors in included files", "[core][ini]")
+{
+    auto const dir  = test_dir("included-parse-error");
+    auto const path = write_ini(dir / "main.ini", "include = bad.ini\n");
+    write_ini(dir / "bad.ini", "[unsupported-section]\n");
+
+    IniFile ini{path};
+    CHECK_FALSE(ini.ok());
+    CHECK(ini.error().find("bad.ini") != std::string::npos);
+    CHECK(ini.error().find("line 1") != std::string::npos);
+}
+
 TEST_CASE("INI file reports parse and open errors", "[core][ini]")
 {
     auto const bad_path = write_ini("[unsupported-section]\n");

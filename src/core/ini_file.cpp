@@ -68,6 +68,11 @@ auto parse_line(std::string_view line, std::size_t line_number, ParsedLine& pars
     return true;
 }
 
+auto include_error(std::filesystem::path const& file, std::string_view error) -> std::string
+{
+    return file.string() + ": " + std::string{error};
+}
+
 auto include_paths(std::filesystem::path const&        current_file,
                    std::string_view                    include_value,
                    std::vector<std::filesystem::path>& paths,
@@ -240,6 +245,7 @@ auto IniFile::parse(std::filesystem::path const& path, std::vector<std::filesyst
         ++line_number;
         ParsedLine parsed;
         if (!parse_line(line, line_number, parsed, _error)) {
+            _error = include_error(current_file, _error);
             include_stack.pop_back();
             return false;
         }
