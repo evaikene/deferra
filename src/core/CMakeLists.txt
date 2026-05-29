@@ -13,11 +13,13 @@ set(HDRS
     event_loop.hpp
     event_loop_types.hpp
     event_thread.hpp
+    ini_file.hpp
     logging.hpp
     object.hpp
     shared_data.hpp
     signal.hpp
     timer.hpp
+    utils.hpp
 )
 
 # Private headers not exposed to library users
@@ -34,10 +36,12 @@ set(SRCS
     application.cpp
     event_loop.cpp
     event_thread.cpp
+    ini_file.cpp
     logging.cpp
     object.cpp
     thread_context.cpp
     timer.cpp
+    utils.cpp
 )
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")

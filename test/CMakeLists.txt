@@ -55,3 +55,15 @@ set(TARGET "logging-test")
 add_executable(${TARGET} logging-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# INI file test
+set(TARGET "ini-file-test")
+add_executable(${TARGET} ini-file-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# Utils test
+set(TARGET "utils-test")
+add_executable(${TARGET} utils-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
