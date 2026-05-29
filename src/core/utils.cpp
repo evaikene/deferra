@@ -1,18 +1,16 @@
 #include "utils.hpp"
 
 #include <cctype>
-#include <cerrno>
 #include <charconv>
 #include <cmath>
-#include <cstdlib>
 
 namespace jb::core {
 
 namespace {
 
-constexpr int kSecsInMin = 60;
+constexpr int kSecsInMin  = 60;
 constexpr int kSecsInHour = 60 * kSecsInMin;
-constexpr int kSecsInDay = 24 * kSecsInHour;
+constexpr int kSecsInDay  = 24 * kSecsInHour;
 
 auto conversion_error(std::string_view type, std::string_view value) -> std::string
 {
@@ -50,12 +48,11 @@ auto parse_integer(std::string_view value) -> ValueResult<long long>
 auto parse_floating_point(std::string_view value) -> ValueResult<double>
 {
     value = trim_ascii_whitespace(value);
-    std::string text{value};
-
-    char* end   = nullptr;
-    errno       = 0;
-    auto parsed = std::strtod(text.c_str(), &end);
-    if (end == text.c_str() || errno == ERANGE || end != text.c_str() + text.size() || !std::isfinite(parsed)) {
+    double      parsed{};
+    auto const* first  = value.data();
+    auto const* last   = value.data() + value.size();
+    auto const  result = std::from_chars(first, last, parsed);
+    if (result.ec != std::errc{} || result.ptr != last || !std::isfinite(parsed)) {
         return {.value = std::nullopt, .error = conversion_error("floating point", value)};
     }
     return {.value = parsed, .error = {}};

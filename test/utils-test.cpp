@@ -32,6 +32,7 @@ TEST_CASE("parse_floating_point requires a full finite number string", "[core][u
     REQUIRE(value);
     CHECK(*value.value == 1.25);
 
+    CHECK_FALSE(parse_floating_point("1,25"));
     CHECK_FALSE(parse_floating_point("1.25x"));
     CHECK_FALSE(parse_floating_point("nan"));
     CHECK_FALSE(parse_floating_point(""));

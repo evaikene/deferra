@@ -20,8 +20,9 @@ using IniValueResult = ValueResult<T>;
 ///
 /// The parser accepts `key = value` lines, `#` and `;` full-line comments, and repeated
 /// keys. Repeated keys preserve insertion order; single-value accessors return the last
-/// value. Section headers are intentionally unsupported; callers should use dot-namespaced
-/// keys such as `queue.priority`.
+/// value. Inline comments after values are not stripped. Floating point values are parsed
+/// locale-independently. Section headers are intentionally unsupported; callers should use
+/// dot-namespaced keys such as `queue.priority`.
 class IniFile {
 public:
     using map_type       = std::map<std::string, std::vector<std::string>>;

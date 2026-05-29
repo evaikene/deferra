@@ -23,7 +23,7 @@ auto trim_ascii_whitespace(std::string_view value) -> std::string_view;
 /// Parses a full string as a base-10 signed integer.
 auto parse_integer(std::string_view value) -> ValueResult<long long>;
 
-/// Parses a full string as a finite floating point value.
+/// Parses a full string locale-independently as a finite floating point value.
 auto parse_floating_point(std::string_view value) -> ValueResult<double>;
 
 /// Parses permissive boolean text. y, yes, true, on and 1 are true; all other values are false.
