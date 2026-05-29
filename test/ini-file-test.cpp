@@ -260,6 +260,7 @@ TEST_CASE("INI file reports the file path for parse errors in included files", "
 
     IniFile ini{path};
     CHECK_FALSE(ini.ok());
+    CHECK(ini.error().find("main.ini") != std::string::npos);
     CHECK(ini.error().find("bad.ini") != std::string::npos);
     CHECK(ini.error().find("line 1") != std::string::npos);
 }

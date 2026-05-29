@@ -259,11 +259,13 @@ auto IniFile::parse(std::filesystem::path const& path, std::vector<std::filesyst
 
             std::vector<std::filesystem::path> includes;
             if (!include_paths(current_file, parsed.value, includes, _error)) {
+                _error = include_error(current_file, _error);
                 include_stack.pop_back();
                 return false;
             }
             for (auto const& include_path : includes) {
                 if (!parse(include_path, include_stack)) {
+                    _error = include_error(current_file, _error);
                     include_stack.pop_back();
                     return false;
                 }
