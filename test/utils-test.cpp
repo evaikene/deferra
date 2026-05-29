@@ -3,11 +3,33 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono> // IWYU pragma: keep for std::chrono_literals
+#include <filesystem>
+#include <fstream>
 
 // NOLINTBEGIN(readability-magic-numbers)
 
 using namespace jb::core;
 using namespace std::chrono_literals;
+
+namespace {
+
+auto test_dir(std::string_view name) -> std::filesystem::path
+{
+    auto path = std::filesystem::temp_directory_path() / "deferra-utils-test" / std::filesystem::path{name};
+    std::filesystem::remove_all(path);
+    std::filesystem::create_directories(path);
+    return path;
+}
+
+auto write_file(std::filesystem::path const& path) -> std::filesystem::path
+{
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream file{path};
+    file << "value\n";
+    return path;
+}
+
+} // anonymous namespace
 
 TEST_CASE("trim_ascii_whitespace removes leading and trailing ASCII whitespace", "[core][utils]")
 {
@@ -73,6 +95,41 @@ TEST_CASE("parse_duration supports single unit interval suffixes", "[core][utils
     CHECK_FALSE(parse_duration("1h30m"));
     CHECK_FALSE(parse_duration("-1s"));
     CHECK_FALSE(parse_duration("10"));
+}
+
+TEST_CASE("has_glob_pattern detects wildcard path characters", "[core][utils]")
+{
+    CHECK(has_glob_pattern("conf.d/*.ini"));
+    CHECK(has_glob_pattern("conf.d/[01]-file.ini"));
+    CHECK(has_glob_pattern("conf.d/file?.ini"));
+
+    CHECK_FALSE(has_glob_pattern("conf.d/file.ini"));
+    CHECK_FALSE(has_glob_pattern("conf.d/file[.ini"));
+    CHECK_FALSE(has_glob_pattern("conf.d/file].ini"));
+    CHECK_FALSE(has_glob_pattern(""));
+}
+
+TEST_CASE("expand_glob_paths returns sorted matches", "[core][utils]")
+{
+    auto const dir    = test_dir("glob-sorted");
+    auto const first  = write_file(dir / "00-first.ini");
+    auto const second = write_file(dir / "01-second.ini");
+    write_file(dir / "ignored.txt");
+
+    auto const paths = expand_glob_paths(dir / "*.ini");
+    REQUIRE(paths);
+    REQUIRE(paths.value->size() == 2);
+    CHECK((*paths.value)[0] == first);
+    CHECK((*paths.value)[1] == second);
+}
+
+TEST_CASE("expand_glob_paths returns an empty vector for unmatched patterns", "[core][utils]")
+{
+    auto const dir = test_dir("glob-empty");
+
+    auto const paths = expand_glob_paths(dir / "*.ini");
+    REQUIRE(paths);
+    CHECK(paths.value->empty());
 }
 
 // NOLINTEND(readability-magic-numbers)
