@@ -102,7 +102,7 @@ auto CommandLineParser::program_name() const -> std::string_view
 auto CommandLineParser::find_long_option(std::string_view name) const -> CommandLineOption const*
 {
     for (auto const& option : _options) {
-        if (option.long_name == name) {
+        if (!option.long_name.empty() && option.long_name == name) {
             return &option;
         }
     }

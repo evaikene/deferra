@@ -123,6 +123,25 @@ TEST_CASE("Command line parser keeps unknown options in the argument stream", "[
     CHECK(args[2].short_name() == 'x');
 }
 
+TEST_CASE("Command line parser does not match empty long names", "[core][command-line]")
+{
+    constexpr std::array options{
+        CommandLineOption{.short_name = 'v'},
+    };
+    char const* argv[] = {"program", "--=value", nullptr};
+
+    CommandLineParser parser{2, argv, options};
+
+    auto const& args = parser.arguments();
+    REQUIRE(args.size() == 1);
+    CHECK(args[0].kind() == CommandLineArgumentKind::Unknown);
+    CHECK_FALSE(args[0].known());
+    CHECK(args[0].name().empty());
+    REQUIRE(args[0].value());
+    CHECK(*args[0].value() == "value");
+    CHECK(args[0].value_is_inline());
+}
+
 TEST_CASE("Command line parser parses inline and next-token values", "[core][command-line]")
 {
     constexpr std::array options{
