@@ -104,6 +104,8 @@ TEST_CASE("has_glob_pattern detects wildcard path characters", "[core][utils]")
     CHECK(has_glob_pattern("conf.d/file?.ini"));
 
     CHECK_FALSE(has_glob_pattern("conf.d/file.ini"));
+    CHECK_FALSE(has_glob_pattern("conf.d/file[.ini"));
+    CHECK_FALSE(has_glob_pattern("conf.d/file].ini"));
     CHECK_FALSE(has_glob_pattern(""));
 }
 

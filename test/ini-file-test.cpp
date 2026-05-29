@@ -179,6 +179,27 @@ TEST_CASE("INI file resolves nested relative includes from the current file", "[
     CHECK(ini.value("nested") == "yes");
 }
 
+TEST_CASE("INI file resolves relative includes from the symlink path directory", "[core][ini]")
+{
+    auto const dir        = test_dir("symlink-relative-include");
+    auto const actual_dir = dir / "actual";
+    auto const link_dir   = dir / "links";
+    auto const actual     = write_ini(actual_dir / "main.ini", "include = linked-extra.ini\n");
+    write_ini(link_dir / "linked-extra.ini", "extra = yes\n");
+
+    auto const      link = link_dir / "main.ini";
+    std::error_code error;
+    std::filesystem::create_symlink(actual, link, error);
+    if (error) {
+        SUCCEED("filesystem does not permit symlink creation");
+        return;
+    }
+
+    IniFile ini{link};
+    REQUIRE(ini.ok());
+    CHECK(ini.value("extra") == "yes");
+}
+
 TEST_CASE("INI file expands glob includes in alphabetical order", "[core][ini]")
 {
     auto const dir = test_dir("glob-include");

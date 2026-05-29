@@ -18,15 +18,19 @@ struct ParsedLine {
     std::string_view value;
 };
 
-auto normalize_path(std::filesystem::path const& path) -> std::filesystem::path
+auto file_path(std::filesystem::path const& path) -> std::filesystem::path
 {
     std::error_code error;
     auto const      absolute_path = std::filesystem::absolute(path, error);
     auto const&     base          = error ? path : absolute_path;
+    return base.lexically_normal();
+}
 
-    error.clear();
-    auto const canonical_path = std::filesystem::weakly_canonical(base, error);
-    return error ? base.lexically_normal() : canonical_path;
+auto identity_path(std::filesystem::path const& path) -> std::filesystem::path
+{
+    std::error_code error;
+    auto const      canonical_path = std::filesystem::weakly_canonical(path, error);
+    return error ? path.lexically_normal() : canonical_path;
 }
 
 auto parse_line(std::string_view line, std::size_t line_number, ParsedLine& parsed, std::string& error) -> bool
@@ -215,19 +219,20 @@ auto IniFile::interval_or(std::string_view key, Duration default_value) const ->
 
 auto IniFile::parse(std::filesystem::path const& path, std::vector<std::filesystem::path>& include_stack) -> bool
 {
-    auto const normalized_path = normalize_path(path);
-    if (std::ranges::find(include_stack, normalized_path) != include_stack.end()) {
-        _error = "recursive INI include: " + normalized_path.string();
+    auto const current_file = file_path(path);
+    auto const current_id   = identity_path(current_file);
+    if (std::ranges::find(include_stack, current_id) != include_stack.end()) {
+        _error = "recursive INI include: " + current_file.string();
         return false;
     }
 
-    std::ifstream file{normalized_path};
+    std::ifstream file{current_file};
     if (!file) {
-        _error = "failed to open INI file: " + normalized_path.string();
+        _error = "failed to open INI file: " + current_file.string();
         return false;
     }
 
-    include_stack.push_back(normalized_path);
+    include_stack.push_back(current_id);
 
     std::string line;
     std::size_t line_number = 0;
@@ -247,7 +252,7 @@ auto IniFile::parse(std::filesystem::path const& path, std::vector<std::filesyst
             }
 
             std::vector<std::filesystem::path> includes;
-            if (!include_paths(normalized_path, parsed.value, includes, _error)) {
+            if (!include_paths(current_file, parsed.value, includes, _error)) {
                 include_stack.pop_back();
                 return false;
             }
@@ -264,7 +269,7 @@ auto IniFile::parse(std::filesystem::path const& path, std::vector<std::filesyst
     }
 
     if (file.bad()) {
-        _error = "failed to read INI file: " + normalized_path.string();
+        _error = "failed to read INI file: " + current_file.string();
         include_stack.pop_back();
         return false;
     }

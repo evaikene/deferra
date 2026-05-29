@@ -122,7 +122,12 @@ auto parse_duration(std::string_view value) -> ValueResult<Duration>
 
 auto has_glob_pattern(std::string_view path) -> bool
 {
-    return path.find_first_of("*?[") != std::string_view::npos;
+    if (path.find_first_of("*?") != std::string_view::npos) {
+        return true;
+    }
+
+    auto const bracket = path.find('[');
+    return bracket != std::string_view::npos && path.find(']', bracket + 1) != std::string_view::npos;
 }
 
 auto expand_glob_paths(std::filesystem::path const& pattern) -> ValueResult<std::vector<std::filesystem::path>>

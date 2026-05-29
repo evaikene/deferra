@@ -39,8 +39,9 @@ auto has_glob_pattern(std::string_view path) -> bool;
 
 /// Expands a glob pattern into sorted filesystem paths.
 ///
-/// An unmatched pattern returns an empty vector. Platform-specific globbing is hidden
-/// behind this API so callers do not depend on POSIX-only headers or functions.
+/// On supported platforms, an unmatched pattern returns an empty vector. On unsupported
+/// platforms, the result contains an error instead of paths. Platform-specific globbing
+/// is hidden behind this API so callers do not depend on POSIX-only headers or functions.
 auto expand_glob_paths(std::filesystem::path const& pattern) -> ValueResult<std::vector<std::filesystem::path>>;
 
 } // namespace jb::core
