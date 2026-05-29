@@ -1,8 +1,13 @@
 #include "utils.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <charconv>
 #include <cmath>
+
+#if defined(__unix__) || defined(__APPLE__)
+#  include <glob.h>
+#endif
 
 namespace jb::core {
 
@@ -113,6 +118,39 @@ auto parse_duration(std::string_view value) -> ValueResult<Duration>
     }
 
     return {.value = std::chrono::duration_cast<Duration>(duration), .error = {}};
+}
+
+auto has_glob_pattern(std::string_view path) -> bool
+{
+    return path.find_first_of("*?[") != std::string_view::npos;
+}
+
+auto expand_glob_paths(std::filesystem::path const& pattern) -> ValueResult<std::vector<std::filesystem::path>>
+{
+#if defined(__unix__) || defined(__APPLE__)
+    glob_t     glob_result{};
+    auto const result = glob(pattern.c_str(), 0, nullptr, &glob_result);
+    if (result == GLOB_NOMATCH) {
+        globfree(&glob_result);
+        return {.value = std::vector<std::filesystem::path>{}, .error = {}};
+    }
+    if (result != 0) {
+        globfree(&glob_result);
+        return {.value = std::nullopt, .error = "failed to expand glob pattern: " + pattern.string()};
+    }
+
+    std::vector<std::filesystem::path> paths;
+    paths.reserve(glob_result.gl_pathc);
+    for (std::size_t i = 0; i < glob_result.gl_pathc; ++i) {
+        paths.emplace_back(glob_result.gl_pathv[i]);
+    }
+    globfree(&glob_result);
+
+    std::ranges::sort(paths);
+    return {.value = std::move(paths), .error = {}};
+#else
+    return {.value = std::nullopt, .error = "glob expansion is not implemented on this platform: " + pattern.string()};
+#endif
 }
 
 } // namespace jb::core

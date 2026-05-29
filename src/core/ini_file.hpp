@@ -20,9 +20,12 @@ using IniValueResult = ValueResult<T>;
 ///
 /// The parser accepts `key = value` lines, `#` and `;` full-line comments, and repeated
 /// keys. Repeated keys preserve insertion order; single-value accessors return the last
-/// value. Inline comments after values are not stripped. Floating point values are parsed
-/// locale-independently. Section headers are intentionally unsupported; callers should use
-/// dot-namespaced keys such as `queue.priority`.
+/// value. `include = path` lines parse another INI file, or files matched by a glob
+/// pattern, at that point in file order. Relative include paths are resolved from the
+/// file that contains the include statement, and include cycles are rejected. Inline
+/// comments after values are not stripped. Floating point values are parsed
+/// locale-independently. Section headers are intentionally unsupported; callers should
+/// use dot-namespaced keys such as `queue.priority`.
 class IniFile {
 public:
     using map_type       = std::map<std::string, std::vector<std::string>>;
@@ -96,7 +99,7 @@ public:
     auto interval_or(std::string_view key, Duration default_value) const -> IniValueResult<Duration>;
 
 private:
-    auto parse(std::filesystem::path const& path) -> bool;
+    auto parse(std::filesystem::path const& path, std::vector<std::filesystem::path>& include_stack) -> bool;
 
     map_type    _values;
     std::string _error;
