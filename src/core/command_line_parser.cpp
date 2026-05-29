@@ -40,6 +40,9 @@ auto CommandLineArgument::missing_value() const -> bool
 auto CommandLineArgument::boolean_value() const -> ValueResult<bool>
 {
     if (_kind == CommandLineArgumentKind::Option || _kind == CommandLineArgumentKind::Unknown) {
+        if (missing_value()) {
+            return {.value = std::nullopt, .error = missing_value_error("boolean", _token)};
+        }
         if (!_value) {
             return {.value = true, .error = {}};
         }
@@ -184,7 +187,8 @@ void CommandLineParser::parse_short_options(int argc, char const* const argv[], 
         auto const* option   = find_short_option(token[offset]);
         apply_descriptor(argument, option);
 
-        if (argument._value_mode == CommandLineValueMode::Required) {
+        if (argument._value_mode == CommandLineValueMode::Required ||
+            argument._value_mode == CommandLineValueMode::Optional) {
             if (offset + 1 < token.size()) {
                 argument._value        = token.substr(offset + 1);
                 argument._value_inline = true;
@@ -192,7 +196,7 @@ void CommandLineParser::parse_short_options(int argc, char const* const argv[], 
                 return;
             }
 
-            if (index + 1 < argc) {
+            if (argument._value_mode == CommandLineValueMode::Required && index + 1 < argc) {
                 auto const next = std::string_view{argv[index + 1] ? argv[index + 1] : ""};
                 if (!is_option_like(next)) {
                     ++index;

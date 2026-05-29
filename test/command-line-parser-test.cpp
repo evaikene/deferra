@@ -233,28 +233,64 @@ TEST_CASE("Command line argument converts positional values", "[core][command-li
 TEST_CASE("Command line argument typed conversions report missing and invalid values", "[core][command-line]")
 {
     constexpr std::array options{
+        CommandLineOption{.long_name = "enabled", .short_name = 'e', .value_mode = CommandLineValueMode::Required},
         CommandLineOption{.long_name = "count",   .short_name = 'c', .value_mode = CommandLineValueMode::Required},
         CommandLineOption{.long_name = "ratio",   .short_name = 'r', .value_mode = CommandLineValueMode::Required},
         CommandLineOption{.long_name = "timeout", .short_name = 't', .value_mode = CommandLineValueMode::Required},
     };
-    char const* argv[] = {"program", "--count", "--ratio=", "--timeout=soon", nullptr};
+    char const* argv[] = {"program", "--enabled", "--count", "--ratio=", "--timeout=soon", nullptr};
 
-    CommandLineParser parser{4, argv, options};
+    CommandLineParser parser{5, argv, options};
 
     auto const& args = parser.arguments();
-    REQUIRE(args.size() == 3);
+    REQUIRE(args.size() == 4);
 
-    auto missing = args[0].integer_value();
+    auto missing_boolean = args[0].boolean_value();
+    CHECK_FALSE(missing_boolean);
+    CHECK(missing_boolean.error == "missing boolean value for argument: '--enabled'");
+
+    auto missing = args[1].integer_value();
     CHECK_FALSE(missing);
     CHECK(missing.error == "missing integer value for argument: '--count'");
 
-    auto empty = args[1].floating_point_value();
+    auto empty = args[2].floating_point_value();
     CHECK_FALSE(empty);
     CHECK(empty.error == "invalid floating point: ''");
 
-    auto invalid = args[2].duration_value();
+    auto invalid = args[3].duration_value();
     CHECK_FALSE(invalid);
     CHECK(invalid.error == "invalid duration: 'soon'");
+}
+
+TEST_CASE("Command line parser parses optional short inline values", "[core][command-line]")
+{
+    constexpr std::array options{
+        CommandLineOption{.long_name = "define", .short_name = 'D', .value_mode = CommandLineValueMode::Optional},
+        CommandLineOption{.long_name = "verbose", .short_name = 'v'},
+    };
+    char const* argv[] = {"program", "-Dname=value", "-D", "next", "-v", nullptr};
+
+    CommandLineParser parser{5, argv, options};
+
+    auto const& args = parser.arguments();
+    REQUIRE(args.size() == 4);
+
+    CHECK(args[0].kind() == CommandLineArgumentKind::Option);
+    CHECK(args[0].name() == "define");
+    REQUIRE(args[0].value());
+    CHECK(*args[0].value() == "name=value");
+    CHECK(args[0].value_is_inline());
+
+    CHECK(args[1].kind() == CommandLineArgumentKind::Option);
+    CHECK(args[1].name() == "define");
+    CHECK_FALSE(args[1].has_value());
+    CHECK_FALSE(args[1].missing_value());
+
+    CHECK(args[2].kind() == CommandLineArgumentKind::Positional);
+    CHECK(args[2].token() == "next");
+
+    CHECK(args[3].kind() == CommandLineArgumentKind::Option);
+    CHECK(args[3].name() == "verbose");
 }
 
 TEST_CASE("Command line parser expands grouped short flags", "[core][command-line]")
