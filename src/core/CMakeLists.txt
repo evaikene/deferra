@@ -8,6 +8,7 @@ find_package(fmt CONFIG REQUIRED)
 # Public headers exposed to library users
 set(HDRS
     application.hpp
+    command_line_parser.hpp
     connection.hpp
     enum_bitmask.hpp
     event_loop.hpp
@@ -24,7 +25,7 @@ set(HDRS
 
 # Private headers not exposed to library users
 set(PRIV_HDRS
-  event_loop_backend.hpp
+    event_loop_backend.hpp
     object_priv.hpp
     signal_priv.hpp
     thread_context.hpp
@@ -34,6 +35,7 @@ set(PRIV_HDRS
 # Library source files
 set(SRCS
     application.cpp
+    command_line_parser.cpp
     event_loop.cpp
     event_thread.cpp
     ini_file.cpp
