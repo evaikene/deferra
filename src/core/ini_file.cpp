@@ -1,5 +1,7 @@
 #include "ini_file.hpp"
 
+#include <fmt/format.h>
+
 #include <algorithm>
 #include <fstream>
 #include <system_error>
@@ -10,7 +12,7 @@ namespace {
 
 auto make_error(std::size_t line_number, std::string_view message) -> std::string
 {
-    return "line " + std::to_string(line_number) + ": " + std::string{message};
+    return fmt::format("line {}: {}", line_number, message);
 }
 
 struct ParsedLine {
@@ -70,7 +72,7 @@ auto parse_line(std::string_view line, std::size_t line_number, ParsedLine& pars
 
 auto include_error(std::filesystem::path const& file, std::string_view error) -> std::string
 {
-    return file.string() + ": " + std::string{error};
+    return fmt::format("{}: {}", file.string(), error);
 }
 
 auto include_paths(std::filesystem::path const&        current_file,
@@ -100,14 +102,13 @@ auto include_paths(std::filesystem::path const&        current_file,
 
 auto conversion_error(std::string_view key, std::string_view type, std::string_view value) -> std::string
 {
-    return "value for '" + std::string{key} + "' cannot be converted to " + std::string{type} + ": '" +
-           std::string{value} + "'";
+    return fmt::format("value for '{}' cannot be converted to {}: '{}'", key, type, value);
 }
 
 template <typename T>
 auto missing_error(std::string_view key) -> IniValueResult<T>
 {
-    return {.value = std::nullopt, .error = "missing key: '" + std::string{key} + "'"};
+    return {.value = std::nullopt, .error = fmt::format("missing key: '{}'", key)};
 }
 
 template <typename T>
@@ -227,13 +228,13 @@ auto IniFile::parse(std::filesystem::path const& path, std::vector<std::filesyst
     auto const current_file = file_path(path);
     auto const current_id   = identity_path(current_file);
     if (std::ranges::find(include_stack, current_id) != include_stack.end()) {
-        _error = "recursive INI include: " + current_file.string();
+        _error = fmt::format("recursive INI include: {}", current_file.string());
         return false;
     }
 
     std::ifstream file{current_file};
     if (!file) {
-        _error = "failed to open INI file: " + current_file.string();
+        _error = fmt::format("failed to open INI file: {}", current_file.string());
         return false;
     }
 
@@ -277,7 +278,7 @@ auto IniFile::parse(std::filesystem::path const& path, std::vector<std::filesyst
     }
 
     if (file.bad()) {
-        _error = "failed to read INI file: " + current_file.string();
+        _error = fmt::format("failed to read INI file: {}", current_file.string());
         include_stack.pop_back();
         return false;
     }

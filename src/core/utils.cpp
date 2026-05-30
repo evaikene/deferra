@@ -1,5 +1,7 @@
 #include "utils.hpp"
 
+#include <fmt/format.h>
+
 #include <algorithm>
 #include <cctype>
 #include <charconv>
@@ -19,7 +21,7 @@ constexpr int kSecsInDay  = 24 * kSecsInHour;
 
 auto conversion_error(std::string_view type, std::string_view value) -> std::string
 {
-    return "invalid " + std::string{type} + ": '" + std::string{value} + "'";
+    return fmt::format("invalid {}: '{}'", type, value);
 }
 
 } // anonymous namespace
@@ -141,7 +143,7 @@ auto expand_glob_paths(std::filesystem::path const& pattern) -> ValueResult<std:
     }
     if (result != 0) {
         globfree(&glob_result);
-        return {.value = std::nullopt, .error = "failed to expand glob pattern: " + pattern.string()};
+        return {.value = std::nullopt, .error = fmt::format("failed to expand glob pattern: {}", pattern.string())};
     }
 
     std::vector<std::filesystem::path> paths;
@@ -154,7 +156,8 @@ auto expand_glob_paths(std::filesystem::path const& pattern) -> ValueResult<std:
     std::ranges::sort(paths);
     return {.value = std::move(paths), .error = {}};
 #else
-    return {.value = std::nullopt, .error = "glob expansion is not implemented on this platform: " + pattern.string()};
+    return {.value = std::nullopt,
+            .error = fmt::format("glob expansion is not implemented on this platform: {}", pattern.string())};
 #endif
 }
 

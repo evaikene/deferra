@@ -1,12 +1,14 @@
 #include "command_line_parser.hpp"
 
+#include <fmt/format.h>
+
 namespace jb::core {
 
 namespace {
 
 auto missing_value_error(std::string_view type, std::string_view token) -> std::string
 {
-    return "missing " + std::string{type} + " value for argument: '" + std::string{token} + "'";
+    return fmt::format("missing {} value for argument: '{}'", type, token);
 }
 
 auto is_option_like(std::string_view token) -> bool
@@ -76,7 +78,7 @@ auto CommandLineArgument::conversion_value(std::string_view type) const -> Value
         return {.value = _token, .error = {}};
     }
     if (_value) {
-        return {.value = *_value, .error = {}};
+        return {.value = _value, .error = {}};
     }
     return {.value = std::nullopt, .error = missing_value_error(type, _token)};
 }
@@ -175,7 +177,7 @@ void CommandLineParser::parse_long_option(int argc, char const* const argv[], in
         }
     }
 
-    _arguments.push_back(std::move(argument));
+    _arguments.emplace_back(argument);
 }
 
 void CommandLineParser::parse_short_options(int argc, char const* const argv[], int& index, std::string_view token)
@@ -192,7 +194,7 @@ void CommandLineParser::parse_short_options(int argc, char const* const argv[], 
             if (offset + 1 < token.size()) {
                 argument._value        = token.substr(offset + 1);
                 argument._value_inline = true;
-                _arguments.push_back(std::move(argument));
+                _arguments.emplace_back(argument);
                 return;
             }
 
@@ -204,17 +206,17 @@ void CommandLineParser::parse_short_options(int argc, char const* const argv[], 
                 }
             }
 
-            _arguments.push_back(std::move(argument));
+            _arguments.emplace_back(argument);
             return;
         }
 
-        _arguments.push_back(std::move(argument));
+        _arguments.emplace_back(argument);
     }
 }
 
 void CommandLineParser::parse_positional(std::string_view token)
 {
-    _arguments.push_back(CommandLineArgument{CommandLineArgumentKind::Positional, token});
+    _arguments.emplace_back(CommandLineArgument{CommandLineArgumentKind::Positional, token});
 }
 
 void CommandLineParser::apply_descriptor(CommandLineArgument& argument, CommandLineOption const* option)
