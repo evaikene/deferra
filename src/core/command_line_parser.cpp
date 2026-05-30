@@ -177,7 +177,7 @@ void CommandLineParser::parse_long_option(int argc, char const* const argv[], in
         }
     }
 
-    _arguments.emplace_back(argument);
+    _arguments.push_back(std::move(argument)); // NOLINT(performance-move-const-arg) indicates intent
 }
 
 void CommandLineParser::parse_short_options(int argc, char const* const argv[], int& index, std::string_view token)
@@ -206,17 +206,17 @@ void CommandLineParser::parse_short_options(int argc, char const* const argv[], 
                 }
             }
 
-            _arguments.emplace_back(argument);
+            _arguments.push_back(std::move(argument));  // NOLINT(performance-move-const-arg) indicates intent
             return;
         }
 
-        _arguments.emplace_back(argument);
+        _arguments.push_back(std::move(argument));  // NOLINT(performance-move-const-arg) indicates intent
     }
 }
 
 void CommandLineParser::parse_positional(std::string_view token)
 {
-    _arguments.emplace_back(CommandLineArgument{CommandLineArgumentKind::Positional, token});
+    _arguments.push_back(CommandLineArgument{CommandLineArgumentKind::Positional, token});
 }
 
 void CommandLineParser::apply_descriptor(CommandLineArgument& argument, CommandLineOption const* option)
