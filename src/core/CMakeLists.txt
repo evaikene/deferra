@@ -14,7 +14,9 @@ set(HDRS
     event_loop.hpp
     event_loop_types.hpp
     event_thread.hpp
+    file.hpp
     ini_file.hpp
+    io_device.hpp
     logging.hpp
     object.hpp
     shared_data.hpp
@@ -38,7 +40,9 @@ set(SRCS
     command_line_parser.cpp
     event_loop.cpp
     event_thread.cpp
+    file.cpp
     ini_file.cpp
+    io_device.cpp
     logging.cpp
     object.cpp
     thread_context.cpp
