@@ -111,6 +111,9 @@ public:
                 _client_read_buffer.append(buffer.data(), static_cast<std::size_t>(n));
                 continue;
             }
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                 break;
             }
