@@ -80,6 +80,8 @@ auto File::open(std::filesystem::path path, OpenModes modes) -> bool
     }
 
     clear_error();
+    _d_file->path.clear();
+    _d_file->modes.reset();
 
     auto const readable = modes.test(OpenMode::ReadOnly);
     auto const writable = modes.test(OpenMode::WriteOnly);
@@ -139,6 +141,8 @@ void File::close()
     if (_d_file->stream.fail()) {
         set_error(IOError::CloseError, "failed to close file");
     }
+    _d_file->path.clear();
+    _d_file->modes.reset();
 }
 
 auto File::read(std::size_t max_size) -> std::string

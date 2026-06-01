@@ -5,9 +5,11 @@
 
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -79,19 +81,34 @@ public:
     void write_to_client(std::string_view data) const
     {
         REQUIRE(_accepted_fd >= 0);
-        REQUIRE(::send(_accepted_fd, data.data(), data.size(), 0) == static_cast<ssize_t>(data.size()));
+
+        std::size_t sent = 0;
+        while (sent < data.size()) {
+            auto const n = ::send(_accepted_fd, data.data() + sent, data.size() - sent, 0);
+            if (n > 0) {
+                sent += static_cast<std::size_t>(n);
+                continue;
+            }
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                continue;
+            }
+            FAIL("send failed: " << std::strerror(errno));
+        }
     }
 
-    auto read_from_client() const -> std::string
+    auto read_from_client() -> std::string
     {
         REQUIRE(_accepted_fd >= 0);
 
-        std::string out;
         for (;;) {
             std::array<char, 1024> buffer{};
             auto const             n = ::recv(_accepted_fd, buffer.data(), buffer.size(), 0);
             if (n > 0) {
-                out.append(buffer.data(), static_cast<std::size_t>(n));
+                _client_read_buffer.append(buffer.data(), static_cast<std::size_t>(n));
                 continue;
             }
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -99,7 +116,7 @@ public:
             }
             break;
         }
-        return out;
+        return _client_read_buffer;
     }
 
     void close_client()
@@ -120,6 +137,7 @@ private:
     int           _fd{-1};
     int           _accepted_fd{-1};
     std::uint16_t _port{0};
+    std::string   _client_read_buffer;
 };
 
 template <typename Predicate>
@@ -200,7 +218,7 @@ TEST_CASE("TcpSocket clears buffered data when reconnecting", "[net][tcp-socket]
     CHECK_FALSE(socket.can_read_line());
 }
 
-TEST_CASE("TcpSocket read API shell returns empty buffered data", "[net][tcp-socket]")
+TEST_CASE("TcpSocket read API should return empty buffered data", "[net][tcp-socket]")
 {
     Application app{0, nullptr};
     TcpSocket   socket;
@@ -374,7 +392,7 @@ TEST_CASE("TcpSocket disconnect_from_host closes after queued writes flush", "[n
 
     REQUIRE(wait_for(app, [&]() -> bool { return socket.state() == SocketState::Unconnected; }));
     CHECK(disconnected_count == 1);
-    CHECK(server.read_from_client() == "done");
+    REQUIRE(wait_for(app, [&]() -> bool { return server.read_from_client() == "done"; }));
 }
 
 TEST_CASE("TcpSocket rejects non-numeric addresses", "[net][tcp-socket]")

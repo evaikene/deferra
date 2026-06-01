@@ -77,6 +77,40 @@ TEST_CASE("File creates and writes a missing file", "[core][file]")
     CHECK(read_file(path) == "hello");
 }
 
+TEST_CASE("File clears open metadata after close", "[core][file]")
+{
+    auto const path = test_dir("close-clears-path") / "data.txt";
+    write_file(path, "abc");
+
+    File file;
+    REQUIRE(file.open(path, OpenMode::ReadOnly));
+    REQUIRE(file.path() == path);
+
+    file.close();
+
+    CHECK_FALSE(file.is_open());
+    CHECK(file.path().empty());
+    CHECK(file.size() == 0);
+    CHECK(file.error() == IOError::NotOpen);
+}
+
+TEST_CASE("File clears open metadata before failed reopen", "[core][file]")
+{
+    auto const dir  = test_dir("failed-reopen-clears-path");
+    auto const path = dir / "data.txt";
+    write_file(path, "abc");
+
+    File file;
+    REQUIRE(file.open(path, OpenMode::ReadOnly));
+
+    CHECK_FALSE(file.open(dir / "missing.txt", OpenMode::ReadOnly));
+    CHECK(file.error() == IOError::OpenError);
+    CHECK_FALSE(file.is_open());
+    CHECK(file.path().empty());
+    CHECK(file.size() == 0);
+    CHECK(file.error() == IOError::NotOpen);
+}
+
 TEST_CASE("File preserves existing contents without Truncate", "[core][file]")
 {
     auto const path = test_dir("preserve") / "data.txt";

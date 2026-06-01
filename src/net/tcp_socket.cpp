@@ -331,7 +331,7 @@ void TcpSocket::handle_fd_event(jb::core::FdEvents events)
         return;
     }
 
-    if (_d_socket->state == SocketState::Connecting && events.test_any(jb::core::FdEvents{jb::core::FdEvent::Write})) {
+    if (_d_socket->state == SocketState::Connecting && events.any()) {
         handle_connect_ready();
     }
 
@@ -452,6 +452,7 @@ void TcpSocket::update_watch()
 
     jb::core::FdEvents events;
     if (_d_socket->state == SocketState::Connecting) {
+        events.set(jb::core::FdEvent::Read);
         events.set(jb::core::FdEvent::Write);
     }
     if (_d_socket->state == SocketState::Connected || _d_socket->state == SocketState::Closing) {
