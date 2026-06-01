@@ -73,3 +73,21 @@ set(TARGET "utils-test")
 add_executable(${TARGET} utils-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# IODevice test
+set(TARGET "io-device-test")
+add_executable(${TARGET} io-device-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# File test
+set(TARGET "file-test")
+add_executable(${TARGET} file-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# TCP socket test
+set(TARGET "tcp-socket-test")
+add_executable(${TARGET} tcp-socket-test.cpp)
+target_link_libraries(${TARGET} PRIVATE net Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
