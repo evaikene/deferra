@@ -177,6 +177,29 @@ TEST_CASE("TcpSocket connects to a loopback server", "[net][tcp-socket]")
     CHECK(connected_count == 1);
 }
 
+TEST_CASE("TcpSocket clears buffered data when reconnecting", "[net][tcp-socket]")
+{
+    Application app{0, nullptr};
+    TestServer  first_server;
+    TcpSocket   socket;
+
+    REQUIRE(connect_socket(app, first_server, socket));
+
+    first_server.write_to_client("stale\n");
+    REQUIRE(wait_for(app, [&]() -> bool { return socket.can_read_line(); }));
+    CHECK(socket.bytes_available() == 6);
+
+    TestServer second_server;
+    socket.connect_to_host("127.0.0.1", second_server.port());
+    REQUIRE(wait_for(app, [&]() -> bool {
+        second_server.accept_client();
+        return socket.state() == SocketState::Connected;
+    }));
+
+    CHECK(socket.bytes_available() == 0);
+    CHECK_FALSE(socket.can_read_line());
+}
+
 TEST_CASE("TcpSocket read API shell returns empty buffered data", "[net][tcp-socket]")
 {
     Application app{0, nullptr};

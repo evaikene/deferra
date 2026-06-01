@@ -164,6 +164,22 @@ TEST_CASE("File read_line respects max_size without requiring a newline", "[core
     CHECK(file.read_line() == "def");
 }
 
+TEST_CASE("File bytes_available clears stale errors after successful query", "[core][file]")
+{
+    auto const path = test_dir("available-clears-error") / "data.txt";
+    write_file(path, "abc");
+
+    File file;
+    REQUIRE(file.open(path, OpenMode::ReadOnly));
+
+    CHECK(file.write("x") == 0);
+    CHECK(file.error() == IOError::Unsupported);
+
+    CHECK(file.bytes_available() == 3);
+    CHECK(file.error() == IOError::NoError);
+    CHECK(file.can_read_line());
+}
+
 TEST_CASE("File reports unsupported reads and writes for incompatible modes", "[core][file]")
 {
     auto const path = test_dir("unsupported") / "data.txt";

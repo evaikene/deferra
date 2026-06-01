@@ -293,6 +293,7 @@ auto File::bytes_available() const -> std::size_t
         return 0;
     }
 
+    const_cast<File*>(this)->clear_error();
     return static_cast<std::size_t>(end - current);
 }
 

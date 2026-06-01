@@ -46,6 +46,26 @@ auto set_nonblocking(int fd) -> bool
     return ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
+auto disable_sigpipe(int fd) -> bool
+{
+#if defined(SO_NOSIGPIPE)
+    int yes = 1;
+    return ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes)) == 0;
+#else
+    (void)fd;
+    return true;
+#endif
+}
+
+auto send_flags() -> int
+{
+#if defined(MSG_NOSIGNAL)
+    return MSG_NOSIGNAL;
+#else
+    return 0;
+#endif
+}
+
 auto make_sockaddr(std::string_view address, std::uint16_t port, sockaddr_storage& storage, socklen_t& length) -> int
 {
     std::memset(&storage, 0, sizeof(storage));
@@ -97,6 +117,8 @@ TcpSocket::~TcpSocket()
 void TcpSocket::connect_to_host(std::string_view address, std::uint16_t port)
 {
     close_socket(false);
+    _d_socket->input_buffer.clear();
+    _d_socket->output_buffer.clear();
     clear_error();
     _d_socket->peer_address.assign(address);
     _d_socket->peer_port = port;
@@ -118,6 +140,13 @@ void TcpSocket::connect_to_host(std::string_view address, std::uint16_t port)
     auto fd = ::socket(family, SOCK_STREAM, 0);
     if (fd < 0) {
         set_error(jb::core::IOError::OpenError, system_error_message("socket failed"));
+        return;
+    }
+
+    if (!disable_sigpipe(fd)) {
+        auto message = system_error_message("setsockopt failed");
+        ::close(fd);
+        set_error(jb::core::IOError::OpenError, std::move(message));
         return;
     }
 
@@ -384,7 +413,8 @@ void TcpSocket::read_available()
 void TcpSocket::write_pending()
 {
     while (!_d_socket->output_buffer.empty()) {
-        auto const n = ::send(_d_socket->fd, _d_socket->output_buffer.data(), _d_socket->output_buffer.size(), 0);
+        auto const n =
+            ::send(_d_socket->fd, _d_socket->output_buffer.data(), _d_socket->output_buffer.size(), send_flags());
         if (n > 0) {
             auto const size = static_cast<std::size_t>(n);
             _d_socket->output_buffer.erase(0, size);
