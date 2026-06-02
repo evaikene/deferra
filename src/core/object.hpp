@@ -14,54 +14,54 @@ namespace priv {
 struct ObjectPrivate; // Defined in object_priv.hpp
 } // namespace priv
 
- /// Root base class for all objects that participate in the signal-slot
- /// system and the parent-ownership tree.
- ///
- /// Parent-child ownership:
- ///
- /// Passing a non-null @p parent to the constructor transfers lifetime ownership.
- /// When the parent is deleted, it recursively deletes all its children. Children
- /// can also be explicitly deleted before their parent; the destructor unlinks
- /// itself automatically.
- ///
- /// Signals:
- ///
- /// Subclasses declare public `Signal<Args...>` members and emit them via the
- /// protected `emit()` method.
- ///
- /// @code
- /// class Button : public jb::core::Object {
- /// public:
- ///     jb::core::Signal<> clicked;
- ///     void press() { emit(clicked); }
- /// };
- /// @endcode
- ///
- /// Pimpl pattern:
- ///
- /// Subclasses that need private state follow the two-constructor convention so
- /// that Object handles allocation. Object always deletes the private struct;
- /// subclasses must not delete it.
- ///
- /// @code
- /// MyWidget::MyWidget(Object* parent)
- ///     : Object(*new priv::MyWidgetPrivate(), parent)
- /// {}
- /// @endcode
- ///
- /// `Object` always deletes the private struct; subclasses must not delete it.
- ///
- /// Thread affinity:
- ///
- /// Each Object records ThreadCtx and EventLoop at construction time. These values
- /// govern Auto-connection dispatch and can be changed by `move_to_thread()`.
- /// Object must be deleted in the thread it currently lives on.
- ///
- /// Lifetime rules:
- ///
- /// - Parent-owned Objects must be heap-allocated
- /// - Objects are non-copyable and non-movable
- /// - Never hold a raw pointer to parent-owned Objects past the parent's destruction.
+/// Root base class for all objects that participate in the signal-slot
+/// system and the parent-ownership tree.
+///
+/// Parent-child ownership:
+///
+/// Passing a non-null @p parent to the constructor transfers lifetime ownership.
+/// When the parent is deleted, it recursively deletes all its children. Children
+/// can also be explicitly deleted before their parent; the destructor unlinks
+/// itself automatically.
+///
+/// Signals:
+///
+/// Subclasses declare public `Signal<Args...>` members and emit them via the
+/// protected `emit()` method.
+///
+/// @code
+/// class Button : public jb::core::Object {
+/// public:
+///     jb::core::Signal<> clicked;
+///     void press() { emit(clicked); }
+/// };
+/// @endcode
+///
+/// Pimpl pattern:
+///
+/// Subclasses that need private state follow the two-constructor convention so
+/// that Object handles allocation. Object always deletes the private struct;
+/// subclasses must not delete it.
+///
+/// @code
+/// MyWidget::MyWidget(Object* parent)
+///     : Object(*new priv::MyWidgetPrivate(), parent)
+/// {}
+/// @endcode
+///
+/// `Object` always deletes the private struct; subclasses must not delete it.
+///
+/// Thread affinity:
+///
+/// Each Object records ThreadCtx and EventLoop at construction time. These values
+/// govern Auto-connection dispatch and can be changed by `move_to_thread()`.
+/// Object must be deleted in the thread it currently lives on.
+///
+/// Lifetime rules:
+///
+/// - Parent-owned Objects must be heap-allocated
+/// - Objects are non-copyable and non-movable
+/// - Never hold a raw pointer to parent-owned Objects past the parent's destruction.
 class Object {
 public:
 
@@ -138,41 +138,47 @@ public:
 
 protected:
 
-     /// Constructor for subclasses that supply their own private data.
-     /// @param[in] dd  Reference to a heap-allocated struct that inherits (directly
-     ///                or transitively) from priv::ObjectPrivate. Object takes ownership;
-     ///                do NOT delete @p dd elsewhere.
-     /// @param[in] parent Optional parent
-     explicit Object(priv::ObjectPrivate& dd, Object* parent = nullptr);
+    /// Constructor for subclasses that supply their own private data.
+    /// @param[in] dd  Reference to a heap-allocated struct that inherits (directly
+    ///                or transitively) from priv::ObjectPrivate. Object takes ownership;
+    ///                do NOT delete @p dd elsewhere.
+    /// @param[in] parent Optional parent
+    explicit Object(priv::ObjectPrivate& dd, Object* parent = nullptr);
 
-     /// Emit @p signal with the given arguments.
-     ///
-     /// Invokes all connected slots, dispatching Direct connections inline and
-     /// posting Queued connections to their receiver's EventLoop.
-     ///
-     /// This overload handles Signal<Args...> with one or more parameters.
-     /// The non-arg specialisation below handles Signal<>.
-     template<typename... Args>
-     void emit(Signal<Args...>& signal, Args... args)
-     {
-         signal.emit(this, args...);
-     }
+    /// Emit @p signal with the given arguments.
+    ///
+    /// Invokes all connected slots, dispatching Direct connections inline and
+    /// posting Queued connections to their receiver's EventLoop.
+    ///
+    /// This overload handles Signal<Args...> with one or more parameters.
+    /// The non-arg specialisation below handles Signal<>.
+    template <typename... Args>
+    void emit(Signal<Args...>& signal, Args... args)
+    {
+        signal.emit(this, args...);
+    }
 
-     /// Emit a zero-argument signal
-     void emit(Signal<>& signal)
-     {
-         signal.emit(this);
-     }
+    /// Emit a zero-argument signal
+    void emit(Signal<>& signal) { signal.emit(this); }
 
-     /// Returns a pointer to the private data
-     /// Subclasses downcast this to their concrete private data type.
-     [[nodiscard]] auto d_ptr() noexcept -> void*;
-     [[nodiscard]] auto d_ptr() const noexcept -> void const*;
+    /// Returns a pointer to the private data
+    /// Subclasses downcast this to their concrete private data type.
+    [[nodiscard]] auto d_ptr() const noexcept -> void*;
+
+    /// Templated helper for downcasting d_ptr() to a concrete private data type
+    /// @tparam T Concrete private data type to downcast to
+    /// @return Pointer to the private data downcast to T
+    template <typename T>
+    [[nodiscard]] auto d_ptr() const noexcept -> T*
+    {
+        return static_cast<T*>(d_ptr());
+    }
 
 private:
 
     /// Grant all Signal specialisations access to register_connection()
-    template <typename...> friend class Signal;
+    template <typename...>
+    friend class Signal;
 
     /// Called by Signal<Args...>::connect() to register a connection record
     void register_connection(std::shared_ptr<priv::ConnectionBase> const& conn);

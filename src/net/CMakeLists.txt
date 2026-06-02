@@ -7,6 +7,11 @@ set(HDRS
     tcp_socket.hpp
 )
 
+# Private headers not exposed to library users
+set(PRIV_HDRS
+    tcp_socket_priv.hpp
+)
+
 # Library source files
 set(SRCS
     tcp_socket.cpp
@@ -22,6 +27,7 @@ target_include_directories(${TARGET}
 target_sources(${TARGET}
     PRIVATE
         ${SRCS}
+        ${PRIV_HDRS}
     PUBLIC
         ${HDRS}
 )

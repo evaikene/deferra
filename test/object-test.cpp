@@ -2,7 +2,6 @@
 
 #include "application.hpp"
 #include "event_thread.hpp"
-#include "thread_context.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 

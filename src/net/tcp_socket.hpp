@@ -10,7 +10,7 @@
 namespace jb::net {
 
 /// TCP socket connection state.
-enum class SocketState {
+enum class SocketState : std::uint8_t {
     Unconnected, ///< No socket connection exists
     Connecting,  ///< A nonblocking connection attempt is in progress
     Connected,   ///< The socket is connected
@@ -82,7 +82,6 @@ public:
     jb::core::Signal<> disconnected;
 
 private:
-    struct Private;
 
     void close_socket(bool emit_disconnected);
     void handle_fd_event(jb::core::FdEvents events);
@@ -91,8 +90,6 @@ private:
     void write_pending();
     void set_state(SocketState state);
     void update_watch();
-
-    Private* _d_socket;
 };
 
 } // namespace jb::net

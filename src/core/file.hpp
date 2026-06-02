@@ -4,6 +4,7 @@
 #include "io_device.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -11,14 +12,14 @@
 namespace jb::core {
 
 /// File open mode flags.
-enum class OpenMode {
-    ReadOnly  = 1u << 0u,                ///< Open for reading
-    WriteOnly = 1u << 1u,                ///< Open for writing
-    ReadWrite = (1u << 0u) | (1u << 1u), ///< Open for reading and writing
-    Append    = 1u << 2u,                ///< Writes append to the end of the file
-    Truncate  = 1u << 3u,                ///< Truncate the file while opening
-    Create    = 1u << 4u,                ///< Create the file if it does not exist
-    Text      = 1u << 5u,                ///< Open in text mode instead of binary mode
+enum class OpenMode : std::uint8_t {
+    ReadOnly  = 1U << 0U,                ///< Open for reading
+    WriteOnly = 1U << 1U,                ///< Open for writing
+    ReadWrite = (1U << 0U) | (1U << 1U), ///< Open for reading and writing
+    Append    = 1U << 2U,                ///< Writes append to the end of the file
+    Truncate  = 1U << 3U,                ///< Truncate the file while opening
+    Create    = 1U << 4U,                ///< Create the file if it does not exist
+    Text      = 1U << 5U,                ///< Open in text mode instead of binary mode
 };
 
 /// Type-safe set of file open mode flags.
@@ -87,14 +88,11 @@ public:
     [[nodiscard]] auto at_end() const -> bool;
 
 private:
-    struct Private;
 
     [[nodiscard]] auto can_read() const -> bool;
     [[nodiscard]] auto can_write() const -> bool;
     [[nodiscard]] auto has_mode(OpenMode mode) const -> bool;
     auto               fail(IOError error, std::string message) -> bool;
-
-    Private* _d_file;
 };
 
 } // namespace jb::core

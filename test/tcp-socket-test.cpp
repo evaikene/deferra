@@ -20,6 +20,8 @@
 using namespace jb::core;
 using namespace jb::net;
 
+// NOLINTBEGIN(readability-magic-numbers)
+
 namespace {
 
 class TestServer {
@@ -263,7 +265,7 @@ TEST_CASE("TcpSocket receives data and emits readyRead", "[net][tcp-socket]")
     TcpSocket   socket;
     int         ready_count = 0;
 
-    socket.readyRead.connect([&]() -> void { ++ready_count; });
+    socket.ready_read.connect([&]() -> void { ++ready_count; });
     REQUIRE(connect_socket(app, server, socket));
 
     server.write_to_client("hello");
@@ -320,7 +322,7 @@ TEST_CASE("TcpSocket writes buffered data and emits bytesWritten", "[net][tcp-so
     TcpSocket   socket;
     std::size_t written = 0;
 
-    socket.bytesWritten.connect([&](std::size_t bytes) -> void { written += bytes; });
+    socket.bytes_written.connect([&](std::size_t bytes) -> void { written += bytes; });
     REQUIRE(connect_socket(app, server, socket));
 
     CHECK(socket.write("ping") == 4);
@@ -409,3 +411,5 @@ TEST_CASE("TcpSocket rejects non-numeric addresses", "[net][tcp-socket]")
     CHECK(socket.error() == jb::core::IOError::InvalidArgument);
     CHECK_FALSE(socket.error_string().empty());
 }
+
+// NOLINTEND(readability-magic-numbers)

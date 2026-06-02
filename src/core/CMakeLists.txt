@@ -28,6 +28,8 @@ set(HDRS
 # Private headers not exposed to library users
 set(PRIV_HDRS
     event_loop_backend.hpp
+    file_priv.hpp
+    io_device_priv.hpp
     object_priv.hpp
     signal_priv.hpp
     thread_context.hpp
