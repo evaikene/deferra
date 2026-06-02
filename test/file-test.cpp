@@ -67,7 +67,7 @@ TEST_CASE("File creates and writes a missing file", "[core][file]")
 
     File        file;
     std::size_t written = 0;
-    file.bytesWritten.connect([&](std::size_t bytes) -> void { written += bytes; });
+    file.bytes_written.connect([&](std::size_t bytes) -> void { written += bytes; });
 
     REQUIRE(file.open(path, {OpenMode::WriteOnly, OpenMode::Create}));
     CHECK(file.write("hello") == 5);

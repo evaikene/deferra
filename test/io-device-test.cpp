@@ -6,6 +6,8 @@
 #include <string>
 #include <string_view>
 
+// NOLINTBEGIN(readability-magic-numbers)
+
 using namespace jb::core;
 
 namespace {
@@ -90,14 +92,14 @@ TEST_CASE("IODevice stores and clears errors", "[core][io]")
     CHECK(device.error_string().empty());
 }
 
-TEST_CASE("IODevice emits errorOccurred for real errors", "[core][io]")
+TEST_CASE("IODevice emits error_occurred for real errors", "[core][io]")
 {
     TestDevice  device;
     int         count = 0;
     IOError     last_error{IOError::NoError};
     std::string last_message;
 
-    device.errorOccurred.connect([&](IOError error, std::string message) -> void {
+    device.error_occurred.connect([&](IOError error, std::string message) -> void {
         ++count;
         last_error   = error;
         last_message = std::move(message);
@@ -110,12 +112,13 @@ TEST_CASE("IODevice emits errorOccurred for real errors", "[core][io]")
     CHECK(last_message == "write failed");
 }
 
-TEST_CASE("IODevice does not emit errorOccurred for NoError", "[core][io]")
+TEST_CASE("IODevice does not emit error_occurred for NoError", "[core][io]")
 {
     TestDevice device;
     int        count = 0;
 
-    device.errorOccurred.connect([&](IOError, std::string) -> void { ++count; });
+    device.error_occurred.connect(
+        [&](IOError, std::string) -> void { ++count; }); // NOLINT(performance-unnecessary-value-param)
 
     device.set_error(IOError::NoError, "");
 
@@ -124,14 +127,14 @@ TEST_CASE("IODevice does not emit errorOccurred for NoError", "[core][io]")
     CHECK(device.error_string().empty());
 }
 
-TEST_CASE("IODevice derived devices emit readyRead and bytesWritten", "[core][io]")
+TEST_CASE("IODevice derived devices emit ready_read and bytes_written", "[core][io]")
 {
     TestDevice  device;
     int         ready_count   = 0;
     std::size_t written_bytes = 0;
 
-    device.readyRead.connect([&]() -> void { ++ready_count; });
-    device.bytesWritten.connect([&](std::size_t bytes) -> void { written_bytes += bytes; });
+    device.ready_read.connect([&]() -> void { ++ready_count; });
+    device.bytes_written.connect([&](std::size_t bytes) -> void { written_bytes += bytes; });
 
     device.emit_ready_read();
     CHECK(device.write("abc") == 3);
@@ -170,3 +173,5 @@ TEST_CASE("IODevice concrete implementation can expose line reads", "[core][io]"
     CHECK(device.can_read_line());
     CHECK(device.read_line() == "second");
 }
+
+// NOLINTEND(readability-magic-numbers)

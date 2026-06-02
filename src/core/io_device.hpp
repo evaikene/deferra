@@ -4,13 +4,14 @@
 #include "signal.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
 namespace jb::core {
 
 /// Common I/O error category used by IODevice implementations.
-enum class IOError {
+enum class IOError : std::uint8_t {
     NoError,         ///< No error has occurred
     NotOpen,         ///< Operation requires an open device
     OpenError,       ///< Opening the device failed
@@ -22,6 +23,10 @@ enum class IOError {
     Unsupported,     ///< The operation is not supported by this device
     ResourceError,   ///< The operating system reported a resource error
 };
+
+namespace priv {
+struct IODevicePrivate; // defined in io_device_priv.hpp
+} // namespace priv
 
 /// Base class for byte-oriented I/O devices.
 ///
@@ -76,15 +81,22 @@ public:
     [[nodiscard]] auto error_string() const noexcept -> std::string const&;
 
     /// Emitted when new bytes are available to read.
-    Signal<> readyRead;
+    Signal<> ready_read;
 
     /// Emitted after bytes have been accepted for writing.
-    Signal<std::size_t> bytesWritten;
+    Signal<std::size_t> bytes_written;
 
     /// Emitted when an operation fails.
-    Signal<IOError, std::string> errorOccurred;
+    Signal<IOError, std::string> error_occurred;
 
 protected:
+
+    /// Constructor for subclasses that supply their own private data.
+    /// @param[in] dd  Reference to a heap-allocated struct that inherits (directly
+    ///                or transitively) from priv::IODevicePrivate. IODevice takes ownership;
+    ///                do NOT delete @p dd elsewhere.
+    /// @param[in] parent Optional parent
+    explicit IODevice(priv::IODevicePrivate& dd, Object* parent = nullptr);
 
     /// Clears the stored error state.
     void clear_error();
@@ -97,10 +109,6 @@ protected:
 
     /// Emits bytesWritten.
     void emit_bytes_written(std::size_t bytes);
-
-private:
-    IOError     _error{IOError::NoError};
-    std::string _error_string;
 };
 
 } // namespace jb::core

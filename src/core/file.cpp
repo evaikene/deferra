@@ -1,17 +1,14 @@
 #include "file.hpp"
 
+#include "file_priv.hpp"
+#include "object_priv.hpp"
+
 #include <fstream>
 #include <ios>
 #include <system_error>
 #include <utility>
 
 namespace jb::core {
-
-struct File::Private {
-    std::fstream          stream;
-    std::filesystem::path path;
-    OpenModes             modes;
-};
 
 namespace {
 
@@ -64,14 +61,10 @@ void strip_crlf(std::string& line)
 } // anonymous namespace
 
 File::File(Object* parent)
-    : IODevice(parent)
-    , _d_file(new Private)
+    : IODevice(*new priv::FilePrivate, parent)
 {}
 
-File::~File()
-{
-    delete _d_file;
-}
+File::~File() = default;
 
 auto File::open(std::filesystem::path path, OpenModes modes) -> bool
 {
@@ -79,9 +72,11 @@ auto File::open(std::filesystem::path path, OpenModes modes) -> bool
         close();
     }
 
+    auto* d = d_ptr<priv::FilePrivate>();
+
     clear_error();
-    _d_file->path.clear();
-    _d_file->modes.reset();
+    d->path.clear();
+    d->modes.reset();
 
     auto const readable = modes.test(OpenMode::ReadOnly);
     auto const writable = modes.test(OpenMode::WriteOnly);
@@ -114,20 +109,21 @@ auto File::open(std::filesystem::path path, OpenModes modes) -> bool
         }
     }
 
-    _d_file->stream.clear();
-    _d_file->stream.open(path, make_open_mode(modes));
-    if (!_d_file->stream.is_open()) {
+    d->stream.clear();
+    d->stream.open(path, make_open_mode(modes));
+    if (!d->stream.is_open()) {
         return fail(IOError::OpenError, "failed to open file");
     }
 
-    _d_file->path  = std::move(path);
-    _d_file->modes = modes;
+    d->path  = std::move(path);
+    d->modes = modes;
+
     return true;
 }
 
 auto File::is_open() const -> bool
 {
-    return _d_file->stream.is_open();
+    return d_ptr<priv::FilePrivate const>()->stream.is_open();
 }
 
 void File::close()
@@ -136,13 +132,15 @@ void File::close()
         return;
     }
 
+    auto* d = d_ptr<priv::FilePrivate>();
+
     clear_error();
-    _d_file->stream.close();
-    if (_d_file->stream.fail()) {
+    d->stream.close();
+    if (d->stream.fail()) {
         set_error(IOError::CloseError, "failed to close file");
     }
-    _d_file->path.clear();
-    _d_file->modes.reset();
+    d->path.clear();
+    d->modes.reset();
 }
 
 auto File::read(std::size_t max_size) -> std::string
@@ -158,17 +156,19 @@ auto File::read(std::size_t max_size) -> std::string
 
     clear_error();
 
-    std::string data(max_size, '\0');
-    _d_file->stream.read(data.data(), static_cast<std::streamsize>(data.size()));
-    data.resize(static_cast<std::size_t>(_d_file->stream.gcount()));
+    auto* d = d_ptr<priv::FilePrivate>();
 
-    if (_d_file->stream.bad()) {
+    std::string data(max_size, '\0');
+    d->stream.read(data.data(), static_cast<std::streamsize>(data.size()));
+    data.resize(static_cast<std::size_t>(d->stream.gcount()));
+
+    if (d->stream.bad()) {
         set_error(IOError::ReadError, "failed to read file");
         return {};
     }
 
-    if (_d_file->stream.eof()) {
-        _d_file->stream.clear();
+    if (d->stream.eof()) {
+        d->stream.clear();
     }
 
     return data;
@@ -205,12 +205,16 @@ auto File::read_line(std::size_t max_size) -> std::string
 
     clear_error();
 
+    auto* d = d_ptr<priv::FilePrivate>();
+
+    constexpr std::size_t kMaxLineSize = 256U;
+
     std::string line;
-    line.reserve(std::min<std::size_t>(max_size, 256));
+    line.reserve(std::min(max_size, kMaxLineSize));
 
     while (line.size() < max_size) {
         char ch = '\0';
-        if (!_d_file->stream.get(ch)) {
+        if (!d->stream.get(ch)) {
             break;
         }
 
@@ -220,16 +224,17 @@ auto File::read_line(std::size_t max_size) -> std::string
         }
     }
 
-    if (_d_file->stream.bad()) {
+    if (d->stream.bad()) {
         set_error(IOError::ReadError, "failed to read file");
         return {};
     }
 
-    if (_d_file->stream.eof()) {
-        _d_file->stream.clear();
+    if (d->stream.eof()) {
+        d->stream.clear();
     }
 
     strip_crlf(line);
+
     return line;
 }
 
@@ -250,23 +255,27 @@ auto File::write(std::string_view data) -> std::size_t
     }
 
     clear_error();
+
+    auto* d = d_ptr<priv::FilePrivate>();
+
     if (has_mode(OpenMode::Append)) {
-        _d_file->stream.seekp(0, std::ios::end);
+        d->stream.seekp(0, std::ios::end);
     }
 
-    _d_file->stream.write(data.data(), static_cast<std::streamsize>(data.size()));
-    if (!_d_file->stream) {
+    d->stream.write(data.data(), static_cast<std::streamsize>(data.size()));
+    if (!d->stream) {
         set_error(IOError::WriteError, "failed to write file");
         return 0;
     }
 
-    _d_file->stream.flush();
-    if (!_d_file->stream) {
+    d->stream.flush();
+    if (!d->stream) {
         set_error(IOError::WriteError, "failed to flush file");
         return 0;
     }
 
     emit_bytes_written(data.size());
+
     return data.size();
 }
 
@@ -281,7 +290,7 @@ auto File::bytes_available() const -> std::size_t
         return 0;
     }
 
-    auto& stream  = _d_file->stream;
+    auto& stream  = d_ptr<priv::FilePrivate>()->stream;
     auto  current = stream.tellg();
     if (current < 0) {
         const_cast<File*>(this)->set_error(IOError::ReadError, "failed to query file position");
@@ -298,29 +307,33 @@ auto File::bytes_available() const -> std::size_t
     }
 
     const_cast<File*>(this)->clear_error();
+
     return static_cast<std::size_t>(end - current);
 }
 
 auto File::path() const -> std::filesystem::path const&
 {
-    return _d_file->path;
+    return d_ptr<priv::FilePrivate const>()->path;
 }
 
 auto File::size() const -> std::size_t
 {
-    if (_d_file->path.empty()) {
+    auto const* d = d_ptr<priv::FilePrivate const>();
+
+    if (d->path.empty()) {
         const_cast<File*>(this)->set_error(IOError::NotOpen, "file is not open");
         return 0;
     }
 
     std::error_code ec;
-    auto const      size = std::filesystem::file_size(_d_file->path, ec);
+    auto const      size = std::filesystem::file_size(d->path, ec);
     if (ec) {
         const_cast<File*>(this)->set_error(IOError::ResourceError, filesystem_error(ec));
         return 0;
     }
 
     const_cast<File*>(this)->clear_error();
+
     return static_cast<std::size_t>(size);
 }
 
@@ -331,7 +344,7 @@ auto File::position() const -> std::size_t
         return 0;
     }
 
-    auto& stream = _d_file->stream;
+    auto& stream = d_ptr<priv::FilePrivate>()->stream;
     auto  pos    = can_read() ? stream.tellg() : stream.tellp();
     if (pos < 0) {
         const_cast<File*>(this)->set_error(IOError::SeekError, "failed to query file position");
@@ -339,6 +352,7 @@ auto File::position() const -> std::size_t
     }
 
     const_cast<File*>(this)->clear_error();
+
     return static_cast<std::size_t>(pos);
 }
 
@@ -348,18 +362,21 @@ auto File::seek(std::size_t offset) -> bool
         return fail(IOError::NotOpen, "file is not open");
     }
 
+    auto* d = d_ptr<priv::FilePrivate>();
+
     clear_error();
-    _d_file->stream.clear();
+    d->stream.clear();
     if (can_read()) {
-        _d_file->stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+        d->stream.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
     }
     if (can_write() && !has_mode(OpenMode::Append)) {
-        _d_file->stream.seekp(static_cast<std::streamoff>(offset), std::ios::beg);
+        d->stream.seekp(static_cast<std::streamoff>(offset), std::ios::beg);
     }
 
-    if (!_d_file->stream) {
+    if (!d->stream) {
         return fail(IOError::SeekError, "failed to seek file");
     }
+
     return true;
 }
 
@@ -380,12 +397,13 @@ auto File::can_write() const -> bool
 
 auto File::has_mode(OpenMode mode) const -> bool
 {
-    return _d_file->modes.test(mode);
+    return d_ptr<priv::FilePrivate const>()->modes.test(mode);
 }
 
 auto File::fail(IOError error, std::string message) -> bool
 {
     set_error(error, std::move(message));
+
     return false;
 }
 

@@ -167,12 +167,7 @@ auto Object::move_to_thread(EventThread* event_thread) -> bool
     return move_to_thread_impl(event_thread);
 }
 
-auto Object::d_ptr() noexcept -> void*
-{
-    return _d;
-}
-
-auto Object::d_ptr() const noexcept -> void const*
+auto Object::d_ptr() const noexcept -> void*
 {
     return _d;
 }
