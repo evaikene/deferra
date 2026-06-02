@@ -104,10 +104,10 @@ protected:
     /// Stores an error and emits errorOccurred unless @p error is NoError.
     void set_error(IOError error, std::string message);
 
-    /// Emits readyRead.
+    /// Emits ready_read.
     void emit_ready_read();
 
-    /// Emits bytesWritten.
+    /// Emits bytes_written.
     void emit_bytes_written(std::size_t bytes);
 };
 

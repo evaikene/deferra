@@ -1,7 +1,6 @@
 #include "file.hpp"
 
 #include "file_priv.hpp"
-#include "object_priv.hpp"
 
 #include <fstream>
 #include <ios>
