@@ -200,8 +200,12 @@ private:
     /// Returns the token used to track this object's lifetime.
     auto lifetime() const -> std::weak_ptr<priv::ObjectLifetime>;
 
-    /// Posts an internal callable to this object's event lane.
-    void post_event_delivery(Task delivery);
+    /// Posts an internal callable to an object's event lane without
+    /// dereferencing the object.
+    static void post_event_delivery(EventLoop*                          event_loop,
+                                    Object*                             receiver,
+                                    std::weak_ptr<priv::ObjectLifetime> lifetime,
+                                    Task                                delivery);
 
     /// Shared init called by both constructors
     void init_common(Object* parent);

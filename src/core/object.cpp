@@ -24,7 +24,8 @@ Object::Object(priv::ObjectPrivate& dd, Object* parent)
 
 void Object::init_common(Object* parent)
 {
-    _d->event_loop = parent ? parent->event_loop() : EventLoop::current();
+    _d->event_loop           = parent ? parent->event_loop() : EventLoop::current();
+    _d->lifetime->event_loop = _d->event_loop;
 
     if (parent) {
         _d->parent = parent;
@@ -35,7 +36,11 @@ void Object::init_common(Object* parent)
 Object::~Object()
 {
     // --- 1. mark this object as dead
-    _d->lifetime->alive.store(false, std::memory_order_release);
+    {
+        std::lock_guard lock{_d->lifetime->event_loop_mx};
+        _d->lifetime->alive.store(false, std::memory_order_release);
+        _d->lifetime->event_loop = nullptr;
+    }
 
     // --- 2. deactivate all connections where this Object is the receiver.
     //        This prevents slots from firing on a half-destroyed object.
@@ -188,9 +193,12 @@ auto Object::lifetime() const -> std::weak_ptr<priv::ObjectLifetime>
     return _d->lifetime;
 }
 
-void Object::post_event_delivery(Task delivery)
+void Object::post_event_delivery(EventLoop*                          event_loop,
+                                 Object*                             receiver,
+                                 std::weak_ptr<priv::ObjectLifetime> lifetime,
+                                 Task                                delivery)
 {
-    _d->event_loop->post_event_delivery(this, _d->lifetime, std::move(delivery));
+    event_loop->post_event_delivery(receiver, std::move(lifetime), std::move(delivery));
 }
 
 auto Object::move_to_thread_impl(EventThread* event_thread) -> bool
@@ -198,6 +206,10 @@ auto Object::move_to_thread_impl(EventThread* event_thread) -> bool
 
     auto* event_loop = event_thread->as_event_loop();
     _d->event_loop   = event_loop;
+    {
+        std::lock_guard lock{_d->lifetime->event_loop_mx};
+        _d->lifetime->event_loop = event_loop;
+    }
 
     // recursively change all children to use the new event loop
     for (auto* child : _d->children) {
@@ -210,6 +222,10 @@ auto Object::move_to_thread_impl(EventThread* event_thread) -> bool
 void Object::move_to_event_loop(EventLoop* new_loop)
 {
     _d->event_loop = new_loop;
+    {
+        std::lock_guard lock{_d->lifetime->event_loop_mx};
+        _d->lifetime->event_loop = new_loop;
+    }
 
     for (auto* child : _d->children) {
         child->move_to_event_loop(new_loop);

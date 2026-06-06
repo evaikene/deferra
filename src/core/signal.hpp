@@ -15,6 +15,10 @@ namespace jb::core {
 class Object;
 class EventLoop;
 
+namespace priv {
+struct ObjectLifetime;
+}
+
 /// Type-safe, thread-aware signal for the signal-slot system.
 /// @tparam Args Parameter types of the signal; may be empty (Signal<>)
 ///
@@ -137,9 +141,10 @@ private:
 
     /// One slot connected to this signal.
     struct TypedConn : priv::ConnectionBase {
-        std::function<void(Args...)> slot;
-        Object*                      receiver{nullptr}; ///< nullptr for lambda connections
-        ConnectionType               conn_type{ConnectionType::Auto};
+        std::function<void(Args...)>        slot;
+        Object*                             receiver{nullptr}; ///< nullptr for lambda connections
+        std::weak_ptr<priv::ObjectLifetime> receiver_lifetime;
+        ConnectionType                      conn_type{ConnectionType::Auto};
 
         void invoke(Args... args)
         {

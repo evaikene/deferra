@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <thread>
 
 using namespace jb::core;
@@ -298,7 +299,6 @@ TEST_CASE("Auto signal-slot connection with threaded event loop", "[core][test]"
 
     // Create the `receiver` object in the context of the thread
     auto* receiver = new Object;
-    receiver->move_to_thread(&thread);
 
     int              direct_value{0}; // incremented if the slot is called directly
     std::atomic<int> queued_value{0}; // incremented if the slot is called via the threaded event loop
@@ -313,12 +313,17 @@ TEST_CASE("Auto signal-slot connection with threaded event loop", "[core][test]"
         }
     });
 
+    // Connections created before a move must use the receiver's current loop.
+    receiver->move_to_thread(&thread);
+
     CHECK(obj->inc() == 1);
     CHECK(obj->inc() == 2);
 
-    while (queued_value.load(std::memory_order_relaxed) != 2) {
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+    while (queued_value.load(std::memory_order_relaxed) != 2 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::yield();
     }
+    CHECK(queued_value.load(std::memory_order_relaxed) == 2);
 
     thread.quit();
     thread.wait();

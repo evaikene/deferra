@@ -7,6 +7,7 @@
 // Do NOT include this file directly.
 
 #include "logging.hpp"
+#include "object_priv.hpp"
 
 #include <algorithm>
 #include <type_traits>
@@ -25,9 +26,10 @@ auto Signal<Args...>::connect(Receiver* receiver, Slot&& slot, ConnectionType ty
         return {};
     }
 
-    auto conn       = std::make_shared<TypedConn>();
-    conn->conn_type = type;
-    conn->receiver  = receiver;
+    auto conn               = std::make_shared<TypedConn>();
+    conn->conn_type         = type;
+    conn->receiver          = receiver;
+    conn->receiver_lifetime = receiver->lifetime();
 
     if constexpr (std::is_member_function_pointer_v<std::decay_t<Slot>>) {
         // member-function pointer: bind the receiver so the stored function only
@@ -115,44 +117,45 @@ void Signal<Args...>::emit(Object* sender, Args... args)
             continue; // deactivated between snapshot and now
         }
 
-        // determine whether to call inline (Direct) or post (Queued)
-        auto const call_direct = [&]() -> bool {
-            switch (c->conn_type) {
-                case ConnectionType::Direct: {
-                    return true;
-                }
-
-                case ConnectionType::Queued: {
-                    return false;
-                }
-
-                case ConnectionType::Auto:
-                default: {
-                    // direct when the sender and receiver share the same EventLoop,
-                    // or when the receiver has no EventLoop (e.g. pre-Application).
-                    auto* receiver_loop = c->receiver ? c->receiver->event_loop() : nullptr;
-                    return !receiver_loop || (sender->event_loop() == receiver_loop);
-                }
-            }
-        }();
-
-        if (call_direct) {
+        if (c->conn_type == ConnectionType::Direct) {
             // synchronous: invoke in the current (sender's) thread
             c->invoke(args...);
+            continue;
         }
-        else {
-            // asynchronous: capture args by value and post to the receiver's
-            // lifetime-aware object-event lane
-            if (!c->receiver->event_loop()) {
-                log_error("Signal::emit: cannot post to receiver with no EventLoop");
-                continue;
-            }
-            c->receiver->post_event_delivery([c, ... captured_args = args]() mutable -> auto {
-                if (c->active.load(std::memory_order_acquire)) {
-                    c->invoke(captured_args...);
-                }
-            });
+
+        auto lifetime = c->receiver_lifetime.lock();
+        if (!lifetime) {
+            continue;
         }
+
+        std::unique_lock lock{lifetime->event_loop_mx};
+        if (!lifetime->alive.load(std::memory_order_acquire)) {
+            continue;
+        }
+
+        auto* event_loop = lifetime->event_loop;
+        if (c->conn_type == ConnectionType::Auto && (!event_loop || sender->event_loop() == event_loop)) {
+            // Auto is direct when the sender and receiver share an EventLoop,
+            // or when the receiver has no EventLoop (e.g. pre-Application).
+            lock.unlock();
+            c->invoke(args...);
+            continue;
+        }
+
+        // asynchronous: capture args by value and post to the receiver's
+        // lifetime-aware object-event lane
+        if (!event_loop) {
+            log_error("Signal::emit: cannot post to receiver with no EventLoop");
+            continue;
+        }
+        Object::post_event_delivery(event_loop,
+                                    c->receiver,
+                                    c->receiver_lifetime,
+                                    [c, ... captured_args = args]() mutable -> auto {
+                                        if (c->active.load(std::memory_order_acquire)) {
+                                            c->invoke(captured_args...);
+                                        }
+                                    });
     }
 }
 
