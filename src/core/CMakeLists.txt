@@ -11,6 +11,7 @@ set(HDRS
     command_line_parser.hpp
     connection.hpp
     enum_bitmask.hpp
+    event.hpp
     event_loop.hpp
     event_loop_types.hpp
     event_thread.hpp

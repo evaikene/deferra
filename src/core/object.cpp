@@ -1,6 +1,7 @@
 #include "object.hpp"
 #include "object_priv.hpp"
 
+#include "event.hpp"
 #include "event_loop.hpp"
 #include "event_thread.hpp"
 #include "thread_context.hpp"
@@ -23,7 +24,8 @@ Object::Object(priv::ObjectPrivate& dd, Object* parent)
 
 void Object::init_common(Object* parent)
 {
-    _d->event_loop = parent ? parent->event_loop() : EventLoop::current();
+    _d->event_loop           = parent ? parent->event_loop() : EventLoop::current();
+    _d->lifetime->event_loop = _d->event_loop;
 
     if (parent) {
         _d->parent = parent;
@@ -34,7 +36,11 @@ void Object::init_common(Object* parent)
 Object::~Object()
 {
     // --- 1. mark this object as dead
-    _d->lifetime->alive.store(false, std::memory_order_release);
+    {
+        std::lock_guard lock{_d->lifetime->event_loop_mx};
+        _d->lifetime->alive.store(false, std::memory_order_release);
+        _d->lifetime->event_loop = nullptr;
+    }
 
     // --- 2. deactivate all connections where this Object is the receiver.
     //        This prevents slots from firing on a half-destroyed object.
@@ -77,24 +83,23 @@ Object::~Object()
 
 void Object::delete_later()
 {
-    auto* loop = event_loop();
+    auto            lifetime = _d->lifetime;
+    std::lock_guard lock{lifetime->event_loop_mx};
+    if (!lifetime->alive.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    auto* loop = lifetime->event_loop;
     if (!loop) {
         log_fatal("Object::delete_later: object must have an event loop");
         return;
     }
 
-    auto lifetime = _d->lifetime;
     if (lifetime->delete_later_pending.exchange(true, std::memory_order_acq_rel)) {
         return; // already scheduled for deletion
     }
 
-    loop->post([this, lifetime]() -> void {
-        if (!lifetime->alive.load(std::memory_order_acquire)) {
-            return; // already destroyed
-        }
-
-        delete this;
-    });
+    loop->defer_delete(this, lifetime);
 }
 
 auto Object::parent() const -> Object*
@@ -133,6 +138,11 @@ auto Object::set_parent(Object* parent) -> bool
     }
 
     return true;
+}
+
+auto Object::event(Event& /* event */) -> bool
+{
+    return false;
 }
 
 auto Object::children() const noexcept -> std::vector<Object*> const&
@@ -183,11 +193,28 @@ void Object::register_connection(std::shared_ptr<priv::ConnectionBase> const& co
     _d->connections.emplace_back(conn);
 }
 
+auto Object::lifetime() const -> std::weak_ptr<priv::ObjectLifetime>
+{
+    return _d->lifetime;
+}
+
+void Object::post_event_delivery(EventLoop*                          event_loop,
+                                 Object*                             receiver,
+                                 std::weak_ptr<priv::ObjectLifetime> lifetime,
+                                 Task                                delivery)
+{
+    event_loop->post_event_delivery(receiver, std::move(lifetime), std::move(delivery));
+}
+
 auto Object::move_to_thread_impl(EventThread* event_thread) -> bool
 {
 
     auto* event_loop = event_thread->as_event_loop();
     _d->event_loop   = event_loop;
+    {
+        std::lock_guard lock{_d->lifetime->event_loop_mx};
+        _d->lifetime->event_loop = event_loop;
+    }
 
     // recursively change all children to use the new event loop
     for (auto* child : _d->children) {
@@ -200,6 +227,10 @@ auto Object::move_to_thread_impl(EventThread* event_thread) -> bool
 void Object::move_to_event_loop(EventLoop* new_loop)
 {
     _d->event_loop = new_loop;
+    {
+        std::lock_guard lock{_d->lifetime->event_loop_mx};
+        _d->lifetime->event_loop = new_loop;
+    }
 
     for (auto* child : _d->children) {
         child->move_to_event_loop(new_loop);

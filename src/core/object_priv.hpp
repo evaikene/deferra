@@ -19,6 +19,10 @@ namespace priv {
 struct ObjectLifetime {
     std::atomic_bool alive{true};
     std::atomic_bool delete_later_pending{false};
+
+    /// Protects event-loop affinity while queued work is being routed.
+    std::mutex event_loop_mx;
+    EventLoop* event_loop{nullptr};
 };
 
 /// Internal state for Object
