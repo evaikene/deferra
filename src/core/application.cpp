@@ -53,13 +53,23 @@ void Application::post_event(Object* receiver, std::unique_ptr<Event> event)
         return;
     }
 
-    auto* event_loop = receiver->event_loop();
+    auto lifetime = receiver->lifetime().lock();
+    if (!lifetime) {
+        return;
+    }
+
+    std::lock_guard lock{lifetime->event_loop_mx};
+    if (!lifetime->alive.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    auto* event_loop = lifetime->event_loop;
     if (!event_loop) {
         log_error("Application::post_event: receiver must have an event loop");
         return;
     }
 
-    event_loop->post_event(receiver, receiver->lifetime(), std::move(event));
+    event_loop->post_event(receiver, lifetime, std::move(event));
 }
 
 auto Application::exec() -> int

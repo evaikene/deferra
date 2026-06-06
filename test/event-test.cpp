@@ -1,11 +1,15 @@
 #include "event.hpp"
 
 #include "application.hpp"
+#include "event_thread.hpp"
 #include "logging.hpp"
 #include "object.hpp"
+#include "thread_context.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <string>
 #include <thread>
 #include <vector>
@@ -95,6 +99,21 @@ private:
     int& _destruction_count;
 };
 
+class ThreadRecordingReceiver : public EventReceiver {
+public:
+
+    auto event(Event& event) -> bool override
+    {
+        event_thread.store(ThreadCtx::current(), std::memory_order_relaxed);
+        auto const handled = EventReceiver::event(event);
+        delivered.store(true, std::memory_order_release);
+        return handled;
+    }
+
+    std::atomic_bool              delivered{false};
+    std::atomic<ThreadCtx const*> event_thread{nullptr};
+};
+
 } // anonymous namespace
 
 TEST_CASE("Event defaults to ignored and retains its type", "[core][event]")
@@ -168,6 +187,30 @@ TEST_CASE("Application post_event is thread-safe", "[core][event][thread]")
 
     app.process_events(EventFlag::Events);
     CHECK(receiver.received);
+}
+
+TEST_CASE("Application post_event uses a moved receiver's current event loop", "[core][event][thread]")
+{
+    Application app{0, nullptr};
+    EventThread thread;
+    thread.exec(true);
+
+    auto* receiver = new ThreadRecordingReceiver;
+    CHECK(receiver->move_to_thread(&thread));
+
+    Application::post_event(receiver, std::make_unique<CustomEvent>());
+
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+    while (!receiver->delivered.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+
+    CHECK(receiver->delivered.load(std::memory_order_acquire));
+    CHECK(receiver->event_thread.load(std::memory_order_relaxed) == thread.as_event_loop()->thread_ctx());
+
+    receiver->delete_later();
+    thread.quit();
+    thread.wait();
 }
 
 TEST_CASE("Application post_event ignores null inputs", "[core][event]")

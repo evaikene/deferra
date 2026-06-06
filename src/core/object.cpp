@@ -83,13 +83,18 @@ Object::~Object()
 
 void Object::delete_later()
 {
-    auto* loop = event_loop();
+    auto            lifetime = _d->lifetime;
+    std::lock_guard lock{lifetime->event_loop_mx};
+    if (!lifetime->alive.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    auto* loop = lifetime->event_loop;
     if (!loop) {
         log_fatal("Object::delete_later: object must have an event loop");
         return;
     }
 
-    auto lifetime = _d->lifetime;
     if (lifetime->delete_later_pending.exchange(true, std::memory_order_acq_rel)) {
         return; // already scheduled for deletion
     }
