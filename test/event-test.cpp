@@ -28,6 +28,20 @@ public:
     {}
 };
 
+class TrackedEvent : public CustomEvent {
+public:
+
+    explicit TrackedEvent(int& destruction_count)
+        : _destruction_count(destruction_count)
+    {}
+
+    ~TrackedEvent() override { ++_destruction_count; }
+
+private:
+
+    int& _destruction_count;
+};
+
 class EventReceiver : public Object {
 public:
 
@@ -318,5 +332,25 @@ TEST_CASE("EventLoop exit drains deferred deletes without delivering remaining o
     app.exec();
 
     CHECK(delivery_count == 0);
+    CHECK(destruction_count == 1);
+}
+
+TEST_CASE("EventLoop exit discards remaining object events", "[core][event]")
+{
+    Application   app{0, nullptr};
+    EventReceiver receiver;
+    int           destruction_count = 0;
+
+    Application::post_event(&receiver, std::make_unique<TrackedEvent>(destruction_count));
+    app.quit();
+    app.exec();
+
+    CHECK_FALSE(receiver.received);
+    CHECK(destruction_count == 1);
+
+    app.quit();
+    app.exec();
+
+    CHECK_FALSE(receiver.received);
     CHECK(destruction_count == 1);
 }

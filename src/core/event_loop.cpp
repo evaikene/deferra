@@ -144,6 +144,7 @@ void EventLoop::run()
     // deferred deletions they schedule are included in the final delete phase.
     drain_task_queue();
     drain_deferred_delete_queue();
+    discard_event_queue();
 
     // restore the original thread context (if any)
     _thread_ctx.store(orig_ctx, std::memory_order_relaxed);
@@ -271,6 +272,15 @@ void EventLoop::drain_event_queue()
             }
         }
         local.pop();
+    }
+}
+
+void EventLoop::discard_event_queue()
+{
+    std::queue<EventEntry> discarded;
+    {
+        std::lock_guard lock{_event_queue_mx};
+        discarded.swap(_event_queue);
     }
 }
 

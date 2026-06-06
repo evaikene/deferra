@@ -205,6 +205,7 @@ private:
     void defer_delete(Object* object, std::weak_ptr<priv::ObjectLifetime> lifetime);
     void drain_task_queue();
     void drain_event_queue();
+    void discard_event_queue();
     void drain_deferred_delete_queue();
 };
 
