@@ -62,7 +62,8 @@ class EventLoop;
 /// Queued connections and copyability:
 ///
 /// For Queued (cross-thread) delivery, all @p Args are captured by value and each
-/// argument type must therefore be copyable (or at least movable).
+/// argument type must therefore be copyable (or at least movable). Queued
+/// delivery runs when the receiver's EventLoop processes EventFlag::Events.
 ///
 template <typename... Args>
 class Signal {
@@ -137,7 +138,7 @@ private:
     /// One slot connected to this signal.
     struct TypedConn : priv::ConnectionBase {
         std::function<void(Args...)> slot;
-        Object*                      receiver{nullptr};      ///< nullptr for lambda connections
+        Object*                      receiver{nullptr}; ///< nullptr for lambda connections
         ConnectionType               conn_type{ConnectionType::Auto};
 
         void invoke(Args... args)

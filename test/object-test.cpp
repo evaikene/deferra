@@ -217,7 +217,39 @@ TEST_CASE("Object basics", "[core]")
         // object should not be deleted until the event loop processes events
         CHECK(object_counter == 1);
 
-        // processing events should delete the object
+        // task processing should delete the object
+        app.process_events(EventFlag::Tasks);
+        CHECK(object_counter == 0);
+    }
+
+    // `delete_later` runs after event processing
+    {
+        object_counter = 0;
+
+        jb::core::Application app{0, nullptr};
+
+        auto* obj = new Testable;
+        obj->delete_later();
+
+        app.process_events(EventFlag::Events);
+        CHECK(object_counter == 0);
+    }
+
+    // timer-only and watcher-only processing do not run deferred deletes
+    {
+        object_counter = 0;
+
+        jb::core::Application app{0, nullptr};
+
+        auto* obj = new Testable;
+        obj->delete_later();
+
+        app.process_events(EventFlag::Timers);
+        CHECK(object_counter == 1);
+
+        app.process_events(EventFlag::Watchers, 0);
+        CHECK(object_counter == 1);
+
         app.process_events(EventFlag::Tasks);
         CHECK(object_counter == 0);
     }
@@ -234,7 +266,7 @@ TEST_CASE("Object basics", "[core]")
 
         CHECK(object_counter == 1);
 
-        app.process_events(EventFlag::Tasks);
+        app.process_events(EventFlag::Events);
         CHECK(object_counter == 0);
     }
 

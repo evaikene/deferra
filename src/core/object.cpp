@@ -1,6 +1,7 @@
 #include "object.hpp"
 #include "object_priv.hpp"
 
+#include "event.hpp"
 #include "event_loop.hpp"
 #include "event_thread.hpp"
 #include "thread_context.hpp"
@@ -88,13 +89,7 @@ void Object::delete_later()
         return; // already scheduled for deletion
     }
 
-    loop->post([this, lifetime]() -> void {
-        if (!lifetime->alive.load(std::memory_order_acquire)) {
-            return; // already destroyed
-        }
-
-        delete this;
-    });
+    loop->defer_delete(this, lifetime);
 }
 
 auto Object::parent() const -> Object*
@@ -133,6 +128,11 @@ auto Object::set_parent(Object* parent) -> bool
     }
 
     return true;
+}
+
+auto Object::event(Event& /* event */) -> bool
+{
+    return false;
 }
 
 auto Object::children() const noexcept -> std::vector<Object*> const&
@@ -181,6 +181,16 @@ void Object::register_connection(std::shared_ptr<priv::ConnectionBase> const& co
     _d->connections.erase(range.begin(), range.end());
 
     _d->connections.emplace_back(conn);
+}
+
+auto Object::lifetime() const -> std::weak_ptr<priv::ObjectLifetime>
+{
+    return _d->lifetime;
+}
+
+void Object::post_event_delivery(Task delivery)
+{
+    _d->event_loop->post_event_delivery(this, _d->lifetime, std::move(delivery));
 }
 
 auto Object::move_to_thread_impl(EventThread* event_thread) -> bool

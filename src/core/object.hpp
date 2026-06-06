@@ -7,10 +7,12 @@
 
 namespace jb::core {
 
+class Event;
 class EventThread;
 class ThreadCtx;
 
 namespace priv {
+struct ObjectLifetime;
 struct ObjectPrivate; // Defined in object_priv.hpp
 } // namespace priv
 
@@ -96,6 +98,14 @@ public:
     /// Note that `parent` must be created in the same thread as this Object.
     auto set_parent(Object* parent) -> bool;
 
+    /// Dispatches an event to this object.
+    /// @param[in,out] event Event to dispatch
+    /// @return True if the event was recognized and dispatched; false otherwise
+    ///
+    /// The return value is independent of Event::accepted(), which indicates
+    /// whether caller-specific propagation should stop.
+    virtual auto event(Event& event) -> bool;
+
     /// Returns a list of this object's children in insertion order
     /// @return List of this object's children
     [[nodiscard]] auto children() const noexcept -> std::vector<Object*> const&;
@@ -112,8 +122,10 @@ public:
     [[nodiscard]] auto event_loop() const noexcept -> EventLoop*;
 
     /// Schedules the Object for deletion. The Object will be deleted by the
-    /// event loop of the thread this object lives on. If called from a different
-    /// thread, the deletion will be scheduled on the object's thread.
+    /// event loop of the thread this object lives on after task or object-event
+    /// processing. Timer-only and watcher-only processing does not perform
+    /// deferred deletion. If called from a different thread, the deletion will
+    /// be scheduled on the object's thread.
     ///
     /// NOTE: The object MUST have an event loop set on its thread for this method
     /// to work.
@@ -148,7 +160,7 @@ protected:
     /// Emit @p signal with the given arguments.
     ///
     /// Invokes all connected slots, dispatching Direct connections inline and
-    /// posting Queued connections to their receiver's EventLoop.
+    /// posting Queued connections to the Events lane of their receiver's EventLoop.
     ///
     /// This overload handles Signal<Args...> with one or more parameters.
     /// The non-arg specialisation below handles Signal<>.
@@ -176,12 +188,20 @@ protected:
 
 private:
 
+    friend class Application;
+
     /// Grant all Signal specialisations access to register_connection()
     template <typename...>
     friend class Signal;
 
     /// Called by Signal<Args...>::connect() to register a connection record
     void register_connection(std::shared_ptr<priv::ConnectionBase> const& conn);
+
+    /// Returns the token used to track this object's lifetime.
+    auto lifetime() const -> std::weak_ptr<priv::ObjectLifetime>;
+
+    /// Posts an internal callable to this object's event lane.
+    void post_event_delivery(Task delivery);
 
     /// Shared init called by both constructors
     void init_common(Object* parent);

@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <thread>
 
 using namespace jb::core;
 
@@ -31,6 +32,18 @@ public:
     }
 
     void incremented_slot(int v) { captured_value = v; }
+};
+
+class EventCountingTestable : public Testable {
+public:
+
+    auto event(Event& event) -> bool override
+    {
+        ++event_count;
+        return Testable::event(event);
+    }
+
+    int event_count{0};
 };
 
 int captured_value = 0;
@@ -137,8 +150,14 @@ TEST_CASE("Queued signal-slot connection", "[core]")
         CHECK(lambda_value == 0);
         CHECK(receiver->captured_value == 0);
 
-        // processing events should call the queued slots and update values
+        // generic tasks do not deliver queued signals
         app.process_events(EventFlag::Tasks);
+        CHECK(captured_value == 0);
+        CHECK(lambda_value == 0);
+        CHECK(receiver->captured_value == 0);
+
+        // object-event processing calls queued slots and updates values
+        app.process_events(EventFlag::Events);
         CHECK(captured_value == 2);
         CHECK(lambda_value == 2);
         CHECK(receiver->captured_value == 2);
@@ -147,7 +166,7 @@ TEST_CASE("Queued signal-slot connection", "[core]")
 
         // after the receiver is deleted, slots should no longer be called
         CHECK(obj->inc() == 3);
-        app.process_events(EventFlag::Tasks);
+        app.process_events(EventFlag::Events);
         CHECK(captured_value == 2);
         CHECK(lambda_value == 2);
 
@@ -156,6 +175,51 @@ TEST_CASE("Queued signal-slot connection", "[core]")
 
         delete obj;
     }
+}
+
+TEST_CASE("Queued signal delivery bypasses Object event overrides", "[core]")
+{
+    Application app{0, nullptr};
+
+    auto* sender   = new Testable;
+    auto* receiver = new EventCountingTestable;
+    sender->incremented.connect(receiver, &Testable::incremented_slot, ConnectionType::Queued);
+
+    CHECK(sender->inc() == 1);
+    app.process_events(EventFlag::Events);
+
+    CHECK(receiver->captured_value == 1);
+    CHECK(receiver->event_count == 0);
+
+    CHECK(sender->inc() == 2);
+    app.process_events(EventFlag::All, 0);
+
+    CHECK(receiver->captured_value == 2);
+    CHECK(receiver->event_count == 0);
+
+    delete receiver;
+    delete sender;
+}
+
+TEST_CASE("Queued signal delivery skips destroyed receivers", "[core]")
+{
+    Application app{0, nullptr};
+
+    int   delivered = 0;
+    auto* sender    = new Testable;
+    auto* receiver  = new Testable;
+    sender->incremented.connect(receiver, [&delivered](int) -> void { ++delivered; }, ConnectionType::Queued);
+
+    CHECK(sender->inc() == 1);
+    delete receiver;
+
+    CHECK_NOTHROW(app.process_events(EventFlag::Events));
+    CHECK(delivered == 0);
+
+    CHECK(sender->inc() == 2);
+    CHECK(sender->incremented.count() == 0);
+
+    delete sender;
 }
 
 TEST_CASE("Disconnecting signal-slot connections", "[core]")
@@ -236,7 +300,7 @@ TEST_CASE("Auto signal-slot connection with threaded event loop", "[core][test]"
     auto* receiver = new Object;
     receiver->move_to_thread(&thread);
 
-    int              direct_value{0};    // incremented if the slot is called directly
+    int              direct_value{0}; // incremented if the slot is called directly
     std::atomic<int> queued_value{0}; // incremented if the slot is called via the threaded event loop
 
     auto* obj = new Testable();
@@ -251,6 +315,10 @@ TEST_CASE("Auto signal-slot connection with threaded event loop", "[core][test]"
 
     CHECK(obj->inc() == 1);
     CHECK(obj->inc() == 2);
+
+    while (queued_value.load(std::memory_order_relaxed) != 2) {
+        std::this_thread::yield();
+    }
 
     thread.quit();
     thread.wait();

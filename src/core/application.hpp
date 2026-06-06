@@ -4,8 +4,11 @@
 #include "object.hpp"
 #include "signal.hpp"
 
+#include <memory>
+
 namespace jb::core {
 
+class Event;
 class EventThread;
 
 /// Main application class.
@@ -30,6 +33,24 @@ public:
     /// Destructor
     ~Application() override;
 
+    /// Sends an event synchronously to an object.
+    /// @param[in] receiver Object receiving the event; nullptr is allowed
+    /// @param[in,out] event Event to dispatch
+    /// @return The value returned by receiver's event handler, or false for a null receiver
+    ///
+    /// This method dispatches only to @p receiver and does not propagate the
+    /// event through the parent ownership tree.
+    static auto send_event(Object* receiver, Event& event) -> bool;
+
+    /// Posts an event for asynchronous delivery to an object.
+    /// @param[in] receiver Object receiving the event
+    /// @param[in] event Event to deliver
+    ///
+    /// This method is thread-safe. A null receiver or event is ignored. Events
+    /// posted to an object without an EventLoop are logged and dropped. Events
+    /// whose receiver is destroyed before delivery are silently discarded.
+    static void post_event(Object* receiver, std::unique_ptr<Event> event);
+
     /// Returns the event thread this application is running on
     auto thread() const -> EventThread* { return _event_loop.get(); }
 
@@ -38,7 +59,7 @@ public:
     auto exec() -> int;
 
     /// Processes specified events until there are no more events to process
-    /// @param[in] flags Events to process (tasks, timers, watchers)
+    /// @param[in] flags Events to process (tasks, object events, timers, watchers)
     /// @return true if the event loop is still running, false if it has been signaled to quit.
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
@@ -46,7 +67,7 @@ public:
 
     /// Processes specified events for `ms` milliseconds, or until there are no more events
     /// to process, whichever comes first.
-    /// @param[in] flags Events to process (tasks, timers, watchers)
+    /// @param[in] flags Events to process (tasks, object events, timers, watchers)
     /// @param[in] ms Maximum time to process events in milliseconds (negative means no timeout)
     /// @return true if the event loop is still running, false if it has been signaled to quit.
     ///

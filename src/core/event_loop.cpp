@@ -1,6 +1,9 @@
 #include "event_loop.hpp"
 
+#include "application.hpp"
+#include "event.hpp"
 #include "logging.hpp"
+#include "object_priv.hpp"
 #include "thread_context.hpp"
 
 #include <chrono>
@@ -25,6 +28,33 @@ void EventLoop::post(Task task)
     {
         std::lock_guard lock{_task_queue_mx};
         _task_queue.push(std::move(task));
+    }
+    _backend->wakeup();
+}
+
+void EventLoop::post_event(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, std::unique_ptr<Event> event)
+{
+    {
+        std::lock_guard lock{_event_queue_mx};
+        _event_queue.push({receiver, std::move(lifetime), std::move(event), {}});
+    }
+    _backend->wakeup();
+}
+
+void EventLoop::post_event_delivery(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, Task delivery)
+{
+    {
+        std::lock_guard lock{_event_queue_mx};
+        _event_queue.push({receiver, std::move(lifetime), {}, std::move(delivery)});
+    }
+    _backend->wakeup();
+}
+
+void EventLoop::defer_delete(Object* object, std::weak_ptr<priv::ObjectLifetime> lifetime)
+{
+    {
+        std::lock_guard lock{_deferred_delete_queue_mx};
+        _deferred_delete_queue.push({object, std::move(lifetime)});
     }
     _backend->wakeup();
 }
@@ -78,10 +108,10 @@ auto EventLoop::watch_fd(int fd, FdEvents events, FdCallback callback) -> FdWatc
         return {};
     }
 
-    _watchers[fd] = { .callback=std::move(callback), .events=events };
+    _watchers[fd] = {.callback = std::move(callback), .events = events};
     _backend->add_fd(fd, events);
 
-    return { fd };
+    return {fd};
 }
 
 void EventLoop::unwatch_fd(FdWatch handle)
@@ -96,9 +126,7 @@ void EventLoop::unwatch_fd(FdWatch handle)
 
 void EventLoop::quit()
 {
-    post([this]() -> void {
-        _running.store(false, std::memory_order_relaxed);
-    });
+    post([this]() -> void { _running.store(false, std::memory_order_relaxed); });
 }
 
 void EventLoop::run()
@@ -109,10 +137,13 @@ void EventLoop::run()
 
     _running.store(true, std::memory_order_relaxed);
 
-    while (process_events(EventFlag::All)) {}
+    while (process_events(EventFlag::All)) {
+    }
 
-    // drain the queue one more time to ensure all the posted tasks are processed before exiting
+    // Do not deliver object events after quit. Finish generic tasks first so any
+    // deferred deletions they schedule are included in the final delete phase.
     drain_task_queue();
+    drain_deferred_delete_queue();
 
     // restore the original thread context (if any)
     _thread_ctx.store(orig_ctx, std::memory_order_relaxed);
@@ -129,13 +160,15 @@ auto EventLoop::process_events(EventFlags flags, int ms) -> bool
         return false; // can only be called from the thread running the event loop
     }
 
+    auto const was_running = _running.load(std::memory_order_relaxed);
+
     // 1. poll and dispatch fd events
     if (flags.test(EventFlag::Watchers)) {
         static constexpr int kMaxEvents{64};
-        priv::ReadyEvent events[kMaxEvents];
+        priv::ReadyEvent     events[kMaxEvents];
 
         auto timeout_ms = compute_timeout_ms(ms);
-        auto n = _backend->poll(events, kMaxEvents, timeout_ms);
+        auto n          = _backend->poll(events, kMaxEvents, timeout_ms);
 
         for (int i = 0; i < n; ++i) {
             dispatch_fd(events[i]);
@@ -150,6 +183,17 @@ auto EventLoop::process_events(EventFlags flags, int ms) -> bool
     // 3. drain the task queue
     if (flags.test(EventFlag::Tasks)) {
         drain_task_queue();
+    }
+
+    // 4. drain the object event queue
+    auto const stopped_during_processing = was_running && !_running.load(std::memory_order_relaxed);
+    if (flags.test(EventFlag::Events) && !stopped_during_processing) {
+        drain_event_queue();
+    }
+
+    // 5. process deferred deletes after task or object-event processing
+    if (flags.test_any(EventFlags{EventFlag::Tasks, EventFlag::Events})) {
+        drain_deferred_delete_queue();
     }
 
     return _running.load(std::memory_order_relaxed);
@@ -203,6 +247,47 @@ void EventLoop::drain_task_queue()
     }
     while (!local.empty()) {
         local.front()();
+        local.pop();
+    }
+}
+
+void EventLoop::drain_event_queue()
+{
+    std::queue<EventEntry> local;
+    {
+        std::lock_guard lock{_event_queue_mx};
+        local.swap(_event_queue);
+    }
+
+    while (!local.empty()) {
+        auto& entry    = local.front();
+        auto  lifetime = entry.lifetime.lock();
+        if (lifetime && lifetime->alive.load(std::memory_order_acquire)) {
+            if (entry.delivery) {
+                entry.delivery();
+            }
+            else {
+                Application::send_event(entry.receiver, *entry.event);
+            }
+        }
+        local.pop();
+    }
+}
+
+void EventLoop::drain_deferred_delete_queue()
+{
+    std::queue<DeferredDeleteEntry> local;
+    {
+        std::lock_guard lock{_deferred_delete_queue_mx};
+        local.swap(_deferred_delete_queue);
+    }
+
+    while (!local.empty()) {
+        auto& entry    = local.front();
+        auto  lifetime = entry.lifetime.lock();
+        if (lifetime && lifetime->alive.load(std::memory_order_acquire)) {
+            delete entry.object;
+        }
         local.pop();
     }
 }

@@ -11,10 +11,17 @@
 
 namespace jb::core {
 
+class Application;
+class Event;
+class Object;
 struct ThreadCtx;
 
-/// EventLoop is a single-threaded event loop that supports posting tasks, timers,
-/// and file descriptor watches.
+namespace priv {
+struct ObjectLifetime;
+}
+
+/// EventLoop is a single-threaded event loop that supports posting tasks and object
+/// events, timers, and file descriptor watches.
 ///
 /// EventLoop class is not meant to be used directly by most users. Instead, it is used
 /// internally by Application and EventThread classes. However, it can be used directly
@@ -23,7 +30,8 @@ struct ThreadCtx;
 ///
 /// Threading contract:
 ///
-/// * post() and quit() are thread-safe and may be called from any thread.
+/// * post(), Application::post_event(), and quit() are thread-safe and may be
+///   called from any thread.
 /// * All other methods (timers, fd watching) MUST be called from the thread that
 ///   owns this loop - i.e. the thread currently inside run().
 /// * To schedule a timer or watch an fd from another thread, wrap the call
@@ -102,8 +110,9 @@ public:
     /// This method must be called from the thread running the event loop. It runs
     /// the event loop until quit is signaled. The event loop will process posted
     /// tasks and can be signaled to quit by calling the `quit()` method from any thread.
-    /// After quit is signaled, the event loop will finish processing any remaining
-    /// tasks and then exit.
+    /// After quit is signaled, the event loop will finish processing remaining
+    /// generic tasks and deferred deletes, but will not deliver remaining object
+    /// events.
     void run();
 
     /// Returns true if the event loop is running, false otherwise
@@ -124,29 +133,50 @@ public:
     void quit();
 
     /// Processes specified events until there are no more events to process
-    /// @param[in] flags Events to process (tasks, timers, watchers)
+    /// @param[in] flags Events to process (tasks, object events, timers, watchers)
     /// @return true if the event loop is still running, false if it has been signaled to quit.
+    ///
+    /// Deferred deletes are processed after task or object-event phases. Timer-only
+    /// and watcher-only processing does not perform deferred deletion.
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
     auto process_events(EventFlags flags) -> bool;
 
     /// Processes specified events for `ms` milliseconds, or until there are no more events
     /// to process, whichever comes first.
-    /// @param[in] flags Events to process (tasks, timers, watchers)
+    /// @param[in] flags Events to process (tasks, object events, timers, watchers)
     /// @param[in] ms Maximum time to process events in milliseconds (negative means no timeout)
     /// @return true if the event loop is still running, false if it has been signaled to quit.
     ///
     /// The `ms` timeout applies only to fd events. If `EventFlag::Watchers` is not set in `flags`,
     /// then `ms` is ignored and this method behaves the same as `process_events(flags)`.
     ///
+    /// Deferred deletes are processed after task or object-event phases. Timer-only
+    /// and watcher-only processing does not perform deferred deletion.
+    ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
     auto process_events(EventFlags flags, int ms) -> bool;
 
 private:
 
+    friend class Application;
+    friend class Object;
+
     struct WatchEntry {
         FdCallback callback;
         FdEvents   events;
+    };
+
+    struct EventEntry {
+        Object*                             receiver;
+        std::weak_ptr<priv::ObjectLifetime> lifetime;
+        std::unique_ptr<Event>              event;
+        Task                                delivery;
+    };
+
+    struct DeferredDeleteEntry {
+        Object*                             object;
+        std::weak_ptr<priv::ObjectLifetime> lifetime;
     };
 
     std::atomic<ThreadCtx*> _thread_ctx;
@@ -156,6 +186,12 @@ private:
     std::queue<Task> _task_queue;
     std::mutex       _task_queue_mx;
 
+    std::queue<EventEntry> _event_queue;
+    std::mutex             _event_queue_mx;
+
+    std::queue<DeferredDeleteEntry> _deferred_delete_queue;
+    std::mutex                      _deferred_delete_queue_mx;
+
     // Loop-thread-only state - NOT thread-safe
     std::unique_ptr<priv::Backend>      _backend;
     priv::TimerHeap                     _timers;
@@ -164,7 +200,12 @@ private:
     auto assert_on_loop_thread() const -> bool;
     auto compute_timeout_ms(int max_timeout_ms) -> int;
     void dispatch_fd(priv::ReadyEvent const& ev) const;
+    void post_event(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, std::unique_ptr<Event> event);
+    void post_event_delivery(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, Task delivery);
+    void defer_delete(Object* object, std::weak_ptr<priv::ObjectLifetime> lifetime);
     void drain_task_queue();
+    void drain_event_queue();
+    void drain_deferred_delete_queue();
 };
 
 } // namespace jb::core
