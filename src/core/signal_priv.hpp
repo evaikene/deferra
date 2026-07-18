@@ -18,7 +18,7 @@ namespace jb::core {
 
 template <typename... Args>
 template <typename Receiver, typename Slot>
-auto Signal<Args...>::connect(Receiver* receiver, Slot&& slot, ConnectionType type) -> Connection
+auto Signal<Args...>::connect(Receiver* receiver, Slot&& slot, ConnectionType type) const -> Connection
 {
     static_assert(std::is_base_of_v<Object, Receiver>, "Signal::connect: Receiver must be derived from Object");
     if (!receiver) {
@@ -56,7 +56,7 @@ auto Signal<Args...>::connect(Receiver* receiver, Slot&& slot, ConnectionType ty
 // Signal<Args...>::connect - context-free lambda (always Direct)
 template <typename... Args>
 template <typename Callable>
-auto Signal<Args...>::connect(Callable&& callable) -> Connection
+auto Signal<Args...>::connect(Callable&& callable) const -> Connection
 {
     auto conn       = std::make_shared<TypedConn>();
     conn->slot      = std::forward<Callable>(callable);
@@ -72,7 +72,7 @@ auto Signal<Args...>::connect(Callable&& callable) -> Connection
 // Signal<Args...>::disconnect
 
 template <typename... Args>
-void Signal<Args...>::disconnect(Connection const& conn) noexcept
+void Signal<Args...>::disconnect(Connection const& conn) const noexcept
 {
     if (auto p = conn._data.lock()) {
         p->deactivate();
@@ -82,7 +82,7 @@ void Signal<Args...>::disconnect(Connection const& conn) noexcept
 // Signal<Args...>::disconnect_all
 
 template <typename... Args>
-void Signal<Args...>::disconnect_all() noexcept
+void Signal<Args...>::disconnect_all() const noexcept
 {
     std::lock_guard<std::mutex> lock{_mx};
     for (auto& c : _connections) {
@@ -94,7 +94,7 @@ void Signal<Args...>::disconnect_all() noexcept
 // Signal<Args...>::emit
 
 template <typename... Args>
-void Signal<Args...>::emit(Object* sender, Args... args)
+void Signal<Args...>::emit(Object* sender, Args... args) const
 {
     //--- 1. snapshot the live connections under the lock
     // We prune dead connections while holding the mutex, then release it before

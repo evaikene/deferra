@@ -63,6 +63,10 @@ struct ObjectLifetime;
 /// thread-safe. Slot invocations themselves are not protected; each slot must guard
 /// its own mutable state.
 ///
+/// Connecting or disconnecting slots changes only the signal's internal
+/// subscription bookkeeping. These operations are therefore available through
+/// a const Signal and do not modify the logical state of the owning Object.
+///
 /// Queued connections and copyability:
 ///
 /// For Queued (cross-thread) delivery, all @p Args are captured by value and each
@@ -101,7 +105,7 @@ public:
     /// @endcode
     ///
     template <typename Receiver, typename Slot>
-    auto connect(Receiver* receiver, Slot&& slot, ConnectionType type = ConnectionType::Auto) -> Connection;
+    auto connect(Receiver* receiver, Slot&& slot, ConnectionType type = ConnectionType::Auto) const -> Connection;
 
     /// Connect to a callable with no Object receiver
     /// @param[in] callable Any callable compatible with `void(Args...)`
@@ -110,17 +114,17 @@ public:
     /// Lambda connections are always Direct: the callable is invoked in the emitting
     /// thread. The ConnectionType parameter is intentionally absent.
     template <typename Callable>
-    auto connect(Callable&& callable) -> Connection;
+    auto connect(Callable&& callable) const -> Connection;
 
     /// Deactivate the connection identified by @p conn
     /// @param[in] conn The connection to disconnect
     ///
     /// Equivalent to calling conn.disconnect(). The slot entry is removed lazily
     /// from the internal list on next emit.
-    void disconnect(Connection const& conn) noexcept;
+    void disconnect(Connection const& conn) const noexcept;
 
     /// Deactivate all connections and clear the internal list.
-    void disconnect_all() noexcept;
+    void disconnect_all() const noexcept;
 
     /// Returns the number of connections
     auto count() const -> std::size_t
@@ -137,7 +141,7 @@ private:
     /// Internal emit entry point, called by Object::emit()
     /// @param[in] sender The Object that is emitting the signal
     /// @param[in] args Signal arguments (passed by value; copied for Queued)
-    void emit(Object* sender, Args... args);
+    void emit(Object* sender, Args... args) const;
 
     /// One slot connected to this signal.
     struct TypedConn : priv::ConnectionBase {
@@ -154,8 +158,8 @@ private:
         }
     };
 
-    mutable std::mutex                      _mx;
-    std::vector<std::shared_ptr<TypedConn>> _connections;
+    mutable std::mutex                              _mx;
+    mutable std::vector<std::shared_ptr<TypedConn>> _connections;
 };
 
 } // namespace jb::core
