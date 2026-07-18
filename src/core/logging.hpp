@@ -1,12 +1,46 @@
-/// jb::core logging system
-///
-/// Provides a small, expandable logging facade. The core uses public `log*` functions
-/// defined here and trusts that *some* `Logger` is installed. A no-op-free default
-/// `ConsoleLogger` writing to `stderr` is created lazily on first use, so logging
-/// works even before `main()` / `Application` setup.
-///
-/// Applications are expected to install their own `Logger` via `set_logger()` to
-/// add coloring, multiple sinks, log files, syslog, async dispatch, etc.
+/**
+ * @file logging.hpp
+ * @brief Provides the `jb::core` logging facade and logger interfaces.
+ *
+ * The public `log_*` functions format messages with {fmt}, capture the source
+ * location at the call site, and forward enabled records to the global
+ * `Logger`. A `ConsoleLogger` writing line-oriented output to `stderr` is
+ * created lazily on first use, so logging works before `main()` or
+ * `Application` setup. Applications can install a custom logger with
+ * `set_logger()` for additional sinks, formatting, or asynchronous delivery.
+ *
+ * Set a logger's threshold to control which messages are emitted. Levels are
+ * ordered from most to least severe, so a logger configured for `Info` also
+ * accepts `Fatal`, `Error`, and `Warning` messages:
+ *
+ * \code{.cpp}
+ * jb::core::logger()->set_level(jb::core::LogLevel::Info);
+ * jb::core::log_info("connected to {}:{}", host, port);
+ * jb::core::log_error("failed to open {}: {}", path, error);
+ * \endcode
+ *
+ * Implement custom loggers by overriding `Logger::log()`. Implementations must
+ * be thread-safe because logging may occur concurrently from any thread. The
+ * `LogMessage::message` view is valid only for the duration of the call, so
+ * asynchronous loggers must copy it before returning:
+ *
+ * \code{.cpp}
+ * class CaptureLogger final : public jb::core::Logger {
+ * public:
+ *     void log(jb::core::LogMessage const& message) override
+ *     {
+ *         // Consume message immediately, or copy message.message for later use.
+ *     }
+ * };
+ *
+ * jb::core::set_logger(std::make_shared<CaptureLogger>());
+ * \endcode
+ *
+ * Fatal messages are logged before the process is aborted when
+ * `abort_on_fatal_error` is enabled. It defaults to `false` in release builds
+ * and `true` in debug builds; use `set_abort_on_fatal_error(false)` when a
+ * test or recovery path must continue after a fatal log.
+ */
 
 #pragma once
 

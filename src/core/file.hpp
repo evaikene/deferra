@@ -1,3 +1,50 @@
+/**
+ * @file file.hpp
+ * @brief Provides synchronous byte-oriented filesystem I/O.
+ *
+ * `File` is an `IODevice` implementation for regular files. Its operations
+ * are blocking, and the current position is shared by reads and writes.
+ * Ordinary file reads do not emit `readyRead`; successful writes emit
+ * `bytesWritten`, and failed operations are reported through `error()` and
+ * `errorOccurred`.
+ *
+ * Open a file with one access mode and any applicable modifiers. Use
+ * `Create` for missing files and `Truncate` when existing contents should be
+ * discarded:
+ *
+ * \code{.cpp}
+ * jb::core::File file;
+ * if (!file.open("output.bin", {jb::core::OpenMode::WriteOnly,
+ *                               jb::core::OpenMode::Create,
+ *                               jb::core::OpenMode::Truncate})) {
+ *     // Handle file.error() and file.error_string().
+ *     return;
+ * }
+ *
+ * file.write("payload");
+ * file.close();
+ * \endcode
+ *
+ * Read bytes or text lines from a file and use `seek()` to change the current
+ * position:
+ *
+ * \code{.cpp}
+ * jb::core::File file;
+ * if (file.open("input.txt", jb::core::OpenMode::ReadOnly)) {
+ *     const auto contents = file.read_all();
+ *     file.seek(0);
+ *     while (file.can_read_line()) {
+ *         const auto line = file.read_line();
+ *         // Process line without its LF or CRLF delimiter.
+ *     }
+ * }
+ * \endcode
+ *
+ * `ReadWrite` permits both operations, `Append` writes at the end of the
+ * file, and `Text` requests text-mode opening on platforms that distinguish
+ * text and binary files. `is_open()`, `position()`, `size()`,
+ * `bytes_available()`, and `at_end()` expose the current file state.
+ */
 #pragma once
 
 #include "enum_bitmask.hpp"

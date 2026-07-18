@@ -1,3 +1,60 @@
+/// @file ini_file.hpp
+/// @brief Reads INI-style key/value configuration files.
+///
+/// `IniFile` parses `key = value` entries without section support. Use
+/// dot-namespaced keys when grouping related settings, and construct an
+/// instance from the path to the configuration file:
+///
+/// \code{.cpp}
+/// jb::core::IniFile config{"app.ini"};
+/// if (!config.ok()) {
+///     // Handle config.error().
+/// }
+///
+/// const auto host = config.value_or("server.host", "localhost");
+/// const auto workers = config.integer_or("server.workers", 4);
+/// if (workers) {
+///     // Use *workers.value.
+/// }
+/// \endcode
+///
+/// Repeated keys retain all values in file order. The single-value accessors
+/// return the last value:
+///
+/// \code{.cpp}
+/// if (auto const* priorities = config.values("queue.priority")) {
+///     for (auto const& priority : *priorities) {
+///         // Process each value in file order.
+///     }
+/// }
+/// \endcode
+///
+/// Typed accessors return `IniValueResult<T>`. They distinguish a missing or
+/// invalid value from a successful conversion through `value` and `error`:
+///
+/// \code{.cpp}
+/// const auto timeout = config.interval("server.timeout");
+/// if (timeout) {
+///     // Use *timeout.value.
+/// } else {
+///     // Handle timeout.error.
+/// }
+/// \endcode
+///
+/// An `include` entry parses another file at that point in file order.
+/// Relative paths are resolved from the including file, and glob patterns are
+/// supported:
+///
+/// \code{.ini}
+/// # app.ini
+/// include = conf/defaults.ini
+/// include = conf.d/*.ini
+/// server.host = example.test
+/// \endcode
+///
+/// Full-line comments beginning with `#` or `;` are ignored. Inline comments
+/// after values are preserved, and include cycles or file and parse errors are
+/// reported through `ok()` and `error()`.
 #pragma once
 
 #include "event_loop_types.hpp"
