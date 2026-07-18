@@ -4,9 +4,9 @@
  *
  * `File` is an `IODevice` implementation for regular files. Its operations
  * are blocking, and the current position is shared by reads and writes.
- * Ordinary file reads do not emit `readyRead`; successful writes emit
- * `bytesWritten`, and failed operations are reported through `error()` and
- * `errorOccurred`.
+ * Ordinary file reads do not emit `ready_read`; successful writes emit
+ * `bytes_written`, and failed operations are reported through `error()` and
+ * `error_occurred`.
  *
  * Open a file with one access mode and any applicable modifiers. Use
  * `Create` for missing files and `Truncate` when existing contents should be
