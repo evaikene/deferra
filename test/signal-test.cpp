@@ -47,6 +47,22 @@ public:
     int event_count{0};
 };
 
+class ConstSender : public Object {
+public:
+
+    Signal<int> changed;
+
+    void notify(int value) { emit(changed, value); }
+};
+
+class ConstReceiver : public Object {
+public:
+
+    void set_value(int value) { received = value; }
+
+    int received{0};
+};
+
 int captured_value = 0;
 
 void value_incremented(int v)
@@ -256,6 +272,50 @@ TEST_CASE("Disconnecting signal-slot connections", "[core]")
 
     delete receiver;
     delete obj;
+}
+
+TEST_CASE("Connecting context-free slots through const signals", "[core]")
+{
+    ConstSender        sender;
+    ConstSender const& const_sender = sender;
+    int                received     = 0;
+
+    auto connection = const_sender.changed.connect([&received](int value) { received = value; });
+
+    sender.notify(42);
+
+    CHECK(connection.is_valid());
+    CHECK(received == 42);
+}
+
+TEST_CASE("Connecting receiver slots through const signals", "[core]")
+{
+    ConstSender        sender;
+    ConstSender const& const_sender = sender;
+    ConstReceiver      receiver;
+
+    auto connection = const_sender.changed.connect(&receiver, &ConstReceiver::set_value);
+
+    sender.notify(42);
+
+    CHECK(connection.is_valid());
+    CHECK(receiver.received == 42);
+}
+
+TEST_CASE("Disconnecting through const signals", "[core]")
+{
+    ConstSender        sender;
+    ConstSender const& const_sender = sender;
+    int                calls        = 0;
+
+    auto connection = const_sender.changed.connect([&calls](int) { ++calls; });
+
+    sender.notify(1);
+    const_sender.changed.disconnect(connection);
+    sender.notify(2);
+
+    CHECK(calls == 1);
+    CHECK_FALSE(connection.is_valid());
 }
 
 TEST_CASE("Modifying signal-slot connections inside a slot", "[core]")
