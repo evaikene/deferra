@@ -1,3 +1,45 @@
+/**
+ * @file enum_bitmask.hpp
+ * @brief Provides a type-safe bitmask wrapper for strongly typed enum flags.
+ *
+ * Define an enum whose values are individual powers of two, then create an
+ * `enum_bitmask` specialization for the enum:
+ *
+ * \code{.cpp}
+ * enum class Permission : unsigned {
+ *     Read  = 1U << 0U,
+ *     Write = 1U << 1U,
+ *     Exec  = 1U << 2U,
+ * };
+ * using Permissions = jb::core::enum_bitmask<Permission>;
+ * \endcode
+ *
+ * Construct a mask from one or more flags, inspect it with `test()` or
+ * `test_any()`, and modify it with `set()` and `clear()`:
+ *
+ * \code{.cpp}
+ * Permissions permissions{Permission::Read, Permission::Write};
+ * if (permissions.test(Permission::Read)) {
+ *     // The read flag is set.
+ * }
+ *
+ * permissions.set(Permission::Exec);
+ * permissions.clear(Permission::Write);
+ * const auto executable = permissions.test_any(Permission::Exec);
+ * \endcode
+ *
+ * Masks can also be combined with the bitwise operators and inspected as
+ * their underlying unsigned integer type:
+ *
+ * \code{.cpp}
+ * constexpr auto readable = Permissions{Permission::Read};
+ * constexpr auto writable = Permissions{Permission::Write};
+ * constexpr auto read_write = readable | writable;
+ * static_assert(read_write.test(Permissions{Permission::Read, Permission::Write}));
+ *
+ * const auto raw_bits = read_write.bits();
+ * \endcode
+ */
 #pragma once
 
 #include <initializer_list>

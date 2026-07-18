@@ -1,3 +1,55 @@
+/**
+ * @file command_line_parser.hpp
+ * @brief Parses command-line arguments into an inspectable argument stream.
+ *
+ * `CommandLineParser` separates command-line tokenization from application
+ * policy. Construct it with `argc` and `argv`, optionally providing a span of
+ * `CommandLineOption` descriptors, then inspect `program_name()` and iterate
+ * over `arguments()`. Each `CommandLineArgument` reports whether it is an
+ * option, positional argument, terminator, or unknown token and provides
+ * typed accessors for supported values.
+ *
+ * For simple command lines, construct the parser without option descriptors
+ * and inspect the positional arguments directly:
+ *
+ * \code{.cpp}
+ * using namespace jb::core;
+ *
+ * CommandLineParser parser{argc, argv};
+ * for (auto const& argument : parser) {
+ *     if (argument.kind() == CommandLineArgumentKind::Positional) {
+ *         // Use argument.token().
+ *     }
+ * }
+ * \endcode
+ *
+ * To describe options and read their values, pass an array of descriptors:
+ *
+ * \code{.cpp}
+ * constexpr std::array options{
+ *     CommandLineOption{.long_name = "verbose", .short_name = 'v'},
+ *     CommandLineOption{.long_name = "count", .short_name = 'c',
+ *                       .value_mode = CommandLineValueMode::Required},
+ * };
+ * CommandLineParser parser{argc, argv, options};
+ *
+ * for (auto const& argument : parser) {
+ *     if (argument.name() == "verbose") {
+ *         auto enabled = argument.boolean_value();
+ *     } else if (argument.name() == "count") {
+ *         auto count = argument.integer_value();
+ *         if (!count) {
+ *             // Handle count.error.
+ *         }
+ *     }
+ * }
+ * \endcode
+ *
+ * Parsing is intentionally non-validating: callers decide how to handle
+ * unknown options, missing values, and conversion errors. The parser stores
+ * non-owning string views into the original `argv` storage and option
+ * descriptors, so those objects must remain alive for the parser's lifetime.
+ */
 #pragma once
 
 #include "utils.hpp"

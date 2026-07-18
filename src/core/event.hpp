@@ -1,3 +1,44 @@
+/**
+ * @file event.hpp
+ * @brief Defines the base type for events dispatched to `Object` instances.
+ *
+ * `Event` carries a numeric type identifier and an accepted state. Events are
+ * ignored by default; a handler can call `accept()` when it has handled the
+ * event, or `ignore()` to leave it available for other handlers. The
+ * `None` and `CoreBase` identifiers are reserved by the library, while user
+ * event types should start at `User` or higher.
+ *
+ * Define application-specific events by deriving from `Event` and passing a
+ * unique type identifier to the base constructor:
+ *
+ * \code{.cpp}
+ * class DataEvent : public jb::core::Event {
+ * public:
+ *     static constexpr Type TypeId = User + 1;
+ *
+ *     explicit DataEvent(int value)
+ *         : Event(TypeId)
+ *         , value(value)
+ *     {}
+ *
+ *     int value;
+ * };
+ * \endcode
+ *
+ * A dispatcher can inspect the type, process the matching event, and mark it
+ * as accepted:
+ *
+ * \code{.cpp}
+ * void handle(jb::core::Event& event)
+ * {
+ *     if (event.type() == DataEvent::TypeId) {
+ *         auto& data = static_cast<DataEvent&>(event);
+ *         // Process data.value.
+ *         event.accept();
+ *     }
+ * }
+ * \endcode
+ */
 #pragma once
 
 namespace jb::core {
