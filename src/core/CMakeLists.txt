@@ -8,8 +8,10 @@ find_package(fmt CONFIG REQUIRED)
 # Public headers exposed to library users
 set(HDRS
     application.hpp
+    byte_buffer.hpp
     command_line_parser.hpp
     connection.hpp
+    error.hpp
     enum_bitmask.hpp
     event.hpp
     event_loop.hpp
@@ -20,10 +22,13 @@ set(HDRS
     io_device.hpp
     logging.hpp
     object.hpp
+    result.hpp
     shared_data.hpp
     signal.hpp
     timer.hpp
+    time_source.hpp
     utils.hpp
+    uuid.hpp
 )
 
 # Private headers not exposed to library users
@@ -50,7 +55,9 @@ set(SRCS
     object.cpp
     thread_context.cpp
     timer.cpp
+    time_source.cpp
     utils.cpp
+    uuid.cpp
 )
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")

@@ -1,0 +1,13 @@
+/** @file jobu_version_priv.hpp
+ * @brief Declares the configure-time project version used privately by JobU executables.
+ */
+#pragma once
+
+#include <string_view>
+
+namespace jb::jobu::detail {
+
+/// Project version substituted from the root CMake project during configuration.
+inline constexpr std::string_view project_version{"@PROJECT_VERSION@"};
+
+} // namespace jb::jobu::detail
