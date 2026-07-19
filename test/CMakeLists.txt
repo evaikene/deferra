@@ -23,6 +23,50 @@ add_executable(${TARGET}
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Generic database API test
+set(TARGET "db-api-test")
+add_executable(${TARGET}
+    db-api-test.cpp
+    support/fake_database_driver.cpp
+)
+target_link_libraries(${TARGET} PRIVATE db Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# Generic database query test
+set(TARGET "db-query-test")
+add_executable(${TARGET}
+    db-query-test.cpp
+    support/fake_database_driver.cpp
+)
+target_link_libraries(${TARGET} PRIVATE db Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# Generic database transaction test
+set(TARGET "db-transaction-test")
+add_executable(${TARGET}
+    db-transaction-test.cpp
+    support/fake_database_driver.cpp
+)
+target_link_libraries(${TARGET} PRIVATE db Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+if(TARGET db-sqlite)
+    # SQLite database integration test
+    set(TARGET "db-sqlite-test")
+    add_executable(${TARGET}
+        db-sqlite-test.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET} PRIVATE db-sqlite Catch2::Catch2WithMain)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+    # SQLite public header boundary test
+    set(TARGET "db-sqlite-public-headers-test")
+    add_executable(${TARGET} db-sqlite-public-headers-test.cpp)
+    target_link_libraries(${TARGET} PRIVATE db-sqlite)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+endif()
+
 # Public header boundary test
 set(TARGET "public-headers-test")
 add_executable(${TARGET} public-headers-test.cpp)
