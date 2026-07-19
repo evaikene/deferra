@@ -160,10 +160,7 @@ auto wait_for(Application& app, Predicate&& pred) -> bool
 auto connect_socket(Application& app, TestServer& server, TcpSocket& socket) -> bool
 {
     socket.connect_to_host("127.0.0.1", server.port());
-    return wait_for(app, [&]() -> bool {
-        server.accept_client();
-        return socket.state() == SocketState::Connected;
-    });
+    return wait_for(app, [&]() -> bool { return server.accept_client() && socket.state() == SocketState::Connected; });
 }
 
 } // anonymous namespace
@@ -215,8 +212,7 @@ TEST_CASE("TcpSocket clears buffered data when reconnecting", "[net][tcp-socket]
     TestServer second_server;
     socket.connect_to_host("127.0.0.1", second_server.port());
     REQUIRE(wait_for(app, [&]() -> bool {
-        second_server.accept_client();
-        return socket.state() == SocketState::Connected;
+        return second_server.accept_client() && socket.state() == SocketState::Connected;
     }));
 
     CHECK(socket.bytes_available() == 0);
