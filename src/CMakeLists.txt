@@ -1,2 +1,7 @@
 add_subdirectory(core)
 add_subdirectory(net)
+add_subdirectory(db)
+add_subdirectory(rpc)
+add_subdirectory(jobu)
+add_subdirectory(jobud)
+add_subdirectory(jobuctl)
