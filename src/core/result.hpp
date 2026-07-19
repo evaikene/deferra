@@ -110,6 +110,16 @@ public:
         return static_cast<T>(std::forward<U>(fallback));
     }
 
+    /// Moves the stored value, or returns a converted fallback when no value is present.
+    template <typename U>
+    auto value_or(U&& fallback) && -> T
+    {
+        if (has_value()) {
+            return std::move(*this).value();
+        }
+        return static_cast<T>(std::forward<U>(fallback));
+    }
+
     /// Compares result state and contained alternatives when equality is available.
     auto operator==(Result const&) const -> bool = default;
 

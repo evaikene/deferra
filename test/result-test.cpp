@@ -75,6 +75,15 @@ TEST_CASE("Result provides dereference, arrow, and move-only access", "[core][re
     CHECK(std::move(value).value().number == 7);
 }
 
+TEST_CASE("Result moves a move-only value through rvalue value_or", "[core][result]")
+{
+    auto success = Result<MoveOnly, std::string>::success(MoveOnly{7});
+    auto failure = Result<MoveOnly, std::string>::failure("missing");
+
+    CHECK(std::move(success).value_or(MoveOnly{1}).number == 7);
+    CHECK(std::move(failure).value_or(MoveOnly{1}).number == 1);
+}
+
 TEST_CASE("Result throws for wrong-state access", "[core][result]")
 {
     Result<int, std::string> uninitialized;

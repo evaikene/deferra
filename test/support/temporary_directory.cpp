@@ -43,14 +43,14 @@ TemporaryDirectory::~TemporaryDirectory()
 }
 
 TemporaryDirectory::TemporaryDirectory(TemporaryDirectory&& other) noexcept
-    : _path{std::move(other._path)}
+    : _path{std::exchange(other._path, std::filesystem::path{})}
 {}
 
 auto TemporaryDirectory::operator=(TemporaryDirectory&& other) noexcept -> TemporaryDirectory&
 {
     if (this != &other) {
         static_cast<void>(cleanup());
-        _path = std::move(other._path);
+        _path = std::exchange(other._path, std::filesystem::path{});
     }
     return *this;
 }

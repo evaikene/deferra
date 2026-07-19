@@ -19,7 +19,7 @@ using ByteView   = std::span<std::byte const>;
 /// @return A view valid only while `value` remains valid.
 [[nodiscard]] inline auto as_bytes(std::string_view value) noexcept -> ByteView
 {
-    return {reinterpret_cast<std::byte const*>(value.data()), value.size()};
+    return std::as_bytes(std::span{value.data(), value.size()});
 }
 
 /// Returns a byte-preserving text view without allocating or validating UTF-8.

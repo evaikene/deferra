@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <utility>
 
 using namespace jb::core;
 using namespace std::chrono_literals;
@@ -51,4 +52,22 @@ TEST_CASE("TemporaryDirectory release transfers cleanup ownership", "[test][file
     }
     CHECK(std::filesystem::exists(released_path));
     CHECK(std::filesystem::remove_all(released_path) > 0);
+}
+
+TEST_CASE("TemporaryDirectory moves cleanup ownership", "[test][filesystem]")
+{
+    std::filesystem::path moved_path;
+    {
+        jb::test::TemporaryDirectory source;
+        moved_path = source.path();
+        jb::test::TemporaryDirectory target{std::move(source)};
+        CHECK(source.path().empty());
+        CHECK(target.path() == moved_path);
+
+        jb::test::TemporaryDirectory replacement;
+        replacement = std::move(target);
+        CHECK(target.path().empty());
+        CHECK(replacement.path() == moved_path);
+    }
+    CHECK_FALSE(std::filesystem::exists(moved_path));
 }
