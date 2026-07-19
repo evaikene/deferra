@@ -180,9 +180,9 @@ auto acquire_lock(Data& data) -> VoidResult
     return VoidResult::success();
 }
 
-auto execute(sqlite3* connection, std::string_view sql, std::string_view message) -> VoidResult
+auto execute(sqlite3* connection, char const* sql, std::string_view message) -> VoidResult
 {
-    auto const result = sqlite3_exec(connection, sql.data(), nullptr, nullptr, nullptr);
+    auto const result = sqlite3_exec(connection, sql, nullptr, nullptr, nullptr);
     if (result != SQLITE_OK) {
         return VoidResult::failure(detail::make_sqlite_error(connection,
                                                              result,
@@ -331,7 +331,7 @@ auto configure_connection(Data& data) -> VoidResult
     return VoidResult::success();
 }
 
-auto execute_transaction(sqlite3* connection, std::string_view sql, std::string_view message) -> VoidResult
+auto execute_transaction(sqlite3* connection, char const* sql, std::string_view message) -> VoidResult
 {
     return execute(connection, sql, message);
 }

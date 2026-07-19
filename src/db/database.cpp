@@ -3,6 +3,7 @@
 #include "database_priv.hpp"
 #include "logging.hpp"
 
+#include <exception>
 #include <thread>
 #include <utility>
 
@@ -10,9 +11,7 @@ namespace jb::db {
 
 using DatabaseResult = jb::core::Result<void, jb::core::Error>;
 
-Database::Database() noexcept
-    : _data{std::make_unique<Private>()}
-{}
+Database::Database() noexcept = default;
 
 Database::Database(std::unique_ptr<Driver> driver)
     : _data{std::make_unique<Private>(std::move(driver))}
@@ -25,11 +24,11 @@ Database::~Database()
     }
     if (_data->query_count != 0) {
         jb::core::log_fatal("Destroying a database with {} live queries", _data->query_count);
-        return;
+        std::terminate();
     }
     if (_data->transaction_owner == TransactionOwner::Guarded) {
         jb::core::log_fatal("Destroying a database with a live transaction guard");
-        return;
+        std::terminate();
     }
     if (_data->open) {
         if (_data->transaction_owner == TransactionOwner::Direct) {
