@@ -40,3 +40,15 @@ TEST_CASE("TemporaryDirectory creates unique directories and removes them", "[te
     }
     CHECK_FALSE(std::filesystem::exists(first_path));
 }
+
+TEST_CASE("TemporaryDirectory release transfers cleanup ownership", "[test][filesystem]")
+{
+    std::filesystem::path released_path;
+    {
+        jb::test::TemporaryDirectory directory;
+        released_path = directory.release();
+        CHECK(std::filesystem::exists(released_path));
+    }
+    CHECK(std::filesystem::exists(released_path));
+    CHECK(std::filesystem::remove_all(released_path) > 0);
+}

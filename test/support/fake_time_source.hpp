@@ -16,12 +16,16 @@ public:
     /// Returns the configured UTC time.
     [[nodiscard]] auto utc_now() const noexcept -> core::UtcTimePoint override { return _utc; }
 
+    /// Returns the configured monotonic time.
     [[nodiscard]] auto monotonic_now() const noexcept -> core::TimePoint override { return _monotonic; }
 
+    /// Replaces UTC time without changing monotonic time.
     void set_utc(core::UtcTimePoint value) { _utc = value; }
 
+    /// Replaces monotonic time without changing UTC time.
     void set_monotonic(core::TimePoint value) { _monotonic = value; }
 
+    /// Advances both clocks by the same duration.
     void advance(core::Duration duration)
     {
         _utc       += std::chrono::duration_cast<core::UtcClock::duration>(duration);
@@ -34,7 +38,3 @@ private:
 };
 
 } // namespace jb::test
-  /// Returns the configured monotonic time.
-  /// Replaces UTC time without changing monotonic time.
-  /// Replaces monotonic time without changing UTC time.
-  /// Advances both clocks by the same duration.
