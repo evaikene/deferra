@@ -97,6 +97,15 @@ add_executable(${TARGET} rpc-protocol-test.cpp)
 target_link_libraries(${TARGET} PRIVATE rpc Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Transport-independent RPC server test
+set(TARGET "rpc-server-test")
+add_executable(${TARGET}
+    rpc-server-test.cpp
+    support/memory_io_device.cpp
+)
+target_link_libraries(${TARGET} PRIVATE rpc Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Byte buffer test
 set(TARGET "byte-buffer-test")
 add_executable(${TARGET} byte-buffer-test.cpp)
