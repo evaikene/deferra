@@ -37,7 +37,7 @@ jobs:
         run: cmake --build .bld
 
       - name: Test
-        run: ctest --test-dir .bld --output-on-failure
+        run: ctest --test-dir .bld/test --output-on-failure
 
   alpine:
     name: Alpine 3.22
@@ -69,4 +69,4 @@ jobs:
         run: cmake --build .bld
 
       - name: Test
-        run: ctest --test-dir .bld --output-on-failure
+        run: ctest --test-dir .bld/test --output-on-failure
