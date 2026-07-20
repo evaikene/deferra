@@ -82,6 +82,25 @@ TEST_CASE("JSON values report their active alternatives", "[rpc][json]")
     check_flags(make_json(JsonValue::Object{}), false, false, false, false, false, false, false, true);
 }
 
+TEST_CASE("JSON values provide typed accessors", "[rpc][json]")
+{
+    CHECK(make_json(true).as_bool());
+    CHECK(make_json(std::int64_t{-1}).as_int() == -1);
+    CHECK(make_json(std::uint64_t{1}).as_uint() == 1);
+    CHECK(make_json(1.5).as_double() == 1.5);
+
+    auto const text = make_json(std::string{"text"});
+    CHECK(text.as_string() == "text");
+
+    auto const array = make_json(JsonValue::Array{});
+    CHECK(array.as_array().empty());
+
+    auto const object = make_json(JsonValue::Object{});
+    CHECK(object.as_object().empty());
+
+    CHECK_THROWS_AS(make_json(true).as_int(), std::bad_variant_access);
+}
+
 TEST_CASE("JSON parsing preserves scalar alternatives", "[rpc][json]")
 {
     SECTION("null")
