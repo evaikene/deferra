@@ -46,6 +46,9 @@ class LocalServer;
 /// called because an immediately successful connection may emit connected
 /// synchronously. Every open lifecycle ends with the inherited closed signal;
 /// connected lifecycles emit disconnected immediately before closed.
+/// A socket returned by LocalServer is already Connected and does not emit
+/// connected retroactively; inspect it or install later lifecycle handlers
+/// immediately after taking ownership.
 class LocalSocket final : public jb::core::IODevice {
 public:
 
@@ -156,6 +159,7 @@ public:
 private:
     friend class LocalServer;
     struct Private;
+    explicit LocalSocket(Private& dd, jb::core::Object* parent = nullptr);
 };
 
 } // namespace jb::net
