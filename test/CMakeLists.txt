@@ -267,4 +267,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     )
     target_link_libraries(${TARGET} PRIVATE net Catch2::Catch2WithMain)
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+    # Linux local RPC integration test
+    set(TARGET "local-rpc-test")
+    add_executable(${TARGET}
+        local-rpc-test.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET}
+        PRIVATE
+            net
+            rpc
+            Catch2::Catch2WithMain
+    )
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 endif()
