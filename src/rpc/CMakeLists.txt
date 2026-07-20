@@ -13,9 +13,11 @@ target_include_directories(${TARGET}
 
 target_sources(${TARGET}
     PRIVATE
+        framing.cpp
         json.cpp
         rpc.cpp
     PUBLIC
+        framing.hpp
         json.hpp
         rpc.hpp
 )
