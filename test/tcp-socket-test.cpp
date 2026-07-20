@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -131,6 +132,16 @@ public:
         _accepted_fd = -1;
     }
 
+    void reset_client()
+    {
+        REQUIRE(_accepted_fd >= 0);
+
+        linger reset{1, 0};
+        REQUIRE(::setsockopt(_accepted_fd, SOL_SOCKET, SO_LINGER, &reset, sizeof(reset)) == 0);
+        ::close(_accepted_fd);
+        _accepted_fd = -1;
+    }
+
 private:
     static void set_nonblocking(int fd)
     {
@@ -202,6 +213,9 @@ TEST_CASE("TcpSocket clears buffered data when reconnecting", "[net][tcp-socket]
     Application app{0, nullptr};
     TestServer  first_server;
     TcpSocket   socket;
+    int         closed_count = 0;
+
+    socket.closed.connect([&]() -> void { ++closed_count; });
 
     REQUIRE(connect_socket(app, first_server, socket));
 
@@ -211,12 +225,16 @@ TEST_CASE("TcpSocket clears buffered data when reconnecting", "[net][tcp-socket]
 
     TestServer second_server;
     socket.connect_to_host("127.0.0.1", second_server.port());
+    CHECK(closed_count == 1);
     REQUIRE(wait_for(app, [&]() -> bool {
         return second_server.accept_client() && socket.state() == SocketState::Connected;
     }));
 
     CHECK(socket.bytes_available() == 0);
     CHECK_FALSE(socket.can_read_line());
+
+    socket.abort();
+    CHECK(closed_count == 2);
 }
 
 TEST_CASE("TcpSocket read API should return empty buffered data", "[net][tcp-socket]")
@@ -244,14 +262,17 @@ TEST_CASE("TcpSocket close and abort are no-ops while unconnected", "[net][tcp-s
     Application app{0, nullptr};
     TcpSocket   socket;
     int         disconnected_count = 0;
+    int         closed_count       = 0;
 
     socket.disconnected.connect([&]() -> void { ++disconnected_count; });
+    socket.closed.connect([&]() -> void { ++closed_count; });
 
     socket.close();
     socket.abort();
 
     CHECK(socket.state() == SocketState::Unconnected);
     CHECK(disconnected_count == 0);
+    CHECK(closed_count == 0);
 }
 
 TEST_CASE("TcpSocket receives data and emits readyRead", "[net][tcp-socket]")
@@ -329,12 +350,22 @@ TEST_CASE("TcpSocket writes buffered data and emits bytesWritten", "[net][tcp-so
 
 TEST_CASE("TcpSocket preserves buffered bytes across graceful peer close", "[net][tcp-socket]")
 {
-    Application app{0, nullptr};
-    TestServer  server;
-    TcpSocket   socket;
-    int         disconnected_count = 0;
+    Application                   app{0, nullptr};
+    TestServer                    server;
+    TcpSocket                     socket;
+    int                           disconnected_count = 0;
+    int                           closed_count       = 0;
+    std::vector<std::string_view> signal_order;
 
-    socket.disconnected.connect([&]() -> void { ++disconnected_count; });
+    socket.ready_read.connect([&]() -> void { signal_order.emplace_back("ready_read"); });
+    socket.disconnected.connect([&]() -> void {
+        ++disconnected_count;
+        signal_order.emplace_back("disconnected");
+    });
+    socket.closed.connect([&]() -> void {
+        ++closed_count;
+        signal_order.emplace_back("closed");
+    });
     REQUIRE(connect_socket(app, server, socket));
 
     server.write_to_client("bye");
@@ -342,6 +373,9 @@ TEST_CASE("TcpSocket preserves buffered bytes across graceful peer close", "[net
 
     REQUIRE(wait_for(app, [&]() -> bool { return socket.state() == SocketState::Unconnected; }));
     CHECK(disconnected_count == 1);
+    CHECK(closed_count == 1);
+    auto const expected_order = std::vector<std::string_view>{"ready_read", "disconnected", "closed"};
+    CHECK(signal_order == expected_order);
     CHECK(socket.can_read_line());
     CHECK(socket.read_line() == "bye");
     CHECK_FALSE(socket.can_read_line());
@@ -378,14 +412,56 @@ TEST_CASE("TcpSocket preserves read_all for buffered bytes after graceful peer c
     CHECK(socket.read_all() == "bye");
 }
 
+TEST_CASE("TcpSocket emits closed once after a peer reset", "[net][tcp-socket]")
+{
+    Application                   app{0, nullptr};
+    TestServer                    server;
+    TcpSocket                     socket;
+    int                           disconnected_count = 0;
+    int                           closed_count       = 0;
+    int                           error_count        = 0;
+    std::vector<std::string_view> signal_order;
+
+    socket.error_occurred.connect([&](IOError, std::string const&) -> void {
+        ++error_count;
+        signal_order.emplace_back("error_occurred");
+    });
+    socket.disconnected.connect([&]() -> void {
+        ++disconnected_count;
+        signal_order.emplace_back("disconnected");
+    });
+    socket.closed.connect([&]() -> void {
+        ++closed_count;
+        signal_order.emplace_back("closed");
+    });
+    REQUIRE(connect_socket(app, server, socket));
+
+    server.reset_client();
+
+    REQUIRE(wait_for(app, [&]() -> bool { return socket.state() == SocketState::Unconnected; }));
+    CHECK(socket.error() == IOError::ReadError);
+    CHECK(disconnected_count == 1);
+    CHECK(closed_count == 1);
+    CHECK(error_count == 1);
+    auto const expected_order = std::vector<std::string_view>{"disconnected", "error_occurred", "closed"};
+    CHECK(signal_order == expected_order);
+
+    socket.close();
+    socket.abort();
+    CHECK(disconnected_count == 1);
+    CHECK(closed_count == 1);
+}
+
 TEST_CASE("TcpSocket disconnect_from_host closes after queued writes flush", "[net][tcp-socket]")
 {
     Application app{0, nullptr};
     TestServer  server;
     TcpSocket   socket;
     int         disconnected_count = 0;
+    int         closed_count       = 0;
 
     socket.disconnected.connect([&]() -> void { ++disconnected_count; });
+    socket.closed.connect([&]() -> void { ++closed_count; });
     REQUIRE(connect_socket(app, server, socket));
 
     CHECK(socket.write("done") == 4);
@@ -393,7 +469,28 @@ TEST_CASE("TcpSocket disconnect_from_host closes after queued writes flush", "[n
 
     REQUIRE(wait_for(app, [&]() -> bool { return socket.state() == SocketState::Unconnected; }));
     CHECK(disconnected_count == 1);
+    CHECK(closed_count == 1);
     REQUIRE(wait_for(app, [&]() -> bool { return server.read_from_client() == "done"; }));
+
+    socket.close();
+    socket.abort();
+    CHECK(disconnected_count == 1);
+    CHECK(closed_count == 1);
+}
+
+TEST_CASE("TcpSocket destruction does not emit closed", "[net][tcp-socket]")
+{
+    Application app{0, nullptr};
+    TestServer  server;
+    int         closed_count = 0;
+
+    {
+        TcpSocket socket;
+        socket.closed.connect([&]() -> void { ++closed_count; });
+        REQUIRE(connect_socket(app, server, socket));
+    }
+
+    CHECK(closed_count == 0);
 }
 
 TEST_CASE("TcpSocket rejects non-numeric addresses", "[net][tcp-socket]")

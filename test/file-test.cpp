@@ -94,6 +94,43 @@ TEST_CASE("File clears open metadata after close", "[core][file]")
     CHECK(file.error() == IOError::NotOpen);
 }
 
+TEST_CASE("File emits closed once per open lifecycle", "[core][file]")
+{
+    auto const path = test_dir("closed-signal") / "data.txt";
+    write_file(path, "abc");
+
+    File file;
+    int  closed_count = 0;
+    file.closed.connect([&]() -> void { ++closed_count; });
+
+    file.close();
+    CHECK(closed_count == 0);
+
+    REQUIRE(file.open(path, OpenMode::ReadOnly));
+    file.close();
+    file.close();
+    CHECK(closed_count == 1);
+
+    REQUIRE(file.open(path, OpenMode::ReadOnly));
+    file.close();
+    CHECK(closed_count == 2);
+}
+
+TEST_CASE("File destruction does not emit closed", "[core][file]")
+{
+    auto const path = test_dir("destructor-closed-signal") / "data.txt";
+    write_file(path, "abc");
+
+    int closed_count = 0;
+    {
+        File file;
+        file.closed.connect([&]() -> void { ++closed_count; });
+        REQUIRE(file.open(path, OpenMode::ReadOnly));
+    }
+
+    CHECK(closed_count == 0);
+}
+
 TEST_CASE("File clears open metadata before failed reopen", "[core][file]")
 {
     auto const dir  = test_dir("failed-reopen-clears-path");

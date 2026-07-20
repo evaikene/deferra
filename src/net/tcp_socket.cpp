@@ -101,7 +101,7 @@ TcpSocket::TcpSocket(jb::core::Object* parent)
 
 TcpSocket::~TcpSocket()
 {
-    close_socket(false);
+    release_socket();
 }
 
 void TcpSocket::connect_to_host(std::string_view address, std::uint16_t port)
@@ -166,8 +166,7 @@ void TcpSocket::connect_to_host(std::string_view address, std::uint16_t port)
     }
 
     auto message = system_error_message("connect failed", errno);
-    close_socket(false);
-    set_error(jb::core::IOError::OpenError, std::move(message));
+    fail_socket(jb::core::IOError::OpenError, std::move(message), false);
 }
 
 void TcpSocket::disconnect_from_host()
@@ -315,9 +314,10 @@ void TcpSocket::set_state(SocketState state)
     d_ptr<priv::TcpSocketPrivate>()->state = state;
 }
 
-void TcpSocket::close_socket(bool emit_disconnected)
+auto TcpSocket::release_socket() -> bool
 {
-    auto* d = d_ptr<priv::TcpSocketPrivate>();
+    auto*      d        = d_ptr<priv::TcpSocketPrivate>();
+    auto const was_open = d->state != SocketState::Unconnected;
 
     auto* loop = event_loop();
     if (loop && d->watch) {
@@ -331,8 +331,31 @@ void TcpSocket::close_socket(bool emit_disconnected)
     d->fd = kInvalidFd;
     set_state(SocketState::Unconnected);
 
+    return was_open;
+}
+
+void TcpSocket::close_socket(bool emit_disconnected)
+{
+    auto const was_open = release_socket();
+
     if (emit_disconnected) {
         emit(disconnected);
+    }
+    if (was_open) {
+        emit_closed();
+    }
+}
+
+void TcpSocket::fail_socket(jb::core::IOError error, std::string message, bool emit_disconnected)
+{
+    auto const was_open = release_socket();
+
+    if (emit_disconnected) {
+        emit(disconnected);
+    }
+    set_error(error, std::move(message));
+    if (was_open) {
+        emit_closed();
     }
 }
 
@@ -368,15 +391,13 @@ void TcpSocket::handle_connect_ready()
     socklen_t len   = sizeof(error);
     if (::getsockopt(d->fd, SOL_SOCKET, SO_ERROR, &error, &len) < 0) {
         auto message = system_error_message("getsockopt failed", errno);
-        close_socket(false);
-        set_error(jb::core::IOError::OpenError, std::move(message));
+        fail_socket(jb::core::IOError::OpenError, std::move(message), false);
         return;
     }
 
     if (error != 0) {
         auto message = system_error_message("connect failed", error);
-        close_socket(false);
-        set_error(jb::core::IOError::OpenError, std::move(message));
+        fail_socket(jb::core::IOError::OpenError, std::move(message), false);
         return;
     }
 
@@ -416,8 +437,10 @@ void TcpSocket::read_available()
         }
 
         auto message = system_error_message("recv failed", errno);
-        close_socket(true);
-        set_error(jb::core::IOError::ReadError, std::move(message));
+        if (read_any) {
+            emit_ready_read();
+        }
+        fail_socket(jb::core::IOError::ReadError, std::move(message), true);
         return;
     }
 
@@ -450,8 +473,7 @@ void TcpSocket::write_pending()
         }
 
         auto message = system_error_message("send failed", errno);
-        close_socket(true);
-        set_error(jb::core::IOError::WriteError, std::move(message));
+        fail_socket(jb::core::IOError::WriteError, std::move(message), true);
         return;
     }
 

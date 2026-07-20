@@ -5,8 +5,8 @@
  * `File` is an `IODevice` implementation for regular files. Its operations
  * are blocking, and the current position is shared by reads and writes.
  * Ordinary file reads do not emit `ready_read`; successful writes emit
- * `bytes_written`, and failed operations are reported through `error()` and
- * `error_occurred`.
+ * `bytes_written`, closing an open file emits `closed`, and failed operations
+ * are reported through `error()` and `error_occurred`.
  *
  * Open a file with one access mode and any applicable modifiers. Use
  * `Create` for missing files and `Truncate` when existing contents should be
@@ -74,9 +74,9 @@ using OpenModes = enum_bitmask<OpenMode>;
 
 /// Synchronous byte-oriented file device.
 ///
-/// File performs blocking filesystem I/O and does not emit readyRead for
-/// ordinary file data. It emits bytesWritten after successful writes and
-/// errorOccurred when operations fail.
+/// File performs blocking filesystem I/O and does not emit ready_read for
+/// ordinary file data. It emits bytes_written after successful writes,
+/// error_occurred when operations fail, and closed after an explicit close.
 class File : public IODevice {
 public:
 
@@ -84,20 +84,22 @@ public:
     /// @param[in] parent Optional parent that owns this file
     explicit File(Object* parent = nullptr);
 
-    /// Closes the file if it is open.
+    /// Closes the file if it is open without emitting signals during destruction.
     ~File() override;
 
     /// Opens @p path with @p modes.
     ///
     /// At least one of ReadOnly, WriteOnly, or ReadWrite must be set. Existing
     /// files are preserved unless Truncate is set. Missing files are created
-    /// only when Create is set.
+    /// only when Create is set. Opening an already open File first completes
+    /// the previous lifecycle and emits closed.
     auto open(std::filesystem::path path, OpenModes modes) -> bool;
 
     /// Returns true when the file is open.
     [[nodiscard]] auto is_open() const -> bool override;
 
-    /// Closes the file. Errors during close are reported through error().
+    /// Closes the file and emits closed once for the completed open lifecycle.
+    /// Errors during close are reported through error() before closed is emitted.
     void close() override;
 
     /// Reads up to @p max_size bytes from the current position.
