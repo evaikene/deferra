@@ -49,6 +49,39 @@ TEST_CASE("JSON values expose owning dependency-independent alternatives", "[rpc
     CHECK(std::get<std::string>(json.data) == "owned");
 }
 
+TEST_CASE("JSON values report their active alternatives", "[rpc][json]")
+{
+    auto check_flags = [](JsonValue const& value,
+                          bool             is_null,
+                          bool             is_bool,
+                          bool             is_int,
+                          bool             is_uint,
+                          bool             is_double,
+                          bool             is_string,
+                          bool             is_array,
+                          bool             is_object) {
+        CHECK(value.is_null() == is_null);
+        CHECK(value.is_bool() == is_bool);
+        CHECK(value.is_int() == is_int);
+        CHECK(value.is_uint() == is_uint);
+        CHECK(value.is_double() == is_double);
+        CHECK(value.is_string() == is_string);
+        CHECK(value.is_array() == is_array);
+        CHECK(value.is_object() == is_object);
+    };
+
+    JsonValue const null_value;
+    check_flags(null_value, true, false, false, false, false, false, false, false);
+
+    check_flags(make_json(false), false, true, false, false, false, false, false, false);
+    check_flags(make_json(std::int64_t{-1}), false, false, true, false, false, false, false, false);
+    check_flags(make_json(std::uint64_t{1}), false, false, false, true, false, false, false, false);
+    check_flags(make_json(1.5), false, false, false, false, true, false, false, false);
+    check_flags(make_json(std::string{"text"}), false, false, false, false, false, true, false, false);
+    check_flags(make_json(JsonValue::Array{}), false, false, false, false, false, false, true, false);
+    check_flags(make_json(JsonValue::Object{}), false, false, false, false, false, false, false, true);
+}
+
 TEST_CASE("JSON parsing preserves scalar alternatives", "[rpc][json]")
 {
     SECTION("null")
