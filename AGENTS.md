@@ -7,6 +7,13 @@ This is a C++20 CMake project. The root `CMakeLists.txt` enables C++20, exports 
 - `src/core/`: static `core` library sources and public headers.
 - `src/core/*_priv.hpp`: private implementation headers.
 - `src/core/event_loop_backend_epoll.cpp` and `event_loop_backend_kqueue.cpp`: platform-specific event loop backends selected by CMake.
+- `src/db`: database-related code.
+- `src/db/sqlite`: SQLite database backend code.
+- `src/jobu`: job scheduling and execution code.
+- `src/jobuctl`: job control and command-line interface code.
+- `src/jobud`: JobU daemon code.
+- `src/net`: networking code.
+- `src/rpc`: JSON-RPC code.
 - `test/`: Catch2 test executables, one file per feature, named `*-test.cpp`.
 - `.bld/`: local out-of-source build directory; do not commit generated build output.
 
@@ -28,7 +35,8 @@ For code changes, Codex must use a staged workflow.
 - `ctest --test-dir .bld/test --output-on-failure`: run the registered Catch2 tests and show failures.
 - `clang-format -i src/core/*.hpp src/core/*.cpp test/*.cpp`: format changed C++ files using the repository style.
 
-The project requires CMake 3.20+, a C++20 compiler, `fmt`, and Catch2 discoverable via CMake package config.
+The project requires CMake 3.20+, a C++20 compiler, `fmt`, `sqlite3`, and Catch2 discoverable via CMake
+package config.
 
 ## Coding Style & Naming Conventions
 
