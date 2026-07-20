@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ubuntu:
+    name: Ubuntu 24.04
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            catch2 \
+            cmake \
+            g++ \
+            libfmt-dev \
+            libsqlite3-dev \
+            ninja-build \
+            nlohmann-json3-dev
+
+      - name: Configure
+        run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build .bld
+
+      - name: Test
+        run: ctest --test-dir .bld/test --output-on-failure
+
+  alpine:
+    name: Alpine 3.22
+    runs-on: ubuntu-24.04
+    container: alpine:3.22
+
+    steps:
+      # GitHub's JavaScript actions need a glibc compatibility layer on musl.
+      - name: Install tools and dependencies
+        run: |
+          apk add --no-cache \
+            catch2-3 \
+            cmake \
+            fmt-dev \
+            g++ \
+            gcompat \
+            git \
+            nlohmann-json \
+            samurai \
+            sqlite-dev
+
+      - name: Check out sources
+        uses: actions/checkout@v5
+
+      - name: Configure
+        run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build .bld
+
+      - name: Test
+        run: ctest --test-dir .bld/test --output-on-failure
