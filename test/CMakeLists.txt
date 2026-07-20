@@ -79,6 +79,12 @@ add_executable(${TARGET} rpc-public-headers-test.cpp)
 target_link_libraries(${TARGET} PRIVATE rpc)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Net public header boundary test
+set(TARGET "net-public-headers-test")
+add_executable(${TARGET} net-public-headers-test.cpp)
+target_link_libraries(${TARGET} PRIVATE net)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # JSON codec test
 set(TARGET "json-test")
 add_executable(${TARGET} json-test.cpp)
@@ -241,3 +247,15 @@ set(TARGET "tcp-socket-test")
 add_executable(${TARGET} tcp-socket-test.cpp)
 target_link_libraries(${TARGET} PRIVATE net Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Linux local socket test
+    set(TARGET "local-socket-test")
+    add_executable(${TARGET}
+        local-socket-test.cpp
+        support/temporary_directory.cpp
+    )
+    target_compile_definitions(${TARGET} PRIVATE _GNU_SOURCE)
+    target_link_libraries(${TARGET} PRIVATE net Catch2::Catch2WithMain)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+endif()
