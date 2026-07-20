@@ -73,6 +73,18 @@ add_executable(${TARGET} public-headers-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# RPC public header boundary test
+set(TARGET "rpc-public-headers-test")
+add_executable(${TARGET} rpc-public-headers-test.cpp)
+target_link_libraries(${TARGET} PRIVATE rpc)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# JSON codec test
+set(TARGET "json-test")
+add_executable(${TARGET} json-test.cpp)
+target_link_libraries(${TARGET} PRIVATE rpc Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Byte buffer test
 set(TARGET "byte-buffer-test")
 add_executable(${TARGET} byte-buffer-test.cpp)
