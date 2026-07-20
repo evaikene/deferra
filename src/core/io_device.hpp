@@ -1,3 +1,11 @@
+/**
+ * @file io_device.hpp
+ * @brief Defines the common lifecycle, error, and signal contract for byte-oriented devices.
+ *
+ * Concrete devices implement the byte operations and report activity through the shared
+ * signals. In particular, `closed` lets transport-independent users observe the end of an
+ * open device lifecycle without knowing its concrete type.
+ */
 #pragma once
 
 #include "object.hpp"
@@ -48,6 +56,9 @@ public:
     [[nodiscard]] virtual auto is_open() const -> bool = 0;
 
     /// Closes the device.
+    ///
+    /// Closing an open device emits closed after the concrete device has completed
+    /// its shutdown. Closing an already closed device has no effect.
     virtual void close() = 0;
 
     /// Reads up to @p max_size bytes from the device.
@@ -89,6 +100,12 @@ public:
     /// Emitted when an operation fails.
     Signal<IOError, std::string> error_occurred;
 
+    /// Emitted once after an open device completes its transition to closed.
+    ///
+    /// Concrete devices make any final readable bytes available and emit ready_read
+    /// before this signal. Destroying a device does not emit closed.
+    Signal<> closed;
+
 protected:
 
     /// Constructor for subclasses that supply their own private data.
@@ -109,6 +126,12 @@ protected:
 
     /// Emits bytes_written.
     void emit_bytes_written(std::size_t bytes);
+
+    /// Emits closed after a concrete device completes an open-to-closed transition.
+    ///
+    /// Derived classes are responsible for calling this exactly once per open lifecycle
+    /// and must not call it from their destructors.
+    void emit_closed();
 };
 
 } // namespace jb::core

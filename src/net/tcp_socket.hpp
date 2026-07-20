@@ -1,3 +1,7 @@
+/**
+ * @file tcp_socket.hpp
+ * @brief Provides an event-loop-driven TCP byte-stream device.
+ */
 #pragma once
 
 #include "io_device.hpp"
@@ -21,7 +25,9 @@ enum class SocketState : std::uint8_t {
 ///
 /// TcpSocket is a byte-oriented IODevice for client TCP connections. The v1 API
 /// accepts numeric addresses only; DNS resolution and server/listener support
-/// are intentionally outside this class.
+/// are intentionally outside this class. Every open-to-closed transition emits
+/// the inherited closed signal after any final ready_read and disconnected
+/// notifications.
 class TcpSocket : public jb::core::IODevice {
 public:
 
@@ -29,16 +35,18 @@ public:
     /// @param[in] parent Optional parent that owns this socket
     explicit TcpSocket(jb::core::Object* parent = nullptr);
 
-    /// Closes the socket if needed.
+    /// Closes the socket if needed without emitting signals during destruction.
     ~TcpSocket() override;
 
     /// Starts a nonblocking connection to a numeric address and port.
     void connect_to_host(std::string_view address, std::uint16_t port);
 
     /// Flushes queued writes and then closes the socket.
+    /// An open socket emits disconnected followed by closed when shutdown completes.
     void disconnect_from_host();
 
     /// Closes immediately and clears any buffered data.
+    /// An open socket emits disconnected followed by closed.
     void abort();
 
     /// Returns the current socket state.
@@ -78,12 +86,14 @@ public:
     /// Emitted when the socket connection succeeds.
     jb::core::Signal<> connected;
 
-    /// Emitted when the socket disconnects.
+    /// Emitted when the socket disconnects, before the inherited closed signal.
     jb::core::Signal<> disconnected;
 
 private:
 
+    auto release_socket() -> bool;
     void close_socket(bool emit_disconnected);
+    void fail_socket(jb::core::IOError error, std::string message, bool emit_disconnected);
     void handle_fd_event(jb::core::FdEvents events);
     void handle_connect_ready();
     void read_available();

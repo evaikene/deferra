@@ -17,12 +17,21 @@ public:
 
     using IODevice::clear_error;
     using IODevice::emit_bytes_written;
+    using IODevice::emit_closed;
     using IODevice::emit_ready_read;
     using IODevice::set_error;
 
     auto is_open() const -> bool override { return _open; }
 
-    void close() override { _open = false; }
+    void close() override
+    {
+        if (!_open) {
+            return;
+        }
+
+        _open = false;
+        emit_closed();
+    }
 
     auto read(std::size_t max_size) -> std::string override
     {
@@ -141,6 +150,39 @@ TEST_CASE("IODevice derived devices emit ready_read and bytes_written", "[core][
 
     CHECK(ready_count == 1);
     CHECK(written_bytes == 3);
+}
+
+TEST_CASE("IODevice concrete devices emit closed once per open lifecycle", "[core][io]")
+{
+    TestDevice device;
+    int        closed_count = 0;
+
+    device.closed.connect([&]() -> void { ++closed_count; });
+
+    device.close();
+    CHECK(closed_count == 0);
+
+    device.open();
+    device.close();
+    device.close();
+    CHECK(closed_count == 1);
+
+    device.open();
+    device.close();
+    CHECK(closed_count == 2);
+}
+
+TEST_CASE("IODevice destruction does not emit closed", "[core][io]")
+{
+    int closed_count = 0;
+
+    {
+        TestDevice device;
+        device.closed.connect([&]() -> void { ++closed_count; });
+        device.open();
+    }
+
+    CHECK(closed_count == 0);
 }
 
 TEST_CASE("IODevice concrete implementation can read buffered data", "[core][io]")

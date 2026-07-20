@@ -140,6 +140,8 @@ void File::close()
     }
     d->path.clear();
     d->modes.reset();
+
+    emit_closed();
 }
 
 auto File::read(std::size_t max_size) -> std::string

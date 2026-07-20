@@ -54,4 +54,9 @@ void IODevice::emit_bytes_written(std::size_t bytes)
     emit(bytes_written, bytes);
 }
 
+void IODevice::emit_closed()
+{
+    emit(closed);
+}
+
 } // namespace jb::core
