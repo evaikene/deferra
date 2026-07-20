@@ -19,7 +19,12 @@ struct ReadyEvent {
     FdEvents events;
 };
 
-/// Abstract backend
+/// Abstract backend.
+///
+/// File-descriptor registration changes are transactional while the backend is
+/// usable. On failure, implementations restore the prior registration. If that
+/// restoration also fails, the backend must make subsequent polling fail rather
+/// than continue with registration state that its EventLoop cannot represent.
 class Backend {
 public:
 
@@ -28,12 +33,14 @@ public:
     /// Register an fd for the given events
     /// @param[in] fd the file descriptor to watch
     /// @param[in] events the events to watch for
-    /// @return true when the registration was applied, false on backend failure
+    /// @return true when the registration was applied, false when the previous
+    ///         registration was retained or the backend became unusable
     virtual auto add_fd(int fd, FdEvents events) -> bool = 0;
 
     /// Remove an fd from the poller
     /// @param[in] fd the file descriptor to remove
-    /// @return true when the registration is absent, false on backend failure
+    /// @return true when the registration is absent, false when the previous
+    ///         registration was retained or the backend became unusable
     virtual auto remove_fd(int fd) -> bool = 0;
 
     /// Block until at least one fd is ready or the timeout expires

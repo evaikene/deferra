@@ -200,6 +200,12 @@ add_executable(${TARGET} event-loop-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Kqueue backend transition test
+set(TARGET "kqueue-backend-test")
+add_executable(${TARGET} kqueue-backend-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Event test
 set(TARGET "event-test")
 add_executable(${TARGET} event-test.cpp)

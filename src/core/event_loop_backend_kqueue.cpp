@@ -1,10 +1,12 @@
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
 
 #  include "event_loop_backend.hpp"
+#  include "event_loop_backend_kqueue_priv.hpp"
 #  include "event_loop_types.hpp"
 #  include "logging.hpp"
 
 #  include <algorithm>
+#  include <atomic>
 #  include <cerrno>
 #  include <cstring>
 #  include <memory>
@@ -72,33 +74,26 @@ public:
 
     auto add_fd(int fd, FdEvents events) -> bool override
     {
-        if (!reconcile_filter(fd, FdEvent::Read, EVFILT_READ, events.test(FdEvent::Read))) {
+        if (!_healthy.load(std::memory_order_relaxed)) {
             return false;
         }
-        return reconcile_filter(fd, FdEvent::Write, EVFILT_WRITE, events.test(FdEvent::Write));
+        return transition_fd(fd, events);
     }
 
     auto remove_fd(int fd) -> bool override
     {
-        auto it = _registered.find(fd);
-        if (it == _registered.end()) {
-            return true;
+        if (!_healthy.load(std::memory_order_relaxed)) {
+            return false;
         }
-
-        auto success = true;
-        if (it->second.test(FdEvent::Read) && !reconcile_filter(fd, FdEvent::Read, EVFILT_READ, false)) {
-            success = false;
-        }
-        if (auto current = _registered.find(fd); current != _registered.end() && current->second.test(FdEvent::Write) &&
-                                                 !reconcile_filter(fd, FdEvent::Write, EVFILT_WRITE, false)) {
-            success = false;
-        }
-
-        return success;
+        return transition_fd(fd, {});
     }
 
     auto poll(ReadyEvent* out, int max_events, int timeout_ms) -> int override
     {
+        if (!_healthy.load(std::memory_order_relaxed)) {
+            return -1;
+        }
+
         static constexpr int  kMaxEvents{64};
         static constexpr long kMSecInSec{1000};
         static constexpr long kNSecInMSec{1000000};
@@ -163,6 +158,10 @@ public:
 
     auto wakeup() -> bool override
     {
+        if (!_healthy.load(std::memory_order_relaxed)) {
+            return false;
+        }
+
         struct kevent ev;
         EV_SET(&ev, kWakeIdent, EVFILT_USER, 0, NOTE_TRIGGER, 0, nullptr);
         while (::kevent(_kq, &ev, 1, nullptr, 0, nullptr) < 0) {
@@ -182,6 +181,7 @@ private:
     static constexpr std::uintptr_t kWakeIdent{0};
 
     int                               _kq{-1};
+    std::atomic_bool                  _healthy{true};
     std::unordered_map<int, FdEvents> _registered;
 
     void close_kqueue()
@@ -215,37 +215,36 @@ private:
         }
     }
 
-    auto reconcile_filter(int fd, FdEvent event, std::int16_t filter, bool requested) -> bool
+    void set_registered_events(int fd, FdEvents events)
     {
-        FdEvents current;
-        if (auto const it = _registered.find(fd); it != _registered.end()) {
-            current = it->second;
-        }
-
-        if (current.test(event) == requested) {
-            return true;
-        }
-
-        auto const flags = static_cast<std::uint16_t>(requested ? EV_ADD | EV_CLEAR : EV_DELETE);
-        if (!apply_filter_change(fd, filter, flags)) {
-            return false;
-        }
-
-        if (requested) {
-            current.set(event);
-        }
-        else {
-            current.clear(event);
-        }
-
-        if (current.none()) {
+        if (events.none()) {
             _registered.erase(fd);
         }
         else {
-            _registered[fd] = current;
+            _registered[fd] = events;
+        }
+    }
+
+    auto transition_fd(int fd, FdEvents requested) -> bool
+    {
+        FdEvents original;
+        if (auto const it = _registered.find(fd); it != _registered.end()) {
+            original = it->second;
         }
 
-        return true;
+        auto const result = transition_kqueue_filters(original, requested, [this, fd](FdEvent event, bool enable) {
+            auto const filter = event == FdEvent::Read ? EVFILT_READ : EVFILT_WRITE;
+            auto const flags  = static_cast<std::uint16_t>(enable ? EV_ADD | EV_CLEAR : EV_DELETE);
+            return apply_filter_change(fd, filter, flags);
+        });
+        set_registered_events(fd, result.events);
+
+        if (result.status == KqueueTransitionStatus::RollbackFailed) {
+            log_error("kevent filter rollback failed for fd {}; event-loop backend is unusable", fd);
+            _healthy.store(false, std::memory_order_relaxed);
+        }
+
+        return result.status == KqueueTransitionStatus::Applied;
     }
 };
 
