@@ -15,10 +15,13 @@ target_sources(${TARGET}
     PRIVATE
         framing.cpp
         json.cpp
+        protocol.cpp
+        protocol_priv.hpp
         rpc.cpp
     PUBLIC
         framing.hpp
         json.hpp
+        protocol.hpp
         rpc.hpp
 )
 
