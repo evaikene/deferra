@@ -84,8 +84,8 @@ auto EventLoop::defer_delete(Object* object, std::weak_ptr<priv::ObjectLifetime>
 
 auto EventLoop::post_delayed(Duration delay, Task task) -> TimerHandle
 {
-    if (!assert_on_loop_thread()) {
-        return {}; // can only be called from the thread running the event loop
+    if (!assert_on_loop_thread() || !_backend) {
+        return {};
     }
 
     return _timers.start(std::move(task), Clock::now() + delay);
@@ -93,8 +93,8 @@ auto EventLoop::post_delayed(Duration delay, Task task) -> TimerHandle
 
 auto EventLoop::post_at(TimePoint when, Task task) -> TimerHandle
 {
-    if (!assert_on_loop_thread()) {
-        return {}; // can only be called from the thread running the event loop
+    if (!assert_on_loop_thread() || !_backend) {
+        return {};
     }
 
     return _timers.start(std::move(task), when);
@@ -102,8 +102,8 @@ auto EventLoop::post_at(TimePoint when, Task task) -> TimerHandle
 
 auto EventLoop::post_repeating(Duration interval, Task task) -> TimerHandle
 {
-    if (!assert_on_loop_thread()) {
-        return {}; // can only be called from the thread running the event loop
+    if (!assert_on_loop_thread() || !_backend) {
+        return {};
     }
 
     return _timers.start(std::move(task), Clock::now() + interval, interval);
