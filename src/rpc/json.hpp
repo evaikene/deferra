@@ -45,6 +45,73 @@ struct JsonValue {
     /// Active JSON alternative; a default-constructed value contains JsonNull.
     Data data{JsonNull{}};
 
+    /// Returns true if the active alternative is JsonNull.
+    /// @return True when the active alternative is JsonNull.
+    [[nodiscard]] auto is_null() const -> bool { return std::holds_alternative<JsonNull>(data); }
+
+    /// Returns true if the active alternative is bool.
+    /// @return True when the active alternative is bool.
+    [[nodiscard]] auto is_bool() const -> bool { return std::holds_alternative<bool>(data); }
+
+    /// Returns true if the active alternative is std::int64_t.
+    /// @return True when the active alternative is std::int64_t.
+    [[nodiscard]] auto is_int() const -> bool { return std::holds_alternative<std::int64_t>(data); }
+
+    /// Returns true if the active alternative is std::uint64_t.
+    /// @return True when the active alternative is std::uint64_t.
+    [[nodiscard]] auto is_uint() const -> bool { return std::holds_alternative<std::uint64_t>(data); }
+
+    /// Returns true if the active alternative is double.
+    /// @return True when the active alternative is double.
+    [[nodiscard]] auto is_double() const -> bool { return std::holds_alternative<double>(data); }
+
+    /// Returns true if the active alternative is std::string.
+    /// @return True when the active alternative is std::string.
+    [[nodiscard]] auto is_string() const -> bool { return std::holds_alternative<std::string>(data); }
+
+    /// Returns true if the active alternative is Array.
+    /// @return True when the active alternative is Array.
+    [[nodiscard]] auto is_array() const -> bool { return std::holds_alternative<Array>(data); }
+
+    /// Returns true if the active alternative is Object.
+    /// @return True when the active alternative is Object.
+    [[nodiscard]] auto is_object() const -> bool { return std::holds_alternative<Object>(data); }
+
+    /// Returns the active alternative as a bool
+    /// @return The active alternative as a bool.
+    /// @throw std::bad_variant_access if the active alternative is not bool.
+    [[nodiscard]] auto as_bool() const -> bool { return std::get<bool>(data); }
+
+    /// Returns the active alternative as a std::int64_t
+    /// @return The active alternative as a std::int64_t.
+    /// @throw std::bad_variant_access if the active alternative is not std::int64_t.
+    [[nodiscard]] auto as_int() const -> std::int64_t { return std::get<std::int64_t>(data); }
+
+    /// Returns the active alternative as a std::uint64_t
+    /// @return The active alternative as a std::uint64_t.
+    /// @throw std::bad_variant_access if the active alternative is not std::uint64_t.
+    [[nodiscard]] auto as_uint() const -> std::uint64_t { return std::get<std::uint64_t>(data); }
+
+    /// Returns the active alternative as a double
+    /// @return The active alternative as a double.
+    /// @throw std::bad_variant_access if the active alternative is not double.
+    [[nodiscard]] auto as_double() const -> double { return std::get<double>(data); }
+
+    /// Returns the active alternative as a std::string
+    /// @return The active alternative as a std::string.
+    /// @throw std::bad_variant_access if the active alternative is not std::string.
+    [[nodiscard]] auto as_string() const -> std::string const& { return std::get<std::string>(data); }
+
+    /// Returns the active alternative as an Array
+    /// @return The active alternative as an Array.
+    /// @throw std::bad_variant_access if the active alternative is not Array.
+    [[nodiscard]] auto as_array() const -> Array const& { return std::get<Array>(data); }
+
+    /// Returns the active alternative as an Object
+    /// @return The active alternative as an Object.
+    /// @throw std::bad_variant_access if the active alternative is not Object.
+    [[nodiscard]] auto as_object() const -> Object const& { return std::get<Object>(data); }
+
     /// Compares the active alternative and all owned contents.
     /// @param other JSON value to compare.
     /// @return True when both trees have equal alternatives and contents.

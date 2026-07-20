@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -13,7 +14,7 @@ namespace {
 
 using CodecJson = nlohmann::json;
 
-enum class JsonFailure {
+enum class JsonFailure : std::uint8_t {
     Syntax,
     InvalidUtf8,
     DuplicateMember,
