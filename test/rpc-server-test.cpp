@@ -148,15 +148,23 @@ TEST_CASE("MemoryIODevice provides deterministic byte and lifecycle behavior", "
     device.open();
     CHECK(device.is_open());
     CHECK(device.can_read_line());
+    device.fail(IOError::ReadError, "stale read error");
     CHECK(device.read_line() == "before-open");
+    CHECK(device.error() == IOError::NoError);
 
     device.inject_input("abcdef");
     CHECK(device.bytes_available() == 6U);
+    device.fail(IOError::ReadError, "stale read error");
     CHECK(device.read(2U) == "ab");
+    CHECK(device.error() == IOError::NoError);
+    device.fail(IOError::ReadError, "stale read error");
     CHECK(device.read_all() == "cdef");
+    CHECK(device.error() == IOError::NoError);
     REQUIRE(events == std::vector<std::string>{"ready"});
 
+    device.fail(IOError::WriteError, "stale write error");
     CHECK(device.write("first") == 5U);
+    CHECK(device.error() == IOError::NoError);
     CHECK(device.unacknowledged_bytes() == 0U);
     CHECK(device.written_data() == "first");
     CHECK(device.take_written_data() == "first");

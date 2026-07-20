@@ -85,6 +85,7 @@ void MemoryIODevice::close()
 
 auto MemoryIODevice::read(std::size_t max_size) -> std::string
 {
+    clear_error();
     auto const size  = std::min(max_size, _input.size());
     auto       bytes = _input.substr(0U, size);
     _input.erase(0U, size);
@@ -93,11 +94,13 @@ auto MemoryIODevice::read(std::size_t max_size) -> std::string
 
 auto MemoryIODevice::read_all() -> std::string
 {
+    clear_error();
     return std::exchange(_input, {});
 }
 
 auto MemoryIODevice::read_line(std::size_t max_size) -> std::string
 {
+    clear_error();
     auto const newline      = _input.find('\n');
     auto const content_size = newline == std::string::npos ? _input.size() : newline;
     auto const size         = std::min(max_size, content_size);
@@ -125,6 +128,7 @@ auto MemoryIODevice::write(std::string_view data) -> std::size_t
         return 0U;
     }
 
+    clear_error();
     auto const accepted = std::min(data.size(), _write_limit.value_or(data.size()));
     _written.append(data.substr(0U, accepted));
     _unacknowledged_bytes += accepted;
