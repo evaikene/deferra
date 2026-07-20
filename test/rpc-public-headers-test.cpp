@@ -1,9 +1,10 @@
-#include "server.hpp"
+#include "client.hpp"
 
 #include "framing.hpp"
 #include "json.hpp"
 #include "protocol.hpp"
 #include "rpc.hpp"
+#include "server.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -11,9 +12,35 @@
 #include <type_traits>
 #include <utility>
 
+namespace {
+
+void compile_client_api(jb::core::IODevice& device, jb::core::Object* parent)
+{
+    auto client = jb::rpc::Client{device, {}, parent};
+    static_cast<void>(client.call("method"));
+    static_cast<void>(client.notify("notification"));
+    client.cancel(jb::rpc::RequestId{std::uint64_t{1}});
+    static_cast<void>(client.pending_request_count());
+
+    auto result       = client.result_received.connect([](jb::rpc::RequestId, jb::rpc::JsonValue) {});
+    auto remote_error = client.error_received.connect([](jb::rpc::RequestId, jb::rpc::RpcError) {});
+    auto failed       = client.request_failed.connect([](jb::rpc::RequestId, jb::core::Error) {});
+    auto protocol     = client.protocol_error.connect([](jb::core::Error) {});
+    result.disconnect();
+    remote_error.disconnect();
+    failed.disconnect();
+    protocol.disconnect();
+    client.close();
+}
+
+} // anonymous namespace
+
 auto main() -> int
 {
     static_assert(std::is_base_of_v<jb::core::Object, jb::rpc::Server>);
+    static_assert(std::is_base_of_v<jb::core::Object, jb::rpc::Client>);
+    static_assert(!std::is_copy_constructible_v<jb::rpc::Client>);
+    static_assert(!std::is_move_constructible_v<jb::rpc::Client>);
     static_assert(!std::is_copy_constructible_v<jb::rpc::Server>);
     static_assert(!std::is_move_constructible_v<jb::rpc::Server>);
     static_assert(!std::is_copy_constructible_v<jb::rpc::StreamFramer>);
@@ -23,6 +50,12 @@ auto main() -> int
     options.max_batch_entries       = 8U;
     options.max_connections         = 4U;
     options.max_queued_output_bytes = 4096U;
+
+    auto client_options                    = jb::rpc::ClientOptions{};
+    client_options.max_batch_entries       = 8U;
+    client_options.max_pending_requests    = 4U;
+    client_options.max_queued_output_bytes = 4096U;
+    static_cast<void>(&compile_client_api);
 
     auto server = jb::rpc::Server{options};
     static_cast<void>(server.register_method("echo", [](auto const&, auto const&) {

@@ -13,6 +13,8 @@ target_include_directories(${TARGET}
 
 target_sources(${TARGET}
     PRIVATE
+        client.cpp
+        client_priv.hpp
         framing.cpp
         json.cpp
         protocol.cpp
@@ -21,6 +23,7 @@ target_sources(${TARGET}
         server.cpp
         server_priv.hpp
     PUBLIC
+        client.hpp
         framing.hpp
         json.hpp
         protocol.hpp
