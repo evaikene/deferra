@@ -7,10 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <exception>
 #include <filesystem>
 #include <memory>
-#include <new>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -404,39 +402,25 @@ auto LocalServer::listen(std::filesystem::path const& path, LocalServerOptions o
                 continue;
             }
 
-            try {
-                auto private_data                         = std::make_unique<LocalSocket::Private>();
-                private_data->state                       = LocalSocketState::Connected;
-                private_data->server_path                 = data->server_path;
-                private_data->read_buffer_limit           = data->options.accepted_read_buffer_limit;
-                private_data->fd                          = accepted.get();
-                private_data->generation                  = 1;
-                private_data->peer_credentials.process_id = static_cast<std::uint64_t>(credentials.pid);
-                private_data->peer_credentials.user_id    = static_cast<std::uint64_t>(credentials.uid);
-                private_data->peer_credentials.group_id   = static_cast<std::uint64_t>(credentials.gid);
+            auto private_data                         = std::make_unique<LocalSocket::Private>();
+            private_data->state                       = LocalSocketState::Connected;
+            private_data->server_path                 = data->server_path;
+            private_data->read_buffer_limit           = data->options.accepted_read_buffer_limit;
+            private_data->fd                          = accepted.get();
+            private_data->generation                  = 1;
+            private_data->peer_credentials.process_id = static_cast<std::uint64_t>(credentials.pid);
+            private_data->peer_credentials.user_id    = static_cast<std::uint64_t>(credentials.uid);
+            private_data->peer_credentials.group_id   = static_cast<std::uint64_t>(credentials.gid);
 
-                auto* socket_data = private_data.get();
-                auto  socket      = std::unique_ptr<LocalSocket>{
-                    new LocalSocket{*private_data.release(), nullptr}
-                };
-                static_cast<void>(accepted.release());
+            auto* socket_data = private_data.get();
+            auto  socket      = std::unique_ptr<LocalSocket>{
+                new LocalSocket{*private_data.release(), nullptr}
+            };
+            static_cast<void>(accepted.release());
 
-                socket_data->update_watch(*socket);
-                data->pending_connections.push_back(std::move(socket));
-                queued_connection = true;
-            }
-            catch (std::bad_alloc const&) {
-                report_accept_error(jb::core::IOError::ResourceError,
-                                    "local server accepted socket adoption failed: out of memory");
-            }
-            catch (std::exception const& exception) {
-                report_accept_error(jb::core::IOError::OpenError,
-                                    std::string{"local server accepted socket adoption failed: "} + exception.what());
-            }
-            catch (...) {
-                report_accept_error(jb::core::IOError::OpenError,
-                                    "local server accepted socket adoption failed: unknown error");
-            }
+            socket_data->update_watch(*socket);
+            data->pending_connections.push_back(std::move(socket));
+            queued_connection = true;
 
             if (!listener_is_current()) {
                 return;
@@ -453,18 +437,12 @@ auto LocalServer::listen(std::filesystem::path const& path, LocalServerOptions o
         }
     };
 
-    try {
-        d->watch = loop->watch_fd(d->fd, jb::core::FdEvent::Read, d->accept_callback);
-    }
-    catch (std::exception const& exception) {
-        loop->unwatch_fd(jb::core::FdWatch{d->fd});
-        d->watch     = {};
+    d->watch = loop->watch_fd(d->fd, jb::core::FdEvent::Read, d->accept_callback);
+    if (!d->watch) {
         d->listening = false;
         ++d->generation;
         d->accept_callback = {};
-        store_error(*d,
-                    jb::core::IOError::OpenError,
-                    std::string{"local server event-loop watch registration failed: "} + exception.what());
+        store_error(*d, jb::core::IOError::OpenError, "local server event-loop watch registration failed");
         static_cast<void>(cleanup_owned_path(*d));
         auto const released_fd = std::exchange(d->fd, kInvalidFd);
         ::close(released_fd);
@@ -529,15 +507,9 @@ auto LocalServer::take_next_connection() -> std::unique_ptr<LocalSocket>
     d->pending_connections.pop_front();
 
     if (was_paused) {
-        try {
-            d->watch = event_loop()->watch_fd(d->fd, jb::core::FdEvent::Read, d->accept_callback);
-        }
-        catch (std::exception const& exception) {
-            event_loop()->unwatch_fd(jb::core::FdWatch{d->fd});
-            d->watch = {};
-            store_error(*d,
-                        jb::core::IOError::OpenError,
-                        std::string{"local server event-loop watch rearm failed: "} + exception.what());
+        d->watch = event_loop()->watch_fd(d->fd, jb::core::FdEvent::Read, d->accept_callback);
+        if (!d->watch) {
+            store_error(*d, jb::core::IOError::OpenError, "local server event-loop watch rearm failed");
             emit(accept_error, d->error, d->error_string);
         }
     }
