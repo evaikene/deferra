@@ -255,6 +255,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         local-socket-test.cpp
         support/temporary_directory.cpp
     )
+    target_compile_definitions(${TARGET} PRIVATE _GNU_SOURCE)
     target_link_libraries(${TARGET} PRIVATE net Catch2::Catch2WithMain)
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 endif()

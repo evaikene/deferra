@@ -42,4 +42,9 @@ target_sources(${TARGET}
 
 target_compile_features(${TARGET} PUBLIC cxx_std_20)
 
+target_compile_definitions(${TARGET}
+    PRIVATE
+        $<$<PLATFORM_ID:Linux>:_GNU_SOURCE>
+)
+
 target_link_libraries(${TARGET} PUBLIC core)
