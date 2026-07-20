@@ -18,11 +18,14 @@ target_sources(${TARGET}
         protocol.cpp
         protocol_priv.hpp
         rpc.cpp
+        server.cpp
+        server_priv.hpp
     PUBLIC
         framing.hpp
         json.hpp
         protocol.hpp
         rpc.hpp
+        server.hpp
 )
 
 target_compile_features(${TARGET} PUBLIC cxx_std_20)

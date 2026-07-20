@@ -1,7 +1,8 @@
-#include "protocol.hpp"
+#include "server.hpp"
 
 #include "framing.hpp"
 #include "json.hpp"
+#include "protocol.hpp"
 #include "rpc.hpp"
 
 #include <cstdint>
@@ -12,8 +13,32 @@
 
 auto main() -> int
 {
+    static_assert(std::is_base_of_v<jb::core::Object, jb::rpc::Server>);
+    static_assert(!std::is_copy_constructible_v<jb::rpc::Server>);
+    static_assert(!std::is_move_constructible_v<jb::rpc::Server>);
     static_assert(!std::is_copy_constructible_v<jb::rpc::StreamFramer>);
     static_assert(std::is_nothrow_move_constructible_v<jb::rpc::StreamFramer>);
+
+    auto options                    = jb::rpc::ServerOptions{};
+    options.max_batch_entries       = 8U;
+    options.max_connections         = 4U;
+    options.max_queued_output_bytes = 4096U;
+
+    auto server = jb::rpc::Server{options};
+    static_cast<void>(server.register_method("echo", [](auto const&, auto const&) {
+        return jb::rpc::MethodResult::success(jb::rpc::JsonValue{});
+    }));
+    static_cast<void>(server.has_method("echo"));
+    static_cast<void>(server.connection_count());
+    server.close_connection(jb::rpc::ConnectionId{1});
+    server.close();
+
+    auto opened = server.connection_opened.connect([](jb::rpc::ConnectionId) {});
+    auto closed = server.connection_closed.connect([](jb::rpc::ConnectionId) {});
+    auto failed = server.connection_error.connect([](jb::rpc::ConnectionId, jb::core::Error) {});
+    opened.disconnect();
+    closed.disconnect();
+    failed.disconnect();
 
     jb::rpc::StreamFramer framer;
     jb::rpc::StreamFramer moved{std::move(framer)};
