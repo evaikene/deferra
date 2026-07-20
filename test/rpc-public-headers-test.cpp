@@ -55,6 +55,7 @@ auto main() -> int
     client_options.max_batch_entries       = 8U;
     client_options.max_pending_requests    = 4U;
     client_options.max_queued_output_bytes = 4096U;
+    static_cast<void>(client_options);
     static_cast<void>(&compile_client_api);
 
     auto server = jb::rpc::Server{options};

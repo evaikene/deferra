@@ -65,8 +65,9 @@ public:
      *
      * An empty method or primitive params fail with `rpc.invalid_argument`. Object and array params are accepted;
      * absent params omit the member. The call becomes pending only after the device accepts the complete frame. Local
-     * validation, pending-limit, JSON-encoding, and outbound-framing failures leave the client usable. A successful
-     * write can produce a synchronous completion signal before this function returns.
+     * validation, pending-limit, JSON-encoding, and outbound-framing failures leave the client usable. Output-limit
+     * overflow and short writes are terminal: they emit protocol_error, fail pending calls, and logically close the
+     * client. A successful write can produce a synchronous completion signal before this function returns.
      *
      * @param method Case-sensitive method name copied into the request; exact lower-case `rpc.` names are permitted.
      * @param params Optional owning parameters copied into the request.
