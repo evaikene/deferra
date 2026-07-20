@@ -117,9 +117,11 @@ TEST_CASE("StreamFramer accepts every split point in a frame", "[rpc][framing]")
 
 TEST_CASE("StreamFramer accepts a frame one byte at a time", "[rpc][framing]")
 {
-    auto const   body        = std::string{"bytes"};
-    auto const   frame       = encoded(body);
-    auto const   header_size = frame.find("\r\n\r\n") + 4U;
+    auto const body       = std::string{"bytes"};
+    auto const frame      = encoded(body);
+    auto const header_end = frame.find("\r\n\r\n");
+    REQUIRE(header_end != std::string::npos);
+    auto const   header_size = header_end + 4U;
     StreamFramer framer;
 
     for (auto index = std::size_t{0}; index < frame.size(); ++index) {
