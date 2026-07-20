@@ -14,7 +14,7 @@ jobs:
 
     steps:
       - name: Check out sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install dependencies
         run: |
@@ -53,12 +53,12 @@ jobs:
             g++ \
             gcompat \
             git \
-            ninja-build \
             nlohmann-json \
+            samurai \
             sqlite-dev
 
       - name: Check out sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configure
         run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug
