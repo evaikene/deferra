@@ -27,10 +27,10 @@ struct LocalSocket::Private : jb::core::priv::IODevicePrivate {
     void fail_lifecycle(LocalSocket& socket, jb::core::IOError error, std::string message, bool emit_disconnected);
     void
     handle_fd_event(LocalSocket& socket, int ready_fd, std::uint64_t callback_generation, jb::core::FdEvents events);
-    void complete_connection(LocalSocket& socket);
-    void read_available(LocalSocket& socket);
-    void write_pending(LocalSocket& socket);
-    void update_watch(LocalSocket& socket);
+    void               complete_connection(LocalSocket& socket);
+    void               read_available(LocalSocket& socket);
+    void               write_pending(LocalSocket& socket);
+    [[nodiscard]] auto update_watch(LocalSocket& socket) -> bool;
 };
 
 } // namespace jb::net

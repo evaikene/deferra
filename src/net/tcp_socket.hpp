@@ -91,15 +91,15 @@ public:
 
 private:
 
-    auto release_socket() -> bool;
-    void close_socket(bool emit_disconnected);
-    void fail_socket(jb::core::IOError error, std::string message, bool emit_disconnected);
-    void handle_fd_event(jb::core::FdEvents events);
-    void handle_connect_ready();
-    void read_available();
-    void write_pending();
-    void set_state(SocketState state);
-    void update_watch();
+    auto               release_socket() -> bool;
+    void               close_socket(bool emit_disconnected);
+    void               fail_socket(jb::core::IOError error, std::string message, bool emit_disconnected);
+    void               handle_fd_event(jb::core::FdEvents events);
+    void               handle_connect_ready();
+    void               read_available();
+    void               write_pending();
+    void               set_state(SocketState state);
+    [[nodiscard]] auto update_watch() -> bool;
 };
 
 } // namespace jb::net

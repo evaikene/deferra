@@ -4,6 +4,7 @@
 #include "event_thread.hpp"
 #include "logging.hpp"
 #include "object.hpp"
+#include "support/fake_event_loop_backend.hpp"
 #include "thread_context.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -183,10 +184,10 @@ TEST_CASE("Application post_event delivers only during event processing", "[core
 
     Application::post_event(&receiver, std::make_unique<CustomEvent>());
 
-    app.process_events(EventFlag::Tasks);
+    CHECK(app.process_events(EventFlag::Tasks) == ProcessEventsResult::Stopped);
     CHECK_FALSE(receiver.received);
 
-    app.process_events(EventFlag::Events);
+    CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
     CHECK(receiver.received);
 }
 
@@ -199,15 +200,29 @@ TEST_CASE("Application post_event is thread-safe", "[core][event][thread]")
         [&receiver]() -> void { Application::post_event(&receiver, std::make_unique<CustomEvent>()); }};
     posting_thread.join();
 
-    app.process_events(EventFlag::Events);
+    CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
     CHECK(receiver.received);
+}
+
+TEST_CASE("Application drops a posted event when wakeup fails", "[core][event]")
+{
+    auto                                   fake = jb::core::priv::make_fake_event_loop();
+    jb::core::priv::ScopedCurrentEventLoop current_loop{fake.loop.get()};
+    EventReceiver                          receiver;
+
+    fake.backend->wakeup_result = false;
+    CHECK_NOTHROW(Application::post_event(&receiver, std::make_unique<CustomEvent>()));
+
+    fake.backend->wakeup_result = true;
+    CHECK(fake.loop->process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
+    CHECK_FALSE(receiver.received);
 }
 
 TEST_CASE("Application post_event uses a moved receiver's current event loop", "[core][event][thread]")
 {
     Application app{0, nullptr};
     EventThread thread;
-    thread.exec(true);
+    CHECK(thread.exec(true));
 
     auto* receiver = new ThreadRecordingReceiver;
     CHECK(receiver->move_to_thread(&thread));
@@ -223,7 +238,7 @@ TEST_CASE("Application post_event uses a moved receiver's current event loop", "
     CHECK(receiver->event_thread.load(std::memory_order_relaxed) == thread.as_event_loop()->thread_ctx());
 
     receiver->delete_later();
-    thread.quit();
+    CHECK(thread.quit());
     thread.wait();
 }
 
@@ -235,7 +250,7 @@ TEST_CASE("Application post_event ignores null inputs", "[core][event]")
     Application::post_event(nullptr, std::make_unique<CustomEvent>());
     Application::post_event(&receiver, nullptr);
 
-    app.process_events(EventFlag::Events);
+    CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
     CHECK_FALSE(receiver.received);
 }
 
@@ -266,7 +281,7 @@ TEST_CASE("Application post_event drops events for destroyed receivers", "[core]
     Application::post_event(receiver, std::make_unique<CustomEvent>());
     delete receiver;
 
-    CHECK_NOTHROW(app.process_events(EventFlag::Events));
+    CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
 }
 
 TEST_CASE("Events posted during dispatch wait for the next event phase", "[core][event]")
@@ -277,15 +292,15 @@ TEST_CASE("Events posted during dispatch wait for the next event phase", "[core]
     Application::post_event(&receiver, std::make_unique<CustomEvent>());
 
     receiver.received = false;
-    app.process_events(EventFlag::Events);
+    CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
     CHECK(receiver.received);
 
     receiver.received = false;
-    app.process_events(EventFlag::Events);
+    CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
     CHECK(receiver.received);
 
     receiver.received = false;
-    app.process_events(EventFlag::Events);
+    CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
     CHECK_FALSE(receiver.received);
 }
 
@@ -297,7 +312,7 @@ TEST_CASE("EventFlag All includes object events", "[core][event]")
     STATIC_CHECK(EventFlags{EventFlag::All}.test(EventFlag::Events));
 
     Application::post_event(&receiver, std::make_unique<CustomEvent>());
-    app.process_events(EventFlag::All, 0);
+    CHECK(app.process_events(EventFlag::All, 0) == ProcessEventsResult::Stopped);
 
     CHECK(receiver.received);
 }
@@ -309,10 +324,10 @@ TEST_CASE("Deferred deletion runs after tasks and object events", "[core][event]
     int         destruction_count = 0;
     auto*       receiver          = new CountingEventReceiver{delivery_count, destruction_count};
 
-    app.event_loop()->post([receiver]() -> void { receiver->delete_later(); });
+    REQUIRE(app.event_loop()->post([receiver]() -> void { receiver->delete_later(); }));
     Application::post_event(receiver, std::make_unique<CustomEvent>());
 
-    app.process_events(EventFlag::All, 0);
+    CHECK(app.process_events(EventFlag::All, 0) == ProcessEventsResult::Stopped);
 
     CHECK(delivery_count == 1);
     CHECK(destruction_count == 1);
@@ -326,10 +341,10 @@ TEST_CASE("EventLoop exit drains deferred deletes without delivering remaining o
     auto*       receiver          = new CountingEventReceiver{delivery_count, destruction_count};
 
     Application::post_event(receiver, std::make_unique<CustomEvent>());
-    app.quit();
-    app.event_loop()->post([receiver]() -> void { receiver->delete_later(); });
+    REQUIRE(app.quit());
+    REQUIRE(app.event_loop()->post([receiver]() -> void { receiver->delete_later(); }));
 
-    app.exec();
+    CHECK(app.exec() == 0);
 
     CHECK(delivery_count == 0);
     CHECK(destruction_count == 1);
@@ -342,14 +357,14 @@ TEST_CASE("EventLoop exit discards remaining object events", "[core][event]")
     int           destruction_count = 0;
 
     Application::post_event(&receiver, std::make_unique<TrackedEvent>(destruction_count));
-    app.quit();
-    app.exec();
+    REQUIRE(app.quit());
+    CHECK(app.exec() == 0);
 
     CHECK_FALSE(receiver.received);
     CHECK(destruction_count == 1);
 
-    app.quit();
-    app.exec();
+    REQUIRE(app.quit());
+    CHECK(app.exec() == 0);
 
     CHECK_FALSE(receiver.received);
     CHECK(destruction_count == 1);

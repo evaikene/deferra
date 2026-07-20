@@ -418,7 +418,14 @@ auto LocalServer::listen(std::filesystem::path const& path, LocalServerOptions o
             };
             static_cast<void>(accepted.release());
 
-            socket_data->update_watch(*socket);
+            if (!socket_data->update_watch(*socket)) {
+                report_accept_error(jb::core::IOError::ResourceError,
+                                    "accepted local socket event-loop watch registration failed");
+                if (!listener_is_current()) {
+                    return;
+                }
+                continue;
+            }
             data->pending_connections.push_back(std::move(socket));
             queued_connection = true;
 
@@ -428,8 +435,17 @@ auto LocalServer::listen(std::filesystem::path const& path, LocalServerOptions o
         }
 
         if (data->pending_connections.size() >= data->options.max_pending_connections && data->watch) {
-            owner->event_loop()->unwatch_fd(data->watch);
-            data->watch = {};
+            auto* loop = owner->event_loop();
+            if (loop && loop->unwatch_fd(data->watch)) {
+                data->watch = {};
+            }
+            else {
+                report_accept_error(jb::core::IOError::ResourceError,
+                                    "local server event-loop watch removal failed while pausing acceptance");
+                if (!listener_is_current()) {
+                    return;
+                }
+            }
         }
 
         if (queued_connection && listener_is_current()) {
@@ -442,7 +458,7 @@ auto LocalServer::listen(std::filesystem::path const& path, LocalServerOptions o
         d->listening = false;
         ++d->generation;
         d->accept_callback = {};
-        store_error(*d, jb::core::IOError::OpenError, "local server event-loop watch registration failed");
+        store_error(*d, jb::core::IOError::ResourceError, "local server event-loop watch registration failed");
         static_cast<void>(cleanup_owned_path(*d));
         auto const released_fd = std::exchange(d->fd, kInvalidFd);
         ::close(released_fd);
@@ -460,12 +476,11 @@ void LocalServer::close()
     }
 
     ++d->generation;
-    if (auto* loop = event_loop(); loop && d->watch) {
-        loop->unwatch_fd(d->watch);
-    }
-    d->watch           = {};
-    d->listening       = false;
-    d->accept_callback = {};
+    auto*      loop          = event_loop();
+    auto const watch         = d->watch;
+    auto const retry_unwatch = loop && watch && !loop->unwatch_fd(watch);
+    d->listening             = false;
+    d->accept_callback       = {};
     d->pending_connections.clear();
 
     static_cast<void>(cleanup_owned_path(*d));
@@ -477,6 +492,10 @@ void LocalServer::close()
                     jb::core::IOError::CloseError,
                     system_error_message("local server listener close failed", error));
     }
+    if (retry_unwatch) {
+        static_cast<void>(loop->unwatch_fd(watch));
+    }
+    d->watch = {};
 }
 
 auto LocalServer::is_listening() const noexcept -> bool
@@ -507,9 +526,12 @@ auto LocalServer::take_next_connection() -> std::unique_ptr<LocalSocket>
     d->pending_connections.pop_front();
 
     if (was_paused) {
-        d->watch = event_loop()->watch_fd(d->fd, jb::core::FdEvent::Read, d->accept_callback);
-        if (!d->watch) {
-            store_error(*d, jb::core::IOError::OpenError, "local server event-loop watch rearm failed");
+        auto* loop = event_loop();
+        if (loop) {
+            d->watch = loop->watch_fd(d->fd, jb::core::FdEvent::Read, d->accept_callback);
+        }
+        if (!loop || !d->watch) {
+            store_error(*d, jb::core::IOError::ResourceError, "local server event-loop watch rearm failed");
             emit(accept_error, d->error, d->error_string);
         }
     }

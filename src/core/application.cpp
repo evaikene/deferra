@@ -6,6 +6,8 @@
 #include "logging.hpp"
 #include "thread_context.hpp"
 
+#include <cstdlib>
+
 namespace jb::core {
 
 Application* Application::s_instance = nullptr;
@@ -69,32 +71,36 @@ void Application::post_event(Object* receiver, std::unique_ptr<Event> event)
         return;
     }
 
-    event_loop->post_event(receiver, lifetime, std::move(event));
+    if (!event_loop->post_event(receiver, lifetime, std::move(event))) {
+        log_error("Application::post_event: event-loop wakeup failed; dropping event");
+    }
 }
 
 auto Application::exec() -> int
 {
     emit(about_to_start);
-    _event_loop->as_event_loop()->run();
+    if (!_event_loop->as_event_loop()->run()) {
+        _exit_code = EXIT_FAILURE;
+    }
     emit(about_to_quit);
 
     return _exit_code;
 }
 
-auto Application::process_events(EventFlags flags) -> bool
+auto Application::process_events(EventFlags flags) -> ProcessEventsResult
 {
     return _event_loop->as_event_loop()->process_events(flags);
 }
 
-auto Application::process_events(EventFlags flags, int ms) -> bool
+auto Application::process_events(EventFlags flags, int ms) -> ProcessEventsResult
 {
     return _event_loop->as_event_loop()->process_events(flags, ms);
 }
 
-void Application::quit(int exit_code)
+auto Application::quit(int exit_code) -> bool
 {
     _exit_code = exit_code;
-    _event_loop->quit();
+    return _event_loop->quit();
 }
 
 } // namespace jb::core

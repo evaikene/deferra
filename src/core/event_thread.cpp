@@ -3,6 +3,8 @@
 #include "event_loop.hpp"
 #include "thread_context.hpp"
 
+#include <cstdlib>
+
 namespace jb::core {
 
 EventThread::EventThread(Object* parent)
@@ -18,35 +20,41 @@ EventThread::~EventThread()
     wait();
 }
 
-void EventThread::exec(bool event_loop_running)
+auto EventThread::exec(bool event_loop_running) -> bool
 {
     // start the thread and run the event loop
-    start();
+    if (!start()) {
+        return false;
+    }
 
     // wait for the thread or the event loop to start running
     if (event_loop_running) {
-        while (!_event_loop->is_running()) {
+        while (!_event_loop->is_running() && !_finished.load(std::memory_order_acquire)) {
             std::this_thread::yield();
         }
+        return _event_loop->is_running();
     }
-    else {
-        while (!_started.load(std::memory_order_relaxed)) {
-            std::this_thread::yield();
-        }
+
+    while (!_started.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
     }
+    return true;
 }
 
-void EventThread::start()
+auto EventThread::start() -> bool
 {
     // ensure the thread is not already running
-    if (_thread) {
+    if (_thread || _started.load(std::memory_order_acquire)) {
         log_fatal("Event thread is already running");
-        return;
+        return false;
+    }
+    if (!_event_loop->is_valid()) {
+        return false;
     }
 
     _thread = std::make_unique<std::thread>([this]() -> void {
         // signal that the thread has started running
-        _started.store(true, std::memory_order_relaxed);
+        _started.store(true, std::memory_order_release);
 
         // initialize the thread context
         auto* ctx = ThreadCtx::current();
@@ -55,14 +63,19 @@ void EventThread::start()
         emit(about_to_start);
 
         // run the event loop until quit is signaled
-        _event_loop->run();
+        if (!_event_loop->run()) {
+            _exit_code.store(EXIT_FAILURE, std::memory_order_relaxed);
+        }
 
         // signal that the thread has finished running
         emit(about_to_quit);
 
         // cleanup
         ctx->set_event_loop(nullptr);
+        _finished.store(true, std::memory_order_release);
     });
+
+    return true;
 }
 
 auto EventThread::is_running() const -> bool
@@ -70,10 +83,10 @@ auto EventThread::is_running() const -> bool
     return _event_loop->is_running();
 }
 
-void EventThread::quit(int exit_code)
+auto EventThread::quit(int exit_code) -> bool
 {
     _exit_code.store(exit_code, std::memory_order_relaxed);
-    _event_loop->quit();
+    return _event_loop->quit();
 }
 
 void EventThread::wait()

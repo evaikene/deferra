@@ -11,8 +11,8 @@ TEST_CASE("Main Application", "[core]")
     REQUIRE(Application::instance() == nullptr);
 
     {
-        constexpr int argc = 1;
-        char const* argv[] = { "test" , nullptr };
+        constexpr int argc   = 1;
+        char const*   argv[] = {"test", nullptr};
 
         Application app{argc, argv};
         CHECK(Application::instance() != nullptr);
@@ -28,20 +28,17 @@ TEST_CASE("Main Application", "[core]")
 TEST_CASE("Running main Application", "[core]")
 {
     Application app{0, nullptr};
+    CHECK(app.process_events(EventFlag::Tasks) == ProcessEventsResult::Stopped);
 
     bool about_to_start_emitted = false;
     bool about_to_quit_emitted  = false;
 
-    app.about_to_start.connect([&about_to_start_emitted]() -> void {
-        about_to_start_emitted = true;
-    });
+    app.about_to_start.connect([&about_to_start_emitted]() -> void { about_to_start_emitted = true; });
 
-    app.about_to_quit.connect([&about_to_quit_emitted]() -> void {
-        about_to_quit_emitted = true;
-    });
+    app.about_to_quit.connect([&about_to_quit_emitted]() -> void { about_to_quit_emitted = true; });
 
     // Post the quit signal to the event loop to ensure the application will exit
-    CHECK_NOTHROW(app.quit());
+    CHECK(app.quit());
 
     // Run the application
     CHECK(app.exec() == 0);
@@ -54,7 +51,7 @@ TEST_CASE("Running main Application", "[core]")
     about_to_quit_emitted  = false;
 
     constexpr int exit_code = 42;
-    CHECK_NOTHROW(app.quit(exit_code));
+    CHECK(app.quit(exit_code));
     CHECK(app.exec() == exit_code);
 
     CHECK(about_to_start_emitted);

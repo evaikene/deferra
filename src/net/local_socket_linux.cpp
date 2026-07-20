@@ -167,7 +167,12 @@ void LocalSocket::connect_to_server(std::filesystem::path const& path)
 
     auto const error = errno;
     if (error == EINPROGRESS || error == EALREADY || error == EINTR) {
-        d->update_watch(*this);
+        if (!d->update_watch(*this)) {
+            d->fail_lifecycle(*this,
+                              jb::core::IOError::ResourceError,
+                              "local socket event-loop watch registration failed",
+                              false);
+        }
         return;
     }
 
@@ -192,7 +197,13 @@ void LocalSocket::disconnect_from_server()
     }
 
     d->state = LocalSocketState::Closing;
-    d->update_watch(*this);
+    if (!d->update_watch(*this)) {
+        d->fail_lifecycle(*this,
+                          jb::core::IOError::ResourceError,
+                          "local socket event-loop watch registration failed",
+                          true);
+        return;
+    }
     d->write_pending(*this);
 }
 
@@ -228,7 +239,13 @@ void LocalSocket::set_read_buffer_limit(std::size_t bytes)
 {
     auto* d              = d_ptr<Private>();
     d->read_buffer_limit = bytes;
-    d->update_watch(*this);
+    if (!d->update_watch(*this)) {
+        auto const emit_disconnected = d->state != LocalSocketState::Connecting;
+        d->fail_lifecycle(*this,
+                          jb::core::IOError::ResourceError,
+                          "local socket event-loop watch registration failed",
+                          emit_disconnected);
+    }
 }
 
 auto LocalSocket::read_buffer_limit() const noexcept -> std::size_t
@@ -257,7 +274,13 @@ auto LocalSocket::read(std::size_t max_size) -> std::string
     auto const size = std::min(max_size, d->input_buffer.size());
     auto       out  = d->input_buffer.substr(0, size);
     d->input_buffer.erase(0, size);
-    d->update_watch(*this);
+    if (!d->update_watch(*this)) {
+        auto const emit_disconnected = d->state != LocalSocketState::Connecting;
+        d->fail_lifecycle(*this,
+                          jb::core::IOError::ResourceError,
+                          "local socket event-loop watch registration failed",
+                          emit_disconnected);
+    }
     return out;
 }
 
@@ -268,7 +291,13 @@ auto LocalSocket::read_all() -> std::string
     auto* d   = d_ptr<Private>();
     auto  out = std::move(d->input_buffer);
     d->input_buffer.clear();
-    d->update_watch(*this);
+    if (!d->update_watch(*this)) {
+        auto const emit_disconnected = d->state != LocalSocketState::Connecting;
+        d->fail_lifecycle(*this,
+                          jb::core::IOError::ResourceError,
+                          "local socket event-loop watch registration failed",
+                          emit_disconnected);
+    }
     return out;
 }
 
@@ -295,7 +324,13 @@ auto LocalSocket::read_line(std::size_t max_size) -> std::string
         strip_crlf(line);
     }
 
-    d->update_watch(*this);
+    if (!d->update_watch(*this)) {
+        auto const emit_disconnected = d->state != LocalSocketState::Connecting;
+        d->fail_lifecycle(*this,
+                          jb::core::IOError::ResourceError,
+                          "local socket event-loop watch registration failed",
+                          emit_disconnected);
+    }
     return line;
 }
 
@@ -320,7 +355,14 @@ auto LocalSocket::write(std::string_view data) -> std::size_t
 
     clear_error();
     d->output_buffer.append(data);
-    d->update_watch(*this);
+    if (!d->update_watch(*this)) {
+        auto const emit_disconnected = d->state != LocalSocketState::Connecting;
+        d->fail_lifecycle(*this,
+                          jb::core::IOError::ResourceError,
+                          "local socket event-loop watch registration failed",
+                          emit_disconnected);
+        return 0;
+    }
     if (d->state == LocalSocketState::Connected || d->state == LocalSocketState::Closing) {
         d->write_pending(*this);
     }
@@ -336,11 +378,9 @@ auto LocalSocket::Private::release_socket(LocalSocket& socket) -> bool
 {
     auto const was_open = state != LocalSocketState::Unconnected;
 
-    auto* loop = socket.event_loop();
-    if (loop && watch) {
-        loop->unwatch_fd(watch);
-    }
-    watch = {};
+    auto*      loop          = socket.event_loop();
+    auto const active_watch  = watch;
+    auto const retry_unwatch = loop && active_watch && !loop->unwatch_fd(active_watch);
 
     auto const released_fd = std::exchange(fd, kInvalidFd);
     state                  = LocalSocketState::Unconnected;
@@ -348,6 +388,10 @@ auto LocalSocket::Private::release_socket(LocalSocket& socket) -> bool
     if (released_fd != kInvalidFd) {
         ::close(released_fd);
     }
+    if (retry_unwatch) {
+        static_cast<void>(loop->unwatch_fd(active_watch));
+    }
+    watch = {};
 
     return was_open;
 }
@@ -412,8 +456,12 @@ void LocalSocket::Private::handle_fd_event(LocalSocket&       socket,
         events.test_any(jb::core::FdEvents{jb::core::FdEvent::Write})) {
         write_pending(socket);
     }
-    if (generation == active_generation && fd == ready_fd) {
-        update_watch(socket);
+    if (generation == active_generation && fd == ready_fd && !update_watch(socket)) {
+        auto const emit_disconnected = state != LocalSocketState::Connecting;
+        fail_lifecycle(socket,
+                       jb::core::IOError::ResourceError,
+                       "local socket event-loop watch registration failed",
+                       emit_disconnected);
     }
 }
 
@@ -446,11 +494,18 @@ void LocalSocket::Private::complete_connection(LocalSocket& socket)
         return;
     }
 
+    state = LocalSocketState::Connected;
+    if (!update_watch(socket)) {
+        fail_lifecycle(socket,
+                       jb::core::IOError::ResourceError,
+                       "local socket event-loop watch registration failed",
+                       false);
+        return;
+    }
+
     peer_credentials.process_id = static_cast<std::uint64_t>(credentials.pid);
     peer_credentials.user_id    = static_cast<std::uint64_t>(credentials.uid);
     peer_credentials.group_id   = static_cast<std::uint64_t>(credentials.gid);
-    state                       = LocalSocketState::Connected;
-    update_watch(socket);
     socket.emit(socket.connected);
 
     if (generation == active_generation && fd == active_fd && state == LocalSocketState::Connected) {
@@ -560,11 +615,14 @@ void LocalSocket::Private::write_pending(LocalSocket& socket)
     }
 }
 
-void LocalSocket::Private::update_watch(LocalSocket& socket)
+auto LocalSocket::Private::update_watch(LocalSocket& socket) -> bool
 {
     auto* loop = socket.event_loop();
-    if (!loop || fd == kInvalidFd) {
-        return;
+    if (fd == kInvalidFd) {
+        return true;
+    }
+    if (!loop) {
+        return false;
     }
 
     jb::core::FdEvents events;
@@ -583,18 +641,26 @@ void LocalSocket::Private::update_watch(LocalSocket& socket)
 
     if (events.none()) {
         if (watch) {
-            loop->unwatch_fd(watch);
+            if (!loop->unwatch_fd(watch)) {
+                return false;
+            }
             watch = {};
         }
-        return;
+        return true;
     }
 
     auto*      owner               = &socket;
     auto const callback_generation = generation;
-    watch = loop->watch_fd(fd, events, [owner, callback_generation](int ready_fd, jb::core::FdEvents ready) -> void {
-        auto* data = owner->d_ptr<Private>();
-        data->handle_fd_event(*owner, ready_fd, callback_generation, ready);
-    });
+    auto const new_watch =
+        loop->watch_fd(fd, events, [owner, callback_generation](int ready_fd, jb::core::FdEvents ready) -> void {
+            auto* data = owner->d_ptr<Private>();
+            data->handle_fd_event(*owner, ready_fd, callback_generation, ready);
+        });
+    if (!new_watch) {
+        return false;
+    }
+    watch = new_watch;
+    return true;
 }
 
 } // namespace jb::net
