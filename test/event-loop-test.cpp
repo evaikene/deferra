@@ -40,14 +40,19 @@ TEST_CASE("EventLoop initial state", "[core][event_loop]")
 
 TEST_CASE("EventLoop reports invalid backend initialization", "[core][event_loop]")
 {
-    auto loop = jb::core::priv::EventLoopTestAccess::make_event_loop(nullptr);
+    auto loop        = jb::core::priv::EventLoopTestAccess::make_event_loop(nullptr);
+    int  timer_calls = 0;
 
     CHECK_FALSE(loop->is_valid());
     CHECK(loop->process_events(EventFlag::All, 0) == ProcessEventsResult::Failed);
     CHECK_FALSE(loop->post([]() -> void {}));
+    CHECK_FALSE(loop->post_delayed(1ms, [&timer_calls]() -> void { ++timer_calls; }));
+    CHECK_FALSE(loop->post_at(Clock::now(), [&timer_calls]() -> void { ++timer_calls; }));
+    CHECK_FALSE(loop->post_repeating(1ms, [&timer_calls]() -> void { ++timer_calls; }));
     CHECK_FALSE(loop->quit());
     CHECK_FALSE(loop->run());
     CHECK_FALSE(loop->is_running());
+    CHECK(timer_calls == 0);
 }
 
 TEST_CASE("EventLoop manual and running processing report distinct states", "[core][event_loop]")

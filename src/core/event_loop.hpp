@@ -73,7 +73,8 @@ public:
     /// Post a task that will be executed after the given delay
     /// @param[in] delay Delay after which the task will be executed
     /// @param[in] task Task to post
-    /// @return Timer handle
+    /// @return Timer handle, or an invalid handle when the loop is invalid or
+    ///         the thread contract is violated
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
     auto post_delayed(Duration delay, Task task) -> TimerHandle;
@@ -81,7 +82,8 @@ public:
     /// Post a task that will be executed at the given time point
     /// @param[in] when Time point at which the task will be executed
     /// @param[in] task Task to post
-    /// @return Timer handle
+    /// @return Timer handle, or an invalid handle when the loop is invalid or
+    ///         the thread contract is violated
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
     auto post_at(TimePoint when, Task task) -> TimerHandle;
@@ -89,7 +91,8 @@ public:
     /// Post a repeating task that will be executed repeatedly at the given interval
     /// @param[in] interval Interval at which the task will be executed
     /// @param[in] task Task to post
-    /// @return Timer handle
+    /// @return Timer handle, or an invalid handle when the loop is invalid or
+    ///         the thread contract is violated
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
     auto post_repeating(Duration interval, Task task) -> TimerHandle;
