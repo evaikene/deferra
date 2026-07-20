@@ -96,6 +96,10 @@ LocalSocket::LocalSocket(jb::core::Object* parent)
     : IODevice(*new Private, parent)
 {}
 
+LocalSocket::LocalSocket(Private& dd, jb::core::Object* parent)
+    : IODevice(dd, parent)
+{}
+
 LocalSocket::~LocalSocket()
 {
     auto* d = d_ptr<Private>();

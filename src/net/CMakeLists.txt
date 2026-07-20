@@ -4,12 +4,14 @@ message("** Setting up ${TARGET}")
 
 # Public headers exposed to library users
 set(HDRS
+    local_server.hpp
     local_socket.hpp
     tcp_socket.hpp
 )
 
 # Private headers not exposed to library users
 set(PRIV_HDRS
+    local_server_priv.hpp
     local_socket_priv.hpp
     tcp_socket_priv.hpp
 )
@@ -21,6 +23,7 @@ set(SRCS
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND SRCS
+        local_server_linux.cpp
         local_socket_linux.cpp
     )
 endif()
