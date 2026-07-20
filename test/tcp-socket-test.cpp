@@ -223,6 +223,30 @@ TEST_CASE("TcpSocket closes without connecting when watch registration fails", "
     CHECK(signal_order == std::vector<std::string_view>{"error_occurred", "closed"});
 }
 
+TEST_CASE("TcpSocket retries watch removal after closing its descriptor", "[net][tcp-socket]")
+{
+    TestServer                             server;
+    auto                                   fake = jb::core::priv::make_fake_event_loop();
+    jb::core::priv::ScopedCurrentEventLoop current_loop{fake.loop.get()};
+    TcpSocket                              socket;
+
+    socket.connect_to_host("127.0.0.1", server.port());
+    REQUIRE(socket.is_open());
+    REQUIRE(fake.backend->add_fd_calls == 1);
+    auto const socket_fd = fake.backend->last_added_fd;
+
+    fake.backend->remove_fd_results = {false, true};
+    socket.abort();
+
+    CHECK(fake.backend->remove_fd_calls == 2);
+    CHECK(fake.backend->last_removed_fd == socket_fd);
+    errno = 0;
+    CHECK(::fcntl(socket_fd, F_GETFD) == -1);
+    CHECK(errno == EBADF);
+    CHECK(socket.state() == SocketState::Unconnected);
+    CHECK_FALSE(socket.is_open());
+}
+
 TEST_CASE("TcpSocket connects to a loopback server", "[net][tcp-socket]")
 {
     Application app{0, nullptr};

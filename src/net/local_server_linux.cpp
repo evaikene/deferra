@@ -476,11 +476,11 @@ void LocalServer::close()
     }
 
     ++d->generation;
-    if (auto* loop = event_loop(); loop && d->watch) {
-        loop->unwatch_fd(d->watch);
-    }
-    d->listening       = false;
-    d->accept_callback = {};
+    auto*      loop          = event_loop();
+    auto const watch         = d->watch;
+    auto const retry_unwatch = loop && watch && !loop->unwatch_fd(watch);
+    d->listening             = false;
+    d->accept_callback       = {};
     d->pending_connections.clear();
 
     static_cast<void>(cleanup_owned_path(*d));
@@ -491,6 +491,9 @@ void LocalServer::close()
         store_error(*d,
                     jb::core::IOError::CloseError,
                     system_error_message("local server listener close failed", error));
+    }
+    if (retry_unwatch) {
+        static_cast<void>(loop->unwatch_fd(watch));
     }
     d->watch = {};
 }

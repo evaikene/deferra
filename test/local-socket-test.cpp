@@ -329,6 +329,31 @@ TEST_CASE("LocalSocket releases its descriptor when watch registration fails", "
     CHECK(signal_order == std::vector<std::string_view>{"error_occurred", "closed"});
 }
 
+TEST_CASE("LocalSocket retries watch removal after closing its descriptor", "[net][local-socket]")
+{
+    jb::test::TemporaryDirectory           directory;
+    NativeLocalListener                    listener{directory.path() / "watch-removal-retry.sock"};
+    auto                                   fake = jb::core::priv::make_fake_event_loop();
+    jb::core::priv::ScopedCurrentEventLoop current_loop{fake.loop.get()};
+    LocalSocket                            socket;
+
+    socket.connect_to_server(listener.path());
+    REQUIRE(socket.is_open());
+    REQUIRE(fake.backend->add_fd_calls == 1);
+    auto const socket_fd = fake.backend->last_added_fd;
+
+    fake.backend->remove_fd_results = {false, true};
+    socket.abort();
+
+    CHECK(fake.backend->remove_fd_calls == 2);
+    CHECK(fake.backend->last_removed_fd == socket_fd);
+    errno = 0;
+    CHECK(::fcntl(socket_fd, F_GETFD) == -1);
+    CHECK(errno == EBADF);
+    CHECK(socket.state() == LocalSocketState::Unconnected);
+    CHECK_FALSE(socket.is_open());
+}
+
 TEST_CASE("LocalSocket rejects invalid filesystem paths safely", "[net][local-socket]")
 {
     Application app{0, nullptr};

@@ -333,16 +333,18 @@ auto TcpSocket::release_socket() -> bool
     auto*      d        = d_ptr<priv::TcpSocketPrivate>();
     auto const was_open = d->state != SocketState::Unconnected;
 
-    auto* loop = event_loop();
-    if (loop && d->watch) {
-        loop->unwatch_fd(d->watch);
-    }
+    auto*      loop          = event_loop();
+    auto const watch         = d->watch;
+    auto const retry_unwatch = loop && watch && !loop->unwatch_fd(watch);
 
-    if (d->fd != kInvalidFd) {
-        ::close(d->fd);
+    auto const released_fd = std::exchange(d->fd, kInvalidFd);
+    if (released_fd != kInvalidFd) {
+        ::close(released_fd);
+    }
+    if (retry_unwatch) {
+        static_cast<void>(loop->unwatch_fd(watch));
     }
     d->watch = {};
-    d->fd    = kInvalidFd;
     set_state(SocketState::Unconnected);
 
     return was_open;

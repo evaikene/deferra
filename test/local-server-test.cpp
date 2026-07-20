@@ -163,6 +163,30 @@ TEST_CASE("LocalServer cleans up when its initial watch registration fails", "[n
     CHECK(accept_error_count == 0);
 }
 
+TEST_CASE("LocalServer retries watch removal after closing its listener", "[net][local-server]")
+{
+    jb::test::TemporaryDirectory           directory;
+    auto                                   fake = jb::core::priv::make_fake_event_loop();
+    jb::core::priv::ScopedCurrentEventLoop current_loop{fake.loop.get()};
+    LocalServer                            server;
+    auto const                             path = directory.path() / "watch-removal-retry.sock";
+
+    REQUIRE(server.listen(path));
+    REQUIRE(fake.backend->add_fd_calls == 1);
+    auto const listener_fd = fake.backend->last_added_fd;
+
+    fake.backend->remove_fd_results = {false, true};
+    server.close();
+
+    CHECK(fake.backend->remove_fd_calls == 2);
+    CHECK(fake.backend->last_removed_fd == listener_fd);
+    errno = 0;
+    CHECK(::fcntl(listener_fd, F_GETFD) == -1);
+    CHECK(errno == EBADF);
+    CHECK_FALSE(server.is_listening());
+    CHECK_FALSE(std::filesystem::exists(path));
+}
+
 TEST_CASE("LocalServer discards an accepted socket when its first watch fails", "[net][local-server]")
 {
     jb::test::TemporaryDirectory           directory;

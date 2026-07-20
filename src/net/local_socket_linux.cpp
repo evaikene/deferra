@@ -378,16 +378,18 @@ auto LocalSocket::Private::release_socket(LocalSocket& socket) -> bool
 {
     auto const was_open = state != LocalSocketState::Unconnected;
 
-    auto* loop = socket.event_loop();
-    if (loop && watch) {
-        loop->unwatch_fd(watch);
-    }
+    auto*      loop          = socket.event_loop();
+    auto const active_watch  = watch;
+    auto const retry_unwatch = loop && active_watch && !loop->unwatch_fd(active_watch);
 
     auto const released_fd = std::exchange(fd, kInvalidFd);
     state                  = LocalSocketState::Unconnected;
     ++generation;
     if (released_fd != kInvalidFd) {
         ::close(released_fd);
+    }
+    if (retry_unwatch) {
+        static_cast<void>(loop->unwatch_fd(active_watch));
     }
     watch = {};
 
