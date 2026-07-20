@@ -17,8 +17,9 @@ class Object;
 struct ThreadCtx;
 
 namespace priv {
+struct EventLoopTestAccess;
 struct ObjectLifetime;
-}
+} // namespace priv
 
 /// EventLoop is a single-threaded event loop that supports posting tasks and object
 /// events, timers, and file descriptor watches.
@@ -46,18 +47,28 @@ public:
     /// @return EventLoop instance (can be nullptr if none are running)
     static auto current() noexcept -> EventLoop*;
 
-    /// Constructor
+    /// Constructs an event loop for the current thread.
+    ///
+    /// Native poller initialization failures do not throw. Instead, the
+    /// constructed loop is invalid and `is_valid()` returns false. Allocation
+    /// failures such as `std::bad_alloc` are not converted.
     EventLoop();
 
     /// Destructor
     ~EventLoop();
 
-    /// Posts a task to the event queue
+    /// Returns whether the native event-loop backend initialized successfully.
+    /// @return true when event-loop operations can be performed, false otherwise
+    [[nodiscard]] auto is_valid() const noexcept -> bool;
+
+    /// Posts a task to the event queue.
     /// @param[in] task Task to post
+    /// @return true when the task was queued and the poller was signalled; false
+    ///         when the task was not queued
     ///
     /// This method is thread-safe and can be called from any thread. The posted
     /// task will be executed on the thread running the event loop.
-    void post(Task task);
+    auto post(Task task) -> bool;
 
     /// Post a task that will be executed after the given delay
     /// @param[in] delay Delay after which the task will be executed
@@ -94,16 +105,26 @@ public:
     /// @param[in] fd File descriptor to monitor
     /// @param[in] events Events to monitor (read/write)
     /// @param[in] callback Callback to call when the events are ready
-    /// @return Watch handle that can be used to remove the watch later
+    /// @return Watch handle that can be used to remove the watch later, or an
+    ///         invalid handle when validation or backend registration fails
+    ///
+    /// The descriptor must be non-negative, @p events and @p callback must be
+    /// nonempty, and replacing an existing watch changes its callback only after
+    /// the backend registration succeeds.
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
     auto watch_fd(int fd, FdEvents events, FdCallback callback) -> FdWatch;
 
-    /// Remove a file descriptor watch by its handle
+    /// Removes a file descriptor watch by its handle.
     /// @param[in] handle Watch handle to remove
+    /// @return true when the watch is already invalid or absent, or backend
+    ///         removal succeeds; false when an active registration could not be removed
+    ///
+    /// On failure the public watch entry is retained so removal can be retried or
+    /// the descriptor can be closed.
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
-    void unwatch_fd(FdWatch handle);
+    auto unwatch_fd(FdWatch handle) -> bool;
 
     /// Runs the event loop until quit is signaled
     ///
@@ -113,7 +134,9 @@ public:
     /// After quit is signaled, the event loop will finish processing remaining
     /// generic tasks and deferred deletes, but will not deliver remaining object
     /// events.
-    void run();
+    /// @return true after an ordinary stop, false after invalid initialization
+    ///         or a backend polling failure
+    auto run() -> bool;
 
     /// Returns true if the event loop is running, false otherwise
     ///
@@ -130,23 +153,28 @@ public:
     ///
     /// This method is thread-safe and can be called from any thread. It signals
     /// the event loop to quit.
-    void quit();
+    /// @return true when the stop task was queued, false otherwise
+    auto quit() -> bool;
 
     /// Processes specified events until there are no more events to process
     /// @param[in] flags Events to process (tasks, object events, timers, watchers)
-    /// @return true if the event loop is still running, false if it has been signaled to quit.
+    /// @return `Running` or `Stopped` after successful processing according to
+    ///         the loop state, or `Failed` for an invalid loop, thread-contract
+    ///         violation, or backend polling failure
     ///
     /// Deferred deletes are processed after task or object-event phases. Timer-only
     /// and watcher-only processing does not perform deferred deletion.
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
-    auto process_events(EventFlags flags) -> bool;
+    auto process_events(EventFlags flags) -> ProcessEventsResult;
 
     /// Processes specified events for `ms` milliseconds, or until there are no more events
     /// to process, whichever comes first.
     /// @param[in] flags Events to process (tasks, object events, timers, watchers)
     /// @param[in] ms Maximum time to process events in milliseconds (negative means no timeout)
-    /// @return true if the event loop is still running, false if it has been signaled to quit.
+    /// @return `Running` or `Stopped` after successful processing according to
+    ///         the loop state, or `Failed` for an invalid loop, thread-contract
+    ///         violation, or backend polling failure
     ///
     /// The `ms` timeout applies only to fd events. If `EventFlag::Watchers` is not set in `flags`,
     /// then `ms` is ignored and this method behaves the same as `process_events(flags)`.
@@ -155,12 +183,15 @@ public:
     /// and watcher-only processing does not perform deferred deletion.
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
-    auto process_events(EventFlags flags, int ms) -> bool;
+    auto process_events(EventFlags flags, int ms) -> ProcessEventsResult;
 
 private:
 
     friend class Application;
     friend class Object;
+    friend struct priv::EventLoopTestAccess;
+
+    explicit EventLoop(std::unique_ptr<priv::Backend> backend);
 
     struct WatchEntry {
         FdCallback callback;
@@ -200,9 +231,10 @@ private:
     auto assert_on_loop_thread() const -> bool;
     auto compute_timeout_ms(int max_timeout_ms) -> int;
     void dispatch_fd(priv::ReadyEvent const& ev) const;
-    void post_event(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, std::unique_ptr<Event> event);
-    void post_event_delivery(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, Task delivery);
-    void defer_delete(Object* object, std::weak_ptr<priv::ObjectLifetime> lifetime);
+    auto post_event(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, std::unique_ptr<Event> event)
+        -> bool;
+    auto post_event_delivery(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, Task delivery) -> bool;
+    auto defer_delete(Object* object, std::weak_ptr<priv::ObjectLifetime> lifetime) -> bool;
     void drain_task_queue();
     void drain_event_queue();
     void discard_event_queue();

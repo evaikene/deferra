@@ -28,11 +28,13 @@ public:
     /// Register an fd for the given events
     /// @param[in] fd the file descriptor to watch
     /// @param[in] events the events to watch for
-    virtual void add_fd(int fd, FdEvents events) = 0;
+    /// @return true when the registration was applied, false on backend failure
+    virtual auto add_fd(int fd, FdEvents events) -> bool = 0;
 
     /// Remove an fd from the poller
     /// @param[in] fd the file descriptor to remove
-    virtual void remove_fd(int fd) = 0;
+    /// @return true when the registration is absent, false on backend failure
+    virtual auto remove_fd(int fd) -> bool = 0;
 
     /// Block until at least one fd is ready or the timeout expires
     /// @param[in,out] out the output buffer to fill with ready events
@@ -44,11 +46,12 @@ public:
     /// Wake a blocked poll() from another thread
     ///
     /// Must be idempotent and safe to call from any thread at any time.
-    virtual void wakeup() = 0;
+    /// @return true when the poller is or will be awake, false on backend failure
+    virtual auto wakeup() -> bool = 0;
 };
 
 /// Backend factory
-/// @return a unique pointer to a new backend instance
+/// @return a unique pointer to a new backend instance, or nullptr on native initialization failure
 auto make_backend() -> std::unique_ptr<Backend>;
 
 } // namespace jb::core::priv

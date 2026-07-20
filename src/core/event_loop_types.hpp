@@ -8,6 +8,13 @@
 
 namespace jb::core {
 
+/// Result of one EventLoop::process_events() invocation.
+enum class ProcessEventsResult : std::uint8_t {
+    Running, ///< Processing succeeded and the loop remains running
+    Stopped, ///< Processing succeeded and the loop is not running
+    Failed,  ///< Processing could not complete because the event-loop backend failed
+};
+
 /// Event flags
 enum class EventFlag : std::uint8_t {
     None     = 0x00, ///< No events

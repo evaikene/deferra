@@ -3,6 +3,7 @@
 #include "application.hpp"
 #include "event_thread.hpp"
 #include "object.hpp"
+#include "support/fake_event_loop_backend.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -168,13 +169,13 @@ TEST_CASE("Queued signal-slot connection", "[core]")
         CHECK(receiver->captured_value == 0);
 
         // generic tasks do not deliver queued signals
-        app.process_events(EventFlag::Tasks);
+        CHECK(app.process_events(EventFlag::Tasks) == ProcessEventsResult::Stopped);
         CHECK(captured_value == 0);
         CHECK(lambda_value == 0);
         CHECK(receiver->captured_value == 0);
 
         // object-event processing calls queued slots and updates values
-        app.process_events(EventFlag::Events);
+        CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
         CHECK(captured_value == 2);
         CHECK(lambda_value == 2);
         CHECK(receiver->captured_value == 2);
@@ -183,7 +184,7 @@ TEST_CASE("Queued signal-slot connection", "[core]")
 
         // after the receiver is deleted, slots should no longer be called
         CHECK(obj->inc() == 3);
-        app.process_events(EventFlag::Events);
+        CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
         CHECK(captured_value == 2);
         CHECK(lambda_value == 2);
 
@@ -203,13 +204,13 @@ TEST_CASE("Queued signal delivery bypasses Object event overrides", "[core]")
     sender->incremented.connect(receiver, &Testable::incremented_slot, ConnectionType::Queued);
 
     CHECK(sender->inc() == 1);
-    app.process_events(EventFlag::Events);
+    CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
 
     CHECK(receiver->captured_value == 1);
     CHECK(receiver->event_count == 0);
 
     CHECK(sender->inc() == 2);
-    app.process_events(EventFlag::All, 0);
+    CHECK(app.process_events(EventFlag::All, 0) == ProcessEventsResult::Stopped);
 
     CHECK(receiver->captured_value == 2);
     CHECK(receiver->event_count == 0);
@@ -230,13 +231,33 @@ TEST_CASE("Queued signal delivery skips destroyed receivers", "[core]")
     CHECK(sender->inc() == 1);
     delete receiver;
 
-    CHECK_NOTHROW(app.process_events(EventFlag::Events));
+    CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
     CHECK(delivered == 0);
 
     CHECK(sender->inc() == 2);
     CHECK(sender->incremented.count() == 0);
 
     delete sender;
+}
+
+TEST_CASE("Queued signal delivery drops one emission when wakeup fails", "[core][signal]")
+{
+    auto                                   fake = jb::core::priv::make_fake_event_loop();
+    jb::core::priv::ScopedCurrentEventLoop current_loop{fake.loop.get()};
+    Testable                               sender;
+    Testable                               receiver;
+    sender.incremented.connect(&receiver, &Testable::incremented_slot, ConnectionType::Queued);
+
+    fake.backend->wakeup_result = false;
+    CHECK_NOTHROW(sender.inc());
+
+    fake.backend->wakeup_result = true;
+    CHECK(fake.loop->process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
+    CHECK(receiver.captured_value == 0);
+
+    CHECK(sender.inc() == 2);
+    CHECK(fake.loop->process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
+    CHECK(receiver.captured_value == 2);
 }
 
 TEST_CASE("Disconnecting signal-slot connections", "[core]")
@@ -355,7 +376,7 @@ TEST_CASE("Auto signal-slot connection with threaded event loop", "[core][test]"
 
     // Create a separate thread with its own event loop
     EventThread thread;
-    thread.exec(true);
+    CHECK(thread.exec(true));
 
     // Create the `receiver` object in the context of the thread
     auto* receiver = new Object;
@@ -385,7 +406,7 @@ TEST_CASE("Auto signal-slot connection with threaded event loop", "[core][test]"
     }
     CHECK(queued_value.load(std::memory_order_relaxed) == 2);
 
-    thread.quit();
+    CHECK(thread.quit());
     thread.wait();
 
     // now the slot should have been called only using the threaded event loop

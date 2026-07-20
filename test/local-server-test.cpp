@@ -1,5 +1,6 @@
 #include "application.hpp"
 #include "local_server.hpp"
+#include "support/fake_event_loop_backend.hpp"
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -19,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -133,6 +135,72 @@ TEST_CASE("LocalServer exposes defaults and requires an event loop", "[net][loca
     server.close();
     CHECK(server.error() == IOError::ResourceError);
     CHECK(server.error_string() == error_message);
+}
+
+TEST_CASE("LocalServer cleans up when its initial watch registration fails", "[net][local-server]")
+{
+    jb::test::TemporaryDirectory           directory;
+    auto                                   fake = jb::core::priv::make_fake_event_loop();
+    jb::core::priv::ScopedCurrentEventLoop current_loop{fake.loop.get()};
+    LocalServer                            server;
+    int                                    accept_error_count = 0;
+    auto const                             path               = directory.path() / "watch-failure.sock";
+
+    server.accept_error.connect([&](IOError, std::string const&) -> void { ++accept_error_count; });
+    fake.backend->add_fd_result = false;
+
+    CHECK_FALSE(server.listen(path));
+    CHECK(fake.backend->add_fd_calls == 1);
+    REQUIRE(fake.backend->last_added_fd >= 0);
+    errno = 0;
+    CHECK(::fcntl(fake.backend->last_added_fd, F_GETFD) == -1);
+    CHECK(errno == EBADF);
+    CHECK_FALSE(server.is_listening());
+    CHECK(server.pending_connection_count() == 0);
+    CHECK(server.error() == IOError::ResourceError);
+    CHECK(server.error_string() == "local server event-loop watch registration failed");
+    CHECK_FALSE(std::filesystem::exists(path));
+    CHECK(accept_error_count == 0);
+}
+
+TEST_CASE("LocalServer discards an accepted socket when its first watch fails", "[net][local-server]")
+{
+    jb::test::TemporaryDirectory           directory;
+    auto                                   fake = jb::core::priv::make_fake_event_loop();
+    jb::core::priv::ScopedCurrentEventLoop current_loop{fake.loop.get()};
+    LocalServer                            server;
+    LocalSocket                            client;
+    int                                    new_connection_count = 0;
+    int                                    accept_error_count   = 0;
+    IOError                                accept_error         = IOError::NoError;
+    auto const                             path                 = directory.path() / "accepted-watch-failure.sock";
+
+    server.new_connection.connect([&]() -> void { ++new_connection_count; });
+    server.accept_error.connect([&](IOError error, std::string const&) -> void {
+        ++accept_error_count;
+        accept_error = error;
+    });
+    fake.backend->add_fd_results = {true, true, false};
+
+    REQUIRE(server.listen(path));
+    auto const listener_fd = fake.backend->last_added_fd;
+    client.connect_to_server(path);
+    REQUIRE(fake.backend->add_fd_calls == 2);
+
+    fake.backend->ready_events.push_back({.fd = listener_fd, .events = FdEvent::Read});
+    CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+
+    CHECK(fake.backend->add_fd_calls == 3);
+    REQUIRE(fake.backend->last_added_fd >= 0);
+    errno = 0;
+    CHECK(::fcntl(fake.backend->last_added_fd, F_GETFD) == -1);
+    CHECK(errno == EBADF);
+    CHECK(server.is_listening());
+    CHECK(server.pending_connection_count() == 0);
+    CHECK(server.error() == IOError::ResourceError);
+    CHECK(accept_error == IOError::ResourceError);
+    CHECK(accept_error_count == 1);
+    CHECK(new_connection_count == 0);
 }
 
 TEST_CASE("LocalServer rejects invalid paths and options without side effects", "[net][local-server]")

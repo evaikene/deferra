@@ -1,5 +1,6 @@
 #include "application.hpp"
 #include "local_socket.hpp"
+#include "support/fake_event_loop_backend.hpp"
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -18,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -291,6 +293,40 @@ TEST_CASE("LocalSocket requires an event loop", "[net][local-socket]")
     CHECK_FALSE(socket.error_string().empty());
     CHECK(error_count == 1);
     CHECK(closed_count == 0);
+}
+
+TEST_CASE("LocalSocket releases its descriptor when watch registration fails", "[net][local-socket]")
+{
+    jb::test::TemporaryDirectory           directory;
+    NativeLocalListener                    listener{directory.path() / "watch-failure.sock"};
+    auto                                   fake = jb::core::priv::make_fake_event_loop();
+    jb::core::priv::ScopedCurrentEventLoop current_loop{fake.loop.get()};
+    LocalSocket                            socket;
+    int                                    connected_count    = 0;
+    int                                    disconnected_count = 0;
+    std::vector<std::string_view>          signal_order;
+
+    socket.connected.connect([&]() -> void { ++connected_count; });
+    socket.disconnected.connect([&]() -> void { ++disconnected_count; });
+    socket.error_occurred.connect(
+        [&](IOError, std::string const&) -> void { signal_order.emplace_back("error_occurred"); });
+    socket.closed.connect([&]() -> void { signal_order.emplace_back("closed"); });
+
+    fake.backend->add_fd_result = false;
+    socket.connect_to_server(listener.path());
+
+    CHECK(fake.backend->add_fd_calls == 1);
+    REQUIRE(fake.backend->last_added_fd >= 0);
+    errno = 0;
+    CHECK(::fcntl(fake.backend->last_added_fd, F_GETFD) == -1);
+    CHECK(errno == EBADF);
+    CHECK(socket.state() == LocalSocketState::Unconnected);
+    CHECK_FALSE(socket.is_open());
+    CHECK(socket.error() == IOError::ResourceError);
+    CHECK(socket.error_string() == "local socket event-loop watch registration failed");
+    CHECK(connected_count == 0);
+    CHECK(disconnected_count == 0);
+    CHECK(signal_order == std::vector<std::string_view>{"error_occurred", "closed"});
 }
 
 TEST_CASE("LocalSocket rejects invalid filesystem paths safely", "[net][local-socket]")

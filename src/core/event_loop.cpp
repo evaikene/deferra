@@ -17,46 +17,69 @@ auto EventLoop::current() noexcept -> EventLoop*
 }
 
 EventLoop::EventLoop()
+    : EventLoop(priv::make_backend())
+{}
+
+EventLoop::EventLoop(std::unique_ptr<priv::Backend> backend)
     : _thread_ctx(ThreadCtx::current())
-    , _backend(priv::make_backend())
+    , _backend(std::move(backend))
 {}
 
 EventLoop::~EventLoop() = default;
 
-void EventLoop::post(Task task)
+auto EventLoop::is_valid() const noexcept -> bool
 {
-    {
-        std::lock_guard lock{_task_queue_mx};
-        _task_queue.push(std::move(task));
-    }
-    _backend->wakeup();
+    return _backend != nullptr;
 }
 
-void EventLoop::post_event(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, std::unique_ptr<Event> event)
+auto EventLoop::post(Task task) -> bool
 {
-    {
-        std::lock_guard lock{_event_queue_mx};
-        _event_queue.push({receiver, std::move(lifetime), std::move(event), {}});
+    std::lock_guard lock{_task_queue_mx};
+    // Wake before insertion while holding the queue lock so a consumer cannot
+    // pass the queue before the successfully signalled entry is visible.
+    if (!_backend || !_backend->wakeup()) {
+        return false;
     }
-    _backend->wakeup();
+    _task_queue.push(std::move(task));
+    return true;
 }
 
-void EventLoop::post_event_delivery(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, Task delivery)
+auto EventLoop::post_event(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, std::unique_ptr<Event> event)
+    -> bool
 {
-    {
-        std::lock_guard lock{_event_queue_mx};
-        _event_queue.push({receiver, std::move(lifetime), {}, std::move(delivery)});
+    std::lock_guard lock{_event_queue_mx};
+    // Wake before insertion while holding the queue lock so a consumer cannot
+    // pass the queue before the successfully signalled entry is visible.
+    if (!_backend || !_backend->wakeup()) {
+        return false;
     }
-    _backend->wakeup();
+    _event_queue.push({receiver, std::move(lifetime), std::move(event), {}});
+    return true;
 }
 
-void EventLoop::defer_delete(Object* object, std::weak_ptr<priv::ObjectLifetime> lifetime)
+auto EventLoop::post_event_delivery(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, Task delivery)
+    -> bool
 {
-    {
-        std::lock_guard lock{_deferred_delete_queue_mx};
-        _deferred_delete_queue.push({object, std::move(lifetime)});
+    std::lock_guard lock{_event_queue_mx};
+    // Wake before insertion while holding the queue lock so a consumer cannot
+    // pass the queue before the successfully signalled entry is visible.
+    if (!_backend || !_backend->wakeup()) {
+        return false;
     }
-    _backend->wakeup();
+    _event_queue.push({receiver, std::move(lifetime), {}, std::move(delivery)});
+    return true;
+}
+
+auto EventLoop::defer_delete(Object* object, std::weak_ptr<priv::ObjectLifetime> lifetime) -> bool
+{
+    std::lock_guard lock{_deferred_delete_queue_mx};
+    // Wake before insertion while holding the queue lock so a consumer cannot
+    // pass the queue before the successfully signalled entry is visible.
+    if (!_backend || !_backend->wakeup()) {
+        return false;
+    }
+    _deferred_delete_queue.push({object, std::move(lifetime)});
+    return true;
 }
 
 auto EventLoop::post_delayed(Duration delay, Task task) -> TimerHandle
@@ -65,9 +88,7 @@ auto EventLoop::post_delayed(Duration delay, Task task) -> TimerHandle
         return {}; // can only be called from the thread running the event loop
     }
 
-    auto h = _timers.start(std::move(task), Clock::now() + delay);
-    _backend->wakeup();
-    return h;
+    return _timers.start(std::move(task), Clock::now() + delay);
 }
 
 auto EventLoop::post_at(TimePoint when, Task task) -> TimerHandle
@@ -76,9 +97,7 @@ auto EventLoop::post_at(TimePoint when, Task task) -> TimerHandle
         return {}; // can only be called from the thread running the event loop
     }
 
-    auto h = _timers.start(std::move(task), when);
-    _backend->wakeup();
-    return h;
+    return _timers.start(std::move(task), when);
 }
 
 auto EventLoop::post_repeating(Duration interval, Task task) -> TimerHandle
@@ -87,9 +106,7 @@ auto EventLoop::post_repeating(Duration interval, Task task) -> TimerHandle
         return {}; // can only be called from the thread running the event loop
     }
 
-    auto h = _timers.start(std::move(task), Clock::now() + interval, interval);
-    _backend->wakeup();
-    return h;
+    return _timers.start(std::move(task), Clock::now() + interval, interval);
 }
 
 void EventLoop::cancel_timer(TimerHandle h)
@@ -99,37 +116,47 @@ void EventLoop::cancel_timer(TimerHandle h)
     }
 
     _timers.cancel(h);
-    _backend->wakeup();
 }
 
 auto EventLoop::watch_fd(int fd, FdEvents events, FdCallback callback) -> FdWatch
 {
-    if (!assert_on_loop_thread()) {
+    if (!assert_on_loop_thread() || !_backend || fd < 0 || events.none() || !callback) {
+        return {};
+    }
+
+    if (!_backend->add_fd(fd, events)) {
         return {};
     }
 
     _watchers[fd] = {.callback = std::move(callback), .events = events};
-    _backend->add_fd(fd, events);
-
     return {fd};
 }
 
-void EventLoop::unwatch_fd(FdWatch handle)
+auto EventLoop::unwatch_fd(FdWatch handle) -> bool
 {
     if (!assert_on_loop_thread()) {
-        return;
+        return false;
     }
 
-    _backend->remove_fd(handle.fd);
-    _watchers.erase(handle.fd);
+    auto const it = _watchers.find(handle.fd);
+    if (!handle || it == _watchers.end()) {
+        return true;
+    }
+
+    if (!_backend || !_backend->remove_fd(handle.fd)) {
+        return false;
+    }
+
+    _watchers.erase(it);
+    return true;
 }
 
-void EventLoop::quit()
+auto EventLoop::quit() -> bool
 {
-    post([this]() -> void { _running.store(false, std::memory_order_relaxed); });
+    return post([this]() -> void { _running.store(false, std::memory_order_relaxed); });
 }
 
-void EventLoop::run()
+auto EventLoop::run() -> bool
 {
     // set the thread context for this event loop
     auto* orig_ctx = _thread_ctx.load(std::memory_order_relaxed);
@@ -137,7 +164,16 @@ void EventLoop::run()
 
     _running.store(true, std::memory_order_relaxed);
 
-    while (process_events(EventFlag::All)) {
+    auto success = true;
+    for (;;) {
+        auto const result = process_events(EventFlag::All);
+        if (result == ProcessEventsResult::Running) {
+            continue;
+        }
+        if (result == ProcessEventsResult::Failed) {
+            success = false;
+        }
+        break;
     }
 
     // Do not deliver object events after quit. Finish generic tasks first so any
@@ -148,17 +184,22 @@ void EventLoop::run()
 
     // restore the original thread context (if any)
     _thread_ctx.store(orig_ctx, std::memory_order_relaxed);
+    return success;
 }
 
-auto EventLoop::process_events(EventFlags flags) -> bool
+auto EventLoop::process_events(EventFlags flags) -> ProcessEventsResult
 {
     return process_events(flags, -1);
 }
 
-auto EventLoop::process_events(EventFlags flags, int ms) -> bool
+auto EventLoop::process_events(EventFlags flags, int ms) -> ProcessEventsResult
 {
     if (!assert_on_loop_thread()) {
-        return false; // can only be called from the thread running the event loop
+        return ProcessEventsResult::Failed; // can only be called from the thread running the event loop
+    }
+    if (!_backend) {
+        _running.store(false, std::memory_order_relaxed);
+        return ProcessEventsResult::Failed;
     }
 
     auto const was_running = _running.load(std::memory_order_relaxed);
@@ -170,6 +211,10 @@ auto EventLoop::process_events(EventFlags flags, int ms) -> bool
 
         auto timeout_ms = compute_timeout_ms(ms);
         auto n          = _backend->poll(events, kMaxEvents, timeout_ms);
+        if (n < 0) {
+            _running.store(false, std::memory_order_relaxed);
+            return ProcessEventsResult::Failed;
+        }
 
         for (int i = 0; i < n; ++i) {
             dispatch_fd(events[i]);
@@ -197,7 +242,7 @@ auto EventLoop::process_events(EventFlags flags, int ms) -> bool
         drain_deferred_delete_queue();
     }
 
-    return _running.load(std::memory_order_relaxed);
+    return _running.load(std::memory_order_relaxed) ? ProcessEventsResult::Running : ProcessEventsResult::Stopped;
 }
 
 auto EventLoop::assert_on_loop_thread() const -> bool

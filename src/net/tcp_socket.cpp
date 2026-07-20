@@ -154,14 +154,19 @@ void TcpSocket::connect_to_host(std::string_view address, std::uint16_t port)
     auto const rc = ::connect(fd, reinterpret_cast<sockaddr const*>(&storage), length);
     if (rc == 0) {
         set_state(SocketState::Connected);
-        update_watch();
+        if (!update_watch()) {
+            fail_socket(jb::core::IOError::ResourceError, "TCP socket event-loop watch registration failed", false);
+            return;
+        }
         emit(connected);
         return;
     }
 
     if (errno == EINPROGRESS) {
         set_state(SocketState::Connecting);
-        update_watch();
+        if (!update_watch()) {
+            fail_socket(jb::core::IOError::ResourceError, "TCP socket event-loop watch registration failed", false);
+        }
         return;
     }
 
@@ -183,7 +188,10 @@ void TcpSocket::disconnect_from_host()
     }
 
     set_state(SocketState::Closing);
-    update_watch();
+    if (!update_watch()) {
+        fail_socket(jb::core::IOError::ResourceError, "TCP socket event-loop watch registration failed", true);
+        return;
+    }
     write_pending();
 }
 
@@ -296,7 +304,13 @@ auto TcpSocket::write(std::string_view data) -> std::size_t
 
     clear_error();
     d->output_buffer.append(data);
-    update_watch();
+    if (!update_watch()) {
+        auto const emit_disconnected = d->state != SocketState::Connecting;
+        fail_socket(jb::core::IOError::ResourceError,
+                    "TCP socket event-loop watch registration failed",
+                    emit_disconnected);
+        return 0;
+    }
     if (d->state == SocketState::Connected || d->state == SocketState::Closing) {
         write_pending();
     }
@@ -323,12 +337,12 @@ auto TcpSocket::release_socket() -> bool
     if (loop && d->watch) {
         loop->unwatch_fd(d->watch);
     }
-    d->watch = {};
 
     if (d->fd != kInvalidFd) {
         ::close(d->fd);
     }
-    d->fd = kInvalidFd;
+    d->watch = {};
+    d->fd    = kInvalidFd;
     set_state(SocketState::Unconnected);
 
     return was_open;
@@ -380,7 +394,12 @@ void TcpSocket::handle_fd_event(jb::core::FdEvents events)
         }
     }
 
-    update_watch();
+    if (d->state != SocketState::Unconnected && !update_watch()) {
+        auto const emit_disconnected = d->state != SocketState::Connecting;
+        fail_socket(jb::core::IOError::ResourceError,
+                    "TCP socket event-loop watch registration failed",
+                    emit_disconnected);
+    }
 }
 
 void TcpSocket::handle_connect_ready()
@@ -402,6 +421,10 @@ void TcpSocket::handle_connect_ready()
     }
 
     set_state(SocketState::Connected);
+    if (!update_watch()) {
+        fail_socket(jb::core::IOError::ResourceError, "TCP socket event-loop watch registration failed", false);
+        return;
+    }
     emit(connected);
     write_pending();
 }
@@ -482,12 +505,15 @@ void TcpSocket::write_pending()
     }
 }
 
-void TcpSocket::update_watch()
+auto TcpSocket::update_watch() -> bool
 {
     auto* d    = d_ptr<priv::TcpSocketPrivate>();
     auto* loop = event_loop();
-    if (!loop || d->fd == kInvalidFd) {
-        return;
+    if (d->fd == kInvalidFd) {
+        return true;
+    }
+    if (!loop) {
+        return false;
     }
 
     jb::core::FdEvents events;
@@ -504,13 +530,21 @@ void TcpSocket::update_watch()
 
     if (events.none()) {
         if (d->watch) {
-            loop->unwatch_fd(d->watch);
+            if (!loop->unwatch_fd(d->watch)) {
+                return false;
+            }
             d->watch = {};
         }
-        return;
+        return true;
     }
 
-    d->watch = loop->watch_fd(d->fd, events, [this](int, jb::core::FdEvents ready) -> void { handle_fd_event(ready); });
+    auto const watch =
+        loop->watch_fd(d->fd, events, [this](int, jb::core::FdEvents ready) -> void { handle_fd_event(ready); });
+    if (!watch) {
+        return false;
+    }
+    d->watch = watch;
+    return true;
 }
 
 } // namespace jb::net

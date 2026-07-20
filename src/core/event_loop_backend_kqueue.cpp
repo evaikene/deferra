@@ -1,109 +1,107 @@
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
 
-#include "event_loop_backend.hpp"
-#include "event_loop_types.hpp"
+#  include "event_loop_backend.hpp"
+#  include "event_loop_types.hpp"
+#  include "logging.hpp"
 
-#include <algorithm>
-#include <cerrno>
-#include <memory>
-#include <stdexcept>
-#include <unordered_map>
+#  include <algorithm>
+#  include <cerrno>
+#  include <cstring>
+#  include <memory>
+#  include <unordered_map>
 
-#include <fcntl.h>
-#include <sys/event.h>
-#include <sys/time.h>
-#include <unistd.h>
+#  include <fcntl.h>
+#  include <sys/event.h>
+#  include <sys/time.h>
+#  include <unistd.h>
 
 namespace jb::core::priv {
 
 class KqueueBackend final : public Backend {
 public:
 
-    KqueueBackend()
+    ~KqueueBackend() override
+    {
+        if (_kq >= 0) {
+            ::close(_kq);
+        }
+    }
+
+    auto initialize() -> bool
     {
         _kq = ::kqueue();
         if (_kq < 0) {
-            throw std::runtime_error{"kqueue failed"};
+            auto const error = errno;
+            log_error("kqueue failed: {}", std::strerror(error));
+            return false;
         }
-        if (::fcntl(_kq, F_SETFD, FD_CLOEXEC) < 0) {
-            ::close(_kq);
-            throw std::runtime_error{"fcntl F_SETFD FD_CLOEXEC failed"};
+
+        for (;;) {
+            if (::fcntl(_kq, F_SETFD, FD_CLOEXEC) == 0) {
+                break;
+            }
+
+            auto const error = errno;
+            if (error == EINTR) {
+                continue;
+            }
+
+            log_error("fcntl F_SETFD FD_CLOEXEC failed: {}", std::strerror(error));
+            close_kqueue();
+            return false;
         }
 
         // register the user-event wakeup channel once
         struct kevent ev;
         EV_SET(&ev, kWakeIdent, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, nullptr);
-        if (::kevent(_kq, &ev, 1, nullptr, 0, nullptr) < 0) {
-            ::close(_kq);
-            throw std::runtime_error{"kevent EVFILT_USER register failed"};
+        for (;;) {
+            if (::kevent(_kq, &ev, 1, nullptr, 0, nullptr) == 0) {
+                return true;
+            }
+
+            auto const error = errno;
+            if (error == EINTR) {
+                continue;
+            }
+
+            log_error("kevent EVFILT_USER register failed: {}", std::strerror(error));
+            close_kqueue();
+            return false;
         }
     }
 
-    ~KqueueBackend() override { ::close(_kq); }
-
-    void add_fd(int fd, FdEvents events) override
+    auto add_fd(int fd, FdEvents events) -> bool override
     {
-        FdEvents old;
-        if (auto it = _registered.find(fd); it != _registered.end()) {
-            old = it->second;
+        if (!reconcile_filter(fd, FdEvent::Read, EVFILT_READ, events.test(FdEvent::Read))) {
+            return false;
         }
-
-        struct kevent changes[2];
-        int           n = 0;
-
-        // reconcile READ filter
-        if (events.test(FdEvent::Read) && !old.test(FdEvent::Read)) {
-            EV_SET(&changes[n++], fd, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, nullptr);
-        }
-        else if (!events.test(FdEvent::Read) && old.test(FdEvent::Read)) {
-            EV_SET(&changes[n++], fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
-        }
-
-        // reconcile WRITE filter
-        if (events.test(FdEvent::Write) && !old.test(FdEvent::Write)) {
-            EV_SET(&changes[n++], fd, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, nullptr);
-        }
-        else if (!events.test(FdEvent::Write) && old.test(FdEvent::Write)) {
-            EV_SET(&changes[n++], fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
-        }
-
-        if (n > 0 && ::kevent(_kq, changes, n, nullptr, 0, nullptr) < 0) {
-            throw std::runtime_error{"kevent register failed"};
-        }
-
-        if (events.none()) {
-            _registered.erase(fd);
-        }
-        else {
-            _registered[fd] = events;
-        }
+        return reconcile_filter(fd, FdEvent::Write, EVFILT_WRITE, events.test(FdEvent::Write));
     }
 
-    void remove_fd(int fd) override
+    auto remove_fd(int fd) -> bool override
     {
         auto it = _registered.find(fd);
         if (it == _registered.end()) {
-            return;
+            return true;
         }
 
-        struct kevent changes[2];
-        int           n = 0;
-        if (it->second.test(FdEvent::Read)) {
-            EV_SET(&changes[n++], fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
+        auto success = true;
+        if (it->second.test(FdEvent::Read) && !reconcile_filter(fd, FdEvent::Read, EVFILT_READ, false)) {
+            success = false;
         }
-        if (it->second.test(FdEvent::Write)) {
-            EV_SET(&changes[n++], fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
+        if (auto current = _registered.find(fd); current != _registered.end() && current->second.test(FdEvent::Write) &&
+                                                 !reconcile_filter(fd, FdEvent::Write, EVFILT_WRITE, false)) {
+            success = false;
         }
 
-        ::kevent(_kq, changes, n, nullptr, 0, nullptr);
-        _registered.erase(it);
+        return success;
     }
 
     auto poll(ReadyEvent* out, int max_events, int timeout_ms) -> int override
     {
         static constexpr int  kMaxEvents{64};
-        static constexpr long kMSecInSec{1'000};
-        static constexpr long kNSecInMSec{1'000'000};
+        static constexpr long kMSecInSec{1000};
+        static constexpr long kNSecInMSec{1000000};
 
         auto max = std::min(max_events, kMaxEvents);
 
@@ -118,9 +116,11 @@ public:
         struct kevent events[kMaxEvents];
         auto          n = ::kevent(_kq, nullptr, 0, events, max, ts_ptr);
         if (n < 0) {
-            if (errno == EINTR) {
+            auto const error = errno;
+            if (error == EINTR) {
                 return 0;
             }
+            log_error("kevent poll failed: {}", std::strerror(error));
             return -1;
         }
 
@@ -161,28 +161,102 @@ public:
         return written;
     }
 
-    void wakeup() override
+    auto wakeup() -> bool override
     {
         struct kevent ev;
         EV_SET(&ev, kWakeIdent, EVFILT_USER, 0, NOTE_TRIGGER, 0, nullptr);
         while (::kevent(_kq, &ev, 1, nullptr, 0, nullptr) < 0) {
-            if (errno == EINTR) {
+            auto const error = errno;
+            if (error == EINTR) {
                 continue;
             }
-            throw std::runtime_error{"kevent wakeup failed"};
+            log_error("kevent wakeup failed: {}", std::strerror(error));
+            return false;
+        }
+        return true;
+    }
+
+private:
+
+    // A fixed ident for the user-event wakeup channel
+    static constexpr std::uintptr_t kWakeIdent{0};
+
+    int                               _kq{-1};
+    std::unordered_map<int, FdEvents> _registered;
+
+    void close_kqueue()
+    {
+        if (_kq >= 0) {
+            ::close(_kq);
+            _kq = -1;
         }
     }
 
-    private:
+    auto apply_filter_change(int fd, std::int16_t filter, std::uint16_t flags) -> bool
+    {
+        struct kevent change;
+        EV_SET(&change, fd, filter, flags, 0, 0, nullptr);
 
-        // A fixed ident for the user-event wakeup channel
-        static constexpr std::uintptr_t kWakeIdent{0};
+        for (;;) {
+            if (::kevent(_kq, &change, 1, nullptr, 0, nullptr) == 0) {
+                return true;
+            }
 
-        int                               _kq{-1};
-        std::unordered_map<int, FdEvents> _registered;
-    };
+            auto const error = errno;
+            if (error == EINTR) {
+                continue;
+            }
+            if ((flags & EV_DELETE) != 0U && (error == ENOENT || error == EBADF)) {
+                return true;
+            }
 
-    auto make_backend() -> std::unique_ptr<Backend> { return std::make_unique<KqueueBackend>(); }
+            log_error("kevent filter change failed for fd {}: {}", fd, std::strerror(error));
+            return false;
+        }
+    }
+
+    auto reconcile_filter(int fd, FdEvent event, std::int16_t filter, bool requested) -> bool
+    {
+        FdEvents current;
+        if (auto const it = _registered.find(fd); it != _registered.end()) {
+            current = it->second;
+        }
+
+        if (current.test(event) == requested) {
+            return true;
+        }
+
+        auto const flags = static_cast<std::uint16_t>(requested ? EV_ADD | EV_CLEAR : EV_DELETE);
+        if (!apply_filter_change(fd, filter, flags)) {
+            return false;
+        }
+
+        if (requested) {
+            current.set(event);
+        }
+        else {
+            current.clear(event);
+        }
+
+        if (current.none()) {
+            _registered.erase(fd);
+        }
+        else {
+            _registered[fd] = current;
+        }
+
+        return true;
+    }
+};
+
+auto make_backend() -> std::unique_ptr<Backend>
+{
+    auto backend = std::make_unique<KqueueBackend>();
+    if (!backend->initialize()) {
+        return nullptr;
+    }
+    return backend;
+}
 
 } // namespace jb::core::priv
 

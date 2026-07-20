@@ -99,7 +99,10 @@ void Object::delete_later()
         return; // already scheduled for deletion
     }
 
-    loop->defer_delete(this, lifetime);
+    if (!loop->defer_delete(this, lifetime)) {
+        lifetime->delete_later_pending.store(false, std::memory_order_release);
+        log_error("Object::delete_later: event-loop wakeup failed; object remains alive");
+    }
 }
 
 auto Object::parent() const -> Object*
@@ -203,7 +206,9 @@ void Object::post_event_delivery(EventLoop*                          event_loop,
                                  std::weak_ptr<priv::ObjectLifetime> lifetime,
                                  Task                                delivery)
 {
-    event_loop->post_event_delivery(receiver, std::move(lifetime), std::move(delivery));
+    if (!event_loop->post_event_delivery(receiver, std::move(lifetime), std::move(delivery))) {
+        log_error("Object::post_event_delivery: event-loop wakeup failed; dropping delivery");
+    }
 }
 
 auto Object::move_to_thread_impl(EventThread* event_thread) -> bool

@@ -25,14 +25,14 @@ TEST_CASE("Event Thread", "[core]")
     CHECK(event_thread->as_event_loop() != app.event_loop());
 
     // run the event loop
-    CHECK_NOTHROW(event_thread->exec(true));
+    CHECK(event_thread->exec(true));
     CHECK(event_thread->is_running());
 
     // event loop should now have a different thread context
     CHECK(event_thread->thread_ctx() != ThreadCtx::current());
 
     // quit the event loop with an exit code
-    CHECK_NOTHROW(event_thread->quit(1));
+    CHECK(event_thread->quit(1));
     CHECK_NOTHROW(event_thread->wait());
     CHECK(event_thread->exit_code() == 1);
 

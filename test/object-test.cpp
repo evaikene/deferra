@@ -2,6 +2,7 @@
 
 #include "application.hpp"
 #include "event_thread.hpp"
+#include "support/fake_event_loop_backend.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -218,7 +219,7 @@ TEST_CASE("Object basics", "[core]")
         CHECK(object_counter == 1);
 
         // task processing should delete the object
-        app.process_events(EventFlag::Tasks);
+        CHECK(app.process_events(EventFlag::Tasks) == ProcessEventsResult::Stopped);
         CHECK(object_counter == 0);
     }
 
@@ -231,7 +232,7 @@ TEST_CASE("Object basics", "[core]")
         auto* obj = new Testable;
         obj->delete_later();
 
-        app.process_events(EventFlag::Events);
+        CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
         CHECK(object_counter == 0);
     }
 
@@ -244,13 +245,13 @@ TEST_CASE("Object basics", "[core]")
         auto* obj = new Testable;
         obj->delete_later();
 
-        app.process_events(EventFlag::Timers);
+        CHECK(app.process_events(EventFlag::Timers) == ProcessEventsResult::Stopped);
         CHECK(object_counter == 1);
 
-        app.process_events(EventFlag::Watchers, 0);
+        CHECK(app.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
         CHECK(object_counter == 1);
 
-        app.process_events(EventFlag::Tasks);
+        CHECK(app.process_events(EventFlag::Tasks) == ProcessEventsResult::Stopped);
         CHECK(object_counter == 0);
     }
 
@@ -266,7 +267,7 @@ TEST_CASE("Object basics", "[core]")
 
         CHECK(object_counter == 1);
 
-        app.process_events(EventFlag::Events);
+        CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
         CHECK(object_counter == 0);
     }
 
@@ -284,7 +285,7 @@ TEST_CASE("Object basics", "[core]")
 
         CHECK(object_counter == 0);
 
-        app.process_events(EventFlag::Tasks);
+        CHECK(app.process_events(EventFlag::Tasks) == ProcessEventsResult::Stopped);
         CHECK(object_counter == 0);
     }
 
@@ -311,7 +312,7 @@ TEST_CASE("Object basics", "[core]")
         CHECK(obj->move_to_thread(thread));
 
         // run the threaded event loop
-        thread->exec(true);
+        CHECK(thread->exec(true));
 
         // moving the object should now fail
         CHECK_FALSE(obj->move_to_thread(app.thread()));
@@ -326,7 +327,7 @@ TEST_CASE("Object basics", "[core]")
         obj->delete_later();
 
         // stop the threaded event loop and wait for it to finish
-        thread->quit();
+        CHECK(thread->quit());
         thread->wait();
 
         CHECK(object_counter == 0);
@@ -334,4 +335,22 @@ TEST_CASE("Object basics", "[core]")
         // cleanup
         delete thread;
     }
+}
+
+TEST_CASE("Object delete_later can be retried after wakeup failure", "[core][object]")
+{
+    object_counter = 0;
+
+    auto                                   fake = jb::core::priv::make_fake_event_loop();
+    jb::core::priv::ScopedCurrentEventLoop current_loop{fake.loop.get()};
+    auto*                                  object = new Testable;
+
+    fake.backend->wakeup_result = false;
+    CHECK_NOTHROW(object->delete_later());
+    CHECK(object_counter == 1);
+
+    fake.backend->wakeup_result = true;
+    CHECK_NOTHROW(object->delete_later());
+    CHECK(fake.loop->process_events(EventFlag::Tasks) == ProcessEventsResult::Stopped);
+    CHECK(object_counter == 0);
 }

@@ -1,4 +1,5 @@
 #include "application.hpp"
+#include "support/fake_event_loop_backend.hpp"
 #include "tcp_socket.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -187,6 +188,39 @@ TEST_CASE("TcpSocket starts unconnected", "[net][tcp-socket]")
     CHECK(socket.peer_address().empty());
     CHECK(socket.peer_port() == 0);
     CHECK(socket.error() == jb::core::IOError::NoError);
+}
+
+TEST_CASE("TcpSocket closes without connecting when watch registration fails", "[net][tcp-socket]")
+{
+    TestServer                             server;
+    auto                                   fake = jb::core::priv::make_fake_event_loop();
+    jb::core::priv::ScopedCurrentEventLoop current_loop{fake.loop.get()};
+    TcpSocket                              socket;
+    int                                    connected_count    = 0;
+    int                                    disconnected_count = 0;
+    std::vector<std::string_view>          signal_order;
+
+    socket.connected.connect([&]() -> void { ++connected_count; });
+    socket.disconnected.connect([&]() -> void { ++disconnected_count; });
+    socket.error_occurred.connect(
+        [&](IOError, std::string const&) -> void { signal_order.emplace_back("error_occurred"); });
+    socket.closed.connect([&]() -> void { signal_order.emplace_back("closed"); });
+
+    fake.backend->add_fd_result = false;
+    socket.connect_to_host("127.0.0.1", server.port());
+
+    CHECK(fake.backend->add_fd_calls == 1);
+    REQUIRE(fake.backend->last_added_fd >= 0);
+    errno = 0;
+    CHECK(::fcntl(fake.backend->last_added_fd, F_GETFD) == -1);
+    CHECK(errno == EBADF);
+    CHECK(socket.state() == SocketState::Unconnected);
+    CHECK_FALSE(socket.is_open());
+    CHECK(socket.error() == IOError::ResourceError);
+    CHECK(socket.error_string() == "TCP socket event-loop watch registration failed");
+    CHECK(connected_count == 0);
+    CHECK(disconnected_count == 0);
+    CHECK(signal_order == std::vector<std::string_view>{"error_occurred", "closed"});
 }
 
 TEST_CASE("TcpSocket connects to a loopback server", "[net][tcp-socket]")

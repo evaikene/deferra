@@ -48,38 +48,46 @@ public:
     ///
     /// This method is thread-safe. A null receiver or event is ignored. Events
     /// posted to an object without an EventLoop are logged and dropped. Events
-    /// whose receiver is destroyed before delivery are silently discarded.
+    /// that cannot wake the receiver's EventLoop are also logged and dropped.
+    /// Events whose receiver is destroyed before delivery are silently discarded.
     static void post_event(Object* receiver, std::unique_ptr<Event> event);
 
     /// Returns the event thread this application is running on
     auto thread() const -> EventThread* { return _event_loop.get(); }
 
     /// Runs the application event loop until quit is signaled to quit
-    /// @return Exit code (0 for success, non-zero for failure)
+    /// @return the requested exit code after an ordinary stop, or `EXIT_FAILURE`
+    ///         when the event loop fails
     auto exec() -> int;
 
     /// Processes specified events until there are no more events to process
     /// @param[in] flags Events to process (tasks, object events, timers, watchers)
-    /// @return true if the event loop is still running, false if it has been signaled to quit.
+    /// @return `Running` or `Stopped` after successful processing according to
+    ///         the event-loop state, or `Failed` when processing cannot complete
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
-    auto process_events(EventFlags flags) -> bool;
+    auto process_events(EventFlags flags) -> ProcessEventsResult;
 
     /// Processes specified events for `ms` milliseconds, or until there are no more events
     /// to process, whichever comes first.
     /// @param[in] flags Events to process (tasks, object events, timers, watchers)
     /// @param[in] ms Maximum time to process events in milliseconds (negative means no timeout)
-    /// @return true if the event loop is still running, false if it has been signaled to quit.
+    /// @return `Running` or `Stopped` after successful processing according to
+    ///         the event-loop state, or `Failed` when processing cannot complete
     ///
     /// The `ms` timeout applies only to fd events. If `EventFlag::Watchers` is not set in `flags`,
     /// then `ms` is ignored and this method behaves the same as `process_events(flags)`.
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
-    auto process_events(EventFlags flags, int ms) -> bool;
+    auto process_events(EventFlags flags, int ms) -> ProcessEventsResult;
 
     /// Signals the application to quit with the given exit code
     /// @param[in] exit_code Exit code to quit with (default: 0)
-    void quit(int exit_code = 0);
+    /// @return true when the stop task was queued, false when the caller must not
+    ///         assume the event loop was woken
+    ///
+    /// The requested exit code is stored even if the stop task cannot be queued.
+    auto quit(int exit_code = 0) -> bool;
 
     /// Returns the exit code of the application after it has finished executing
     /// @return Exit code of the application
