@@ -8,6 +8,7 @@
 #include "run.hpp"
 #include "value.hpp"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -42,6 +43,20 @@ namespace jb::jobu::detail {
 [[nodiscard]] auto int32_to_storage(std::int32_t value) -> jb::db::Value;
 [[nodiscard]] auto read_int32(jb::db::Record const& record, std::string_view field)
     -> jb::core::Result<std::int32_t, jb::core::Error>;
+
+[[nodiscard]] auto positive_uint32_to_storage(std::uint32_t value) -> jb::core::Result<jb::db::Value, jb::core::Error>;
+[[nodiscard]] auto read_positive_uint32(jb::db::Record const& record, std::string_view field)
+    -> jb::core::Result<std::uint32_t, jb::core::Error>;
+
+[[nodiscard]] auto optional_nonnegative_seconds_to_storage(std::optional<std::chrono::seconds> value)
+    -> jb::core::Result<jb::db::Value, jb::core::Error>;
+[[nodiscard]] auto read_optional_nonnegative_seconds(jb::db::Record const& record, std::string_view field)
+    -> jb::core::Result<std::optional<std::chrono::seconds>, jb::core::Error>;
+
+[[nodiscard]] auto nonnegative_milliseconds_to_storage(std::chrono::milliseconds value)
+    -> jb::core::Result<jb::db::Value, jb::core::Error>;
+[[nodiscard]] auto read_nonnegative_milliseconds(jb::db::Record const& record, std::string_view field)
+    -> jb::core::Result<std::chrono::milliseconds, jb::core::Error>;
 
 [[nodiscard]] auto read_text(jb::db::Record const& record, std::string_view field)
     -> jb::core::Result<std::string, jb::core::Error>;
