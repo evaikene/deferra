@@ -18,6 +18,11 @@ target_sources(${TARGET}
         domain_storage_priv.cpp
         domain_storage_priv.hpp
         jobu.cpp
+        management.cpp
+        queue_repository_priv.cpp
+        queue_repository_priv.hpp
+        queue_validation_priv.cpp
+        queue_validation_priv.hpp
         system_info.cpp
         system_info_priv.hpp
         utc_timestamp.cpp
@@ -27,6 +32,7 @@ target_sources(${TARGET}
         attribute_registry.hpp
         job.hpp
         jobu.hpp
+        management.hpp
         queue.hpp
         run.hpp
         secret.hpp
@@ -43,3 +49,7 @@ target_link_libraries(${TARGET}
         db
         rpc
 )
+
+if(TARGET db-sqlite)
+    add_subdirectory(sqlite)
+endif()

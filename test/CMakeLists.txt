@@ -91,6 +91,33 @@ if(TARGET db-sqlite)
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 endif()
 
+if(TARGET jobu-sqlite)
+    # JobU SQLite-backed queue management service test
+    set(TARGET "jobu-queue-management-test")
+    add_executable(${TARGET}
+        jobu-queue-management-test.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+    # JobU SQLite application schema integration test
+    set(TARGET "jobu-sqlite-schema-test")
+    add_executable(${TARGET}
+        jobu-sqlite-schema-test.cpp
+        support/fake_database_driver.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+    # JobU SQLite public header boundary test
+    set(TARGET "jobu-sqlite-public-headers-test")
+    add_executable(${TARGET} jobu-sqlite-public-headers-test.cpp)
+    target_link_libraries(${TARGET} PRIVATE jobu-sqlite)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+endif()
+
 # Public header boundary test
 set(TARGET "public-headers-test")
 add_executable(${TARGET} public-headers-test.cpp)
@@ -98,7 +125,7 @@ target_link_libraries(${TARGET} PRIVATE jobu)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JobU public headers added by Phase 3 must each compile as the first include.
-foreach(JOBU_DOMAIN_HEADER IN ITEMS attempt attribute-registry job queue run secret utc-timestamp)
+foreach(JOBU_DOMAIN_HEADER IN ITEMS attempt attribute-registry job management queue run secret utc-timestamp)
     set(TARGET "jobu-${JOBU_DOMAIN_HEADER}-public-header-test")
     add_executable(${TARGET} "${TARGET}.cpp")
     target_link_libraries(${TARGET} PRIVATE jobu)

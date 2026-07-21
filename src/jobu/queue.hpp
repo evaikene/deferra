@@ -38,7 +38,7 @@ struct Queue {
 
     static constexpr std::uint32_t kDefaultWeight           = 1;
     static constexpr std::uint32_t kDefaultConcurrencyLimit = 1;
-    static constexpr long          kDefaultRunnableWaitTime = 1000;
+    static constexpr long          kDefaultRunnableWaitTime = 10000;
 
     /// Stable queue identity.
     jb::core::Uuid                        id;

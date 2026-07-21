@@ -9,6 +9,7 @@
 #include "error.hpp"
 #include "job.hpp"
 #include "jobu.hpp"
+#include "management.hpp"
 #include "query.hpp"
 #include "queue.hpp"
 #include "record.hpp"

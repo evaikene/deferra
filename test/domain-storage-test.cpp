@@ -329,6 +329,41 @@ TEST_CASE("Domain storage checks booleans and bounded integers", "[jobu][storage
     CHECK_FALSE(read_int32(record("priority", std::numeric_limits<std::int64_t>::max()), "priority"));
 }
 
+TEST_CASE("Domain storage bounds nonnegative durations to signed storage range", "[jobu][storage]")
+{
+    auto absent = optional_nonnegative_seconds_to_storage(std::nullopt);
+    REQUIRE(absent);
+    CHECK(std::holds_alternative<Null>(*absent));
+
+    auto zero_seconds = optional_nonnegative_seconds_to_storage(0s);
+    REQUIRE(zero_seconds);
+    CHECK(std::get<std::int64_t>(*zero_seconds) == 0);
+    CHECK_FALSE(optional_nonnegative_seconds_to_storage(-1s));
+
+    auto maximum_seconds = optional_nonnegative_seconds_to_storage(std::chrono::seconds::max());
+    if constexpr (std::in_range<std::int64_t>(std::chrono::seconds::max().count())) {
+        REQUIRE(maximum_seconds);
+        CHECK(std::get<std::int64_t>(*maximum_seconds) == std::chrono::seconds::max().count());
+    }
+    else {
+        CHECK_FALSE(maximum_seconds);
+    }
+
+    auto zero_milliseconds = nonnegative_milliseconds_to_storage(0ms);
+    REQUIRE(zero_milliseconds);
+    CHECK(std::get<std::int64_t>(*zero_milliseconds) == 0);
+    CHECK_FALSE(nonnegative_milliseconds_to_storage(-1ms));
+
+    auto maximum_milliseconds = nonnegative_milliseconds_to_storage(std::chrono::milliseconds::max());
+    if constexpr (std::in_range<std::int64_t>(std::chrono::milliseconds::max().count())) {
+        REQUIRE(maximum_milliseconds);
+        CHECK(std::get<std::int64_t>(*maximum_milliseconds) == std::chrono::milliseconds::max().count());
+    }
+    else {
+        CHECK_FALSE(maximum_milliseconds);
+    }
+}
+
 TEST_CASE("Domain storage handles required and optional text", "[jobu][storage]")
 {
     CHECK(*read_text(record("name", std::string{"queue"}), "name") == "queue");

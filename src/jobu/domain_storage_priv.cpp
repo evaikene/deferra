@@ -88,13 +88,25 @@ auto read_positive_unsigned(jb::db::Record const& record, std::string_view field
         return StorageResult<Unsigned>::failure(std::move(value).error());
     }
     auto const* integer = std::get_if<std::int64_t>(value.value());
-    if (integer == nullptr || *integer <= 0) {
+    if (integer == nullptr || *integer <= 0 ||
+        static_cast<std::uint64_t>(*integer) > static_cast<std::uint64_t>(std::numeric_limits<Unsigned>::max())) {
         return StorageResult<Unsigned>::failure(storage_error("jobu.storage.invalid_integer",
                                                               "Persisted JobU integer is invalid",
                                                               field,
                                                               integer == nullptr ? "wrong_type" : "out_of_range"));
     }
     return StorageResult<Unsigned>::success(static_cast<Unsigned>(*integer));
+}
+
+template <typename Rep>
+auto nonnegative_duration_count_to_storage(Rep count) -> StorageResult<jb::db::Value>
+{
+    static_assert(std::is_integral_v<Rep>);
+    if (count < 0 || !std::in_range<std::int64_t>(count)) {
+        return StorageResult<jb::db::Value>::failure(
+            storage_error("jobu.storage.invalid_integer", "JobU duration cannot be persisted", {}, "out_of_range"));
+    }
+    return StorageResult<jb::db::Value>::success(static_cast<std::int64_t>(count));
 }
 
 auto json_error(std::string_view field, std::string_view reason) -> jb::core::Error
@@ -269,6 +281,71 @@ auto read_int32(jb::db::Record const& record, std::string_view field) -> jb::cor
                                                                   integer == nullptr ? "wrong_type" : "out_of_range"));
     }
     return StorageResult<std::int32_t>::success(static_cast<std::int32_t>(*integer));
+}
+
+auto positive_uint32_to_storage(std::uint32_t value) -> jb::core::Result<jb::db::Value, jb::core::Error>
+{
+    return positive_unsigned_to_storage(value);
+}
+
+auto read_positive_uint32(jb::db::Record const& record, std::string_view field)
+    -> jb::core::Result<std::uint32_t, jb::core::Error>
+{
+    return read_positive_unsigned<std::uint32_t>(record, field);
+}
+
+auto optional_nonnegative_seconds_to_storage(std::optional<std::chrono::seconds> value)
+    -> jb::core::Result<jb::db::Value, jb::core::Error>
+{
+    if (!value) {
+        return StorageResult<jb::db::Value>::success(jb::db::Null{});
+    }
+    return nonnegative_duration_count_to_storage(value->count());
+}
+
+auto read_optional_nonnegative_seconds(jb::db::Record const& record, std::string_view field)
+    -> jb::core::Result<std::optional<std::chrono::seconds>, jb::core::Error>
+{
+    auto value = required_value(record, field, "jobu.storage.invalid_integer");
+    if (!value) {
+        return StorageResult<std::optional<std::chrono::seconds>>::failure(std::move(value).error());
+    }
+    if (std::holds_alternative<jb::db::Null>(**value)) {
+        return StorageResult<std::optional<std::chrono::seconds>>::success(std::nullopt);
+    }
+    auto const* integer = std::get_if<std::int64_t>(value.value());
+    if (integer == nullptr || *integer < 0) {
+        return StorageResult<std::optional<std::chrono::seconds>>::failure(
+            storage_error("jobu.storage.invalid_integer",
+                          "Persisted JobU duration is invalid",
+                          field,
+                          integer == nullptr ? "wrong_type" : "out_of_range"));
+    }
+    return StorageResult<std::optional<std::chrono::seconds>>::success(std::chrono::seconds{*integer});
+}
+
+auto nonnegative_milliseconds_to_storage(std::chrono::milliseconds value)
+    -> jb::core::Result<jb::db::Value, jb::core::Error>
+{
+    return nonnegative_duration_count_to_storage(value.count());
+}
+
+auto read_nonnegative_milliseconds(jb::db::Record const& record, std::string_view field)
+    -> jb::core::Result<std::chrono::milliseconds, jb::core::Error>
+{
+    auto value = required_value(record, field, "jobu.storage.invalid_integer");
+    if (!value) {
+        return StorageResult<std::chrono::milliseconds>::failure(std::move(value).error());
+    }
+    auto const* integer = std::get_if<std::int64_t>(value.value());
+    if (integer == nullptr || *integer < 0) {
+        return StorageResult<std::chrono::milliseconds>::failure(
+            storage_error("jobu.storage.invalid_integer",
+                          "Persisted JobU duration is invalid",
+                          field,
+                          integer == nullptr ? "wrong_type" : "out_of_range"));
+    }
+    return StorageResult<std::chrono::milliseconds>::success(std::chrono::milliseconds{*integer});
 }
 
 auto read_text(jb::db::Record const& record, std::string_view field) -> jb::core::Result<std::string, jb::core::Error>
