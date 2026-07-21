@@ -13,9 +13,12 @@ target_sources(${TARGET}
     PRIVATE
         attribute.cpp
         jobu.cpp
+        system_info.cpp
+        system_info_priv.hpp
     PUBLIC
         attribute.hpp
         jobu.hpp
+        system_info.hpp
 )
 
 target_compile_features(${TARGET} PUBLIC cxx_std_20)

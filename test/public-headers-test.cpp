@@ -10,6 +10,7 @@
 #include "record.hpp"
 #include "result.hpp"
 #include "rpc.hpp"
+#include "system_info.hpp"
 #include "time_source.hpp"
 #include "transaction.hpp"
 #include "uuid.hpp"
