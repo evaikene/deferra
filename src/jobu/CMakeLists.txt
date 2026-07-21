@@ -12,13 +12,22 @@ target_include_directories(${TARGET}
 target_sources(${TARGET}
     PRIVATE
         attribute.cpp
+        domain_storage_priv.cpp
+        domain_storage_priv.hpp
         jobu.cpp
         system_info.cpp
         system_info_priv.hpp
+        utc_timestamp.cpp
     PUBLIC
+        attempt.hpp
         attribute.hpp
+        job.hpp
         jobu.hpp
+        queue.hpp
+        run.hpp
+        secret.hpp
         system_info.hpp
+        utc_timestamp.hpp
 )
 
 target_compile_features(${TARGET} PUBLIC cxx_std_20)

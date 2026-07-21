@@ -14,6 +14,18 @@ add_executable(${TARGET} attribute-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU UTC timestamp test
+set(TARGET "utc-timestamp-test")
+add_executable(${TARGET} utc-timestamp-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# JobU domain storage adapter test
+set(TARGET "domain-storage-test")
+add_executable(${TARGET} domain-storage-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # JobU system information test
 set(TARGET "system-info-test")
 add_executable(${TARGET} system-info-test.cpp)
@@ -78,6 +90,14 @@ set(TARGET "public-headers-test")
 add_executable(${TARGET} public-headers-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# JobU domain public headers must each compile as the first include.
+foreach(JOBU_DOMAIN_HEADER IN ITEMS attempt job queue run secret utc-timestamp)
+    set(TARGET "jobu-${JOBU_DOMAIN_HEADER}-public-header-test")
+    add_executable(${TARGET} "${TARGET}.cpp")
+    target_link_libraries(${TARGET} PRIVATE jobu)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+endforeach()
 
 # RPC public header boundary test
 set(TARGET "rpc-public-headers-test")
