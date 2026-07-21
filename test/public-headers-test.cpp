@@ -1,5 +1,6 @@
 #include "attempt.hpp"
 #include "attribute.hpp"
+#include "attribute_registry.hpp"
 #include "byte_buffer.hpp"
 #include "database.hpp"
 #include "db.hpp"
