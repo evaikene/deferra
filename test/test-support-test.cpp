@@ -1,4 +1,5 @@
 #include "support/fake_time_source.hpp"
+#include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -6,6 +7,7 @@
 #include <chrono>
 #include <filesystem>
 #include <utility>
+#include <vector>
 
 using namespace jb::core;
 using namespace std::chrono_literals;
@@ -70,4 +72,21 @@ TEST_CASE("TemporaryDirectory moves cleanup ownership", "[test][filesystem]")
         CHECK(replacement.path() == moved_path);
     }
     CHECK_FALSE(std::filesystem::exists(moved_path));
+}
+
+TEST_CASE("SequenceUuidGenerator returns configured values and stable exhaustion", "[test][uuid]")
+{
+    auto const                      first  = *Uuid::parse("00000000-0000-0000-0000-000000000001");
+    auto const                      second = *Uuid::parse("00000000-0000-0000-0000-000000000002");
+    jb::test::SequenceUuidGenerator generator{
+        {first, second}
+    };
+
+    CHECK(*generator.generate() == first);
+    CHECK(*generator.generate() == second);
+
+    auto const exhausted = generator.generate();
+    REQUIRE_FALSE(exhausted);
+    CHECK(exhausted.error().category == ErrorCategory::ResourceExhausted);
+    CHECK(exhausted.error().code == "test.uuid.sequence_exhausted");
 }
