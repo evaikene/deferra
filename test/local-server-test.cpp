@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -21,6 +22,7 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -30,6 +32,35 @@ using namespace jb::net;
 // NOLINTBEGIN(readability-magic-numbers)
 
 namespace {
+
+auto get_descriptor_flags(int fd, int command) -> int
+{
+    for (;;) {
+        auto const flags = ::fcntl(fd, command, 0);
+        if (flags >= 0 || errno != EINTR) {
+            return flags;
+        }
+    }
+}
+
+void check_socket_options(int fd)
+{
+    auto const status_flags = get_descriptor_flags(fd, F_GETFL);
+    REQUIRE(status_flags >= 0);
+    CHECK((status_flags & O_NONBLOCK) != 0);
+
+    auto const descriptor_flags = get_descriptor_flags(fd, F_GETFD);
+    REQUIRE(descriptor_flags >= 0);
+    CHECK((descriptor_flags & FD_CLOEXEC) != 0);
+
+#if defined(SO_NOSIGPIPE)
+    int       no_sigpipe = 0;
+    socklen_t length     = sizeof(no_sigpipe);
+    REQUIRE(::getsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, &length) == 0);
+    CHECK(length == sizeof(no_sigpipe));
+    CHECK(no_sigpipe != 0);
+#endif
+}
 
 template <typename Predicate>
 auto wait_for(Application& app, Predicate&& predicate, std::chrono::milliseconds timeout = std::chrono::seconds{3})
@@ -185,6 +216,36 @@ TEST_CASE("LocalServer retries watch removal after closing its listener", "[net]
     CHECK(errno == EBADF);
     CHECK_FALSE(server.is_listening());
     CHECK_FALSE(std::filesystem::exists(path));
+}
+
+TEST_CASE("LocalServer configures listener and accepted descriptors", "[net][local-server]")
+{
+    jb::test::TemporaryDirectory           directory;
+    auto                                   fake = jb::core::priv::make_fake_event_loop();
+    jb::core::priv::ScopedCurrentEventLoop current_loop{fake.loop.get()};
+    LocalServer                            server;
+    LocalSocket                            client;
+    auto const                             path = directory.path() / "descriptor-options.sock";
+
+    REQUIRE(server.listen(path));
+    REQUIRE(fake.backend->add_fd_calls == 1);
+    auto const listener_fd = fake.backend->last_added_fd;
+    check_socket_options(listener_fd);
+
+    client.connect_to_server(path);
+    REQUIRE(fake.backend->add_fd_calls == 2);
+
+    fake.backend->ready_events.push_back({.fd = listener_fd, .events = FdEvent::Read});
+    CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+
+    REQUIRE(fake.backend->add_fd_calls == 3);
+    REQUIRE(server.pending_connection_count() == 1);
+    auto const accepted_fd = fake.backend->last_added_fd;
+    check_socket_options(accepted_fd);
+
+    auto accepted = server.take_next_connection();
+    REQUIRE(accepted);
+    CHECK(accepted->is_open());
 }
 
 TEST_CASE("LocalServer discards an accepted socket when its first watch fails", "[net][local-server]")
@@ -387,12 +448,20 @@ TEST_CASE("LocalServer exchanges binary data through accepted LocalSockets", "[n
     CHECK(accepted->is_open());
     CHECK(accepted->server_path() == server.server_path());
     CHECK(accepted->read_buffer_limit() == options.accepted_read_buffer_limit);
+#if defined(__APPLE__)
+    CHECK_FALSE(accepted->peer_credentials().process_id);
+    REQUIRE(accepted->peer_credentials().user_id);
+    REQUIRE(accepted->peer_credentials().group_id);
+    CHECK(*accepted->peer_credentials().user_id == static_cast<std::uint64_t>(::geteuid()));
+    CHECK(*accepted->peer_credentials().group_id == static_cast<std::uint64_t>(::getegid()));
+#else
     REQUIRE(accepted->peer_credentials().process_id);
     REQUIRE(accepted->peer_credentials().user_id);
     REQUIRE(accepted->peer_credentials().group_id);
     CHECK(*accepted->peer_credentials().process_id == static_cast<std::uint64_t>(::getpid()));
     CHECK(*accepted->peer_credentials().user_id == static_cast<std::uint64_t>(::getuid()));
     CHECK(*accepted->peer_credentials().group_id == static_cast<std::uint64_t>(::getgid()));
+#endif
     CHECK(accepted_connected_count == 0);
 
     auto const client_payload = std::string{"client\0binary-data", 18};
