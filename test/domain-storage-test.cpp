@@ -503,23 +503,29 @@ TEST_CASE("Attribute persistence rejects malformed typed documents with a stable
         return decode_attribute_document(registry, document, AttributeScope::Job, AttributeDocumentMode::Partial);
     };
 
+    auto unknown_type = decode(attribute_document({
+        {"test.integer", typed_json("unknown", json(std::int64_t{1}))}
+    }));
+    REQUIRE_FALSE(unknown_type);
+    CHECK(unknown_type.error().category == ErrorCategory::Internal);
+    CHECK(unknown_type.error().code == "jobu.attribute.invalid_document");
+    CHECK(unknown_type.error().detail == "reason=unknown_type_tag");
+
     for (auto document : {
-             attribute_document({{"test.integer", typed_json("unknown", json(std::int64_t{1}))}                                               }
-             ),
              attribute_document(
                  {{"test.integer",
                    typed_json("integer", json(std::uint64_t{std::numeric_limits<std::uint64_t>::max()}))}    }
-             ),
+                 ),
              attribute_document(
                  {{"test.duration",
                    typed_json("duration_ns", json(std::uint64_t{std::numeric_limits<std::uint64_t>::max()}))}}
-             ),
+                 ),
              attribute_document({{"test.bytes", typed_json("bytes_hex", json(std::string{"AA"}))}                                             }
-             ),
+                 ),
              attribute_document({{"unknown.value", typed_json("integer", json(std::int64_t{1}))}                                              }
-             ),
+                 ),
              attribute_document({                                                                                                            },
-             2),
+                 2),
     }) {
         auto result = decode(std::move(document));
         REQUIRE_FALSE(result);

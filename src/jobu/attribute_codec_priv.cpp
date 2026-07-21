@@ -392,7 +392,7 @@ auto decode_attribute_document(AttributeRegistry const&  registry,
         }
         auto decoded = typed_value_from_json(encoded, 0);
         if (!decoded) {
-            return document_failure<AttributeSet>(decoded.error().code);
+            return Result<AttributeSet>::failure(std::move(decoded).error());
         }
         auto validated = registry.validate(name, *decoded, scope);
         if (!validated) {

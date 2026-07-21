@@ -83,7 +83,8 @@ private:
  *
  * Durations use exact signed integer milliseconds and bytes use lower-case hexadecimal. List and map values use
  * natural JSON recursively; nested durations and bytes are rejected because Phase 3 has no element schema with which
- * to decode them.
+ * to decode them. Applicable standard cross-field constraints are also validated; for example, `retry.max_delay`
+ * must not be below `retry.initial_delay` when both attributes are supplied.
  *
  * @param values Partial or complete attribute set to encode without retaining it.
  * @param registry Registry defining every top-level attribute.
@@ -96,9 +97,10 @@ private:
 
 /** Decodes the public definition-directed JSON object into an attribute set.
  *
- * The conversion validates every name and value at @p scope. It does not materialize omitted definitions or retain
- * references to @p value. List and map members decode only the natural JSON alternatives because Phase 3 has no nested
- * duration or byte element schema.
+ * The conversion validates every name and value at @p scope, together with applicable standard cross-field
+ * constraints; for example, `retry.max_delay` must not be below `retry.initial_delay` when both attributes are
+ * supplied. It does not materialize omitted definitions or retain references to @p value. List and map members decode
+ * only the natural JSON alternatives because Phase 3 has no nested duration or byte element schema.
  *
  * @param value JSON object to decode without retaining it.
  * @param registry Registry defining every top-level attribute.
