@@ -14,6 +14,12 @@ add_executable(${TARGET} attribute-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU standard attribute registry, materialization, and public JSON test
+set(TARGET "attribute-materialization-test")
+add_executable(${TARGET} attribute-materialization-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # JobU UTC timestamp test
 set(TARGET "utc-timestamp-test")
 add_executable(${TARGET} utc-timestamp-test.cpp)
@@ -91,8 +97,8 @@ add_executable(${TARGET} public-headers-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
-# JobU domain public headers must each compile as the first include.
-foreach(JOBU_DOMAIN_HEADER IN ITEMS attempt job queue run secret utc-timestamp)
+# JobU public headers added by Phase 3 must each compile as the first include.
+foreach(JOBU_DOMAIN_HEADER IN ITEMS attempt attribute-registry job queue run secret utc-timestamp)
     set(TARGET "jobu-${JOBU_DOMAIN_HEADER}-public-header-test")
     add_executable(${TARGET} "${TARGET}.cpp")
     target_link_libraries(${TARGET} PRIVATE jobu)

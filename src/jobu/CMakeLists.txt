@@ -12,6 +12,9 @@ target_include_directories(${TARGET}
 target_sources(${TARGET}
     PRIVATE
         attribute.cpp
+        attribute_codec_priv.cpp
+        attribute_codec_priv.hpp
+        attribute_registry.cpp
         domain_storage_priv.cpp
         domain_storage_priv.hpp
         jobu.cpp
@@ -21,6 +24,7 @@ target_sources(${TARGET}
     PUBLIC
         attempt.hpp
         attribute.hpp
+        attribute_registry.hpp
         job.hpp
         jobu.hpp
         queue.hpp
