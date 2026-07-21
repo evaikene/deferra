@@ -26,6 +26,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         local_server_linux.cpp
         local_socket_linux.cpp
     )
+elseif(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+    list(APPEND SRCS
+        local_socket_macos.cpp
+    )
 endif()
 
 add_library(${TARGET} STATIC)

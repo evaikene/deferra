@@ -46,6 +46,129 @@ void close_fd(int& fd) noexcept
     throw std::system_error{error, std::generic_category(), std::string{operation}};
 }
 
+auto get_descriptor_flags(int fd, int command) -> int
+{
+    for (;;) {
+        auto const flags = ::fcntl(fd, command, 0);
+        if (flags >= 0 || errno != EINTR) {
+            return flags;
+        }
+    }
+}
+
+auto set_descriptor_flags(int fd, int command, int flags) -> bool
+{
+    for (;;) {
+        if (::fcntl(fd, command, flags) == 0) {
+            return true;
+        }
+        if (errno != EINTR) {
+            return false;
+        }
+    }
+}
+
+auto configure_descriptor(int fd) -> bool
+{
+    auto const status_flags = get_descriptor_flags(fd, F_GETFL);
+    if (status_flags < 0 || !set_descriptor_flags(fd, F_SETFL, status_flags | O_NONBLOCK)) {
+        return false;
+    }
+
+    auto const descriptor_flags = get_descriptor_flags(fd, F_GETFD);
+    return descriptor_flags >= 0 && set_descriptor_flags(fd, F_SETFD, descriptor_flags | FD_CLOEXEC);
+}
+
+auto disable_sigpipe(int fd) -> bool
+{
+#if defined(SO_NOSIGPIPE)
+    int yes = 1;
+    for (;;) {
+        if (::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes)) == 0) {
+            return true;
+        }
+        if (errno != EINTR) {
+            return false;
+        }
+    }
+#else
+    static_cast<void>(fd);
+    return true;
+#endif
+}
+
+auto send_flags() -> int
+{
+#if defined(MSG_NOSIGNAL)
+    return MSG_NOSIGNAL;
+#else
+    return 0;
+#endif
+}
+
+auto create_listener_socket() -> int
+{
+    int fd;
+    for (;;) {
+        fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd >= 0 || errno != EINTR) {
+            break;
+        }
+    }
+    if (fd < 0) {
+        return fd;
+    }
+    if (configure_descriptor(fd)) {
+        return fd;
+    }
+
+    auto const error = errno;
+    ::close(fd);
+    errno = error;
+    return kInvalidFd;
+}
+
+auto accept_socket(int listener_fd) -> int
+{
+    int fd;
+    for (;;) {
+        fd = ::accept(listener_fd, nullptr, nullptr);
+        if (fd >= 0 || errno != EINTR) {
+            break;
+        }
+    }
+    if (fd < 0) {
+        return fd;
+    }
+    if (configure_descriptor(fd) && disable_sigpipe(fd)) {
+        return fd;
+    }
+
+    auto const error = errno;
+    ::close(fd);
+    errno = error;
+    return kInvalidFd;
+}
+
+void check_socket_options(int fd)
+{
+    auto const status_flags = get_descriptor_flags(fd, F_GETFL);
+    REQUIRE(status_flags >= 0);
+    CHECK((status_flags & O_NONBLOCK) != 0);
+
+    auto const descriptor_flags = get_descriptor_flags(fd, F_GETFD);
+    REQUIRE(descriptor_flags >= 0);
+    CHECK((descriptor_flags & FD_CLOEXEC) != 0);
+
+#if defined(SO_NOSIGPIPE)
+    int       no_sigpipe = 0;
+    socklen_t length     = sizeof(no_sigpipe);
+    REQUIRE(::getsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, &length) == 0);
+    CHECK(length == sizeof(no_sigpipe));
+    CHECK(no_sigpipe != 0);
+#endif
+}
+
 class NativeLocalListener {
 public:
     explicit NativeLocalListener(std::filesystem::path path)
@@ -64,7 +187,7 @@ public:
         std::memcpy(address.sun_path, native_path.c_str(), native_path.size() + 1U);
         auto const length = static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + native_path.size() + 1U);
 
-        _listener_fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        _listener_fd = create_listener_socket();
         if (_listener_fd < 0) {
             throw_system_error("native listener socket", errno);
         }
@@ -105,7 +228,7 @@ public:
         }
 
         for (;;) {
-            _client_fd = ::accept4(_listener_fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+            _client_fd = accept_socket(_listener_fd);
             if (_client_fd >= 0) {
                 return true;
             }
@@ -128,7 +251,7 @@ public:
         }
 
         while (!_pending_output.empty()) {
-            auto const n = ::send(_client_fd, _pending_output.data(), _pending_output.size(), MSG_NOSIGNAL);
+            auto const n = ::send(_client_fd, _pending_output.data(), _pending_output.size(), send_flags());
             if (n > 0) {
                 _pending_output.erase(0, static_cast<std::size_t>(n));
                 continue;
@@ -341,6 +464,7 @@ TEST_CASE("LocalSocket retries watch removal after closing its descriptor", "[ne
     REQUIRE(socket.is_open());
     REQUIRE(fake.backend->add_fd_calls == 1);
     auto const socket_fd = fake.backend->last_added_fd;
+    check_socket_options(socket_fd);
 
     fake.backend->remove_fd_results = {false, true};
     socket.abort();
@@ -411,7 +535,7 @@ TEST_CASE("LocalSocket reports connection failures and clears them on retry", "[
     CHECK(socket.error_string().empty());
 }
 
-TEST_CASE("LocalSocket connects and exposes Linux peer credentials", "[net][local-socket]")
+TEST_CASE("LocalSocket connects with platform peer credentials", "[net][local-socket]")
 {
     Application                  app{0, nullptr};
     jb::test::TemporaryDirectory directory;
@@ -423,26 +547,43 @@ TEST_CASE("LocalSocket connects and exposes Linux peer credentials", "[net][loca
     socket.connected.connect([&]() -> void {
         ++connected_count;
         auto const& credentials = socket.peer_credentials();
-        credentials_in_signal   = socket.state() == LocalSocketState::Connected &&
-                                  credentials.process_id == static_cast<std::uint64_t>(::getpid()) &&
-                                  credentials.user_id == static_cast<std::uint64_t>(::getuid()) &&
-                                  credentials.group_id == static_cast<std::uint64_t>(::getgid());
+#if defined(__APPLE__)
+        credentials_in_signal = socket.state() == LocalSocketState::Connected && !credentials.process_id &&
+                                credentials.user_id == static_cast<std::uint64_t>(::geteuid()) &&
+                                credentials.group_id == static_cast<std::uint64_t>(::getegid());
+#else
+        credentials_in_signal = socket.state() == LocalSocketState::Connected &&
+                                credentials.process_id == static_cast<std::uint64_t>(::getpid()) &&
+                                credentials.user_id == static_cast<std::uint64_t>(::getuid()) &&
+                                credentials.group_id == static_cast<std::uint64_t>(::getgid());
+#endif
     });
 
     REQUIRE(connect_socket(app, listener, socket));
 
     CHECK(socket.is_open());
     CHECK(socket.server_path() == listener.path());
+#if defined(__APPLE__)
+    CHECK_FALSE(socket.peer_credentials().process_id);
+    CHECK(socket.peer_credentials().user_id == static_cast<std::uint64_t>(::geteuid()));
+    CHECK(socket.peer_credentials().group_id == static_cast<std::uint64_t>(::getegid()));
+#else
     CHECK(socket.peer_credentials().process_id == static_cast<std::uint64_t>(::getpid()));
     CHECK(socket.peer_credentials().user_id == static_cast<std::uint64_t>(::getuid()));
     CHECK(socket.peer_credentials().group_id == static_cast<std::uint64_t>(::getgid()));
+#endif
     CHECK(connected_count == 1);
     CHECK(credentials_in_signal);
 
     socket.close();
     CHECK(socket.state() == LocalSocketState::Unconnected);
     CHECK(socket.server_path() == listener.path());
+#if defined(__APPLE__)
+    CHECK_FALSE(socket.peer_credentials().process_id);
+    CHECK(socket.peer_credentials().user_id == static_cast<std::uint64_t>(::geteuid()));
+#else
     CHECK(socket.peer_credentials().process_id == static_cast<std::uint64_t>(::getpid()));
+#endif
 }
 
 TEST_CASE("LocalSocket replacement aborts the old lifecycle and clears input", "[net][local-socket]")
@@ -475,7 +616,12 @@ TEST_CASE("LocalSocket replacement aborts the old lifecycle and clears input", "
     }));
 
     CHECK(connected_count == 2);
+#if defined(__APPLE__)
+    CHECK_FALSE(socket.peer_credentials().process_id);
+    CHECK(socket.peer_credentials().user_id == static_cast<std::uint64_t>(::geteuid()));
+#else
     CHECK(socket.peer_credentials().process_id == static_cast<std::uint64_t>(::getpid()));
+#endif
 }
 
 TEST_CASE("LocalSocket preserves binary reads and line semantics", "[net][local-socket]")
