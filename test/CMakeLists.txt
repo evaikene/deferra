@@ -14,6 +14,12 @@ add_executable(${TARGET} attribute-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU system information test
+set(TARGET "system-info-test")
+add_executable(${TARGET} system-info-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Test support test
 set(TARGET "test-support-test")
 add_executable(${TARGET}
@@ -147,14 +153,14 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JobU executable smoke tests
 add_test(NAME jobud-version COMMAND $<TARGET_FILE:jobud> --version)
-add_test(NAME jobud-not-implemented COMMAND $<TARGET_FILE:jobud>)
-set_tests_properties(jobud-not-implemented PROPERTIES
+add_test(NAME jobud-usage COMMAND $<TARGET_FILE:jobud>)
+set_tests_properties(jobud-usage PROPERTIES
     WILL_FAIL TRUE
 )
 
 add_test(NAME jobuctl-version COMMAND $<TARGET_FILE:jobuctl> --version)
-add_test(NAME jobuctl-not-implemented COMMAND $<TARGET_FILE:jobuctl>)
-set_tests_properties(jobuctl-not-implemented PROPERTIES
+add_test(NAME jobuctl-usage COMMAND $<TARGET_FILE:jobuctl>)
+set_tests_properties(jobuctl-usage PROPERTIES
     WILL_FAIL TRUE
 )
 
@@ -287,4 +293,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             Catch2::Catch2WithMain
     )
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+    # Linux foreground daemon and job control executable integration test
+    set(TARGET "jobuctl-system-info-test")
+    add_executable(${TARGET}
+        jobuctl-system-info-test.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET} PRIVATE core)
+    add_dependencies(${TARGET} jobud jobuctl)
+    add_test(NAME ${TARGET}
+        COMMAND $<TARGET_FILE:${TARGET}> $<TARGET_FILE:jobud> $<TARGET_FILE:jobuctl> ${PROJECT_VERSION}
+    )
+    set_tests_properties(${TARGET} PROPERTIES TIMEOUT 15)
 endif()
