@@ -46,7 +46,8 @@ struct QueuePage {
 
 /// Values used to create an active queue.
 struct CreateQueueRequest {
-    /// User-facing UTF-8 name containing 1 through 128 bytes.
+    /// User-facing name containing 1 through 128 bytes of valid UTF-8.
+    /// ASCII control characters and reserved deletion suffixes are rejected.
     std::string                         name;
     /// Positive scheduler weight.
     std::uint32_t                       weight{1};

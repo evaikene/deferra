@@ -33,7 +33,8 @@ auto invalid_name() -> jb::core::Error
 {
     return service_error(jb::core::ErrorCategory::InvalidArgument,
                          "jobu.queue.invalid_name",
-                         "Queue name must be valid UTF-8 containing 1 through 128 bytes and no reserved suffix");
+                         "Queue name must contain 1 through 128 bytes of valid UTF-8, no ASCII control characters, "
+                         "and no reserved deletion suffix");
 }
 
 auto invalid_configuration(std::string_view reason) -> jb::core::Error
