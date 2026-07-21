@@ -298,12 +298,20 @@ TEST_CASE("Local RPC keeps one credentialed connection persistent", "[rpc][net][
     REQUIRE(fixture.invocations.size() == 2U);
     for (auto const& invocation : fixture.invocations) {
         CHECK(invocation.context.connection_id == fixture.admitted_ids.front());
+#if defined(__APPLE__)
+        CHECK_FALSE(invocation.context.operation.peer.process_id);
+        REQUIRE(invocation.context.operation.peer.user_id);
+        REQUIRE(invocation.context.operation.peer.group_id);
+        CHECK(*invocation.context.operation.peer.user_id == static_cast<std::uint64_t>(::geteuid()));
+        CHECK(*invocation.context.operation.peer.group_id == static_cast<std::uint64_t>(::getegid()));
+#else
         REQUIRE(invocation.context.operation.peer.process_id);
         REQUIRE(invocation.context.operation.peer.user_id);
         REQUIRE(invocation.context.operation.peer.group_id);
         CHECK(*invocation.context.operation.peer.process_id == static_cast<std::uint64_t>(::getpid()));
         CHECK(*invocation.context.operation.peer.user_id == static_cast<std::uint64_t>(::getuid()));
         CHECK(*invocation.context.operation.peer.group_id == static_cast<std::uint64_t>(::getgid()));
+#endif
         CHECK_FALSE(invocation.context.operation.authenticated_principal);
     }
     CHECK(fixture.invocations[0].context.operation.peer.process_id ==
