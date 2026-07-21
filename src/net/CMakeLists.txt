@@ -31,6 +31,9 @@ elseif(CMAKE_SYSTEM_NAME MATCHES "Darwin")
         local_server_macos.cpp
         local_socket_macos.cpp
     )
+    list(APPEND PRIV_HDRS
+        local_ipc_macos_priv.hpp
+    )
 endif()
 
 add_library(${TARGET} STATIC)

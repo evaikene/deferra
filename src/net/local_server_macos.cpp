@@ -1,5 +1,6 @@
 #include "local_server.hpp"
 
+#include "local_ipc_macos_priv.hpp"
 #include "local_server_priv.hpp"
 #include "local_socket_priv.hpp"
 
@@ -14,7 +15,6 @@
 #include <type_traits>
 #include <utility>
 
-#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -79,53 +79,6 @@ void clear_error(auto& data)
     data.error_string.clear();
 }
 
-auto get_descriptor_flags(int fd, int command) -> int
-{
-    for (;;) {
-        auto const flags = ::fcntl(fd, command, 0);
-        if (flags >= 0 || errno != EINTR) {
-            return flags;
-        }
-    }
-}
-
-auto set_descriptor_flags(int fd, int command, int flags) -> bool
-{
-    for (;;) {
-        if (::fcntl(fd, command, flags) == 0) {
-            return true;
-        }
-        if (errno != EINTR) {
-            return false;
-        }
-    }
-}
-
-auto disable_sigpipe(int fd) -> bool
-{
-    int yes = 1;
-    for (;;) {
-        if (::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes)) == 0) {
-            return true;
-        }
-        if (errno != EINTR) {
-            return false;
-        }
-    }
-}
-
-auto configure_socket(int fd) -> bool
-{
-    auto const status_flags = get_descriptor_flags(fd, F_GETFL);
-    if (status_flags < 0 || !set_descriptor_flags(fd, F_SETFL, status_flags | O_NONBLOCK)) {
-        return false;
-    }
-
-    auto const descriptor_flags = get_descriptor_flags(fd, F_GETFD);
-    return descriptor_flags >= 0 && set_descriptor_flags(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) &&
-           disable_sigpipe(fd);
-}
-
 auto create_listener_socket() -> int
 {
     int fd;
@@ -138,7 +91,7 @@ auto create_listener_socket() -> int
     if (fd < 0) {
         return fd;
     }
-    if (configure_socket(fd)) {
+    if (priv::configure_socket(fd)) {
         return fd;
     }
 
@@ -446,7 +399,7 @@ auto LocalServer::listen(std::filesystem::path const& path, LocalServerOptions o
                 break;
             }
 
-            if (!configure_socket(accepted.get())) {
+            if (!priv::configure_socket(accepted.get())) {
                 auto const error = errno;
                 report_accept_error(native_open_error(error),
                                     system_error_message("local server accepted socket configuration failed", error));
@@ -480,9 +433,8 @@ auto LocalServer::listen(std::filesystem::path const& path, LocalServerOptions o
 
             auto* socket_data = private_data.get();
             auto  socket      = std::unique_ptr<LocalSocket>{
-                new LocalSocket{*socket_data, nullptr}
+                new LocalSocket{*private_data.release(), nullptr}
             };
-            static_cast<void>(private_data.release());
             static_cast<void>(accepted.release());
 
             if (!socket_data->update_watch(*socket)) {
