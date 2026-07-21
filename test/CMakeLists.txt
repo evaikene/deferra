@@ -260,17 +260,24 @@ add_executable(${TARGET} tcp-socket-test.cpp)
 target_link_libraries(${TARGET} PRIVATE net Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # Linux local socket test
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
+    # Platform local socket test
     set(TARGET "local-socket-test")
     add_executable(${TARGET}
         local-socket-test.cpp
         support/temporary_directory.cpp
     )
-    target_compile_definitions(${TARGET} PRIVATE _GNU_SOURCE)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(${TARGET} PRIVATE _GNU_SOURCE)
+    endif()
     target_link_libraries(${TARGET} PRIVATE net Catch2::Catch2WithMain)
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+    if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+        set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+    endif()
+endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # Linux local server test
     set(TARGET "local-server-test")
     add_executable(${TARGET}
