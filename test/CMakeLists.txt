@@ -289,8 +289,8 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
     endif()
 endif()
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # Linux local RPC integration test
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
+    # Platform local RPC integration test
     set(TARGET "local-rpc-test")
     add_executable(${TARGET}
         local-rpc-test.cpp
@@ -303,8 +303,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             Catch2::Catch2WithMain
     )
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+    if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+        set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+    endif()
 
-    # Linux foreground daemon and job control executable integration test
+    # Platform foreground daemon and job control executable integration test
     set(TARGET "jobuctl-system-info-test")
     add_executable(${TARGET}
         jobuctl-system-info-test.cpp
@@ -316,4 +319,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         COMMAND $<TARGET_FILE:${TARGET}> $<TARGET_FILE:jobud> $<TARGET_FILE:jobuctl> ${PROJECT_VERSION}
     )
     set_tests_properties(${TARGET} PROPERTIES TIMEOUT 15)
+    if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+        set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+    endif()
 endif()
