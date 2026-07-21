@@ -1,5 +1,6 @@
 #include "local_socket.hpp"
 
+#include "local_ipc_macos_priv.hpp"
 #include "local_socket_priv.hpp"
 
 #include <algorithm>
@@ -10,7 +11,6 @@
 #include <string_view>
 #include <utility>
 
-#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -47,53 +47,6 @@ void strip_crlf(std::string& line)
     }
 }
 
-auto get_descriptor_flags(int fd, int command) -> int
-{
-    for (;;) {
-        auto const flags = ::fcntl(fd, command, 0);
-        if (flags >= 0 || errno != EINTR) {
-            return flags;
-        }
-    }
-}
-
-auto set_descriptor_flags(int fd, int command, int flags) -> bool
-{
-    for (;;) {
-        if (::fcntl(fd, command, flags) == 0) {
-            return true;
-        }
-        if (errno != EINTR) {
-            return false;
-        }
-    }
-}
-
-auto disable_sigpipe(int fd) -> bool
-{
-    int yes = 1;
-    for (;;) {
-        if (::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &yes, sizeof(yes)) == 0) {
-            return true;
-        }
-        if (errno != EINTR) {
-            return false;
-        }
-    }
-}
-
-auto configure_socket(int fd) -> bool
-{
-    auto const status_flags = get_descriptor_flags(fd, F_GETFL);
-    if (status_flags < 0 || !set_descriptor_flags(fd, F_SETFL, status_flags | O_NONBLOCK)) {
-        return false;
-    }
-
-    auto const descriptor_flags = get_descriptor_flags(fd, F_GETFD);
-    return descriptor_flags >= 0 && set_descriptor_flags(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) &&
-           disable_sigpipe(fd);
-}
-
 auto create_socket() -> int
 {
     int fd;
@@ -106,7 +59,7 @@ auto create_socket() -> int
     if (fd < 0) {
         return fd;
     }
-    if (configure_socket(fd)) {
+    if (priv::configure_socket(fd)) {
         return fd;
     }
 

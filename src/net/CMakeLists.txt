@@ -28,7 +28,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     )
 elseif(CMAKE_SYSTEM_NAME MATCHES "Darwin")
     list(APPEND SRCS
+        local_server_macos.cpp
         local_socket_macos.cpp
+    )
+    list(APPEND PRIV_HDRS
+        local_ipc_macos_priv.hpp
     )
 endif()
 
