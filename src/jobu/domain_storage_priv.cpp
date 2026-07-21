@@ -98,6 +98,17 @@ auto read_positive_unsigned(jb::db::Record const& record, std::string_view field
     return StorageResult<Unsigned>::success(static_cast<Unsigned>(*integer));
 }
 
+template <typename Rep>
+auto nonnegative_duration_count_to_storage(Rep count) -> StorageResult<jb::db::Value>
+{
+    static_assert(std::is_integral_v<Rep>);
+    if (count < 0 || !std::in_range<std::int64_t>(count)) {
+        return StorageResult<jb::db::Value>::failure(
+            storage_error("jobu.storage.invalid_integer", "JobU duration cannot be persisted", {}, "out_of_range"));
+    }
+    return StorageResult<jb::db::Value>::success(static_cast<std::int64_t>(count));
+}
+
 auto json_error(std::string_view field, std::string_view reason) -> jb::core::Error
 {
     return storage_error("jobu.storage.invalid_json", "Persisted JSON document is invalid", field, reason);
@@ -289,11 +300,7 @@ auto optional_nonnegative_seconds_to_storage(std::optional<std::chrono::seconds>
     if (!value) {
         return StorageResult<jb::db::Value>::success(jb::db::Null{});
     }
-    if (value->count() < 0) {
-        return StorageResult<jb::db::Value>::failure(
-            storage_error("jobu.storage.invalid_integer", "JobU duration cannot be persisted", {}, "out_of_range"));
-    }
-    return StorageResult<jb::db::Value>::success(static_cast<std::int64_t>(value->count()));
+    return nonnegative_duration_count_to_storage(value->count());
 }
 
 auto read_optional_nonnegative_seconds(jb::db::Record const& record, std::string_view field)
@@ -320,11 +327,7 @@ auto read_optional_nonnegative_seconds(jb::db::Record const& record, std::string
 auto nonnegative_milliseconds_to_storage(std::chrono::milliseconds value)
     -> jb::core::Result<jb::db::Value, jb::core::Error>
 {
-    if (value.count() < 0) {
-        return StorageResult<jb::db::Value>::failure(
-            storage_error("jobu.storage.invalid_integer", "JobU duration cannot be persisted", {}, "out_of_range"));
-    }
-    return StorageResult<jb::db::Value>::success(static_cast<std::int64_t>(value.count()));
+    return nonnegative_duration_count_to_storage(value.count());
 }
 
 auto read_nonnegative_milliseconds(jb::db::Record const& record, std::string_view field)
