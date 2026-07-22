@@ -161,11 +161,15 @@ protected:
     ///
     /// Invokes all connected slots, dispatching Direct connections inline and
     /// posting Queued connections to the Events lane of their receiver's EventLoop.
+    /// Direct delivery borrows @p args for the duration of each slot invocation.
+    /// If any connection is queued, the signal creates one owning snapshot before
+    /// invoking the first slot and shares it between all queued deliveries. Signal
+    /// argument types used with queued delivery must therefore be copy-constructible.
     ///
     /// This overload handles Signal<Args...> with one or more parameters.
     /// The non-arg specialisation below handles Signal<>.
     template <typename... Args>
-    void emit(Signal<Args...>& signal, Args... args)
+    void emit(Signal<Args...>& signal, Args const&... args)
     {
         signal.emit(this, args...);
     }

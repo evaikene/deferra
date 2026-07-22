@@ -108,10 +108,10 @@ TEST_CASE("IODevice emits error_occurred for real errors", "[core][io]")
     IOError     last_error{IOError::NoError};
     std::string last_message;
 
-    device.error_occurred.connect([&](IOError error, std::string message) -> void {
+    device.error_occurred.connect([&](IOError error, std::string const& message) -> void {
         ++count;
         last_error   = error;
-        last_message = std::move(message);
+        last_message = message;
     });
 
     device.set_error(IOError::WriteError, "write failed");
@@ -126,8 +126,7 @@ TEST_CASE("IODevice does not emit error_occurred for NoError", "[core][io]")
     TestDevice device;
     int        count = 0;
 
-    device.error_occurred.connect(
-        [&](IOError, std::string) -> void { ++count; }); // NOLINT(performance-unnecessary-value-param)
+    device.error_occurred.connect([&](IOError, std::string const&) -> void { ++count; });
 
     device.set_error(IOError::NoError, "");
 

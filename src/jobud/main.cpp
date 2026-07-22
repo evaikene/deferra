@@ -100,8 +100,8 @@ auto main(int argc, char* argv[]) -> int
         }
     });
     local_server.accept_error.connect(
-        [](IOError, std::string message) -> void { log_error("Local server accept error: {}", message); });
-    rpc_server.connection_error.connect([](ConnectionId, Error error) -> void {
+        [](IOError, std::string const& message) -> void { log_error("Local server accept error: {}", message); });
+    rpc_server.connection_error.connect([](ConnectionId, Error const& error) -> void {
         log_error("RPC connection error: {} ({})", error.message, error.code);
     });
 

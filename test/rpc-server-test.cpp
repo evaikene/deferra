@@ -268,7 +268,7 @@ TEST_CASE("Server rejects invalid devices and destroys transferred ownership", "
         auto        errors = 0;
         server.connection_opened.connect([&opened](ConnectionId) { ++opened; });
         server.connection_closed.connect([&closed](ConnectionId) { ++closed; });
-        server.connection_error.connect([&errors](ConnectionId, Error) { ++errors; });
+        server.connection_error.connect([&errors](ConnectionId, Error const&) { ++errors; });
 
         auto null_result = server.add_connection(nullptr);
         REQUIRE_FALSE(null_result);
@@ -627,7 +627,7 @@ TEST_CASE("Parse and invalid-request errors keep a healthy connection open", "[r
     Application app{0, nullptr};
     Server      server;
     auto        protocol_errors = 0;
-    server.connection_error.connect([&protocol_errors](ConnectionId, Error) { ++protocol_errors; });
+    server.connection_error.connect([&protocol_errors](ConnectionId, Error const&) { ++protocol_errors; });
     REQUIRE(server.register_method("ok", null_success_handler()));
     auto connection = attach(server);
 
@@ -802,7 +802,7 @@ TEST_CASE("Every framing failure is terminal only for its connection", "[rpc][se
     Application app{0, nullptr};
     Server      server;
     auto        events = std::vector<std::string>{};
-    server.connection_error.connect([&events](ConnectionId, Error error) {
+    server.connection_error.connect([&events](ConnectionId, Error const& error) {
         events.push_back("error:" + error.code);
         CHECK(error.detail.empty());
     });
@@ -842,7 +842,7 @@ TEST_CASE("Response framing failures close only the affected connection", "[rpc]
             return MethodResult::success(make_json(std::string(200U, 'x')));
         }));
         auto code = std::string{};
-        server.connection_error.connect([&code](ConnectionId, Error error) { code = std::move(error.code); });
+        server.connection_error.connect([&code](ConnectionId, Error const& error) { code = error.code; });
         auto connection = attach(server);
         connection.device->inject_input(request_frame(std::uint64_t{1}, "large"));
         CHECK(code == "rpc.framing.body_too_large");
@@ -867,7 +867,7 @@ TEST_CASE("Response framing failures close only the affected connection", "[rpc]
             return MethodResult::success(make_json(std::string(200U, 'x')));
         }));
         auto code = std::string{};
-        server.connection_error.connect([&code](ConnectionId, Error error) { code = std::move(error.code); });
+        server.connection_error.connect([&code](ConnectionId, Error const& error) { code = error.code; });
         auto connection = attach(server);
         connection.device->inject_input(request);
         CHECK(code == "rpc.framing.header_too_large");
@@ -881,7 +881,7 @@ TEST_CASE("Short writes report an I/O failure before closing", "[rpc][server][fa
     Server      server;
     REQUIRE(server.register_method("reply", null_success_handler()));
     auto events = std::vector<std::string>{};
-    server.connection_error.connect([&events](ConnectionId, Error error) {
+    server.connection_error.connect([&events](ConnectionId, Error const& error) {
         events.emplace_back("error");
         CHECK(error.category == ErrorCategory::Io);
         CHECK(error.code == "rpc.short_write");
@@ -928,8 +928,8 @@ TEST_CASE("Queued output accounting enforces exact and one-over boundaries", "[r
         REQUIRE(server.register_method("reply", null_success_handler()));
         auto error = Error{};
         auto seen  = false;
-        server.connection_error.connect([&](ConnectionId, Error value) {
-            error = std::move(value);
+        server.connection_error.connect([&](ConnectionId, Error const& value) {
+            error = value;
             seen  = true;
         });
         auto connection = attach(server);
@@ -1024,8 +1024,8 @@ TEST_CASE("Device errors use stable category mapping and signal order", "[rpc][s
     Server      server;
     auto        events   = std::vector<std::string>{};
     auto        observed = Error{};
-    server.connection_error.connect([&](ConnectionId, Error error) {
-        observed = std::move(error);
+    server.connection_error.connect([&](ConnectionId, Error const& error) {
+        observed = error;
         events.emplace_back("error");
     });
     server.connection_closed.connect([&](ConnectionId) { events.emplace_back("closed"); });
@@ -1063,7 +1063,7 @@ TEST_CASE("Normal close operations are idempotent and emit no connection error",
     auto        closed = std::vector<ConnectionId>{};
     auto        errors = 0;
     server.connection_closed.connect([&closed](ConnectionId id) { closed.push_back(id); });
-    server.connection_error.connect([&errors](ConnectionId, Error) { ++errors; });
+    server.connection_error.connect([&errors](ConnectionId, Error const&) { ++errors; });
 
     server.close_connection(999U);
     auto first = attach(server);

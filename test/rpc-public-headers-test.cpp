@@ -22,10 +22,10 @@ void compile_client_api(jb::core::IODevice& device, jb::core::Object* parent)
     client.cancel(jb::rpc::RequestId{std::uint64_t{1}});
     static_cast<void>(client.pending_request_count());
 
-    auto result       = client.result_received.connect([](jb::rpc::RequestId, jb::rpc::JsonValue) {});
-    auto remote_error = client.error_received.connect([](jb::rpc::RequestId, jb::rpc::RpcError) {});
-    auto failed       = client.request_failed.connect([](jb::rpc::RequestId, jb::core::Error) {});
-    auto protocol     = client.protocol_error.connect([](jb::core::Error) {});
+    auto result       = client.result_received.connect([](jb::rpc::RequestId const&, jb::rpc::JsonValue const&) {});
+    auto remote_error = client.error_received.connect([](jb::rpc::RequestId const&, jb::rpc::RpcError const&) {});
+    auto failed       = client.request_failed.connect([](jb::rpc::RequestId const&, jb::core::Error const&) {});
+    auto protocol     = client.protocol_error.connect([](jb::core::Error const&) {});
     result.disconnect();
     remote_error.disconnect();
     failed.disconnect();
@@ -69,7 +69,7 @@ auto main() -> int
 
     auto opened = server.connection_opened.connect([](jb::rpc::ConnectionId) {});
     auto closed = server.connection_closed.connect([](jb::rpc::ConnectionId) {});
-    auto failed = server.connection_error.connect([](jb::rpc::ConnectionId, jb::core::Error) {});
+    auto failed = server.connection_error.connect([](jb::rpc::ConnectionId, jb::core::Error const&) {});
     opened.disconnect();
     closed.disconnect();
     failed.disconnect();

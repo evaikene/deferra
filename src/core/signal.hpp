@@ -20,7 +20,7 @@ struct ObjectLifetime;
 }
 
 /// Type-safe, thread-aware signal for the signal-slot system.
-/// @tparam Args Parameter types of the signal; may be empty (Signal<>)
+/// @tparam Args Owning, non-reference parameter types of the signal; may be empty (Signal<>)
 ///
 /// A Signal<Args...> is a value member of an Object subclass. Zero or more slots
 /// can be connected to it; emitting the signal calls all live slots.
@@ -67,11 +67,17 @@ struct ObjectLifetime;
 /// subscription bookkeeping. These operations are therefore available through
 /// a const Signal and do not modify the logical state of the owning Object.
 ///
-/// Queued connections and copyability:
+/// Argument ownership and queued connections:
 ///
-/// For Queued (cross-thread) delivery, all @p Args are captured by value and each
-/// argument type must therefore be copyable (or at least movable). Queued
-/// delivery runs when the receiver's EventLoop processes EventFlag::Events.
+/// Direct delivery borrows the emitted objects and presents them to stored slots
+/// as immutable references. Those references remain valid only for the duration
+/// of the slot invocation; a slot must copy any argument that it retains.
+///
+/// Before an emission with one or more Queued (cross-thread) deliveries invokes
+/// any slot, the signal creates one immutable owning snapshot and shares it among
+/// all queued tasks. Each argument type used for queued delivery must therefore
+/// be copy-constructible. Queued delivery runs when the receiver's EventLoop
+/// processes EventFlag::Events.
 ///
 template <typename... Args>
 class Signal {
@@ -89,12 +95,14 @@ public:
 
     /// Connect to a member function of an Object-derived @p receiver.
     /// @param[in] receiver Receiver object derived from Object
-    /// @param[in] slot Any callable compatible with `void(Args...)`
+    /// @param[in] slot Any callable compatible with invocation as `void(Args const&...)`
     /// @param[in] type Connection type (default: Auto)
     /// @return A connection handle; keep it to disconnect later
     ///
-    /// The slot type is checked at compile time: it must be callable with
-    /// `Args...`.
+    /// The slot type is checked at compile time against borrowed, immutable
+    /// `Args const&...` arguments. A compatible value-taking slot remains valid
+    /// and makes its own copy. A slot that retains an argument beyond the
+    /// invocation must copy it explicitly.
     ///
     /// Typical use:
     ///
@@ -108,11 +116,14 @@ public:
     auto connect(Receiver* receiver, Slot&& slot, ConnectionType type = ConnectionType::Auto) const -> Connection;
 
     /// Connect to a callable with no Object receiver
-    /// @param[in] callable Any callable compatible with `void(Args...)`
+    /// @param[in] callable Any callable compatible with invocation as `void(Args const&...)`
     /// @return A connection handle; keep it to disconnect later
     ///
     /// Lambda connections are always Direct: the callable is invoked in the emitting
-    /// thread. The ConnectionType parameter is intentionally absent.
+    /// thread. The ConnectionType parameter is intentionally absent. Arguments are
+    /// borrowed for the duration of the invocation; a callable that retains an
+    /// argument must copy it explicitly. Compatible value-taking callables remain
+    /// valid and make their own copies.
     template <typename Callable>
     auto connect(Callable&& callable) const -> Connection;
 
@@ -140,17 +151,17 @@ private:
 
     /// Internal emit entry point, called by Object::emit()
     /// @param[in] sender The Object that is emitting the signal
-    /// @param[in] args Signal arguments (passed by value; copied for Queued)
-    void emit(Object* sender, Args... args) const;
+    /// @param[in] args Signal arguments borrowed for Direct delivery and copied once for Queued delivery
+    void emit(Object* sender, Args const&... args) const;
 
     /// One slot connected to this signal.
     struct TypedConn : priv::ConnectionBase {
-        std::function<void(Args...)>        slot;
+        std::function<void(Args const&...)> slot;
         Object*                             receiver{nullptr}; ///< nullptr for lambda connections
         std::weak_ptr<priv::ObjectLifetime> receiver_lifetime;
         ConnectionType                      conn_type{ConnectionType::Auto};
 
-        void invoke(Args... args)
+        void invoke(Args const&... args)
         {
             if (slot) {
                 slot(args...);

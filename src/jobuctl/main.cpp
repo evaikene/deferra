@@ -108,10 +108,10 @@ auto main(int argc, char* argv[]) -> int
 
     socket.set_read_buffer_limit(2U * 1024U * 1024U);
     socket.error_occurred.connect(
-        [&finish_operator_error](IOError, std::string message) -> void { finish_operator_error(message); });
+        [&finish_operator_error](IOError, std::string const& message) -> void { finish_operator_error(message); });
     socket.connected.connect([&]() -> void {
         client = std::make_unique<Client>(socket);
-        client->result_received.connect([&](RequestId, JsonValue value) -> void {
+        client->result_received.connect([&](RequestId const&, JsonValue const& value) -> void {
             auto info = system_info_from_json(value);
             if (!info) {
                 log_error("Invalid system.info response: {} ({})", info.error().message, info.error().code);
@@ -121,16 +121,17 @@ auto main(int argc, char* argv[]) -> int
             print_system_info(info.value());
             finish(EXIT_SUCCESS);
         });
-        client->error_received.connect([&finish, &finished](RequestId, RpcError error) -> void {
+        client->error_received.connect([&finish, &finished](RequestId const&, RpcError const& error) -> void {
             if (finished) {
                 return;
             }
             fmt::print(stderr, "jobuctl: remote RPC error {}: {}\n", error.code, error.message);
             finish(EXIT_FAILURE);
         });
-        client->request_failed.connect(
-            [&finish_operator_error](RequestId, Error error) -> void { finish_operator_error(error.message); });
-        client->protocol_error.connect([&finish, &finished](Error error) -> void {
+        client->request_failed.connect([&finish_operator_error](RequestId const&, Error const& error) -> void {
+            finish_operator_error(error.message);
+        });
+        client->protocol_error.connect([&finish, &finished](Error const& error) -> void {
             if (finished) {
                 return;
             }

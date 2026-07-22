@@ -10,6 +10,7 @@
 #include "object_priv.hpp"
 
 #include <algorithm>
+#include <tuple>
 #include <type_traits>
 
 namespace jb::core {
@@ -32,11 +33,15 @@ auto Signal<Args...>::connect(Receiver* receiver, Slot&& slot, ConnectionType ty
     conn->receiver_lifetime = receiver->lifetime();
 
     if constexpr (std::is_member_function_pointer_v<std::decay_t<Slot>>) {
+        static_assert(std::is_invocable_r_v<void, std::decay_t<Slot>, Receiver*, Args const&...>,
+                      "Signal::connect: member slot must be callable with the receiver and borrowed signal arguments");
         // member-function pointer: bind the receiver so the stored function only
-        // needs to be called with (Args...)
-        conn->slot = [r = receiver, s = std::forward<Slot>(slot)](Args... args) -> void { (r->*s)(args...); };
+        // needs to be called with borrowed signal arguments.
+        conn->slot = [r = receiver, s = std::forward<Slot>(slot)](Args const&... args) -> void { (r->*s)(args...); };
     }
     else {
+        static_assert(std::is_invocable_r_v<void, std::decay_t<Slot>&, Args const&...>,
+                      "Signal::connect: slot must be callable with borrowed signal arguments");
         // already a free callable (lambda, std::function, etc.) - store directly
         // the receiver is still registered for lifetime tracking.
         conn->slot = std::forward<Slot>(slot);
@@ -58,6 +63,9 @@ template <typename... Args>
 template <typename Callable>
 auto Signal<Args...>::connect(Callable&& callable) const -> Connection
 {
+    static_assert(std::is_invocable_r_v<void, std::decay_t<Callable>&, Args const&...>,
+                  "Signal::connect: callable must accept borrowed signal arguments");
+
     auto conn       = std::make_shared<TypedConn>();
     conn->slot      = std::forward<Callable>(callable);
     conn->conn_type = ConnectionType::Direct;
@@ -94,8 +102,10 @@ void Signal<Args...>::disconnect_all() const noexcept
 // Signal<Args...>::emit
 
 template <typename... Args>
-void Signal<Args...>::emit(Object* sender, Args... args) const
+void Signal<Args...>::emit(Object* sender, Args const&... args) const
 {
+    static_assert((!std::is_reference_v<Args> && ...), "Signal arguments must be owning (non-reference) types");
+
     //--- 1. snapshot the live connections under the lock
     // We prune dead connections while holding the mutex, then release it before
     // invoking any slot (re-entrancy: slots may connect/disconnect)
@@ -111,15 +121,24 @@ void Signal<Args...>::emit(Object* sender, Args... args) const
         snapshot = _connections;
     }
 
-    //--- 2. dispatch each connection
-    for (auto& c : snapshot) {
+    //--- 2. resolve routing before invoking user code
+    struct Delivery {
+        std::shared_ptr<TypedConn>            connection;
+        EventLoop*                            event_loop{nullptr}; // nullptr means Direct
+        std::shared_ptr<priv::ObjectLifetime> receiver_lifetime;
+    };
+
+    std::vector<Delivery> deliveries;
+    deliveries.reserve(snapshot.size());
+    bool has_queued_delivery = false;
+
+    for (auto const& c : snapshot) {
         if (!c->active.load(std::memory_order_acquire)) {
-            continue; // deactivated between snapshot and now
+            continue;
         }
 
         if (c->conn_type == ConnectionType::Direct) {
-            // synchronous: invoke in the current (sender's) thread
-            c->invoke(args...);
+            deliveries.push_back({c});
             continue;
         }
 
@@ -137,24 +156,54 @@ void Signal<Args...>::emit(Object* sender, Args... args) const
         if (c->conn_type == ConnectionType::Auto && (!event_loop || sender->event_loop() == event_loop)) {
             // Auto is direct when the sender and receiver share an EventLoop,
             // or when the receiver has no EventLoop (e.g. pre-Application).
-            lock.unlock();
-            c->invoke(args...);
+            deliveries.push_back({c});
             continue;
         }
 
-        // asynchronous: capture args by value and post to the receiver's
-        // lifetime-aware object-event lane
         if (!event_loop) {
             log_error("Signal::emit: cannot post to receiver with no EventLoop");
             continue;
         }
-        Object::post_event_delivery(event_loop,
+
+        deliveries.push_back({c, event_loop, std::move(lifetime)});
+        has_queued_delivery = true;
+    }
+
+    //--- 3. snapshot queued arguments before any direct slot can mutate source state
+    using QueuedPayload = std::tuple<Args...>;
+    std::shared_ptr<QueuedPayload const> queued_payload;
+    if (has_queued_delivery) {
+        queued_payload = std::make_shared<QueuedPayload const>(args...);
+    }
+
+    //--- 4. dispatch in connection order
+    for (auto const& delivery : deliveries) {
+        auto const& c = delivery.connection;
+        if (!c->active.load(std::memory_order_acquire)) {
+            continue;
+        }
+
+        if (!delivery.event_loop) {
+            c->invoke(args...);
+            continue;
+        }
+
+        auto const&     lifetime = delivery.receiver_lifetime;
+        std::lock_guard lock{lifetime->event_loop_mx};
+        if (!c->active.load(std::memory_order_acquire) || !lifetime->alive.load(std::memory_order_acquire) ||
+            lifetime->event_loop != delivery.event_loop) {
+            continue;
+        }
+
+        Object::post_event_delivery(delivery.event_loop,
                                     c->receiver,
-                                    c->receiver_lifetime,
-                                    [c, ... captured_args = args]() mutable -> auto {
-                                        if (c->active.load(std::memory_order_acquire)) {
-                                            c->invoke(captured_args...);
+                                    lifetime,
+                                    [c, payload = queued_payload]() -> void {
+                                        if (!c->active.load(std::memory_order_acquire)) {
+                                            return;
                                         }
+                                        std::apply([&c](auto const&... values) -> void { c->invoke(values...); },
+                                                   *payload);
                                     });
     }
 }

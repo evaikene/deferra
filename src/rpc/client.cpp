@@ -157,7 +157,7 @@ Client::Private::Private(Client& client, jb::core::IODevice& client_device, Clie
         private_data->acknowledge_output(bytes);
     });
     error_connection =
-        device->error_occurred.connect(&owner, [private_data](jb::core::IOError error, std::string) -> void {
+        device->error_occurred.connect(&owner, [private_data](jb::core::IOError error, std::string const&) -> void {
             private_data->handle_device_error(error);
         });
     closed_connection = device->closed.connect(&owner, [private_data]() -> void {
