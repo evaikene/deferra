@@ -665,8 +665,7 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
         .expected_revision = 1,
         .name              = std::optional<std::optional<std::string>>{std::in_place, std::nullopt},
         .type              = JobType::Http,
-        .schedule          = once_at(UtcTimePoint{20s}
-                       ),
+        .schedule          = once_at(UtcTimePoint{20s}),
         .priority          = 9,
         .attribute_changes = {{"job.timeout", {.data = 30s}}},
         .payload           = replacement_payload,
