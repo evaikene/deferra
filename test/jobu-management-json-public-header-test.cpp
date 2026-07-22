@@ -15,6 +15,18 @@ static_assert(std::is_same_v<
                                                                                   jb::jobu::AttributeRegistry const&)>);
 static_assert(std::is_same_v<decltype(&jb::jobu::update_queue_request_to_json),
                              JsonResult (*)(jb::jobu::UpdateQueueRequest const&, jb::jobu::AttributeRegistry const&)>);
+static_assert(
+    std::is_same_v<decltype(&jb::jobu::job_from_json),
+                   jb::core::Result<jb::jobu::JobDefinition, jb::core::Error> (*)(jb::rpc::JsonValue const&,
+                                                                                  jb::jobu::AttributeRegistry const&)>);
+static_assert(std::is_same_v<decltype(&jb::jobu::create_job_request_to_json),
+                             JsonResult (*)(jb::jobu::CreateJobRequest const&, jb::jobu::AttributeRegistry const&)>);
+static_assert(std::is_same_v<
+              decltype(&jb::jobu::update_job_request_from_json),
+              jb::core::Result<jb::jobu::UpdateJobRequest, jb::core::Error> (*)(jb::rpc::JsonValue const&,
+                                                                                jb::jobu::AttributeRegistry const&)>);
+static_assert(
+    std::is_same_v<decltype(&jb::jobu::move_job_request_to_json), JsonResult (*)(jb::jobu::MoveJobRequest const&)>);
 
 auto main() -> int
 {
