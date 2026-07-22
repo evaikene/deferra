@@ -5,6 +5,7 @@
 #include "query.hpp"
 #include "value.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -20,6 +21,8 @@ using RepositoryResult = jb::core::Result<T, jb::core::Error>;
 
 constexpr std::size_t kMaximumJsonDocumentBytes = 256U * 1024U;
 constexpr std::size_t kMaximumRetentionBatch    = 1000U;
+// Keep each statement below conservative database parameter ceilings; the retention transaction makes chunks atomic.
+constexpr std::size_t kMaximumRunIdsPerDelete   = 500U;
 
 constexpr auto kRunSelection =
     "SELECT id AS run_id, job_id AS run_job_id, job_revision AS run_job_revision, queue_id AS run_queue_id, "
@@ -338,6 +341,38 @@ auto count_running(jb::db::Database& database, std::string_view selector, jb::co
         return RepositoryResult<std::uint64_t>::failure(invalid_run("invalid_count"));
     }
     return RepositoryResult<std::uint64_t>::success(static_cast<std::uint64_t>(*count));
+}
+
+auto delete_terminal_chunk(jb::db::Database& database, std::span<jb::core::Uuid const> run_ids)
+    -> RepositoryResult<std::size_t>
+{
+    auto sql = std::string{
+        "DELETE FROM jobu_runs WHERE state IN ('succeeded', 'failed', 'interrupted', 'cancelled') AND id IN ("};
+    for (std::size_t index = 0; index < run_ids.size(); ++index) {
+        if (index != 0) {
+            sql += ", ";
+        }
+        sql += ":id" + std::to_string(index);
+    }
+    sql += ")";
+
+    jb::db::Query query{database};
+    auto          prepared = query.prepare(sql);
+    if (!prepared) {
+        return RepositoryResult<std::size_t>::failure(std::move(prepared).error());
+    }
+    for (std::size_t index = 0; index < run_ids.size(); ++index) {
+        auto placeholder = ":id" + std::to_string(index);
+        auto bound       = query.bind_value(placeholder, uuid_to_storage(run_ids[index]));
+        if (!bound) {
+            return RepositoryResult<std::size_t>::failure(std::move(bound).error());
+        }
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<std::size_t>::failure(std::move(executed).error());
+    }
+    return affected_rows(query);
 }
 
 } // anonymous namespace
@@ -687,33 +722,16 @@ auto RunRepository::delete_selected_terminal(std::span<jb::core::Uuid const> run
         return RepositoryResult<std::size_t>::failure(invalid_limit());
     }
 
-    auto sql = std::string{
-        "DELETE FROM jobu_runs WHERE state IN ('succeeded', 'failed', 'interrupted', 'cancelled') AND id IN ("};
-    for (std::size_t index = 0; index < run_ids.size(); ++index) {
-        if (index != 0) {
-            sql += ", ";
+    auto deleted = std::size_t{0};
+    for (std::size_t offset = 0; offset < run_ids.size(); offset += kMaximumRunIdsPerDelete) {
+        auto const size  = std::min(kMaximumRunIdsPerDelete, run_ids.size() - offset);
+        auto       chunk = delete_terminal_chunk(_database, run_ids.subspan(offset, size));
+        if (!chunk) {
+            return RepositoryResult<std::size_t>::failure(std::move(chunk).error());
         }
-        sql += ":id" + std::to_string(index);
+        deleted += *chunk;
     }
-    sql += ")";
-
-    jb::db::Query query{_database};
-    auto          prepared = query.prepare(sql);
-    if (!prepared) {
-        return RepositoryResult<std::size_t>::failure(std::move(prepared).error());
-    }
-    for (std::size_t index = 0; index < run_ids.size(); ++index) {
-        auto placeholder = ":id" + std::to_string(index);
-        auto bound       = query.bind_value(placeholder, uuid_to_storage(run_ids[index]));
-        if (!bound) {
-            return RepositoryResult<std::size_t>::failure(std::move(bound).error());
-        }
-    }
-    auto executed = query.exec();
-    if (!executed) {
-        return RepositoryResult<std::size_t>::failure(std::move(executed).error());
-    }
-    return affected_rows(query);
+    return RepositoryResult<std::size_t>::success(deleted);
 }
 
 } // namespace jb::jobu::detail

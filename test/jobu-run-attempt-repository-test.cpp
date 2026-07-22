@@ -572,6 +572,40 @@ TEST_CASE("Run movement cancellation and terminal deletion preserve lifecycle bo
     CHECK(preserved_running->has_value());
 }
 
+TEST_CASE("Run retention deletion preserves the maximum batch contract", "[jobu][run][sqlite]")
+{
+    RepositoryFixture fixture;
+    auto const        queue_id = id(70);
+    auto const        job_id   = id(71);
+    insert_queue(fixture.database, queue_id, "primary");
+    insert_job(fixture.database, job_id, queue_id);
+
+    auto first  = make_run(fixture.registry, id(72), job_id, queue_id, RunState::Succeeded);
+    auto second = make_run(fixture.registry, id(73), job_id, queue_id, RunState::Failed);
+    REQUIRE(fixture.runs.insert_schedule_owned(first));
+    REQUIRE(fixture.runs.insert_schedule_owned(second));
+
+    auto delete_ids    = std::vector<Uuid>(1000U, id(99));
+    delete_ids.front() = first.id;
+    delete_ids.back()  = second.id;
+    {
+        auto begun = Transaction::begin(fixture.database);
+        REQUIRE(begun);
+        auto transaction = std::move(begun).value();
+        auto deleted     = fixture.runs.delete_selected_terminal(delete_ids);
+        REQUIRE(deleted);
+        CHECK(*deleted == 2);
+        REQUIRE(transaction.commit());
+    }
+
+    auto persisted_first = fixture.runs.find_by_id(first.id);
+    REQUIRE(persisted_first);
+    CHECK_FALSE(persisted_first->has_value());
+    auto persisted_second = fixture.runs.find_by_id(second.id);
+    REQUIRE(persisted_second);
+    CHECK_FALSE(persisted_second->has_value());
+}
+
 TEST_CASE("Run repository rejects malformed persisted snapshot documents", "[jobu][run][storage]")
 {
     RepositoryFixture fixture;

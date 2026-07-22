@@ -266,6 +266,30 @@ auto has_row(jb::db::Database& database, std::string_view sql, jb::core::Uuid co
     return query.next();
 }
 
+auto output_exists(jb::db::Database& database, jb::core::Uuid const& run_id, jb::db::Value attempt_number)
+    -> RepositoryResult<bool>
+{
+    jb::db::Query query{database};
+    auto          prepared = query.prepare("SELECT 1 FROM jobu_attempt_output WHERE run_id = :run_id "
+                                           "AND attempt_number = :attempt_number LIMIT 1");
+    if (!prepared) {
+        return RepositoryResult<bool>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":run_id",         uuid_to_storage(run_id)  },
+                              {":attempt_number", std::move(attempt_number)},
+    });
+    if (!bound) {
+        return RepositoryResult<bool>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<bool>::failure(std::move(executed).error());
+    }
+    return query.next();
+}
+
 } // anonymous namespace
 
 AttemptRepository::AttemptRepository(jb::db::Database& database) noexcept
@@ -409,18 +433,18 @@ auto AttemptRepository::insert_or_replace_output(jb::core::Uuid const& run_id,
                                                  AttemptNumber         attempt_number,
                                                  AttemptOutput const& output) -> jb::core::Result<void, jb::core::Error>
 {
-    auto existing = find_output(run_id, attempt_number);
-    if (!existing) {
-        return RepositoryResult<void>::failure(std::move(existing).error());
-    }
     auto number = attempt_number_to_storage(attempt_number);
     if (!number) {
         return RepositoryResult<void>::failure(std::move(number).error());
     }
+    auto existing = output_exists(_database, run_id, *number);
+    if (!existing) {
+        return RepositoryResult<void>::failure(std::move(existing).error());
+    }
 
     jb::db::Query query{_database};
     auto          prepared =
-        existing->has_value()
+        *existing
             ? query.prepare("UPDATE jobu_attempt_output SET stdout_blob = :stdout_blob, stderr_blob = :stderr_blob, "
                             "stdout_truncated = :stdout_truncated, stderr_truncated = :stderr_truncated, "
                             "capture_lost = :capture_lost WHERE run_id = :run_id "
