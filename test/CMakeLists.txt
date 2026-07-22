@@ -38,6 +38,12 @@ add_executable(${TARGET} system-info-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU transport-independent management JSON test
+set(TARGET "management-json-test")
+add_executable(${TARGET} management-json-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Test support test
 set(TARGET "test-support-test")
 add_executable(${TARGET}
@@ -152,7 +158,7 @@ target_link_libraries(${TARGET} PRIVATE jobu)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JobU public headers added by Phase 3 must each compile as the first include.
-foreach(JOBU_DOMAIN_HEADER IN ITEMS attempt attribute-registry job management queue run secret utc-timestamp)
+foreach(JOBU_DOMAIN_HEADER IN ITEMS attempt attribute-registry job management management-json queue run secret utc-timestamp)
     set(TARGET "jobu-${JOBU_DOMAIN_HEADER}-public-header-test")
     add_executable(${TARGET} "${TARGET}.cpp")
     target_link_libraries(${TARGET} PRIVATE jobu)

@@ -10,6 +10,7 @@
 #include "job.hpp"
 #include "jobu.hpp"
 #include "management.hpp"
+#include "management_json.hpp"
 #include "query.hpp"
 #include "queue.hpp"
 #include "record.hpp"
