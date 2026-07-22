@@ -19,6 +19,10 @@ target_sources(${TARGET}
         attempt_repository_priv.hpp
         domain_storage_priv.cpp
         domain_storage_priv.hpp
+        job_repository_priv.cpp
+        job_repository_priv.hpp
+        job_validation_priv.cpp
+        job_validation_priv.hpp
         jobu.cpp
         management.cpp
         queue_repository_priv.cpp
@@ -29,6 +33,8 @@ target_sources(${TARGET}
         run_repository_priv.hpp
         system_info.cpp
         system_info_priv.hpp
+        text_validation_priv.cpp
+        text_validation_priv.hpp
         utc_timestamp.cpp
     PUBLIC
         attempt.hpp

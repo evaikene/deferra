@@ -1,10 +1,11 @@
 /** @file management.hpp
- * @brief Defines the synchronous JobU management service and queue requests.
+ * @brief Defines the synchronous JobU management service and queue/job requests.
  */
 #pragma once
 
 #include "attribute.hpp"
 #include "error.hpp"
+#include "job.hpp"
 #include "queue.hpp"
 #include "result.hpp"
 #include "time_source.hpp"
@@ -41,6 +42,14 @@ struct QueuePage {
     /// Queues in deterministic UUID order.
     std::vector<Queue>            items;
     /// ID of the last returned queue when another page exists.
+    std::optional<jb::core::Uuid> next_after_id;
+};
+
+/// One bounded page of job definitions ordered by ascending UUID bytes.
+struct JobPage {
+    /// Job definitions in deterministic UUID order.
+    std::vector<JobDefinition>    items;
+    /// ID of the last returned job when another page exists.
     std::optional<jb::core::Uuid> next_after_id;
 };
 
@@ -99,16 +108,54 @@ struct QueueListRequest {
     PageOptions               page;
 };
 
+/** Values used to create one active one-time job and its scheduled run.
+ *
+ * Phase 3 accepts only OnceSchedule. The supplied job attribute layer is materialized over built-in, daemon, and
+ * resolved queue defaults before persistence. The payload remains owning and preserves unknown additive members.
+ */
+struct CreateJobRequest {
+    /// Existing non-deleted queue selected by UUID or exact user-facing name.
+    QueueSelector              queue;
+    /// Optional non-unique display name containing at most 256 valid UTF-8 bytes and no ASCII controls.
+    std::optional<std::string> name;
+    /// Runner family whose structural payload rules are applied.
+    JobType                    type{JobType::Cli};
+    /// One-time schedule accepted by Phase 3; CronSchedule returns `jobu.schedule.cron_unavailable`.
+    JobSchedule                schedule;
+    /// Signed scheduling priority copied into the run snapshot.
+    std::int32_t               priority{0};
+    /// Partial job-specific attribute layer.
+    AttributeSet               attributes;
+    /// Owning CLI or HTTP payload object, limited to 256 KiB when deterministically encoded.
+    jb::rpc::JsonValue         payload;
+    /// Optional 1-through-128-byte UTF-8 key reserved for durable create replay.
+    std::optional<std::string> idempotency_key;
+};
+
+/// Filters and bounds for listing job definitions.
+struct JobListRequest {
+    /// Optional queue selector. Deleted queues are visible only when include_deleted is true.
+    std::optional<QueueSelector> queue;
+    /// Includes soft-deleted job definitions when true.
+    bool                         include_deleted{false};
+    /// Restricts results to one lifecycle state when supplied.
+    std::optional<JobState>      state;
+    /// Restricts results to one runner family when supplied.
+    std::optional<JobType>       type;
+    /// UUID keyset and requested page size.
+    PageOptions                  page;
+};
+
 /** Synchronous owner-thread service for durable JobU management operations.
  *
  * The service borrows an already-open Database, AttributeRegistry, UuidGenerator, and TimeSource; each collaborator
  * must outlive the service. All calls must run on the Database owner thread. The daemon-default attribute layer is
  * validated and copied during construction; a validation failure is returned by subsequent operations.
  *
- * Queue gets and lists use one statement without an explicit transaction. Queue creates and updates use one immediate
- * transaction and return only after commit. Errors include stable `jobu.queue.*`, `jobu.attribute.*`, and
- * `jobu.idempotency.*` codes plus unchanged database errors when no domain mapping applies. Methods invoke no
- * callbacks, start no threads, and perform no event-loop processing or external I/O.
+ * Queue/job gets and lists use bounded repository reads without an explicit transaction. Creates and queue updates use
+ * one immediate transaction and return only after commit. Errors include stable `jobu.queue.*`, `jobu.job.*`,
+ * `jobu.attribute.*`, and `jobu.idempotency.*` codes plus unchanged database errors when no domain mapping applies.
+ * Methods invoke no callbacks, start no threads, and perform no event-loop processing or external I/O.
  */
 class ManagementService final {
 public:
@@ -165,6 +212,29 @@ public:
      * Error. Queue-default changes affect only jobs created later.
      */
     [[nodiscard]] auto update_queue(UpdateQueueRequest const& request) -> jb::core::Result<Queue, jb::core::Error>;
+
+    /** Creates one active one-time job and its scheduled run in one immediate transaction.
+     * @param request Queue selector, definition fields, partial attributes, owning payload, and optional idempotency
+     * key. The key is syntax-checked; durable replay semantics are introduced with the idempotency repository.
+     * @return Committed revision-1 definition, or a queue, schedule, validation, generator, attribute, run, or database
+     * Error. No attempt is created and no external work starts.
+     */
+    [[nodiscard]] auto create_job(CreateJobRequest const& request) -> jb::core::Result<JobDefinition, jb::core::Error>;
+
+    /** Gets one job definition by stable ID without starting an explicit transaction.
+     * @param id Stable job-definition UUID.
+     * @param include_deleted Permits lookup of a soft-deleted definition.
+     * @return Job definition, `jobu.job.not_found`, or a storage/database Error.
+     */
+    [[nodiscard]] auto get_job(jb::core::Uuid const& id, bool include_deleted = false)
+        -> jb::core::Result<JobDefinition, jb::core::Error>;
+
+    /** Lists a bounded page using ascending UUID-byte keyset order.
+     * @param request Optional queue/state/type/deletion filters and a limit from 1 through 200. A queue name is
+     * resolved exactly before listing; deleted queues require include_deleted.
+     * @return At most the requested number of definitions and a cursor only when another row exists, or an Error.
+     */
+    [[nodiscard]] auto list_jobs(JobListRequest const& request) -> jb::core::Result<JobPage, jb::core::Error>;
 
 private:
     struct Private;
