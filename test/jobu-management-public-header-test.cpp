@@ -15,10 +15,16 @@ static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::update_queue
 static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::create_job),
                              jb::core::Result<jb::jobu::JobDefinition, jb::core::Error> (
                                  jb::jobu::ManagementService::*)(jb::jobu::CreateJobRequest)>);
+static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::update_job),
+                             jb::core::Result<jb::jobu::JobDefinition, jb::core::Error> (
+                                 jb::jobu::ManagementService::*)(jb::jobu::UpdateJobRequest)>);
 
 int main()
 {
     jb::jobu::PageOptions const      page;
-    jb::jobu::CreateJobRequest const request;
-    return page.limit == 100 && request.type == jb::jobu::JobType::Cli ? 0 : 1;
+    jb::jobu::CreateJobRequest const create_request;
+    jb::jobu::UpdateJobRequest const update_request;
+    return page.limit == 100 && create_request.type == jb::jobu::JobType::Cli && update_request.expected_revision == 0
+             ? 0
+             : 1;
 }

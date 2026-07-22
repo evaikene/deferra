@@ -1,5 +1,6 @@
 #include "management.hpp"
 
+#include "attempt_repository_priv.hpp"
 #include "attribute_codec_priv.hpp"
 #include "attribute_registry.hpp"
 #include "job_repository_priv.hpp"
@@ -11,6 +12,8 @@
 #include "transaction.hpp"
 
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -24,6 +27,8 @@ using ServiceResult = jb::core::Result<T, jb::core::Error>;
 
 constexpr std::size_t kMaximumAttributeDocumentBytes = 256U * 1024U;
 constexpr std::size_t kMaximumPageSize               = 200;
+// JobRevision is unsigned publicly, but schema version 1 stores revisions in a positive signed 64-bit INTEGER.
+constexpr JobRevision kMaximumPersistedJobRevision = static_cast<JobRevision>(std::numeric_limits<std::int64_t>::max());
 
 auto service_error(jb::core::ErrorCategory category, std::string_view code, std::string_view message) -> jb::core::Error
 {
@@ -105,6 +110,46 @@ auto invalid_job_payload(detail::JobPayloadIssue issue) -> jb::core::Error
 auto job_not_found() -> jb::core::Error
 {
     return service_error(jb::core::ErrorCategory::NotFound, "jobu.job.not_found", "Job was not found");
+}
+
+auto job_deleted() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::Conflict, "jobu.job.deleted", "Job is deleted");
+}
+
+auto job_revision_conflict() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::Conflict,
+                         "jobu.job.revision_conflict",
+                         "Job revision does not match the expected revision");
+}
+
+auto job_revision_exhausted() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::ResourceExhausted,
+                         "jobu.job.revision_exhausted",
+                         "Job revision cannot be incremented");
+}
+
+auto job_state_conflict() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::Conflict,
+                         "jobu.job.state_conflict",
+                         "Job state changed incompatibly during the operation");
+}
+
+auto job_immutable() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::Conflict,
+                         "jobu.job.immutable",
+                         "A one-time job cannot be changed after an attempt starts");
+}
+
+auto schedule_refresh_conflict() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::Conflict,
+                         "jobu.run.schedule_conflict",
+                         "The pending schedule-owned run could not be refreshed");
 }
 
 auto cron_unavailable() -> jb::core::Error
@@ -260,6 +305,12 @@ auto is_empty_update(UpdateQueueRequest const& request) noexcept -> bool
            !request.defaults && !request.history_retention && !request.runnable_wait_warning;
 }
 
+auto is_empty_update(UpdateJobRequest const& request) noexcept -> bool
+{
+    return !request.name && !request.type && !request.schedule && !request.priority &&
+           request.attribute_changes.empty() && !request.payload;
+}
+
 } // anonymous namespace
 
 struct ManagementService::Private {
@@ -276,6 +327,7 @@ struct ManagementService::Private {
         , queues{database_value, attributes_value}
         , jobs{database_value, attributes_value}
         , runs{database_value, attributes_value}
+        , attempts{database_value}
     {
         auto validated = validate_attributes(attributes, daemon_defaults, AttributeScope::DaemonDefault);
         if (!validated) {
@@ -291,6 +343,7 @@ struct ManagementService::Private {
     detail::QueueRepository        queues;
     detail::JobRepository          jobs;
     detail::RunRepository          runs;
+    detail::AttemptRepository      attempts;
     std::optional<jb::core::Error> initialization_error;
 };
 
@@ -628,6 +681,148 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
     }
     return ServiceResult<JobDefinition>::success(std::move(job));
+}
+
+auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>
+{
+    if (_data->initialization_error) {
+        return ServiceResult<JobDefinition>::failure(*_data->initialization_error);
+    }
+    if (request.expected_revision == 0) {
+        return ServiceResult<JobDefinition>::failure(invalid_job_configuration("expected_revision_not_positive"));
+    }
+    if (is_empty_update(request)) {
+        return ServiceResult<JobDefinition>::failure(invalid_job_configuration("empty_update"));
+    }
+    if (request.name) {
+        auto name = validate_job_name(*request.name);
+        if (!name) {
+            return ServiceResult<JobDefinition>::failure(std::move(name).error());
+        }
+    }
+    if (request.schedule && std::holds_alternative<CronSchedule>(*request.schedule)) {
+        return ServiceResult<JobDefinition>::failure(cron_unavailable());
+    }
+    auto attribute_changes = validate_attributes(_data->attributes, request.attribute_changes, AttributeScope::Job);
+    if (!attribute_changes) {
+        return ServiceResult<JobDefinition>::failure(std::move(attribute_changes).error());
+    }
+    auto const now = _data->time_source.utc_now();
+
+    auto begun = jb::db::Transaction::begin(_data->database);
+    if (!begun) {
+        return ServiceResult<JobDefinition>::failure(std::move(begun).error());
+    }
+    auto transaction = std::move(begun).value();
+    auto found       = _data->jobs.find_by_id(request.job_id, true);
+    if (!found) {
+        return ServiceResult<JobDefinition>::failure(std::move(found).error());
+    }
+    if (!found->has_value()) {
+        return ServiceResult<JobDefinition>::failure(job_not_found());
+    }
+    auto replacement = std::move(**found);
+    if (replacement.state == JobState::Deleted) {
+        return ServiceResult<JobDefinition>::failure(job_deleted());
+    }
+    if (replacement.revision != request.expected_revision) {
+        return ServiceResult<JobDefinition>::failure(job_revision_conflict());
+    }
+    if (replacement.state != JobState::Active && replacement.state != JobState::Suspended) {
+        return ServiceResult<JobDefinition>::failure(job_state_conflict());
+    }
+    auto started = _data->attempts.has_started_for_job(replacement.id);
+    if (!started) {
+        return ServiceResult<JobDefinition>::failure(std::move(started).error());
+    }
+    if (*started) {
+        return ServiceResult<JobDefinition>::failure(job_immutable());
+    }
+
+    if (request.name) {
+        replacement.name = std::move(*request.name);
+    }
+    if (request.type) {
+        replacement.type = *request.type;
+    }
+    if (request.schedule) {
+        replacement.schedule = std::move(*request.schedule);
+    }
+    if (request.priority) {
+        replacement.priority = *request.priority;
+    }
+    for (auto& [name, value] : request.attribute_changes) {
+        replacement.attributes.insert_or_assign(std::move(name), std::move(value));
+    }
+    if (request.payload) {
+        replacement.payload = std::move(*request.payload);
+    }
+    if (std::holds_alternative<CronSchedule>(replacement.schedule)) {
+        return ServiceResult<JobDefinition>::failure(cron_unavailable());
+    }
+    auto payload = validate_job_payload(replacement.type, replacement.payload);
+    if (!payload) {
+        return ServiceResult<JobDefinition>::failure(std::move(payload).error());
+    }
+    auto serialized_attributes = serialize_attributes(_data->attributes,
+                                                      replacement.attributes,
+                                                      AttributeScope::Job,
+                                                      detail::AttributeDocumentMode::Materialized);
+    if (!serialized_attributes) {
+        return ServiceResult<JobDefinition>::failure(std::move(serialized_attributes).error());
+    }
+    if (replacement.revision >= kMaximumPersistedJobRevision) {
+        return ServiceResult<JobDefinition>::failure(job_revision_exhausted());
+    }
+    ++replacement.revision;
+    replacement.updated_at = now;
+
+    auto replaced =
+        _data->jobs.update_definition(replacement, request.expected_revision, *serialized_attributes, *payload);
+    if (!replaced) {
+        return ServiceResult<JobDefinition>::failure(std::move(replaced).error());
+    }
+    if (!*replaced) {
+        auto diagnosed = _data->jobs.find_by_id(replacement.id, true);
+        if (!diagnosed) {
+            return ServiceResult<JobDefinition>::failure(std::move(diagnosed).error());
+        }
+        if (!diagnosed->has_value()) {
+            return ServiceResult<JobDefinition>::failure(job_not_found());
+        }
+        if ((**diagnosed).state == JobState::Deleted) {
+            return ServiceResult<JobDefinition>::failure(job_deleted());
+        }
+        if ((**diagnosed).revision != request.expected_revision) {
+            return ServiceResult<JobDefinition>::failure(job_revision_conflict());
+        }
+        return ServiceResult<JobDefinition>::failure(job_state_conflict());
+    }
+
+    auto const planned_at = std::get<OnceSchedule>(replacement.schedule).planned_at;
+    auto       refreshed =
+        _data->runs.refresh_unstarted_schedule_owned(replacement.id,
+                                                     {
+                                                         .job_revision    = replacement.revision,
+                                                         .queue_id        = replacement.queue_id,
+                                                         .planned_at      = planned_at,
+                                                         .runnable_at     = planned_at,
+                                                         .type            = replacement.type,
+                                                         .priority        = replacement.priority,
+                                                         .attributes_json = serialized_attributes->serialized(),
+                                                         .payload_json    = payload->serialized(),
+                                                     });
+    if (!refreshed) {
+        return ServiceResult<JobDefinition>::failure(std::move(refreshed).error());
+    }
+    if (!*refreshed) {
+        return ServiceResult<JobDefinition>::failure(schedule_refresh_conflict());
+    }
+    auto committed = transaction.commit();
+    if (!committed) {
+        return ServiceResult<JobDefinition>::failure(std::move(committed).error());
+    }
+    return ServiceResult<JobDefinition>::success(std::move(replacement));
 }
 
 auto ManagementService::get_job(jb::core::Uuid const& id, bool include_deleted)

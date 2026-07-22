@@ -44,6 +44,20 @@ struct RunSnapshot {
     jb::rpc::JsonValue     payload;
 };
 
+/** Non-owning serialized fields for refreshing one pending schedule-owned run.
+ * The caller must keep both JSON views alive until refresh_unstarted_schedule_owned() returns.
+ */
+struct ScheduleOwnedRunUpdate {
+    JobRevision            job_revision{1};
+    jb::core::Uuid         queue_id;
+    jb::core::UtcTimePoint planned_at;
+    jb::core::UtcTimePoint runnable_at;
+    JobType                type{JobType::Cli};
+    std::int32_t           priority{0};
+    std::string_view       attributes_json;
+    std::string_view       payload_json;
+};
+
 class RunRepository final {
 public:
     RunRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept;
@@ -56,6 +70,9 @@ public:
     [[nodiscard]] auto find_by_id(jb::core::Uuid const& run_id)
         -> jb::core::Result<std::optional<JobRun>, jb::core::Error>;
     [[nodiscard]] auto refresh_unstarted_schedule_owned(jb::core::Uuid const& job_id, RunSnapshot const& snapshot)
+        -> jb::core::Result<bool, jb::core::Error>;
+    [[nodiscard]] auto refresh_unstarted_schedule_owned(jb::core::Uuid const&         job_id,
+                                                        ScheduleOwnedRunUpdate const& snapshot)
         -> jb::core::Result<bool, jb::core::Error>;
     [[nodiscard]] auto move_non_terminal(jb::core::Uuid const& job_id,
                                          jb::core::Uuid const& target_queue_id,
