@@ -63,6 +63,9 @@ namespace jb::jobu::detail {
 [[nodiscard]] auto read_optional_text(jb::db::Record const& record, std::string_view field)
     -> jb::core::Result<std::optional<std::string>, jb::core::Error>;
 
+[[nodiscard]] auto read_optional_blob(jb::db::Record const& record, std::string_view field)
+    -> jb::core::Result<std::optional<jb::core::ByteBuffer>, jb::core::Error>;
+
 [[nodiscard]] auto json_to_storage(jb::rpc::JsonValue const& value, bool require_object, std::size_t max_size)
     -> jb::core::Result<jb::db::Value, jb::core::Error>;
 [[nodiscard]] auto

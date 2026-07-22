@@ -380,6 +380,24 @@ auto read_optional_text(jb::db::Record const& record, std::string_view field)
     return StorageResult<std::optional<std::string>>::success(*text);
 }
 
+auto read_optional_blob(jb::db::Record const& record, std::string_view field)
+    -> jb::core::Result<std::optional<jb::core::ByteBuffer>, jb::core::Error>
+{
+    auto value = required_value(record, field, "jobu.storage.invalid_blob");
+    if (!value) {
+        return StorageResult<std::optional<jb::core::ByteBuffer>>::failure(std::move(value).error());
+    }
+    if (std::holds_alternative<jb::db::Null>(**value)) {
+        return StorageResult<std::optional<jb::core::ByteBuffer>>::success(std::nullopt);
+    }
+    auto const* bytes = std::get_if<jb::core::ByteBuffer>(value.value());
+    if (bytes == nullptr) {
+        return StorageResult<std::optional<jb::core::ByteBuffer>>::failure(
+            storage_error("jobu.storage.invalid_blob", "Persisted binary value is invalid", field, "wrong_type"));
+    }
+    return StorageResult<std::optional<jb::core::ByteBuffer>>::success(*bytes);
+}
+
 auto json_to_storage(jb::rpc::JsonValue const& value, bool require_object, std::size_t max_size)
     -> jb::core::Result<jb::db::Value, jb::core::Error>
 {

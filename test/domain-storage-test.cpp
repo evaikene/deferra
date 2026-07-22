@@ -372,6 +372,15 @@ TEST_CASE("Domain storage handles required and optional text", "[jobu][storage]"
     CHECK(read_text(record("name", std::int64_t{1}), "name").error().code == "jobu.storage.invalid_text");
 }
 
+TEST_CASE("Domain storage preserves nullable binary values", "[jobu][storage]")
+{
+    auto const bytes = ByteBuffer{std::byte{0x00}, std::byte{0xff}, std::byte{0x00}};
+    CHECK(*read_optional_blob(record("output", bytes), "output") == std::optional<ByteBuffer>{bytes});
+    CHECK_FALSE(read_optional_blob(record("output", Null{}), "output")->has_value());
+    CHECK(read_optional_blob(record("output", std::string{"not a blob"}), "output").error().code ==
+          "jobu.storage.invalid_blob");
+}
+
 TEST_CASE("Domain storage uses stable lower-case enum text", "[jobu][storage]")
 {
     CHECK(storage_text(QueueState::Suspending) == "suspending");
