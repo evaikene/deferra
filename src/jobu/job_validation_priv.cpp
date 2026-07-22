@@ -59,24 +59,31 @@ auto is_valid_job_name(std::string_view name) noexcept -> bool
     return name.size() <= kMaximumJobNameBytes && is_valid_utf8(name) && !has_ascii_control(name);
 }
 
-auto validate_and_serialize_job_payload(JobType type, jb::rpc::JsonValue const& payload)
-    -> jb::core::Result<std::string, JobPayloadIssue>
-{
-    using ValidationResult = jb::core::Result<std::string, JobPayloadIssue>;
+ValidatedJobPayload::ValidatedJobPayload(std::string serialized) noexcept
+    : _serialized{std::move(serialized)}
+{}
 
+auto job_payload_structure_issue(JobType type, jb::rpc::JsonValue const& payload) -> JobPayloadIssue
+{
     if (!payload.is_object()) {
-        return ValidationResult::failure(JobPayloadIssue::NotObject);
+        return JobPayloadIssue::NotObject;
     }
 
-    auto issue = JobPayloadIssue::UnknownType;
     switch (type) {
         case JobType::Cli:
-            issue = structurally_valid_cli(payload.as_object());
-            break;
+            return structurally_valid_cli(payload.as_object());
         case JobType::Http:
-            issue = structurally_valid_http(payload.as_object());
-            break;
+            return structurally_valid_http(payload.as_object());
     }
+    return JobPayloadIssue::UnknownType;
+}
+
+auto validate_and_serialize_job_payload(JobType type, jb::rpc::JsonValue const& payload)
+    -> jb::core::Result<ValidatedJobPayload, JobPayloadIssue>
+{
+    using ValidationResult = jb::core::Result<ValidatedJobPayload, JobPayloadIssue>;
+
+    auto const issue = job_payload_structure_issue(type, payload);
     if (issue != JobPayloadIssue::None) {
         return ValidationResult::failure(issue);
     }
@@ -88,13 +95,7 @@ auto validate_and_serialize_job_payload(JobType type, jb::rpc::JsonValue const& 
     if (serialized->size() > maximum_job_document_bytes) {
         return ValidationResult::failure(JobPayloadIssue::TooLarge);
     }
-    return ValidationResult::success(std::move(serialized).value());
-}
-
-auto job_payload_issue(JobType type, jb::rpc::JsonValue const& payload) -> JobPayloadIssue
-{
-    auto validated = validate_and_serialize_job_payload(type, payload);
-    return validated ? JobPayloadIssue::None : validated.error();
+    return ValidationResult::success(ValidatedJobPayload{std::move(serialized).value()});
 }
 
 auto job_payload_issue_text(JobPayloadIssue issue) noexcept -> std::string_view

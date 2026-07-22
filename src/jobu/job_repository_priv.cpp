@@ -189,7 +189,7 @@ auto decode_job(jb::db::Record const& record, AttributeRegistry const& attribute
     if (!payload) {
         return RepositoryResult<JobDefinition>::failure(std::move(payload).error());
     }
-    auto payload_issue = job_payload_issue(*type, *payload);
+    auto payload_issue = job_payload_structure_issue(*type, *payload);
     if (payload_issue != JobPayloadIssue::None) {
         return RepositoryResult<JobDefinition>::failure(invalid_job(job_payload_issue_text(payload_issue)));
     }
@@ -233,7 +233,8 @@ JobRepository::JobRepository(jb::db::Database& database, AttributeRegistry const
     , _attributes{attributes}
 {}
 
-auto JobRepository::insert(JobDefinition const& job) -> jb::core::Result<void, jb::core::Error>
+auto JobRepository::insert(JobDefinition const& job, ValidatedJobPayload const& payload)
+    -> jb::core::Result<void, jb::core::Error>
 {
     if (job.name && !is_valid_job_name(*job.name)) {
         return RepositoryResult<void>::failure(invalid_job("invalid_name"));
@@ -241,11 +242,6 @@ auto JobRepository::insert(JobDefinition const& job) -> jb::core::Result<void, j
     if ((job.state == JobState::Deleted) != job.deleted_at.has_value()) {
         return RepositoryResult<void>::failure(invalid_job("deleted_state_mismatch"));
     }
-    auto payload = validate_and_serialize_job_payload(job.type, job.payload);
-    if (!payload) {
-        return RepositoryResult<void>::failure(invalid_job(job_payload_issue_text(payload.error())));
-    }
-
     auto revision = revision_to_storage(job.revision);
     if (!revision) {
         return RepositoryResult<void>::failure(std::move(revision).error());
@@ -300,7 +296,7 @@ auto JobRepository::insert(JobDefinition const& job) -> jb::core::Result<void, j
                               {":cron_timezone",   std::move(schedule->cron_timezone)        },
                               {":priority",        int32_to_storage(job.priority)            },
                               {":attributes_json", std::move(attributes).value()             },
-                              {":payload_json",    jb::db::Value{std::move(payload).value()} },
+                              {":payload_json",    jb::db::make_text(payload.serialized())   },
                               {":created_at_us",   std::move(created).value()                },
                               {":updated_at_us",   std::move(updated).value()                },
                               {":deleted_at_us",   std::move(deleted_at)                     },

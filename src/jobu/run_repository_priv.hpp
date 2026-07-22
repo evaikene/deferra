@@ -17,6 +17,8 @@ class Database;
 
 namespace jb::jobu::detail {
 
+class ValidatedJobPayload;
+
 struct RunSnapshot {
     JobRevision            job_revision{1};
     jb::core::Uuid         queue_id;
@@ -33,6 +35,8 @@ public:
     RunRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept;
 
     [[nodiscard]] auto insert_schedule_owned(JobRun const& run) -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto insert_schedule_owned(JobRun const& run, ValidatedJobPayload const& payload)
+        -> jb::core::Result<void, jb::core::Error>;
     [[nodiscard]] auto find_schedule_owned(jb::core::Uuid const& job_id)
         -> jb::core::Result<std::optional<JobRun>, jb::core::Error>;
     [[nodiscard]] auto find_by_id(jb::core::Uuid const& run_id)
@@ -59,6 +63,9 @@ public:
         -> jb::core::Result<std::size_t, jb::core::Error>;
 
 private:
+    [[nodiscard]] auto insert_schedule_owned_impl(JobRun const& run, ValidatedJobPayload const* payload)
+        -> jb::core::Result<void, jb::core::Error>;
+
     jb::db::Database&        _database;
     AttributeRegistry const& _attributes;
 };

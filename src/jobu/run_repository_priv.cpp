@@ -2,6 +2,7 @@
 
 #include "attribute_codec_priv.hpp"
 #include "domain_storage_priv.hpp"
+#include "job_validation_priv.hpp"
 #include "query.hpp"
 #include "value.hpp"
 
@@ -384,6 +385,18 @@ RunRepository::RunRepository(jb::db::Database& database, AttributeRegistry const
 
 auto RunRepository::insert_schedule_owned(JobRun const& run) -> jb::core::Result<void, jb::core::Error>
 {
+    return insert_schedule_owned_impl(run, nullptr);
+}
+
+auto RunRepository::insert_schedule_owned(JobRun const& run, ValidatedJobPayload const& payload)
+    -> jb::core::Result<void, jb::core::Error>
+{
+    return insert_schedule_owned_impl(run, &payload);
+}
+
+auto RunRepository::insert_schedule_owned_impl(JobRun const& run, ValidatedJobPayload const* validated_payload)
+    -> jb::core::Result<void, jb::core::Error>
+{
     if (!run.schedule_owned || run.origin != RunOrigin::Scheduled) {
         return RepositoryResult<void>::failure(invalid_run("insert_not_schedule_owned"));
     }
@@ -425,7 +438,9 @@ auto RunRepository::insert_schedule_owned(JobRun const& run) -> jb::core::Result
     if (!attributes) {
         return RepositoryResult<void>::failure(std::move(attributes).error());
     }
-    auto payload = json_to_storage(run.payload, true, kMaximumJsonDocumentBytes);
+    auto payload = validated_payload == nullptr
+                     ? json_to_storage(run.payload, true, kMaximumJsonDocumentBytes)
+                     : RepositoryResult<jb::db::Value>::success(jb::db::make_text(validated_payload->serialized()));
     if (!payload) {
         return RepositoryResult<void>::failure(std::move(payload).error());
     }

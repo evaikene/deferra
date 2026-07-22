@@ -144,13 +144,13 @@ auto validate_job_name(std::optional<std::string> const& name) -> ServiceResult<
     return ServiceResult<void>::success();
 }
 
-auto validate_job_payload(JobType type, jb::rpc::JsonValue const& payload) -> ServiceResult<void>
+auto validate_job_payload(JobType type, jb::rpc::JsonValue const& payload) -> ServiceResult<detail::ValidatedJobPayload>
 {
-    auto const issue = detail::job_payload_issue(type, payload);
-    if (issue != detail::JobPayloadIssue::None) {
-        return ServiceResult<void>::failure(invalid_job_payload(issue));
+    auto validated = detail::validate_and_serialize_job_payload(type, payload);
+    if (!validated) {
+        return ServiceResult<detail::ValidatedJobPayload>::failure(invalid_job_payload(validated.error()));
     }
-    return ServiceResult<void>::success();
+    return ServiceResult<detail::ValidatedJobPayload>::success(std::move(validated).value());
 }
 
 auto validate_attributes(AttributeRegistry const& attributes, AttributeSet const& values, AttributeScope scope)
@@ -592,11 +592,11 @@ auto ManagementService::create_job(CreateJobRequest const& request) -> jb::core:
         .result         = std::nullopt,
     };
 
-    auto inserted_job = _data->jobs.insert(job);
+    auto inserted_job = _data->jobs.insert(job, *payload);
     if (!inserted_job) {
         return ServiceResult<JobDefinition>::failure(std::move(inserted_job).error());
     }
-    auto inserted_run = _data->runs.insert_schedule_owned(run);
+    auto inserted_run = _data->runs.insert_schedule_owned(run, *payload);
     if (!inserted_run) {
         return ServiceResult<JobDefinition>::failure(std::move(inserted_run).error());
     }
