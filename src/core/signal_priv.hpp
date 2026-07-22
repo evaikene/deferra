@@ -104,6 +104,8 @@ void Signal<Args...>::disconnect_all() const noexcept
 template <typename... Args>
 void Signal<Args...>::emit(Object* sender, Args const&... args) const
 {
+    static_assert((!std::is_reference_v<Args> && ...), "Signal arguments must be owning (non-reference) types");
+
     //--- 1. snapshot the live connections under the lock
     // We prune dead connections while holding the mutex, then release it before
     // invoking any slot (re-entrancy: slots may connect/disconnect)
