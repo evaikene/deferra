@@ -29,6 +29,7 @@ target_sources(${TARGET}
         job_validation_priv.hpp
         jobu.cpp
         management.cpp
+        management_json.cpp
         queue_repository_priv.cpp
         queue_repository_priv.hpp
         queue_validation_priv.cpp
@@ -51,6 +52,7 @@ target_sources(${TARGET}
         job.hpp
         jobu.hpp
         management.hpp
+        management_json.hpp
         queue.hpp
         run.hpp
         secret.hpp
