@@ -6,9 +6,11 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -78,6 +80,32 @@ auto valid_queue_json(StandardAttributeRegistry const& registry) -> JsonValue
     REQUIRE(encoded);
     return std::move(encoded).value();
 }
+
+class TrackingAttributeRegistry final : public AttributeRegistry {
+public:
+    [[nodiscard]] auto find(std::string_view name) const noexcept -> AttributeDefinition const* override
+    {
+        ++_find_calls;
+        return _registry.find(name);
+    }
+
+    [[nodiscard]] auto validate(std::string_view name, AttributeValue const& value, AttributeScope scope) const
+        -> Result<void, Error> override
+    {
+        return _registry.validate(name, value, scope);
+    }
+
+    [[nodiscard]] auto definitions() const -> std::span<AttributeDefinition const> override
+    {
+        return _registry.definitions();
+    }
+
+    [[nodiscard]] auto find_calls() const noexcept -> std::size_t { return _find_calls; }
+
+private:
+    StandardAttributeRegistry _registry;
+    mutable std::size_t       _find_calls{0};
+};
 
 template <typename T>
 auto check_invalid_request(Result<T, Error> const& result) -> void
@@ -351,12 +379,14 @@ TEST_CASE("Queue page decoding rejects invalid known fields", "[jobu][management
     oversized.items.resize(201U, sample_queue());
     check_invalid_response(queue_page_to_json(oversized, registry));
 
-    auto oversized_items = JsonValue::Array(201U, valid_queue_json(registry));
+    auto oversized_items   = JsonValue::Array(201U, valid_queue_json(registry));
+    auto tracking_registry = TrackingAttributeRegistry{};
     check_invalid_response(queue_page_from_json(make_json(JsonValue::Object{
                                                     {"items",         make_json(std::move(oversized_items))},
                                                     {"next_after_id", make_json(JsonNull{})                },
     }),
-                                                registry));
+                                                tracking_registry));
+    CHECK(tracking_registry.find_calls() == 0U);
 }
 
 TEST_CASE("Queue selector JSON uses one shared strict shape", "[jobu][management][json][queue][selector]")

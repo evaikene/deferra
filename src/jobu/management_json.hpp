@@ -5,6 +5,10 @@
  * Queue clients encode typed requests before invoking JSON-RPC and decode typed results after a successful response.
  * Daemon handlers perform the inverse conversions before and after calling ManagementService. Every returned value
  * owns its contents; inputs and registries are borrowed only for the duration of the conversion.
+ *
+ * Request conversion validates wire structure, member representations, and adapter-owned bounds. Domain rules such as
+ * queue names, positive weights and concurrency limits, and nonnegative durations remain ManagementService
+ * responsibilities so direct and transported requests share one service policy.
  */
 #pragma once
 
@@ -89,6 +93,7 @@ namespace jb::jobu {
  *
  * Queue-default attributes are encoded through @p registry at AttributeScope::QueueDefault. The optional idempotency
  * key is omitted when absent; inherited retention is encoded as JSON null.
+ * ManagementService remains responsible for domain constraints such as positive configuration values.
  *
  * @param request Typed create request to encode without retaining it.
  * @param registry Attribute registry borrowed for this conversion.
@@ -101,6 +106,7 @@ namespace jb::jobu {
  *
  * `name` is mandatory. Other fields use their typed request defaults when omitted. Unknown members and explicit null
  * outside `history_retention_seconds` are rejected. The registry is used only while decoding queue defaults.
+ * ManagementService remains responsible for domain constraints such as positive configuration values.
  *
  * @param value JSON request object to decode without retaining references to it.
  * @param registry Attribute registry borrowed for this conversion.
@@ -111,10 +117,11 @@ namespace jb::jobu {
 
 /** Encodes queue.list parameters.
  *
- * Optional filters and the pagination cursor are omitted when absent.
+ * `include_deleted` and `limit` are always emitted. The optional `state` filter and `after_id` pagination cursor are
+ * omitted when absent.
  *
  * @param request Typed list request to encode without retaining it.
- * @return Owning JSON object, or `jobu.protocol.invalid_request` when a supplied filter cannot be represented.
+ * @return Owning JSON object, or `jobu.protocol.invalid_request` when the request cannot be represented.
  */
 [[nodiscard]] auto queue_list_request_to_json(QueueListRequest const& request)
     -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
@@ -134,6 +141,7 @@ namespace jb::jobu {
  *
  * Only supplied mutable fields are emitted. A supplied outer retention optional with no inner value becomes JSON
  * null, preserving the distinction between unchanged retention and inheritance from the daemon policy.
+ * ManagementService remains responsible for domain constraints such as positive configuration values.
  *
  * @param request Typed update request to encode without retaining it.
  * @param registry Attribute registry borrowed while encoding supplied queue defaults.
@@ -147,6 +155,7 @@ namespace jb::jobu {
  * Exactly one queue selector and at least one mutable field are required. Unknown members are rejected. Missing
  * `history_retention_seconds` leaves retention unchanged, JSON null selects daemon inheritance, and an integer selects
  * an explicit duration. The registry is used only while decoding supplied queue defaults.
+ * ManagementService remains responsible for domain constraints such as positive configuration values.
  *
  * @param value JSON request object to decode without retaining references to it.
  * @param registry Attribute registry borrowed for this conversion.

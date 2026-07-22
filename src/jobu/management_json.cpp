@@ -440,13 +440,14 @@ auto queue_page_from_json(jb::rpc::JsonValue const& value, AttributeRegistry con
     }
     auto const* items = find_member(value.as_object(), "items");
     auto const* next  = find_member(value.as_object(), "next_after_id");
-    if (!items || !items->is_array() || !next) {
+    if (!items || !items->is_array() || !next || items->as_array().size() > maximum_page_size) {
         return invalid<QueuePage>(false);
     }
 
-    auto result = QueuePage{};
-    result.items.reserve(items->as_array().size());
-    for (auto const& item : items->as_array()) {
+    auto const& item_array = items->as_array();
+    auto        result     = QueuePage{};
+    result.items.reserve(item_array.size());
+    for (auto const& item : item_array) {
         auto decoded = queue_from_json(item, registry);
         if (!decoded) {
             return invalid<QueuePage>(false);
