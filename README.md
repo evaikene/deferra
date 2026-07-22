@@ -85,8 +85,9 @@ cmake --build .bld
 ctest --test-dir .bld/test --output-on-failure
 ```
 
-The SQLite driver is enabled by default. Disable it when only the in-memory
-libraries are needed:
+The SQLite driver is enabled by default and is required to build `jobud`.
+Disable it when only the backend-independent libraries and `jobuctl` are
+needed:
 
 ```sh
 cmake -S . -B .bld -G Ninja \

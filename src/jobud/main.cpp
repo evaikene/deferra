@@ -1,13 +1,20 @@
 #include "jobu_version_priv.hpp"
 
 #include "application.hpp"
+#include "attribute_registry.hpp"
 #include "command_line_parser.hpp"
+#include "database.hpp"
 #include "local_server.hpp"
 #include "logging.hpp"
+#include "management.hpp"
 #include "protocol.hpp"
 #include "server.hpp"
+#include "sqlite/sqlite_driver.hpp"
+#include "sqlite/sqlite_schema.hpp"
 #include "system_info.hpp"
 #include "system_info_priv.hpp"
+#include "time_source.hpp"
+#include "uuid.hpp"
 
 #include <fmt/format.h>
 
@@ -15,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -22,29 +30,53 @@
 
 namespace {
 
-auto parse_socket_path(int argc, char* argv[]) -> std::optional<std::filesystem::path>
+struct StartupOptions {
+    std::filesystem::path socket_path;
+    std::filesystem::path database_path;
+};
+
+auto parse_startup_options(int argc, char* argv[]) -> std::optional<StartupOptions>
 {
     using namespace jb::core;
 
     constexpr std::array options{
-        CommandLineOption{.long_name = "socket", .value_mode = CommandLineValueMode::Required},
+        CommandLineOption{.long_name = "socket",   .value_mode = CommandLineValueMode::Required},
+        CommandLineOption{.long_name = "database", .value_mode = CommandLineValueMode::Required},
     };
     CommandLineParser parser{argc, argv, options};
-    if (parser.arguments().size() != 1U) {
+    if (parser.arguments().size() != options.size()) {
         return std::nullopt;
     }
 
-    auto const& socket = parser.arguments().front();
-    if (socket.kind() != CommandLineArgumentKind::Option || !socket.known() || socket.missing_value() ||
-        !socket.value() || socket.value()->empty()) {
+    auto socket_path   = std::optional<std::filesystem::path>{};
+    auto database_path = std::optional<std::filesystem::path>{};
+    for (auto const& argument : parser) {
+        if (argument.kind() != CommandLineArgumentKind::Option || !argument.known() || argument.missing_value() ||
+            !argument.value() || argument.value()->empty()) {
+            return std::nullopt;
+        }
+
+        auto path = std::filesystem::path{std::string{*argument.value()}};
+        if (argument.name() == "socket" && !socket_path) {
+            socket_path = std::move(path);
+        }
+        else if (argument.name() == "database" && !database_path) {
+            database_path = std::move(path);
+        }
+        else {
+            return std::nullopt;
+        }
+    }
+
+    if (!socket_path || !database_path) {
         return std::nullopt;
     }
-    return std::filesystem::path{std::string{*socket.value()}};
+    return StartupOptions{.socket_path = std::move(*socket_path), .database_path = std::move(*database_path)};
 }
 
 void print_usage()
 {
-    fmt::print(stderr, "Usage: jobud --socket <filesystem-path>\n");
+    fmt::print(stderr, "Usage: jobud --socket <filesystem-path> --database <sqlite-file>\n");
 }
 
 } // anonymous namespace
@@ -61,15 +93,34 @@ auto main(int argc, char* argv[]) -> int
         return EXIT_SUCCESS;
     }
 
-    auto const socket_path = parse_socket_path(argc, argv);
-    if (!socket_path) {
+    auto const startup = parse_startup_options(argc, argv);
+    if (!startup) {
         print_usage();
         return EXIT_FAILURE;
     }
 
-    Application app{0, nullptr};
-    LocalServer local_server;
-    Server      rpc_server;
+    Application      app{0, nullptr};
+    SystemTimeSource time_source;
+    jb::db::Database database{
+        std::make_unique<jb::db::sqlite::Driver>(jb::db::sqlite::Options{.database_file = startup->database_path})};
+
+    auto opened = database.open();
+    if (!opened) {
+        log_error("Unable to open the JobU database: {} ({})", opened.error().message, opened.error().code);
+        return EXIT_FAILURE;
+    }
+
+    auto schema = jb::jobu::sqlite::ensure_schema(database);
+    if (!schema) {
+        log_error("Unable to prepare the JobU database schema: {} ({})", schema.error().message, schema.error().code);
+        return EXIT_FAILURE;
+    }
+
+    UuidV7Generator           uuid_generator{time_source};
+    StandardAttributeRegistry attribute_registry;
+    ManagementService         management_service{database, attribute_registry, uuid_generator, time_source};
+    LocalServer               local_server;
+    Server                    rpc_server;
 
     auto const info = SystemInfo{
         .daemon_version = std::string{jb::jobu::detail::project_version},
@@ -105,7 +156,7 @@ auto main(int argc, char* argv[]) -> int
         log_error("RPC connection error: {} ({})", error.message, error.code);
     });
 
-    if (!local_server.listen(*socket_path)) {
+    if (!local_server.listen(startup->socket_path)) {
         log_error("Unable to listen on the local socket: {}", local_server.error_string());
         return EXIT_FAILURE;
     }
