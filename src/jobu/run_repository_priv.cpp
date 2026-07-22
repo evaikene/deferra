@@ -138,17 +138,6 @@ auto optional_json_to_storage(std::optional<jb::rpc::JsonValue> const& value) ->
     return json_to_storage(*value, true, kMaximumJsonDocumentBytes);
 }
 
-auto attributes_to_storage(AttributeRegistry const& attributes, AttributeSet const& values)
-    -> RepositoryResult<jb::db::Value>
-{
-    auto encoded =
-        encode_attribute_document(attributes, values, AttributeScope::Job, AttributeDocumentMode::Materialized);
-    if (!encoded) {
-        return RepositoryResult<jb::db::Value>::failure(std::move(encoded).error());
-    }
-    return json_to_storage(*encoded, true, kMaximumJsonDocumentBytes);
-}
-
 auto decode_run(jb::db::Record const& record, AttributeRegistry const& attributes) -> RepositoryResult<JobRun>
 {
     auto id = read_uuid(record, "run_id");
@@ -647,6 +636,38 @@ auto RunRepository::find_by_id(jb::core::Uuid const& run_id) -> jb::core::Result
 auto RunRepository::refresh_unstarted_schedule_owned(jb::core::Uuid const& job_id, RunSnapshot const& snapshot)
     -> jb::core::Result<bool, jb::core::Error>
 {
+    auto attributes = encode_and_serialize_attribute_document(_attributes,
+                                                              snapshot.attributes,
+                                                              AttributeScope::Job,
+                                                              AttributeDocumentMode::Materialized);
+    if (!attributes) {
+        return RepositoryResult<bool>::failure(std::move(attributes).error());
+    }
+    auto payload = json_to_storage(snapshot.payload, true, kMaximumJsonDocumentBytes);
+    if (!payload) {
+        return RepositoryResult<bool>::failure(std::move(payload).error());
+    }
+    return refresh_unstarted_schedule_owned(job_id,
+                                            {
+                                                .job_revision    = snapshot.job_revision,
+                                                .queue_id        = snapshot.queue_id,
+                                                .planned_at      = snapshot.planned_at,
+                                                .runnable_at     = snapshot.runnable_at,
+                                                .type            = snapshot.type,
+                                                .priority        = snapshot.priority,
+                                                .attributes_json = attributes->serialized(),
+                                                .payload_json    = std::get<std::string>(*payload),
+                                            });
+}
+
+auto RunRepository::refresh_unstarted_schedule_owned(jb::core::Uuid const&         job_id,
+                                                     ScheduleOwnedRunUpdate const& snapshot)
+    -> jb::core::Result<bool, jb::core::Error>
+{
+    if (snapshot.attributes_json.size() > kMaximumJsonDocumentBytes ||
+        snapshot.payload_json.size() > kMaximumJsonDocumentBytes || storage_text(snapshot.type).empty()) {
+        return RepositoryResult<bool>::failure(invalid_run("invalid_snapshot"));
+    }
     auto revision = revision_to_storage(snapshot.job_revision);
     if (!revision) {
         return RepositoryResult<bool>::failure(std::move(revision).error());
@@ -659,15 +680,6 @@ auto RunRepository::refresh_unstarted_schedule_owned(jb::core::Uuid const& job_i
     if (!runnable) {
         return RepositoryResult<bool>::failure(std::move(runnable).error());
     }
-    auto attributes = attributes_to_storage(_attributes, snapshot.attributes);
-    if (!attributes) {
-        return RepositoryResult<bool>::failure(std::move(attributes).error());
-    }
-    auto payload = json_to_storage(snapshot.payload, true, kMaximumJsonDocumentBytes);
-    if (!payload) {
-        return RepositoryResult<bool>::failure(std::move(payload).error());
-    }
-
     jb::db::Query query{_database};
     auto          prepared = query.prepare(
         "UPDATE jobu_runs SET job_revision = :job_revision, queue_id = :queue_id, planned_at_us = :planned_at_us, "
@@ -685,8 +697,8 @@ auto RunRepository::refresh_unstarted_schedule_owned(jb::core::Uuid const& job_i
                               {":runnable_at_us",  std::move(runnable).value()                   },
                               {":type",            jb::db::make_text(storage_text(snapshot.type))},
                               {":priority",        int32_to_storage(snapshot.priority)           },
-                              {":attributes_json", std::move(attributes).value()                 },
-                              {":payload_json",    std::move(payload).value()                    },
+                              {":attributes_json", jb::db::make_text(snapshot.attributes_json)   },
+                              {":payload_json",    jb::db::make_text(snapshot.payload_json)      },
                               {":job_id",          uuid_to_storage(job_id)                       },
     });
     if (!bound) {

@@ -132,6 +132,31 @@ struct CreateJobRequest {
     std::optional<std::string> idempotency_key;
 };
 
+/** Changes selected fields of one pending one-time job using optimistic concurrency.
+ *
+ * The name's outer optional distinguishes unchanged from changed, while its inner optional distinguishes clearing the
+ * name from replacing it. Attribute changes patch the stored complete materialized set; omitted attributes remain
+ * unchanged and no daemon or queue defaults are reapplied.
+ */
+struct UpdateJobRequest {
+    /// Stable job-definition UUID to update.
+    jb::core::Uuid                            job_id;
+    /// Positive revision that must match the durable definition.
+    JobRevision                               expected_revision{0};
+    /// Unchanged name, cleared name, or replacement display name.
+    std::optional<std::optional<std::string>> name;
+    /// Replacement runner family, validated together with the resulting payload.
+    std::optional<JobType>                    type;
+    /// Replacement one-time schedule; CronSchedule remains unavailable in Phase 3.
+    std::optional<JobSchedule>                schedule;
+    /// Replacement scheduling priority.
+    std::optional<std::int32_t>               priority;
+    /// Job-scope values that replace the corresponding stored materialized values.
+    AttributeSet                              attribute_changes;
+    /// Replacement owning runner payload.
+    std::optional<jb::rpc::JsonValue>         payload;
+};
+
 /// Filters and bounds for listing job definitions.
 struct JobListRequest {
     /// Optional queue selector. Deleted queues are visible only when include_deleted is true.
@@ -152,8 +177,8 @@ struct JobListRequest {
  * must outlive the service. All calls must run on the Database owner thread. The daemon-default attribute layer is
  * validated and copied during construction; a validation failure is returned by subsequent operations.
  *
- * Queue/job gets and lists use bounded repository reads without an explicit transaction. Creates and queue updates use
- * one immediate transaction and return only after commit. Errors include stable `jobu.queue.*`, `jobu.job.*`,
+ * Queue/job gets and lists use bounded repository reads without an explicit transaction. Creates and updates use one
+ * immediate transaction and return only after commit. Errors include stable `jobu.queue.*`, `jobu.job.*`,
  * `jobu.attribute.*`, and `jobu.idempotency.*` codes plus unchanged database errors when no domain mapping applies.
  * Methods invoke no callbacks, start no threads, and perform no event-loop processing or external I/O.
  */
@@ -221,6 +246,14 @@ public:
      * Error. No attempt is created and no external work starts.
      */
     [[nodiscard]] auto create_job(CreateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
+
+    /** Updates one pending one-time job and its scheduled-run snapshot in one immediate transaction.
+     * @param request Non-empty patch consumed after validation. expected_revision must match the durable positive
+     * revision. Updates preserve stored attributes not named in attribute_changes and never reapply defaults.
+     * @return Committed definition with its revision incremented once, or a validation, not-found, deleted, revision,
+     * state, immutable, schedule-snapshot, attribute, payload, or database Error. No attempt or external work starts.
+     */
+    [[nodiscard]] auto update_job(UpdateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
 
     /** Gets one job definition by stable ID without starting an explicit transaction.
      * @param id Stable job-definition UUID.

@@ -1,5 +1,6 @@
 #include "management.hpp"
 
+#include "attempt_repository_priv.hpp"
 #include "attribute_codec_priv.hpp"
 #include "attribute_registry.hpp"
 #include "database.hpp"
@@ -18,6 +19,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -633,6 +635,209 @@ TEST_CASE("Job creation rejects oversized materialized attribute snapshots", "[j
     CHECK(oversized_error.message == "Job attribute document exceeds its size limit");
     CHECK(count_rows(fixture.database, "jobu_jobs") == 0);
     CHECK(count_rows(fixture.database, "jobu_runs") == 0);
+}
+
+TEST_CASE("Job update patches one-time definitions and their pending run snapshots", "[jobu][job][update][sqlite]")
+{
+    auto const     queue_id = uuid("00000000-0000-7000-8000-000000000070");
+    auto const     job_id   = uuid("00000000-0000-7000-8000-000000000071");
+    auto const     run_id   = uuid("00000000-0000-7000-8000-000000000072");
+    ServiceFixture fixture{
+        {queue_id, job_id, run_id}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time, max_attempts(2)};
+    REQUIRE(service.create_queue({.name = "jobs", .defaults = max_attempts(3)}));
+    auto created = service.create_job({
+        .queue      = queue_id,
+        .name       = "before",
+        .schedule   = once_at(UtcTimePoint{5s}),
+        .priority   = 1,
+        .attributes = max_attempts(4),
+        .payload    = cli_payload("before"),
+    });
+    REQUIRE(created);
+    REQUIRE(service.update_queue({.queue = queue_id, .defaults = max_attempts(8)}));
+    fixture.time.advance(1s);
+
+    auto const replacement_payload = http_payload("https://updated.test/path", "PATCH");
+    auto       request             = UpdateJobRequest{
+        .job_id            = job_id,
+        .expected_revision = 1,
+        .name              = std::optional<std::optional<std::string>>{std::in_place, std::nullopt},
+        .type              = JobType::Http,
+        .schedule          = once_at(UtcTimePoint{20s}
+                       ),
+        .priority          = 9,
+        .attribute_changes = {{"job.timeout", {.data = 30s}}},
+        .payload           = replacement_payload,
+    };
+    auto updated = service.update_job(request);
+    REQUIRE(updated);
+    CHECK(request.expected_revision == 1);
+    CHECK(request.payload == replacement_payload);
+    CHECK(updated->id == job_id);
+    CHECK(updated->queue_id == queue_id);
+    CHECK(updated->revision == 2);
+    CHECK_FALSE(updated->name);
+    CHECK(updated->state == JobState::Active);
+    CHECK(updated->type == JobType::Http);
+    CHECK(std::get<OnceSchedule>(updated->schedule).planned_at == UtcTimePoint{20s});
+    CHECK(updated->priority == 9);
+    CHECK(std::get<Duration>(updated->attributes.at("job.timeout").data) == 30s);
+    CHECK(std::get<std::int64_t>(updated->attributes.at("retry.max_attempts").data) == 4);
+    CHECK(updated->payload == replacement_payload);
+    CHECK(updated->created_at == UtcTimePoint{10s});
+    CHECK(updated->updated_at == UtcTimePoint{11s});
+
+    auto persisted = service.get_job(job_id);
+    REQUIRE(persisted);
+    CHECK(persisted->revision == updated->revision);
+    CHECK(attributes_json(persisted->attributes, fixture.registry) ==
+          attributes_json(updated->attributes, fixture.registry));
+    CHECK(persisted->payload == updated->payload);
+
+    detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                  stored_run = runs.find_by_id(run_id);
+    REQUIRE(stored_run);
+    REQUIRE(stored_run->has_value());
+    CHECK((**stored_run).job_revision == updated->revision);
+    CHECK((**stored_run).queue_id == updated->queue_id);
+    CHECK((**stored_run).planned_at == UtcTimePoint{20s});
+    CHECK((**stored_run).runnable_at == UtcTimePoint{20s});
+    CHECK((**stored_run).type == updated->type);
+    CHECK((**stored_run).priority == updated->priority);
+    CHECK(attributes_json((**stored_run).attributes, fixture.registry) ==
+          attributes_json(updated->attributes, fixture.registry));
+    CHECK((**stored_run).payload == updated->payload);
+    auto const documents = stored_documents(fixture.database, job_id);
+    CHECK(documents.job_attributes == documents.run_attributes);
+    CHECK(documents.job_payload == documents.run_payload);
+
+    require_error(service.update_job({.job_id = job_id, .expected_revision = 1, .priority = 10}),
+                  ErrorCategory::Conflict,
+                  "jobu.job.revision_conflict");
+
+    execute(fixture.database, "UPDATE jobu_jobs SET state = 'suspended' WHERE id IS NOT NULL");
+    fixture.time.advance(1s);
+    auto suspended = service.update_job({.job_id = job_id, .expected_revision = 2, .priority = 10});
+    REQUIRE(suspended);
+    CHECK(suspended->state == JobState::Suspended);
+    CHECK(suspended->revision == 3);
+    CHECK(suspended->priority == 10);
+    CHECK(suspended->updated_at == UtcTimePoint{12s});
+}
+
+TEST_CASE("Job update validates revisions state and replacement fields", "[jobu][job][update][validation]")
+{
+    auto const     queue_id = uuid("00000000-0000-7000-8000-000000000080");
+    auto const     job_id   = uuid("00000000-0000-7000-8000-000000000081");
+    ServiceFixture fixture{
+        {queue_id, job_id, uuid("00000000-0000-7000-8000-000000000082")}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "jobs"}));
+    REQUIRE(
+        service.create_job({.queue = queue_id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("true")}));
+
+    require_error(service.update_job({.job_id = job_id, .priority = 1}),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.job.invalid_configuration");
+    require_error(service.update_job({.job_id = job_id, .expected_revision = 1}),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.job.invalid_configuration");
+    require_error(service.update_job({
+                      .job_id            = job_id,
+                      .expected_revision = 1,
+                      .name = std::optional<std::optional<std::string>>{std::in_place, std::string{"bad\x01name", 8}}
+    }),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.job.invalid_name");
+    require_error(service.update_job(
+                      {.job_id = job_id, .expected_revision = 1, .schedule = CronSchedule{.expression = "* * * * *"}}),
+                  ErrorCategory::Unsupported,
+                  "jobu.schedule.cron_unavailable");
+    require_error(service.update_job(
+                      {.job_id = job_id, .expected_revision = 1, .attribute_changes = {{"unknown", {.data = true}}}}),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.attribute.unknown");
+    require_error(service.update_job({.job_id = job_id, .expected_revision = 1, .type = JobType::Http}),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.job.invalid_payload");
+    require_error(service.update_job(
+                      {.job_id = uuid("00000000-0000-7000-8000-000000000099"), .expected_revision = 1, .priority = 1}),
+                  ErrorCategory::NotFound,
+                  "jobu.job.not_found");
+
+    execute(fixture.database, "UPDATE jobu_jobs SET state = 'suspending' WHERE id IS NOT NULL");
+    require_error(service.update_job({.job_id = job_id, .expected_revision = 1, .priority = 1}),
+                  ErrorCategory::Conflict,
+                  "jobu.job.state_conflict");
+    execute(fixture.database, "UPDATE jobu_jobs SET state = 'deleted', deleted_at_us = 11 WHERE id IS NOT NULL");
+    require_error(service.update_job({.job_id = job_id, .expected_revision = 1, .priority = 1}),
+                  ErrorCategory::Conflict,
+                  "jobu.job.deleted");
+    execute(fixture.database,
+            "UPDATE jobu_jobs SET state = 'active', deleted_at_us = NULL, revision = 9223372036854775807 "
+            "WHERE id IS NOT NULL");
+    require_error(
+        service.update_job({.job_id            = job_id,
+                            .expected_revision = static_cast<JobRevision>(std::numeric_limits<std::int64_t>::max()),
+                            .priority          = 1}),
+        ErrorCategory::ResourceExhausted,
+        "jobu.job.revision_exhausted");
+}
+
+TEST_CASE("Job update rolls back when attempts prevent snapshot refresh", "[jobu][job][update][transaction]")
+{
+    auto const     queue_id    = uuid("00000000-0000-7000-8000-000000000090");
+    auto const     pending_job = uuid("00000000-0000-7000-8000-000000000091");
+    auto const     pending_run = uuid("00000000-0000-7000-8000-000000000092");
+    auto const     started_job = uuid("00000000-0000-7000-8000-000000000093");
+    auto const     started_run = uuid("00000000-0000-7000-8000-000000000094");
+    ServiceFixture fixture{
+        {queue_id, pending_job, pending_run, started_job, started_run}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "jobs"}));
+    REQUIRE(service.create_job({.queue    = queue_id,
+                                .name     = "pending",
+                                .schedule = once_at(UtcTimePoint{1s}),
+                                .payload  = cli_payload("pending")}));
+    REQUIRE(service.create_job({.queue    = queue_id,
+                                .name     = "started",
+                                .schedule = once_at(UtcTimePoint{2s}),
+                                .payload  = cli_payload("started")}));
+
+    detail::AttemptRepository attempts{fixture.database};
+    REQUIRE(attempts.insert_attempt({
+        .run_id         = pending_run,
+        .attempt_number = 1,
+        .due_at         = UtcTimePoint{1s},
+    }));
+    REQUIRE(attempts.insert_attempt({
+        .run_id         = started_run,
+        .attempt_number = 1,
+        .due_at         = UtcTimePoint{2s},
+        .started_at     = UtcTimePoint{3s},
+        .state          = AttemptState::Running,
+    }));
+
+    require_error(service.update_job({.job_id = pending_job, .expected_revision = 1, .priority = 7}),
+                  ErrorCategory::Conflict,
+                  "jobu.run.schedule_conflict");
+    auto pending = service.get_job(pending_job);
+    REQUIRE(pending);
+    CHECK(pending->revision == 1);
+    CHECK(pending->priority == 0);
+    CHECK(pending->updated_at == UtcTimePoint{10s});
+
+    require_error(service.update_job({.job_id = started_job, .expected_revision = 1, .priority = 8}),
+                  ErrorCategory::Conflict,
+                  "jobu.job.immutable");
+    auto started = service.get_job(started_job);
+    REQUIRE(started);
+    CHECK(started->revision == 1);
+    CHECK(started->priority == 0);
 }
 
 TEST_CASE("Job management rejects malformed persisted definitions", "[jobu][job][sqlite]")

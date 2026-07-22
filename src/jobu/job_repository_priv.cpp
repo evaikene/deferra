@@ -293,6 +293,70 @@ auto JobRepository::insert(JobDefinition const&               job,
     return query.exec();
 }
 
+auto JobRepository::update_definition(JobDefinition const&               replacement,
+                                      JobRevision                        expected_revision,
+                                      SerializedAttributeDocument const& attributes,
+                                      ValidatedJobPayload const& payload) -> jb::core::Result<bool, jb::core::Error>
+{
+    if ((replacement.name && !is_valid_job_name(*replacement.name)) ||
+        (replacement.state != JobState::Active && replacement.state != JobState::Suspended) || replacement.deleted_at ||
+        storage_text(replacement.type).empty()) {
+        return RepositoryResult<bool>::failure(invalid_job("invalid_update"));
+    }
+    auto expected = revision_to_storage(expected_revision);
+    if (!expected) {
+        return RepositoryResult<bool>::failure(std::move(expected).error());
+    }
+    auto revision = revision_to_storage(replacement.revision);
+    if (!revision) {
+        return RepositoryResult<bool>::failure(std::move(revision).error());
+    }
+    auto schedule = schedule_to_storage(replacement.schedule);
+    if (!schedule) {
+        return RepositoryResult<bool>::failure(std::move(schedule).error());
+    }
+    auto updated = timestamp_to_storage(replacement.updated_at);
+    if (!updated) {
+        return RepositoryResult<bool>::failure(std::move(updated).error());
+    }
+
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(
+        "UPDATE jobu_jobs SET revision = :revision, name = :name, type = :type, schedule_kind = :schedule_kind, "
+        "scheduled_at_us = :scheduled_at_us, cron_expression = :cron_expression, cron_timezone = :cron_timezone, "
+        "priority = :priority, attributes_json = :attributes_json, payload_json = :payload_json, "
+        "updated_at_us = :updated_at_us WHERE id = :id AND revision = :expected_revision "
+        "AND state IN ('active', 'suspended')");
+    if (!prepared) {
+        return RepositoryResult<bool>::failure(std::move(prepared).error());
+    }
+    auto name  = replacement.name ? jb::db::make_text(*replacement.name) : jb::db::Value{jb::db::Null{}};
+    auto bound = bind_all(query,
+                          {
+                              {":revision",          std::move(revision).value()                      },
+                              {":name",              std::move(name)                                  },
+                              {":type",              jb::db::make_text(storage_text(replacement.type))},
+                              {":schedule_kind",     std::move(schedule->kind)                        },
+                              {":scheduled_at_us",   std::move(schedule->scheduled_at)                },
+                              {":cron_expression",   std::move(schedule->cron_expression)             },
+                              {":cron_timezone",     std::move(schedule->cron_timezone)               },
+                              {":priority",          int32_to_storage(replacement.priority)           },
+                              {":attributes_json",   jb::db::make_text(attributes.serialized())       },
+                              {":payload_json",      jb::db::make_text(payload.serialized())          },
+                              {":updated_at_us",     std::move(updated).value()                       },
+                              {":id",                uuid_to_storage(replacement.id)                  },
+                              {":expected_revision", std::move(expected).value()                      },
+    });
+    if (!bound) {
+        return RepositoryResult<bool>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<bool>::failure(std::move(executed).error());
+    }
+    return RepositoryResult<bool>::success(query.num_rows_affected() == 1);
+}
+
 auto JobRepository::find_by_id(jb::core::Uuid const& id, bool include_deleted)
     -> jb::core::Result<std::optional<JobDefinition>, jb::core::Error>
 {
