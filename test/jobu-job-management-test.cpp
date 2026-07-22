@@ -665,7 +665,8 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
         .expected_revision = 1,
         .name              = std::optional<std::optional<std::string>>{std::in_place, std::nullopt},
         .type              = JobType::Http,
-        .schedule          = once_at(UtcTimePoint{20s}),
+        .schedule          = once_at(UtcTimePoint{20s}
+                       ),
         .priority          = 9,
         .attribute_changes = {{"job.timeout", {.data = 30s}}},
         .payload           = replacement_payload,
@@ -891,6 +892,264 @@ TEST_CASE("Job lifecycle rolls back revision exhaustion and rejects deleted defi
                   "jobu.job.not_found");
 }
 
+TEST_CASE("Job move preserves definitions and terminal history across guarded targets", "[jobu][job][move]")
+{
+    auto const     source_queue     = uuid("00000000-0000-7000-8000-000000000200");
+    auto const     active_target    = uuid("00000000-0000-7000-8000-000000000201");
+    auto const     suspended_target = uuid("00000000-0000-7000-8000-000000000202");
+    auto const     deleted_target   = uuid("00000000-0000-7000-8000-000000000203");
+    auto const     moving_job       = uuid("00000000-0000-7000-8000-000000000204");
+    auto const     moving_run       = uuid("00000000-0000-7000-8000-000000000205");
+    auto const     history_job      = uuid("00000000-0000-7000-8000-000000000206");
+    auto const     history_run      = uuid("00000000-0000-7000-8000-000000000207");
+    ServiceFixture fixture{
+        {source_queue,
+         active_target, suspended_target,
+         deleted_target, moving_job,
+         moving_run, history_job,
+         history_run}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "source", .defaults = max_attempts(2)}));
+    REQUIRE(service.create_queue({.name = "active-target", .defaults = max_attempts(99)}));
+    REQUIRE(service.create_queue({.name = "suspended-target", .defaults = max_attempts(88)}));
+    REQUIRE(service.create_queue({.name = "deleted-target"}));
+    REQUIRE(service.suspend_queue(suspended_target));
+    execute(fixture.database,
+            "UPDATE jobu_queues SET name = "
+            "'deleted-target-deleted#00000000-0000-7000-8000-000000000203', deleted_name = 'deleted-target', "
+            "state = 'deleted', updated_at_us = 10000000, deleted_at_us = 10000000 WHERE id = "
+            "X'00000000000070008000000000000203'");
+
+    auto created = service.create_job({.queue      = source_queue,
+                                       .name       = "movable",
+                                       .type       = JobType::Cli,
+                                       .schedule   = once_at(UtcTimePoint{30s}),
+                                       .priority   = 7,
+                                       .attributes = max_attempts(7),
+                                       .payload    = cli_payload("move", {"one"})});
+    REQUIRE(created);
+    auto historical = service.create_job({.queue      = source_queue,
+                                          .name       = "history",
+                                          .type       = JobType::Http,
+                                          .schedule   = once_at(UtcTimePoint{40s}),
+                                          .priority   = -4,
+                                          .attributes = max_attempts(6),
+                                          .payload    = http_payload("https://history.test", "POST")});
+    REQUIRE(historical);
+    auto const original_documents = stored_documents(fixture.database, moving_job);
+    execute(fixture.database,
+            "UPDATE jobu_runs SET state = 'succeeded', started_at_us = 9000000, completed_at_us = 10000000, "
+            "result_json = '{}' WHERE id = X'00000000000070008000000000000207'");
+
+    require_error(service.move_job({.job_id = moving_job, .target_queue = active_target}),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.job.invalid_configuration");
+    require_error(service.move_job({.job_id = moving_job, .expected_revision = 1, .target_queue = active_target}),
+                  ErrorCategory::Conflict,
+                  "jobu.job.not_suspended");
+    auto suspended_moving = service.suspend_job(moving_job);
+    REQUIRE(suspended_moving);
+    auto suspended_history = service.suspend_job(history_job);
+    REQUIRE(suspended_history);
+    CHECK(suspended_moving->revision == 3);
+    CHECK(suspended_history->revision == 3);
+
+    require_error(service.move_job({.job_id = moving_job, .expected_revision = 2, .target_queue = active_target}),
+                  ErrorCategory::Conflict,
+                  "jobu.job.revision_conflict");
+    require_error(service.move_job({.job_id = moving_job, .expected_revision = 3, .target_queue = source_queue}),
+                  ErrorCategory::Conflict,
+                  "jobu.queue.state_conflict");
+    execute(fixture.database,
+            "UPDATE jobu_queues SET state = 'suspending' WHERE id = X'00000000000070008000000000000201'");
+    require_error(service.move_job({.job_id = moving_job, .expected_revision = 3, .target_queue = active_target}),
+                  ErrorCategory::Conflict,
+                  "jobu.queue.state_conflict");
+    execute(fixture.database, "UPDATE jobu_queues SET state = 'active' WHERE id = X'00000000000070008000000000000201'");
+    require_error(service.move_job({.job_id = moving_job, .expected_revision = 3, .target_queue = deleted_target}),
+                  ErrorCategory::NotFound,
+                  "jobu.queue.not_found");
+
+    fixture.time.advance(1s);
+    auto moved = service.move_job({.job_id = moving_job, .expected_revision = 3, .target_queue = active_target});
+    REQUIRE(moved);
+    CHECK(moved->queue_id == active_target);
+    CHECK(moved->revision == 4);
+    CHECK(moved->state == JobState::Suspended);
+    CHECK(moved->name == created->name);
+    CHECK(moved->type == created->type);
+    CHECK(moved->priority == created->priority);
+    CHECK(std::get<std::int64_t>(moved->attributes.at("retry.max_attempts").data) == 7);
+    CHECK(moved->payload == created->payload);
+    CHECK(moved->created_at == created->created_at);
+    CHECK(moved->updated_at == UtcTimePoint{11s});
+
+    detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                  current = runs.find_by_id(moving_run);
+    REQUIRE(current);
+    REQUIRE(current->has_value());
+    CHECK((**current).queue_id == active_target);
+    CHECK((**current).job_revision == 4);
+    auto moved_documents = stored_documents(fixture.database, moving_job);
+    CHECK(moved_documents.job_attributes == original_documents.job_attributes);
+    CHECK(moved_documents.run_attributes == original_documents.run_attributes);
+    CHECK(moved_documents.job_payload == original_documents.job_payload);
+    CHECK(moved_documents.run_payload == original_documents.run_payload);
+
+    fixture.time.advance(1s);
+    moved = service.move_job({.job_id = moving_job, .expected_revision = 4, .target_queue = suspended_target});
+    REQUIRE(moved);
+    CHECK(moved->queue_id == suspended_target);
+    CHECK(moved->revision == 5);
+    current = runs.find_by_id(moving_run);
+    REQUIRE(current);
+    REQUIRE(current->has_value());
+    CHECK((**current).queue_id == suspended_target);
+    CHECK((**current).job_revision == 5);
+
+    auto moved_history =
+        service.move_job({.job_id = history_job, .expected_revision = 3, .target_queue = active_target});
+    REQUIRE(moved_history);
+    CHECK(moved_history->queue_id == active_target);
+    CHECK(moved_history->revision == 4);
+    auto terminal = runs.find_by_id(history_run);
+    REQUIRE(terminal);
+    REQUIRE(terminal->has_value());
+    CHECK((**terminal).state == RunState::Succeeded);
+    CHECK((**terminal).queue_id == source_queue);
+    CHECK((**terminal).job_revision == 1);
+
+    execute(fixture.database,
+            "UPDATE jobu_jobs SET revision = 9223372036854775807 WHERE id = "
+            "X'00000000000070008000000000000204'");
+    require_error(
+        service.move_job({.job_id            = moving_job,
+                          .expected_revision = static_cast<JobRevision>(std::numeric_limits<std::int64_t>::max()),
+                          .target_queue      = source_queue}),
+        ErrorCategory::ResourceExhausted,
+        "jobu.job.revision_exhausted");
+    current = runs.find_by_id(moving_run);
+    REQUIRE(current);
+    REQUIRE(current->has_value());
+    CHECK((**current).queue_id == suspended_target);
+    CHECK((**current).job_revision == 5);
+}
+
+TEST_CASE("Job deletion cancels pending work cleans references and enforces prerequisites", "[jobu][job][delete]")
+{
+    auto const     queue_id      = uuid("00000000-0000-7000-8000-000000000210");
+    auto const     deleted_job   = uuid("00000000-0000-7000-8000-000000000211");
+    auto const     deleted_run   = uuid("00000000-0000-7000-8000-000000000212");
+    auto const     running_job   = uuid("00000000-0000-7000-8000-000000000213");
+    auto const     running_run   = uuid("00000000-0000-7000-8000-000000000214");
+    auto const     exhausted_job = uuid("00000000-0000-7000-8000-000000000215");
+    auto const     exhausted_run = uuid("00000000-0000-7000-8000-000000000216");
+    ServiceFixture fixture{
+        {queue_id, deleted_job, deleted_run, running_job, running_run, exhausted_job, exhausted_run}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "jobs"}));
+    REQUIRE(service.create_job({.queue    = queue_id,
+                                .name     = "delete",
+                                .schedule = once_at(UtcTimePoint{20s}),
+                                .payload  = cli_payload("delete")}));
+    REQUIRE(service.create_job({.queue    = queue_id,
+                                .name     = "running",
+                                .schedule = once_at(UtcTimePoint{30s}),
+                                .payload  = cli_payload("running")}));
+    REQUIRE(service.create_job({.queue    = queue_id,
+                                .name     = "exhausted",
+                                .schedule = once_at(UtcTimePoint{40s}),
+                                .payload  = cli_payload("exhausted")}));
+
+    require_error(service.delete_job({.job_id = deleted_job}),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.job.invalid_configuration");
+    require_error(service.delete_job({.job_id = uuid("00000000-0000-7000-8000-000000000299"), .expected_revision = 1}),
+                  ErrorCategory::NotFound,
+                  "jobu.job.not_found");
+    require_error(service.delete_job({.job_id = deleted_job, .expected_revision = 1}),
+                  ErrorCategory::Conflict,
+                  "jobu.job.not_suspended");
+    auto suspended = service.suspend_job(deleted_job);
+    REQUIRE(suspended);
+    REQUIRE(suspended->revision == 3);
+    require_error(service.delete_job({.job_id = deleted_job, .expected_revision = 2}),
+                  ErrorCategory::Conflict,
+                  "jobu.job.revision_conflict");
+    execute(fixture.database,
+            "INSERT INTO jobu_secrets(name, value_blob, created_at_us, updated_at_us) "
+            "VALUES ('delete.secret', X'0102', 1, 1)");
+    execute(fixture.database,
+            "INSERT INTO jobu_secret_refs(secret_name, job_id, field_path) VALUES "
+            "('delete.secret', X'00000000000070008000000000000211', 'payload.token')");
+
+    fixture.time.advance(1s);
+    REQUIRE(service.delete_job({.job_id = deleted_job, .expected_revision = 3}));
+    require_error(service.delete_job({.job_id = deleted_job, .expected_revision = 4}),
+                  ErrorCategory::Conflict,
+                  "jobu.job.deleted");
+    auto stored_deleted = service.get_job(deleted_job, true);
+    REQUIRE(stored_deleted);
+    CHECK(stored_deleted->state == JobState::Deleted);
+    CHECK(stored_deleted->revision == 4);
+    CHECK(stored_deleted->updated_at == UtcTimePoint{11s});
+    CHECK(stored_deleted->deleted_at == UtcTimePoint{11s});
+
+    detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                  cancelled = runs.find_by_id(deleted_run);
+    REQUIRE(cancelled);
+    REQUIRE(cancelled->has_value());
+    CHECK((**cancelled).state == RunState::Cancelled);
+    CHECK((**cancelled).completed_at == UtcTimePoint{11s});
+    REQUIRE((**cancelled).result);
+    CHECK((**cancelled).result->as_object().at("reason").as_string() == "job_deleted");
+    CHECK(count_rows(fixture.database, "jobu_secret_refs") == 0);
+    CHECK(count_rows(fixture.database, "jobu_secrets") == 1);
+
+    execute(fixture.database,
+            "UPDATE jobu_runs SET state = 'running', started_at_us = 10000000 WHERE id = "
+            "X'00000000000070008000000000000214'");
+    detail::AttemptRepository attempts{fixture.database};
+    REQUIRE(attempts.insert_attempt({
+        .run_id         = running_run,
+        .attempt_number = 1,
+        .due_at         = UtcTimePoint{10s},
+        .started_at     = UtcTimePoint{10s},
+        .state          = AttemptState::Running,
+    }));
+    execute(fixture.database,
+            "UPDATE jobu_jobs SET state = 'suspended', revision = 3 WHERE id = "
+            "X'00000000000070008000000000000213'");
+    require_error(service.delete_job({.job_id = running_job, .expected_revision = 3}),
+                  ErrorCategory::Conflict,
+                  "jobu.job.has_running_attempt");
+    auto preserved_running = service.get_job(running_job);
+    REQUIRE(preserved_running);
+    CHECK(preserved_running->state == JobState::Suspended);
+    CHECK(preserved_running->revision == 3);
+
+    auto exhausted = service.suspend_job(exhausted_job);
+    REQUIRE(exhausted);
+    execute(fixture.database,
+            "UPDATE jobu_jobs SET revision = 9223372036854775807 WHERE id = "
+            "X'00000000000070008000000000000215'");
+    require_error(service.delete_job({
+                      .job_id            = exhausted_job,
+                      .expected_revision = static_cast<JobRevision>(std::numeric_limits<std::int64_t>::max()),
+                  }),
+                  ErrorCategory::ResourceExhausted,
+                  "jobu.job.revision_exhausted");
+    auto preserved_exhausted = service.get_job(exhausted_job);
+    REQUIRE(preserved_exhausted);
+    CHECK(preserved_exhausted->state == JobState::Suspended);
+    auto pending = runs.find_by_id(exhausted_run);
+    REQUIRE(pending);
+    REQUIRE(pending->has_value());
+    CHECK((**pending).state == RunState::Scheduled);
+}
+
 TEST_CASE("Job update validates revisions state and replacement fields", "[jobu][job][update][validation]")
 {
     auto const     queue_id = uuid("00000000-0000-7000-8000-000000000080");
@@ -1054,4 +1313,13 @@ TEST_CASE("Job methods report invalid daemon defaults consistently", "[jobu][job
     require_error(invalid_service.resume_job(uuid("00000000-0000-7000-8000-000000000099")),
                   ErrorCategory::InvalidArgument,
                   "jobu.attribute.unknown");
+    require_error(invalid_service.move_job({.job_id            = uuid("00000000-0000-7000-8000-000000000099"),
+                                            .expected_revision = 1,
+                                            .target_queue      = queue->id}),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.attribute.unknown");
+    require_error(
+        invalid_service.delete_job({.job_id = uuid("00000000-0000-7000-8000-000000000099"), .expected_revision = 1}),
+        ErrorCategory::InvalidArgument,
+        "jobu.attribute.unknown");
 }

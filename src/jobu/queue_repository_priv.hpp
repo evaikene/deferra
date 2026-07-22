@@ -39,6 +39,12 @@ public:
                                  QueueState             expected_state,
                                  QueueState             next_state,
                                  jb::core::UtcTimePoint updated_at) -> jb::core::Result<bool, jb::core::Error>;
+    [[nodiscard]] auto count_non_deleted_jobs(jb::core::Uuid const& queue_id)
+        -> jb::core::Result<std::size_t, jb::core::Error>;
+    [[nodiscard]] auto mark_deleted(jb::core::Uuid const&  id,
+                                    std::string_view       internal_name,
+                                    std::string_view       original_name,
+                                    jb::core::UtcTimePoint deleted_at) -> jb::core::Result<bool, jb::core::Error>;
 
 private:
     jb::db::Database&        _database;

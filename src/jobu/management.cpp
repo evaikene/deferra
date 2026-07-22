@@ -75,6 +75,20 @@ auto queue_state_conflict() -> jb::core::Error
                          "Queue state changed incompatibly during the operation");
 }
 
+auto queue_not_suspended() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::Conflict,
+                         "jobu.queue.not_suspended",
+                         "Queue must be fully suspended for this operation");
+}
+
+auto queue_has_running_attempt() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::Conflict,
+                         "jobu.queue.has_running_attempt",
+                         "Queue cannot be deleted while work is running");
+}
+
 auto invalid_job_name() -> jb::core::Error
 {
     return service_error(jb::core::ErrorCategory::InvalidArgument,
@@ -136,6 +150,29 @@ auto job_state_conflict() -> jb::core::Error
     return service_error(jb::core::ErrorCategory::Conflict,
                          "jobu.job.state_conflict",
                          "Job state changed incompatibly during the operation");
+}
+
+auto job_not_suspended() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::Conflict,
+                         "jobu.job.not_suspended",
+                         "Job must be fully suspended for this operation");
+}
+
+auto job_has_running_attempt() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::Conflict,
+                         "jobu.job.has_running_attempt",
+                         "Job cannot be deleted while work is running");
+}
+
+auto storage_invariant(std::string_view reason) -> jb::core::Error
+{
+    auto error   = service_error(jb::core::ErrorCategory::Internal,
+                                 "jobu.storage.invariant",
+                                 "Persisted JobU data violates a cross-table invariant");
+    error.detail = "reason=" + std::string{reason};
+    return error;
 }
 
 auto job_immutable() -> jb::core::Error
@@ -687,6 +724,87 @@ auto ManagementService::resume_queue(QueueSelector const& selector) -> jb::core:
     return ServiceResult<Queue>::success(std::move(queue));
 }
 
+auto ManagementService::delete_queue(QueueSelector const& selector) -> jb::core::Result<void, jb::core::Error>
+{
+    if (_data->initialization_error) {
+        return ServiceResult<void>::failure(*_data->initialization_error);
+    }
+    auto validated = validate_selector(selector);
+    if (!validated) {
+        return ServiceResult<void>::failure(std::move(validated).error());
+    }
+    auto const now = _data->time_source.utc_now();
+
+    auto begun = jb::db::Transaction::begin(_data->database);
+    if (!begun) {
+        return ServiceResult<void>::failure(std::move(begun).error());
+    }
+    auto transaction = std::move(begun).value();
+    auto found       = find_queue(_data->queues, selector, true);
+    if (!found) {
+        return ServiceResult<void>::failure(std::move(found).error());
+    }
+    if (!found->has_value()) {
+        return ServiceResult<void>::failure(queue_not_found());
+    }
+    auto queue = std::move(**found);
+    if (queue.state == QueueState::Deleted) {
+        return ServiceResult<void>::failure(queue_state_conflict());
+    }
+    if (queue.state != QueueState::Suspended) {
+        return ServiceResult<void>::failure(queue_not_suspended());
+    }
+
+    auto running = _data->runs.count_running_for_queue(queue.id);
+    if (!running) {
+        return ServiceResult<void>::failure(std::move(running).error());
+    }
+    if (*running != 0) {
+        return ServiceResult<void>::failure(queue_has_running_attempt());
+    }
+    auto job_count = _data->queues.count_non_deleted_jobs(queue.id);
+    if (!job_count) {
+        return ServiceResult<void>::failure(std::move(job_count).error());
+    }
+    auto exhausted = _data->jobs.has_exhausted_revision_in_queue(queue.id, kMaximumPersistedJobRevision);
+    if (!exhausted) {
+        return ServiceResult<void>::failure(std::move(exhausted).error());
+    }
+    if (*exhausted) {
+        return ServiceResult<void>::failure(job_revision_exhausted());
+    }
+
+    auto references = _data->jobs.erase_secret_references_for_queue(queue.id);
+    if (!references) {
+        return ServiceResult<void>::failure(std::move(references).error());
+    }
+    auto deleted_jobs = _data->jobs.mark_all_in_queue_deleted(queue.id, now);
+    if (!deleted_jobs) {
+        return ServiceResult<void>::failure(std::move(deleted_jobs).error());
+    }
+    if (*deleted_jobs != *job_count) {
+        return ServiceResult<void>::failure(storage_invariant("queue_delete_job_count"));
+    }
+    auto cancelled = _data->runs.cancel_pending_for_queue(queue.id, now, "queue_deleted");
+    if (!cancelled) {
+        return ServiceResult<void>::failure(std::move(cancelled).error());
+    }
+
+    auto internal_name = queue.name + "-deleted#" + queue.id.to_string();
+    auto deleted_queue = _data->queues.mark_deleted(queue.id, internal_name, queue.name, now);
+    if (!deleted_queue) {
+        return ServiceResult<void>::failure(std::move(deleted_queue).error());
+    }
+    if (!*deleted_queue) {
+        return ServiceResult<void>::failure(queue_state_conflict());
+    }
+    auto committed = transaction.commit();
+    if (!committed) {
+        return ServiceResult<void>::failure(std::move(committed).error());
+    }
+    return ServiceResult<void>::success();
+}
+
 auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>
 {
     if (_data->initialization_error) {
@@ -1076,6 +1194,178 @@ auto ManagementService::resume_job(jb::core::Uuid const& id) -> jb::core::Result
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
     }
     return ServiceResult<JobDefinition>::success(std::move(job));
+}
+
+auto ManagementService::move_job(MoveJobRequest const& request) -> jb::core::Result<JobDefinition, jb::core::Error>
+{
+    if (_data->initialization_error) {
+        return ServiceResult<JobDefinition>::failure(*_data->initialization_error);
+    }
+    if (request.expected_revision == 0) {
+        return ServiceResult<JobDefinition>::failure(invalid_job_configuration("expected_revision_not_positive"));
+    }
+    auto selector = validate_selector(request.target_queue);
+    if (!selector) {
+        return ServiceResult<JobDefinition>::failure(std::move(selector).error());
+    }
+    auto const now = _data->time_source.utc_now();
+
+    auto begun = jb::db::Transaction::begin(_data->database);
+    if (!begun) {
+        return ServiceResult<JobDefinition>::failure(std::move(begun).error());
+    }
+    auto transaction = std::move(begun).value();
+    auto found       = _data->jobs.find_by_id(request.job_id, true);
+    if (!found) {
+        return ServiceResult<JobDefinition>::failure(std::move(found).error());
+    }
+    if (!found->has_value()) {
+        return ServiceResult<JobDefinition>::failure(job_not_found());
+    }
+    auto job = std::move(**found);
+    if (job.state == JobState::Deleted) {
+        return ServiceResult<JobDefinition>::failure(job_deleted());
+    }
+    if (job.revision != request.expected_revision) {
+        return ServiceResult<JobDefinition>::failure(job_revision_conflict());
+    }
+    if (job.state != JobState::Suspended) {
+        return ServiceResult<JobDefinition>::failure(job_not_suspended());
+    }
+
+    auto found_queue = find_queue(_data->queues, request.target_queue, false);
+    if (!found_queue) {
+        return ServiceResult<JobDefinition>::failure(std::move(found_queue).error());
+    }
+    if (!found_queue->has_value()) {
+        return ServiceResult<JobDefinition>::failure(queue_not_found());
+    }
+    auto const& target_queue = **found_queue;
+    if (target_queue.id == job.queue_id ||
+        (target_queue.state != QueueState::Active && target_queue.state != QueueState::Suspended)) {
+        return ServiceResult<JobDefinition>::failure(queue_state_conflict());
+    }
+    if (job.revision >= kMaximumPersistedJobRevision) {
+        return ServiceResult<JobDefinition>::failure(job_revision_exhausted());
+    }
+    auto const next_revision = job.revision + 1;
+    auto       moved_job     = _data->jobs.move(job.id, job.revision, target_queue.id, next_revision, now);
+    if (!moved_job) {
+        return ServiceResult<JobDefinition>::failure(std::move(moved_job).error());
+    }
+    if (!*moved_job) {
+        auto diagnosed = _data->jobs.find_by_id(job.id, true);
+        if (!diagnosed) {
+            return ServiceResult<JobDefinition>::failure(std::move(diagnosed).error());
+        }
+        if (!diagnosed->has_value()) {
+            return ServiceResult<JobDefinition>::failure(job_not_found());
+        }
+        if ((**diagnosed).state == JobState::Deleted) {
+            return ServiceResult<JobDefinition>::failure(job_deleted());
+        }
+        if ((**diagnosed).revision != request.expected_revision) {
+            return ServiceResult<JobDefinition>::failure(job_revision_conflict());
+        }
+        if ((**diagnosed).state != JobState::Suspended) {
+            return ServiceResult<JobDefinition>::failure(job_not_suspended());
+        }
+        return ServiceResult<JobDefinition>::failure(job_state_conflict());
+    }
+    auto moved_runs = _data->runs.move_non_terminal(job.id, target_queue.id, next_revision);
+    if (!moved_runs) {
+        return ServiceResult<JobDefinition>::failure(std::move(moved_runs).error());
+    }
+
+    job.queue_id   = target_queue.id;
+    job.revision   = next_revision;
+    job.updated_at = now;
+    auto committed = transaction.commit();
+    if (!committed) {
+        return ServiceResult<JobDefinition>::failure(std::move(committed).error());
+    }
+    return ServiceResult<JobDefinition>::success(std::move(job));
+}
+
+auto ManagementService::delete_job(DeleteJobRequest const& request) -> jb::core::Result<void, jb::core::Error>
+{
+    if (_data->initialization_error) {
+        return ServiceResult<void>::failure(*_data->initialization_error);
+    }
+    if (request.expected_revision == 0) {
+        return ServiceResult<void>::failure(invalid_job_configuration("expected_revision_not_positive"));
+    }
+    auto const now = _data->time_source.utc_now();
+
+    auto begun = jb::db::Transaction::begin(_data->database);
+    if (!begun) {
+        return ServiceResult<void>::failure(std::move(begun).error());
+    }
+    auto transaction = std::move(begun).value();
+    auto found       = _data->jobs.find_by_id(request.job_id, true);
+    if (!found) {
+        return ServiceResult<void>::failure(std::move(found).error());
+    }
+    if (!found->has_value()) {
+        return ServiceResult<void>::failure(job_not_found());
+    }
+    auto job = std::move(**found);
+    if (job.state == JobState::Deleted) {
+        return ServiceResult<void>::failure(job_deleted());
+    }
+    if (job.revision != request.expected_revision) {
+        return ServiceResult<void>::failure(job_revision_conflict());
+    }
+    if (job.state != JobState::Suspended) {
+        return ServiceResult<void>::failure(job_not_suspended());
+    }
+    auto running = _data->runs.count_running_for_job(job.id);
+    if (!running) {
+        return ServiceResult<void>::failure(std::move(running).error());
+    }
+    if (*running != 0) {
+        return ServiceResult<void>::failure(job_has_running_attempt());
+    }
+    if (job.revision >= kMaximumPersistedJobRevision) {
+        return ServiceResult<void>::failure(job_revision_exhausted());
+    }
+    auto const next_revision = job.revision + 1;
+    auto       deleted       = _data->jobs.mark_deleted(job.id, job.revision, next_revision, now);
+    if (!deleted) {
+        return ServiceResult<void>::failure(std::move(deleted).error());
+    }
+    if (!*deleted) {
+        auto diagnosed = _data->jobs.find_by_id(job.id, true);
+        if (!diagnosed) {
+            return ServiceResult<void>::failure(std::move(diagnosed).error());
+        }
+        if (!diagnosed->has_value()) {
+            return ServiceResult<void>::failure(job_not_found());
+        }
+        if ((**diagnosed).state == JobState::Deleted) {
+            return ServiceResult<void>::failure(job_deleted());
+        }
+        if ((**diagnosed).revision != request.expected_revision) {
+            return ServiceResult<void>::failure(job_revision_conflict());
+        }
+        if ((**diagnosed).state != JobState::Suspended) {
+            return ServiceResult<void>::failure(job_not_suspended());
+        }
+        return ServiceResult<void>::failure(job_state_conflict());
+    }
+    auto cancelled = _data->runs.cancel_pending_for_job(job.id, now, "job_deleted");
+    if (!cancelled) {
+        return ServiceResult<void>::failure(std::move(cancelled).error());
+    }
+    auto references = _data->jobs.erase_secret_references_for_job(job.id);
+    if (!references) {
+        return ServiceResult<void>::failure(std::move(references).error());
+    }
+    auto committed = transaction.commit();
+    if (!committed) {
+        return ServiceResult<void>::failure(std::move(committed).error());
+    }
+    return ServiceResult<void>::success();
 }
 
 auto ManagementService::get_job(jb::core::Uuid const& id, bool include_deleted)
