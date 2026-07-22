@@ -154,6 +154,19 @@ auto validate_job_payload(JobType type, jb::rpc::JsonValue const& payload) -> Se
     return ServiceResult<detail::ValidatedJobPayload>::success(std::move(validated).value());
 }
 
+auto attribute_document_size_message(AttributeScope scope) noexcept -> std::string_view
+{
+    switch (scope) {
+        case AttributeScope::DaemonDefault:
+            return "Daemon default attribute document exceeds its size limit";
+        case AttributeScope::QueueDefault:
+            return "Queue attribute document exceeds its size limit";
+        case AttributeScope::Job:
+            return "Job attribute document exceeds its size limit";
+    }
+    return "Attribute document exceeds its size limit";
+}
+
 auto serialize_attributes(AttributeRegistry const&      attributes,
                           AttributeSet const&           values,
                           AttributeScope                scope,
@@ -167,7 +180,7 @@ auto serialize_attributes(AttributeRegistry const&      attributes,
         return ServiceResult<detail::SerializedAttributeDocument>::failure(
             service_error(jb::core::ErrorCategory::ResourceExhausted,
                           "jobu.protocol.value_too_large",
-                          "Queue attribute document exceeds its size limit"));
+                          attribute_document_size_message(scope)));
     }
     return ServiceResult<detail::SerializedAttributeDocument>::success(std::move(serialized).value());
 }

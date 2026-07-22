@@ -289,9 +289,11 @@ TEST_CASE("Queue management rejects invalid input before durable mutation", "[jo
     auto                 oversized_defaults = AttributeSet{
         {"test.map", {.data = AttributeValue::Map{{"value", {.data = std::string(256U * 1024U, 'x')}}}}}
     };
-    require_error(map_service.create_queue({.name = "oversized-default", .defaults = std::move(oversized_defaults)}),
-                  ErrorCategory::ResourceExhausted,
-                  "jobu.protocol.value_too_large");
+    auto oversized_error = require_error(
+        map_service.create_queue({.name = "oversized-default", .defaults = std::move(oversized_defaults)}),
+        ErrorCategory::ResourceExhausted,
+        "jobu.protocol.value_too_large");
+    CHECK(oversized_error.message == "Queue attribute document exceeds its size limit");
 
     auto invalid_utf8_defaults = AttributeSet{
         {"test.map", {.data = AttributeValue::Map{{"value", {.data = std::string{"\xc3", 1U}}}}}}

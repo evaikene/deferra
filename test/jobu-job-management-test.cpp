@@ -624,12 +624,13 @@ TEST_CASE("Job creation rejects oversized materialized attribute snapshots", "[j
     auto job_attributes = AttributeSet{
         {"test.job_large", {.data = std::string(140U * 1024U, 'j')}}
     };
-    require_error(service.create_job({.queue      = queue_id,
-                                      .schedule   = once_at(UtcTimePoint{1s}),
-                                      .attributes = std::move(job_attributes),
-                                      .payload    = cli_payload("true")}),
-                  ErrorCategory::ResourceExhausted,
-                  "jobu.protocol.value_too_large");
+    auto oversized_error = require_error(service.create_job({.queue      = queue_id,
+                                                             .schedule   = once_at(UtcTimePoint{1s}),
+                                                             .attributes = std::move(job_attributes),
+                                                             .payload    = cli_payload("true")}),
+                                         ErrorCategory::ResourceExhausted,
+                                         "jobu.protocol.value_too_large");
+    CHECK(oversized_error.message == "Job attribute document exceeds its size limit");
     CHECK(count_rows(fixture.database, "jobu_jobs") == 0);
     CHECK(count_rows(fixture.database, "jobu_runs") == 0);
 }
