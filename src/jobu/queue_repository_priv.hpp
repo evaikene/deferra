@@ -15,12 +15,15 @@ class Database;
 
 namespace jb::jobu::detail {
 
+class SerializedAttributeDocument;
+
 class QueueRepository final {
 public:
     QueueRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept;
 
-    [[nodiscard]] auto insert(Queue const& queue, std::string_view internal_name)
-        -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto insert(Queue const&                       queue,
+                              std::string_view                   internal_name,
+                              SerializedAttributeDocument const& defaults) -> jb::core::Result<void, jb::core::Error>;
     [[nodiscard]] auto find_by_id(jb::core::Uuid const& id, bool include_deleted)
         -> jb::core::Result<std::optional<Queue>, jb::core::Error>;
     [[nodiscard]] auto find_by_name(std::string_view name, bool include_deleted)
@@ -30,7 +33,8 @@ public:
                             std::size_t                   limit,
                             std::optional<jb::core::Uuid> after_id)
         -> jb::core::Result<std::vector<Queue>, jb::core::Error>;
-    [[nodiscard]] auto replace_mutable_fields(Queue const& queue) -> jb::core::Result<bool, jb::core::Error>;
+    [[nodiscard]] auto replace_mutable_fields(Queue const& queue, SerializedAttributeDocument const* defaults)
+        -> jb::core::Result<bool, jb::core::Error>;
 
 private:
     jb::db::Database&        _database;

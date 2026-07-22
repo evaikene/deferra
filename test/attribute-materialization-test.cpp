@@ -1,3 +1,4 @@
+#include "attribute_codec_priv.hpp"
 #include "attribute_registry.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -10,13 +11,20 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 
 using namespace jb::core;
 using namespace jb::jobu;
+using namespace jb::jobu::detail;
 using namespace jb::rpc;
 using namespace std::chrono_literals;
+
+static_assert(std::is_move_constructible_v<SerializedAttributeDocument>);
+static_assert(std::is_move_assignable_v<SerializedAttributeDocument>);
+static_assert(!std::is_copy_constructible_v<SerializedAttributeDocument>);
+static_assert(!std::is_copy_assignable_v<SerializedAttributeDocument>);
 
 namespace {
 
@@ -227,6 +235,22 @@ auto nested_list(std::size_t levels, AttributeValue leaf) -> AttributeValue
         leaf = AttributeValue{.data = AttributeValue::List{std::move(leaf)}};
     }
     return leaf;
+}
+
+auto typed_json(std::string type, JsonValue value) -> JsonValue
+{
+    return make_json(JsonValue::Object{
+        {"type",  make_json(std::move(type))},
+        {"value", std::move(value)          },
+    });
+}
+
+auto attribute_document(JsonValue::Object values) -> JsonValue
+{
+    return make_json(JsonValue::Object{
+        {"values",  make_json(std::move(values))},
+        {"version", make_json(std::uint64_t{1}) },
+    });
 }
 
 } // anonymous namespace
@@ -446,4 +470,162 @@ TEST_CASE("Public attribute JSON rejects lossy, malformed, and unsupported recur
         AttributeScope::Job);
     REQUIRE_FALSE(too_deep);
     CHECK(too_deep.error().code == "jobu.attribute.invalid_value");
+}
+
+TEST_CASE("Attribute persistence validates UTF-8 while traversing typed values", "[jobu][storage][attribute]")
+{
+    CompleteTypeRegistry registry;
+    auto const           invalid_utf8 = std::string{"\xc3\x28", 2U};
+
+    SECTION("encoding rejects invalid string values")
+    {
+        auto encoded = encode_attribute_document(registry,
+                                                 {
+                                                     {"test.string", {.data = invalid_utf8}}
+        },
+                                                 AttributeScope::Job,
+                                                 AttributeDocumentMode::Partial);
+        REQUIRE_FALSE(encoded);
+        CHECK(encoded.error().category == ErrorCategory::InvalidArgument);
+        CHECK(encoded.error().code == "jobu.attribute.invalid_value");
+        CHECK(encoded.error().message == "JobU attribute text is not valid UTF-8");
+    }
+
+    SECTION("encoding rejects invalid nested map keys")
+    {
+        auto encoded =
+            encode_attribute_document(registry,
+                                      {
+                                          {"test.map", {.data = AttributeValue::Map{{invalid_utf8, {.data = true}}}}}
+        },
+                                      AttributeScope::Job,
+                                      AttributeDocumentMode::Partial);
+        REQUIRE_FALSE(encoded);
+        CHECK(encoded.error().category == ErrorCategory::InvalidArgument);
+        CHECK(encoded.error().code == "jobu.attribute.invalid_value");
+        CHECK(encoded.error().message == "JobU attribute text is not valid UTF-8");
+    }
+
+    auto decode = [&registry](JsonValue document) {
+        return decode_attribute_document(registry, document, AttributeScope::Job, AttributeDocumentMode::Partial);
+    };
+
+    SECTION("decoding rejects invalid string values")
+    {
+        auto decoded = decode(attribute_document({
+            {"test.string", typed_json("string", make_json(invalid_utf8))}
+        }));
+        REQUIRE_FALSE(decoded);
+        CHECK(decoded.error().category == ErrorCategory::Internal);
+        CHECK(decoded.error().code == "jobu.attribute.invalid_document");
+        CHECK(decoded.error().detail == "reason=invalid_utf8");
+    }
+
+    SECTION("decoding rejects invalid nested map keys")
+    {
+        auto decoded = decode(attribute_document({
+            {"test.map", typed_json("map", make_json(JsonValue::Object{{invalid_utf8, make_json(true)}}))}
+        }));
+        REQUIRE_FALSE(decoded);
+        CHECK(decoded.error().category == ErrorCategory::Internal);
+        CHECK(decoded.error().code == "jobu.attribute.invalid_document");
+        CHECK(decoded.error().detail == "reason=invalid_utf8");
+    }
+
+    SECTION("decoding rejects invalid type tags and top-level names")
+    {
+        auto invalid_tag = decode(attribute_document({
+            {"test.string", typed_json(invalid_utf8, make_json(std::string{"text"}))}
+        }));
+        REQUIRE_FALSE(invalid_tag);
+        CHECK(invalid_tag.error().detail == "reason=invalid_utf8");
+
+        auto invalid_name = decode(attribute_document({
+            {invalid_utf8, typed_json("string", make_json(std::string{"text"}))}
+        }));
+        REQUIRE_FALSE(invalid_name);
+        CHECK(invalid_name.error().detail == "reason=invalid_utf8");
+    }
+
+    SECTION("valid multibyte text round trips")
+    {
+        AttributeSet values{
+            {"test.map",    {.data = AttributeValue::Map{{"ключ", {.data = std::string{"значение"}}}}}},
+            {"test.string", {.data = std::string{"Tere, maailm! 🌍"}}                                 },
+        };
+        auto encoded = encode_attribute_document(registry, values, AttributeScope::Job, AttributeDocumentMode::Partial);
+        REQUIRE(encoded);
+        auto decoded = decode(*encoded);
+        REQUIRE(decoded);
+        CHECK(same_set(*decoded, values));
+    }
+}
+
+TEST_CASE("Serialized attribute documents own the canonical encoded bytes", "[jobu][storage][attribute]")
+{
+    CompleteTypeRegistry registry;
+    AttributeSet         partial{
+        {"test.map",    {.data = AttributeValue::Map{{"nested", {.data = std::string{"value"}}}}}},
+        {"test.string", {.data = std::string{"text"}}                                            },
+    };
+
+    auto partial_json =
+        encode_attribute_document(registry, partial, AttributeScope::QueueDefault, AttributeDocumentMode::Partial);
+    REQUIRE(partial_json);
+    auto partial_text = serialize_json(*partial_json);
+    REQUIRE(partial_text);
+    auto serialized_partial = encode_and_serialize_attribute_document(registry,
+                                                                      partial,
+                                                                      AttributeScope::QueueDefault,
+                                                                      AttributeDocumentMode::Partial);
+    REQUIRE(serialized_partial);
+    CHECK(serialized_partial->serialized() == *partial_text);
+
+    auto materialized = materialize_attributes(registry, {}, {}, {});
+    REQUIRE(materialized);
+    auto materialized_json =
+        encode_attribute_document(registry, *materialized, AttributeScope::Job, AttributeDocumentMode::Materialized);
+    REQUIRE(materialized_json);
+    auto materialized_text = serialize_json(*materialized_json);
+    REQUIRE(materialized_text);
+    auto serialized_materialized = encode_and_serialize_attribute_document(registry,
+                                                                           *materialized,
+                                                                           AttributeScope::Job,
+                                                                           AttributeDocumentMode::Materialized);
+    REQUIRE(serialized_materialized);
+    CHECK(serialized_materialized->serialized() == *materialized_text);
+}
+
+TEST_CASE("Attribute persistence retains numeric and nesting validation", "[jobu][storage][attribute]")
+{
+    CompleteTypeRegistry registry;
+
+    auto non_finite = encode_attribute_document(registry,
+                                                {
+                                                    {"test.number", {.data = std::numeric_limits<double>::infinity()}}
+    },
+                                                AttributeScope::Job,
+                                                AttributeDocumentMode::Partial);
+    REQUIRE_FALSE(non_finite);
+    CHECK(non_finite.error().code == "jobu.attribute.invalid_value");
+
+    auto too_deep = encode_attribute_document(registry,
+                                              {
+                                                  {"test.list", nested_list(65U, {.data = std::int64_t{1}})}
+    },
+                                              AttributeScope::Job,
+                                              AttributeDocumentMode::Partial);
+    REQUIRE_FALSE(too_deep);
+    CHECK(too_deep.error().code == "jobu.attribute.invalid_value");
+
+    auto decoded_number = decode_attribute_document(
+        registry,
+        attribute_document({
+            {"test.number", typed_json("number", make_json(std::numeric_limits<double>::infinity()))}
+    }),
+        AttributeScope::Job,
+        AttributeDocumentMode::Partial);
+    REQUIRE_FALSE(decoded_number);
+    CHECK(decoded_number.error().code == "jobu.attribute.invalid_document");
+    CHECK(decoded_number.error().detail == "reason=number_shape");
 }

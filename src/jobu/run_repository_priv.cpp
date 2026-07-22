@@ -2,7 +2,6 @@
 
 #include "attribute_codec_priv.hpp"
 #include "domain_storage_priv.hpp"
-#include "job_validation_priv.hpp"
 #include "query.hpp"
 #include "value.hpp"
 
@@ -57,6 +56,15 @@ auto invalid_limit() -> jb::core::Error
     return repository_error(jb::core::ErrorCategory::InvalidArgument,
                             "jobu.storage.invalid_limit",
                             "Repository limit is outside its supported range");
+}
+
+auto invalid_json(std::string_view reason) -> jb::core::Error
+{
+    auto error   = repository_error(jb::core::ErrorCategory::Internal,
+                                    "jobu.storage.invalid_json",
+                                    "Persisted JSON document is invalid");
+    error.detail = "reason=" + std::string{reason};
+    return error;
 }
 
 auto schedule_conflict() -> jb::core::Error
@@ -385,18 +393,6 @@ RunRepository::RunRepository(jb::db::Database& database, AttributeRegistry const
 
 auto RunRepository::insert_schedule_owned(JobRun const& run) -> jb::core::Result<void, jb::core::Error>
 {
-    return insert_schedule_owned_impl(run, nullptr);
-}
-
-auto RunRepository::insert_schedule_owned(JobRun const& run, ValidatedJobPayload const& payload)
-    -> jb::core::Result<void, jb::core::Error>
-{
-    return insert_schedule_owned_impl(run, &payload);
-}
-
-auto RunRepository::insert_schedule_owned_impl(JobRun const& run, ValidatedJobPayload const* validated_payload)
-    -> jb::core::Result<void, jb::core::Error>
-{
     if (!run.schedule_owned || run.origin != RunOrigin::Scheduled) {
         return RepositoryResult<void>::failure(invalid_run("insert_not_schedule_owned"));
     }
@@ -404,6 +400,36 @@ auto RunRepository::insert_schedule_owned_impl(JobRun const& run, ValidatedJobPa
         !valid_started_at(run.state, run.started_at.has_value())) {
         return RepositoryResult<void>::failure(invalid_run("insert_state_mismatch"));
     }
+    auto attributes = encode_and_serialize_attribute_document(_attributes,
+                                                              run.attributes,
+                                                              AttributeScope::Job,
+                                                              AttributeDocumentMode::Materialized);
+    if (!attributes) {
+        return RepositoryResult<void>::failure(std::move(attributes).error());
+    }
+    if (attributes->serialized().size() > kMaximumJsonDocumentBytes) {
+        return RepositoryResult<void>::failure(invalid_json("too_large"));
+    }
+    auto payload = json_to_storage(run.payload, true, kMaximumJsonDocumentBytes);
+    if (!payload) {
+        return RepositoryResult<void>::failure(std::move(payload).error());
+    }
+
+    if (run.state == RunState::Scheduled) {
+        return insert_schedule_owned({
+            .id              = run.id,
+            .job_id          = run.job_id,
+            .job_revision    = run.job_revision,
+            .queue_id        = run.queue_id,
+            .planned_at      = run.planned_at,
+            .runnable_at     = run.runnable_at,
+            .type            = run.type,
+            .priority        = run.priority,
+            .attributes_json = attributes->serialized(),
+            .payload_json    = std::get<std::string>(*payload),
+        });
+    }
+
     if (!is_terminal(run.state)) {
         auto existing = find_schedule_owned(run.job_id);
         if (!existing) {
@@ -434,16 +460,6 @@ auto RunRepository::insert_schedule_owned_impl(JobRun const& run, ValidatedJobPa
     if (!completed) {
         return RepositoryResult<void>::failure(std::move(completed).error());
     }
-    auto attributes = attributes_to_storage(_attributes, run.attributes);
-    if (!attributes) {
-        return RepositoryResult<void>::failure(std::move(attributes).error());
-    }
-    auto payload = validated_payload == nullptr
-                     ? json_to_storage(run.payload, true, kMaximumJsonDocumentBytes)
-                     : RepositoryResult<jb::db::Value>::success(jb::db::make_text(validated_payload->serialized()));
-    if (!payload) {
-        return RepositoryResult<void>::failure(std::move(payload).error());
-    }
     auto result = optional_json_to_storage(run.result);
     if (!result) {
         return RepositoryResult<void>::failure(std::move(result).error());
@@ -473,7 +489,7 @@ auto RunRepository::insert_schedule_owned_impl(JobRun const& run, ValidatedJobPa
                               {":completed_at_us", std::move(completed).value()               },
                               {":type",            jb::db::make_text(storage_text(run.type))  },
                               {":priority",        int32_to_storage(run.priority)             },
-                              {":attributes_json", std::move(attributes).value()              },
+                              {":attributes_json", jb::db::make_text(attributes->serialized())},
                               {":payload_json",    std::move(payload).value()                 },
                               {":state",           jb::db::make_text(storage_text(run.state)) },
                               {":result_json",     std::move(result).value()                  },
@@ -484,6 +500,72 @@ auto RunRepository::insert_schedule_owned_impl(JobRun const& run, ValidatedJobPa
     auto executed = query.exec();
     if (!executed && executed.error().code == "db.constraint.unique" && !is_terminal(run.state)) {
         auto existing = find_schedule_owned(run.job_id);
+        if (!existing) {
+            return RepositoryResult<void>::failure(std::move(existing).error());
+        }
+        if (existing->has_value()) {
+            return RepositoryResult<void>::failure(schedule_conflict(executed.error()));
+        }
+    }
+    return executed;
+}
+
+auto RunRepository::insert_schedule_owned(ScheduleOwnedRunInsert const& run) -> jb::core::Result<void, jb::core::Error>
+{
+    if (run.attributes_json.size() > kMaximumJsonDocumentBytes || run.payload_json.size() > kMaximumJsonDocumentBytes) {
+        return RepositoryResult<void>::failure(invalid_json("too_large"));
+    }
+    if (storage_text(run.type).empty()) {
+        return RepositoryResult<void>::failure(invalid_run("invalid_type"));
+    }
+    auto revision = revision_to_storage(run.job_revision);
+    if (!revision) {
+        return RepositoryResult<void>::failure(std::move(revision).error());
+    }
+    auto planned = timestamp_to_storage(run.planned_at);
+    if (!planned) {
+        return RepositoryResult<void>::failure(std::move(planned).error());
+    }
+    auto runnable = timestamp_to_storage(run.runnable_at);
+    if (!runnable) {
+        return RepositoryResult<void>::failure(std::move(runnable).error());
+    }
+    auto existing = find_schedule_owned(run.job_id);
+    if (!existing) {
+        return RepositoryResult<void>::failure(std::move(existing).error());
+    }
+    if (existing->has_value()) {
+        return RepositoryResult<void>::failure(schedule_conflict());
+    }
+
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(
+        "INSERT INTO jobu_runs(id, job_id, job_revision, queue_id, origin, schedule_owned, planned_at_us, "
+        "runnable_at_us, started_at_us, completed_at_us, type, priority, attributes_json, payload_json, state, "
+        "result_json) VALUES(:id, :job_id, :job_revision, :queue_id, 'scheduled', 1, :planned_at_us, "
+        ":runnable_at_us, NULL, NULL, :type, :priority, :attributes_json, :payload_json, 'scheduled', NULL)");
+    if (!prepared) {
+        return RepositoryResult<void>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":id",              uuid_to_storage(run.id)                  },
+                              {":job_id",          uuid_to_storage(run.job_id)              },
+                              {":job_revision",    std::move(revision).value()              },
+                              {":queue_id",        uuid_to_storage(run.queue_id)            },
+                              {":planned_at_us",   std::move(planned).value()               },
+                              {":runnable_at_us",  std::move(runnable).value()              },
+                              {":type",            jb::db::make_text(storage_text(run.type))},
+                              {":priority",        int32_to_storage(run.priority)           },
+                              {":attributes_json", jb::db::make_text(run.attributes_json)   },
+                              {":payload_json",    jb::db::make_text(run.payload_json)      },
+    });
+    if (!bound) {
+        return bound;
+    }
+    auto executed = query.exec();
+    if (!executed && executed.error().code == "db.constraint.unique") {
+        existing = find_schedule_owned(run.job_id);
         if (!existing) {
             return RepositoryResult<void>::failure(std::move(existing).error());
         }

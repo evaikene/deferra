@@ -17,7 +17,21 @@ class Database;
 
 namespace jb::jobu::detail {
 
-class ValidatedJobPayload;
+/** Non-owning fields for inserting the known initial schedule-owned run.
+ * The caller must keep both JSON views alive until insert_schedule_owned() returns.
+ */
+struct ScheduleOwnedRunInsert {
+    jb::core::Uuid         id;
+    jb::core::Uuid         job_id;
+    JobRevision            job_revision{1};
+    jb::core::Uuid         queue_id;
+    jb::core::UtcTimePoint planned_at;
+    jb::core::UtcTimePoint runnable_at;
+    JobType                type{JobType::Cli};
+    std::int32_t           priority{0};
+    std::string_view       attributes_json;
+    std::string_view       payload_json;
+};
 
 struct RunSnapshot {
     JobRevision            job_revision{1};
@@ -35,7 +49,7 @@ public:
     RunRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept;
 
     [[nodiscard]] auto insert_schedule_owned(JobRun const& run) -> jb::core::Result<void, jb::core::Error>;
-    [[nodiscard]] auto insert_schedule_owned(JobRun const& run, ValidatedJobPayload const& payload)
+    [[nodiscard]] auto insert_schedule_owned(ScheduleOwnedRunInsert const& run)
         -> jb::core::Result<void, jb::core::Error>;
     [[nodiscard]] auto find_schedule_owned(jb::core::Uuid const& job_id)
         -> jb::core::Result<std::optional<JobRun>, jb::core::Error>;
@@ -63,9 +77,6 @@ public:
         -> jb::core::Result<std::size_t, jb::core::Error>;
 
 private:
-    [[nodiscard]] auto insert_schedule_owned_impl(JobRun const& run, ValidatedJobPayload const* payload)
-        -> jb::core::Result<void, jb::core::Error>;
-
     jb::db::Database&        _database;
     AttributeRegistry const& _attributes;
 };

@@ -1,7 +1,9 @@
 #include "management.hpp"
 
+#include "attribute_codec_priv.hpp"
 #include "attribute_registry.hpp"
 #include "database.hpp"
+#include "domain_storage_priv.hpp"
 #include "query.hpp"
 #include "run_repository_priv.hpp"
 #include "sqlite/sqlite_driver.hpp"
@@ -12,6 +14,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -162,6 +165,87 @@ auto attributes_json(AttributeSet const& values, AttributeRegistry const& regist
     return std::move(encoded).value();
 }
 
+struct StoredJobRunDocuments {
+    std::string job_attributes;
+    std::string run_attributes;
+    std::string job_payload;
+    std::string run_payload;
+};
+
+auto stored_documents(Database& database, Uuid const& job_id) -> StoredJobRunDocuments
+{
+    Query query{database};
+    REQUIRE(query.prepare("SELECT jobs.attributes_json AS job_attributes, runs.attributes_json AS run_attributes, "
+                          "jobs.payload_json AS job_payload, runs.payload_json AS run_payload FROM jobu_jobs AS jobs "
+                          "JOIN jobu_runs AS runs ON runs.job_id = jobs.id WHERE jobs.id = :job_id"));
+    REQUIRE(query.bind_value(":job_id", jb::jobu::detail::uuid_to_storage(job_id)));
+    REQUIRE(query.exec());
+    REQUIRE(query.next());
+    auto text = [&query](std::string_view field) {
+        auto const* value = query.value(field);
+        REQUIRE(value != nullptr);
+        auto const* stored = std::get_if<std::string>(value);
+        REQUIRE(stored != nullptr);
+        return *stored;
+    };
+    return {
+        .job_attributes = text("job_attributes"),
+        .run_attributes = text("run_attributes"),
+        .job_payload    = text("job_payload"),
+        .run_payload    = text("run_payload"),
+    };
+}
+
+class LargeAttributeRegistry final : public AttributeRegistry {
+public:
+    [[nodiscard]] auto find(std::string_view name) const noexcept -> AttributeDefinition const* override
+    {
+        for (auto const& definition : _definitions) {
+            if (definition.name == name) {
+                return &definition;
+            }
+        }
+        return nullptr;
+    }
+
+    [[nodiscard]] auto validate(std::string_view name, AttributeValue const& value, AttributeScope scope) const
+        -> Result<void, Error> override
+    {
+        auto const* definition = find(name);
+        if (definition == nullptr) {
+            return Result<void, Error>::failure({
+                .category = ErrorCategory::InvalidArgument,
+                .code     = "jobu.attribute.unknown",
+                .message  = "Unknown test attribute",
+            });
+        }
+        if (!definition->scopes.test(scope) || !std::holds_alternative<std::string>(value.data)) {
+            return Result<void, Error>::failure({
+                .category = ErrorCategory::InvalidArgument,
+                .code     = "jobu.attribute.invalid_value",
+                .message  = "Invalid test attribute",
+            });
+        }
+        return Result<void, Error>::success();
+    }
+
+    [[nodiscard]] auto definitions() const -> std::span<AttributeDefinition const> override { return {_definitions}; }
+
+private:
+    static auto definition(std::string name) -> AttributeDefinition
+    {
+        return {
+            .name             = std::move(name),
+            .type             = AttributeType::String,
+            .scopes           = {AttributeScope::DaemonDefault, AttributeScope::QueueDefault, AttributeScope::Job},
+            .built_in_default = {.data = std::string{}},
+            .description      = "Large string used for materialized size tests",
+        };
+    }
+
+    std::array<AttributeDefinition, 2> _definitions{definition("test.queue_large"), definition("test.job_large")};
+};
+
 } // anonymous namespace
 
 TEST_CASE("Job management creates durable one-time definitions and immutable run snapshots", "[jobu][job][sqlite]")
@@ -179,9 +263,9 @@ TEST_CASE("Job management creates durable one-time definitions and immutable run
     auto queue = service.create_queue({.name = "jobs", .defaults = max_attempts(3)});
     REQUIRE(queue);
 
-    auto const planned = UtcTimePoint{-5s};
-    auto const payload = cli_payload("/usr/bin/example", {"--dry-run", "value"});
-    auto       cli     = service.create_job({
+    auto const planned        = UtcTimePoint{-5s};
+    auto const payload        = cli_payload("/usr/bin/example", {"--dry-run", "value"});
+    auto       create_request = CreateJobRequest{
         .queue           = std::string{"jobs"},
         .name            = "cli-job",
         .type            = JobType::Cli,
@@ -190,8 +274,11 @@ TEST_CASE("Job management creates durable one-time definitions and immutable run
         .attributes      = max_attempts(4),
         .payload         = payload,
         .idempotency_key = "create-cli",
-    });
+    };
+    auto cli = service.create_job(create_request);
     REQUIRE(cli);
+    CHECK(create_request.name == "cli-job");
+    CHECK(create_request.payload == payload);
     CHECK(cli->id == cli_id);
     CHECK(cli->queue_id == queue_id);
     CHECK(cli->revision == 1);
@@ -205,6 +292,18 @@ TEST_CASE("Job management creates durable one-time definitions and immutable run
     CHECK(std::get<OnceSchedule>(cli->schedule).planned_at == planned);
     CHECK(cli->attributes.size() == fixture.registry.definitions().size());
     CHECK(std::get<std::int64_t>(cli->attributes.at("retry.max_attempts").data) == 4);
+
+    auto const documents = stored_documents(fixture.database, cli_id);
+    CHECK(documents.job_attributes == documents.run_attributes);
+    CHECK(documents.job_payload == documents.run_payload);
+    auto parsed_attributes = jb::rpc::parse_json(documents.job_attributes);
+    REQUIRE(parsed_attributes);
+    auto decoded_attributes = jb::jobu::detail::decode_attribute_document(fixture.registry,
+                                                                          *parsed_attributes,
+                                                                          AttributeScope::Job,
+                                                                          detail::AttributeDocumentMode::Materialized);
+    REQUIRE(decoded_attributes);
+    CHECK(attributes_json(*decoded_attributes, fixture.registry) == attributes_json(cli->attributes, fixture.registry));
 
     auto fetched = service.get_job(cli_id);
     REQUIRE(fetched);
@@ -506,6 +605,34 @@ TEST_CASE("Job creation rolls back the definition when schedule-run insertion fa
     require_error(service.get_job(rolled_back_job), ErrorCategory::NotFound, "jobu.job.not_found");
     CHECK(count_rows(fixture.database, "jobu_jobs") == 1);
     CHECK(count_rows(fixture.database, "jobu_runs") == 1);
+}
+
+TEST_CASE("Job creation rejects oversized materialized attribute snapshots", "[jobu][job][validation]")
+{
+    auto const     queue_id = uuid("00000000-0000-7000-8000-000000000060");
+    ServiceFixture fixture{
+        {queue_id, uuid("00000000-0000-7000-8000-000000000061"), uuid("00000000-0000-7000-8000-000000000062")}
+    };
+    LargeAttributeRegistry registry;
+    ManagementService      service{fixture.database, registry, fixture.generator, fixture.time};
+
+    auto queue_defaults = AttributeSet{
+        {"test.queue_large", {.data = std::string(140U * 1024U, 'q')}}
+    };
+    REQUIRE(service.create_queue({.name = "large", .defaults = std::move(queue_defaults)}));
+
+    auto job_attributes = AttributeSet{
+        {"test.job_large", {.data = std::string(140U * 1024U, 'j')}}
+    };
+    auto oversized_error = require_error(service.create_job({.queue      = queue_id,
+                                                             .schedule   = once_at(UtcTimePoint{1s}),
+                                                             .attributes = std::move(job_attributes),
+                                                             .payload    = cli_payload("true")}),
+                                         ErrorCategory::ResourceExhausted,
+                                         "jobu.protocol.value_too_large");
+    CHECK(oversized_error.message == "Job attribute document exceeds its size limit");
+    CHECK(count_rows(fixture.database, "jobu_jobs") == 0);
+    CHECK(count_rows(fixture.database, "jobu_runs") == 0);
 }
 
 TEST_CASE("Job management rejects malformed persisted definitions", "[jobu][job][sqlite]")

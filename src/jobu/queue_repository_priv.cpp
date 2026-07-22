@@ -152,17 +152,6 @@ auto bind_all(jb::db::Query& query, std::vector<std::pair<std::string_view, jb::
     return RepositoryResult<void>::success();
 }
 
-auto encoded_defaults(AttributeRegistry const& attributes, AttributeSet const& defaults)
-    -> RepositoryResult<jb::db::Value>
-{
-    auto encoded =
-        encode_attribute_document(attributes, defaults, AttributeScope::QueueDefault, AttributeDocumentMode::Partial);
-    if (!encoded) {
-        return RepositoryResult<jb::db::Value>::failure(std::move(encoded).error());
-    }
-    return json_to_storage(*encoded, true, kMaximumAttributeDocumentBytes);
-}
-
 } // anonymous namespace
 
 QueueRepository::QueueRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept
@@ -170,8 +159,9 @@ QueueRepository::QueueRepository(jb::db::Database& database, AttributeRegistry c
     , _attributes{attributes}
 {}
 
-auto QueueRepository::insert(Queue const& queue, std::string_view internal_name)
-    -> jb::core::Result<void, jb::core::Error>
+auto QueueRepository::insert(Queue const&                       queue,
+                             std::string_view                   internal_name,
+                             SerializedAttributeDocument const& defaults) -> jb::core::Result<void, jb::core::Error>
 {
     auto weight = positive_uint32_to_storage(queue.weight);
     if (!weight) {
@@ -180,10 +170,6 @@ auto QueueRepository::insert(Queue const& queue, std::string_view internal_name)
     auto concurrency = positive_uint32_to_storage(queue.concurrency_limit);
     if (!concurrency) {
         return RepositoryResult<void>::failure(std::move(concurrency).error());
-    }
-    auto defaults = encoded_defaults(_attributes, queue.defaults);
-    if (!defaults) {
-        return RepositoryResult<void>::failure(std::move(defaults).error());
     }
     auto retention = optional_nonnegative_seconds_to_storage(queue.history_retention);
     if (!retention) {
@@ -220,7 +206,7 @@ auto QueueRepository::insert(Queue const& queue, std::string_view internal_name)
                               {":weight",                   std::move(weight).value()                             },
                               {":concurrency_limit",        std::move(concurrency).value()                        },
                               {":recovery_policy",          jb::db::make_text(storage_text(queue.recovery_policy))},
-                              {":defaults_json",            std::move(defaults).value()                           },
+                              {":defaults_json",            jb::db::make_text(defaults.serialized())              },
                               {":retention_seconds",        std::move(retention).value()                          },
                               {":runnable_wait_warning_ms", std::move(warning).value()                            },
                               {":created_at_us",            std::move(created).value()                            },
@@ -387,7 +373,8 @@ auto QueueRepository::list(bool                          include_deleted,
     return RepositoryResult<std::vector<Queue>>::success(std::move(queues));
 }
 
-auto QueueRepository::replace_mutable_fields(Queue const& queue) -> jb::core::Result<bool, jb::core::Error>
+auto QueueRepository::replace_mutable_fields(Queue const& queue, SerializedAttributeDocument const* defaults)
+    -> jb::core::Result<bool, jb::core::Error>
 {
     auto weight = positive_uint32_to_storage(queue.weight);
     if (!weight) {
@@ -396,10 +383,6 @@ auto QueueRepository::replace_mutable_fields(Queue const& queue) -> jb::core::Re
     auto concurrency = positive_uint32_to_storage(queue.concurrency_limit);
     if (!concurrency) {
         return RepositoryResult<bool>::failure(std::move(concurrency).error());
-    }
-    auto defaults = encoded_defaults(_attributes, queue.defaults);
-    if (!defaults) {
-        return RepositoryResult<bool>::failure(std::move(defaults).error());
     }
     auto retention = optional_nonnegative_seconds_to_storage(queue.history_retention);
     if (!retention) {
@@ -414,12 +397,19 @@ auto QueueRepository::replace_mutable_fields(Queue const& queue) -> jb::core::Re
         return RepositoryResult<bool>::failure(std::move(updated).error());
     }
 
+    auto const    sql = defaults == nullptr
+                          ? "UPDATE jobu_queues SET name = :name, weight = :weight, "
+                            "concurrency_limit = :concurrency_limit, recovery_policy = :recovery_policy, "
+                            "retention_seconds = :retention_seconds, "
+                            "runnable_wait_warning_ms = :runnable_wait_warning_ms, updated_at_us = :updated_at_us "
+                            "WHERE id = :id AND state <> 'deleted'"
+                          : "UPDATE jobu_queues SET name = :name, weight = :weight, "
+                            "concurrency_limit = :concurrency_limit, recovery_policy = :recovery_policy, "
+                            "defaults_json = :defaults_json, retention_seconds = :retention_seconds, "
+                            "runnable_wait_warning_ms = :runnable_wait_warning_ms, updated_at_us = :updated_at_us "
+                            "WHERE id = :id AND state <> 'deleted'";
     jb::db::Query query{_database};
-    auto          prepared = query.prepare(
-        "UPDATE jobu_queues SET name = :name, weight = :weight, concurrency_limit = :concurrency_limit, "
-        "recovery_policy = :recovery_policy, defaults_json = :defaults_json, retention_seconds = :retention_seconds, "
-        "runnable_wait_warning_ms = :runnable_wait_warning_ms, updated_at_us = :updated_at_us "
-        "WHERE id = :id AND state <> 'deleted'");
+    auto          prepared = query.prepare(sql);
     if (!prepared) {
         return RepositoryResult<bool>::failure(std::move(prepared).error());
     }
@@ -429,7 +419,6 @@ auto QueueRepository::replace_mutable_fields(Queue const& queue) -> jb::core::Re
                               {":weight",                   std::move(weight).value()                             },
                               {":concurrency_limit",        std::move(concurrency).value()                        },
                               {":recovery_policy",          jb::db::make_text(storage_text(queue.recovery_policy))},
-                              {":defaults_json",            std::move(defaults).value()                           },
                               {":retention_seconds",        std::move(retention).value()                          },
                               {":runnable_wait_warning_ms", std::move(warning).value()                            },
                               {":updated_at_us",            std::move(updated).value()                            },
@@ -437,6 +426,12 @@ auto QueueRepository::replace_mutable_fields(Queue const& queue) -> jb::core::Re
     });
     if (!bound) {
         return RepositoryResult<bool>::failure(std::move(bound).error());
+    }
+    if (defaults != nullptr) {
+        bound = query.bind_value(":defaults_json", jb::db::make_text(defaults->serialized()));
+        if (!bound) {
+            return RepositoryResult<bool>::failure(std::move(bound).error());
+        }
     }
     auto executed = query.exec();
     if (!executed && executed.error().code == "db.constraint.unique") {

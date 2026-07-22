@@ -65,17 +65,6 @@ auto bind_all(jb::db::Query& query, std::vector<std::pair<std::string_view, jb::
     return RepositoryResult<void>::success();
 }
 
-auto attributes_to_storage(AttributeRegistry const& attributes, AttributeSet const& values)
-    -> RepositoryResult<jb::db::Value>
-{
-    auto encoded =
-        encode_attribute_document(attributes, values, AttributeScope::Job, AttributeDocumentMode::Materialized);
-    if (!encoded) {
-        return RepositoryResult<jb::db::Value>::failure(std::move(encoded).error());
-    }
-    return json_to_storage(*encoded, true, maximum_job_document_bytes);
-}
-
 struct StoredSchedule {
     jb::db::Value kind;
     jb::db::Value scheduled_at;
@@ -233,8 +222,9 @@ JobRepository::JobRepository(jb::db::Database& database, AttributeRegistry const
     , _attributes{attributes}
 {}
 
-auto JobRepository::insert(JobDefinition const& job, ValidatedJobPayload const& payload)
-    -> jb::core::Result<void, jb::core::Error>
+auto JobRepository::insert(JobDefinition const&               job,
+                           SerializedAttributeDocument const& attributes,
+                           ValidatedJobPayload const&         payload) -> jb::core::Result<void, jb::core::Error>
 {
     if (job.name && !is_valid_job_name(*job.name)) {
         return RepositoryResult<void>::failure(invalid_job("invalid_name"));
@@ -249,10 +239,6 @@ auto JobRepository::insert(JobDefinition const& job, ValidatedJobPayload const& 
     auto schedule = schedule_to_storage(job.schedule);
     if (!schedule) {
         return RepositoryResult<void>::failure(std::move(schedule).error());
-    }
-    auto attributes = attributes_to_storage(_attributes, job.attributes);
-    if (!attributes) {
-        return RepositoryResult<void>::failure(std::move(attributes).error());
     }
     auto created = timestamp_to_storage(job.created_at);
     if (!created) {
@@ -295,7 +281,7 @@ auto JobRepository::insert(JobDefinition const& job, ValidatedJobPayload const& 
                               {":cron_expression", std::move(schedule->cron_expression)      },
                               {":cron_timezone",   std::move(schedule->cron_timezone)        },
                               {":priority",        int32_to_storage(job.priority)            },
-                              {":attributes_json", std::move(attributes).value()             },
+                              {":attributes_json", jb::db::make_text(attributes.serialized())},
                               {":payload_json",    jb::db::make_text(payload.serialized())   },
                               {":created_at_us",   std::move(created).value()                },
                               {":updated_at_us",   std::move(updated).value()                },

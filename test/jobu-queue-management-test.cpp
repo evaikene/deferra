@@ -11,6 +11,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -82,6 +83,59 @@ auto max_attempts(std::int64_t value) -> AttributeSet
     };
 }
 
+auto defaults_json(Database& database, std::string_view queue_name) -> std::string
+{
+    Query query{database};
+    REQUIRE(query.prepare("SELECT defaults_json FROM jobu_queues WHERE name = :name"));
+    REQUIRE(query.bind_value(":name", make_text(queue_name)));
+    REQUIRE(query.exec());
+    REQUIRE(query.next());
+    auto const* value = query.value("defaults_json");
+    REQUIRE(value != nullptr);
+    auto const* text = std::get_if<std::string>(value);
+    REQUIRE(text != nullptr);
+    return *text;
+}
+
+class MapAttributeRegistry final : public AttributeRegistry {
+public:
+    [[nodiscard]] auto find(std::string_view name) const noexcept -> AttributeDefinition const* override
+    {
+        return name == _definitions.front().name ? &_definitions.front() : nullptr;
+    }
+
+    [[nodiscard]] auto validate(std::string_view name, AttributeValue const& value, AttributeScope scope) const
+        -> Result<void, Error> override
+    {
+        if (find(name) == nullptr) {
+            return Result<void, Error>::failure({
+                .category = ErrorCategory::InvalidArgument,
+                .code     = "jobu.attribute.unknown",
+                .message  = "Unknown test attribute",
+            });
+        }
+        if (!_definitions.front().scopes.test(scope) || !std::holds_alternative<AttributeValue::Map>(value.data)) {
+            return Result<void, Error>::failure({
+                .category = ErrorCategory::InvalidArgument,
+                .code     = "jobu.attribute.invalid_value",
+                .message  = "Invalid test attribute",
+            });
+        }
+        return Result<void, Error>::success();
+    }
+
+    [[nodiscard]] auto definitions() const -> std::span<AttributeDefinition const> override { return {_definitions}; }
+
+private:
+    std::array<AttributeDefinition, 1> _definitions{{{
+        .name             = "test.map",
+        .type             = AttributeType::Map,
+        .scopes           = {AttributeScope::DaemonDefault, AttributeScope::QueueDefault, AttributeScope::Job},
+        .built_in_default = {.data = AttributeValue::Map{}},
+        .description      = "Map used for queue serialization tests",
+    }}};
+};
+
 } // anonymous namespace
 
 TEST_CASE("Queue management creates gets lists and updates durable queues", "[jobu][queue][sqlite]")
@@ -95,7 +149,7 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
     };
     ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
 
-    auto first = service.create_queue({
+    auto create_request = CreateQueueRequest{
         .name                  = "alpha",
         .weight                = 2,
         .concurrency_limit     = 3,
@@ -104,14 +158,19 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
         .history_retention     = 0s,
         .runnable_wait_warning = 25ms,
         .idempotency_key       = "create-alpha",
-    });
+    };
+    auto first = service.create_queue(create_request);
     REQUIRE(first);
+    CHECK(create_request.name == "alpha");
+    CHECK(std::get<std::int64_t>(create_request.defaults.at("retry.max_attempts").data) == 4);
     CHECK(first->id == first_id);
     CHECK(first->state == QueueState::Active);
     CHECK(first->created_at == UtcTimePoint{1s});
     CHECK(first->updated_at == first->created_at);
     CHECK_FALSE(first->deleted_at);
     CHECK(std::get<std::int64_t>(first->defaults.at("retry.max_attempts").data) == 4);
+    CHECK(defaults_json(fixture.database, "alpha") ==
+          R"({"values":{"retry.max_attempts":{"type":"integer","value":4}},"version":1})");
 
     auto by_id = service.get_queue(first_id);
     REQUIRE(by_id);
@@ -122,6 +181,13 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
     auto by_name = service.get_queue(std::string{"alpha"});
     REQUIRE(by_name);
     CHECK(by_name->id == first_id);
+
+    auto const noncanonical_defaults =
+        R"({ "values": { "retry.max_attempts": { "type": "integer", "value": 4 } }, "version": 1 })";
+    execute(fixture.database,
+            "UPDATE jobu_queues SET defaults_json = '" + std::string{noncanonical_defaults} + "' WHERE name = 'alpha'");
+    REQUIRE(service.update_queue({.queue = first_id, .weight = 5}));
+    CHECK(defaults_json(fixture.database, "alpha") == noncanonical_defaults);
 
     fixture.time.advance(1s);
     REQUIRE(service.create_queue({.name = "beta"}));
@@ -149,7 +215,7 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
     CHECK(active->items.size() == 3);
 
     fixture.time.advance(1s);
-    auto updated = service.update_queue({
+    auto update_request = UpdateQueueRequest{
         .queue                 = first_id,
         .name                  = "renamed-alpha",
         .weight                = 7,
@@ -158,8 +224,11 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
         .defaults              = AttributeSet{},
         .history_retention     = std::optional<std::chrono::seconds>{},
         .runnable_wait_warning = 50ms,
-    });
+    };
+    auto updated = service.update_queue(update_request);
     REQUIRE(updated);
+    CHECK(*update_request.name == "renamed-alpha");
+    CHECK(update_request.defaults->empty());
     CHECK(updated->id == first_id);
     CHECK(updated->name == "renamed-alpha");
     CHECK(updated->weight == 7);
@@ -169,6 +238,7 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
     CHECK(updated->runnable_wait_warning == 50ms);
     CHECK(updated->created_at == UtcTimePoint{1s});
     CHECK(updated->updated_at == UtcTimePoint{4s});
+    CHECK(defaults_json(fixture.database, "renamed-alpha") == R"({"values":{},"version":1})");
 
     require_error(service.get_queue(std::string{"alpha"}), ErrorCategory::NotFound, "jobu.queue.not_found");
     auto persisted = service.get_queue(std::string{"renamed-alpha"});
@@ -213,6 +283,25 @@ TEST_CASE("Queue management rejects invalid input before durable mutation", "[jo
     require_error(service.create_queue({.name = "unknown-default", .defaults = {{"unknown", {.data = true}}}}),
                   ErrorCategory::InvalidArgument,
                   "jobu.attribute.unknown");
+
+    MapAttributeRegistry map_registry;
+    ManagementService    map_service{fixture.database, map_registry, fixture.generator, fixture.time};
+    auto                 oversized_defaults = AttributeSet{
+        {"test.map", {.data = AttributeValue::Map{{"value", {.data = std::string(256U * 1024U, 'x')}}}}}
+    };
+    auto oversized_error = require_error(
+        map_service.create_queue({.name = "oversized-default", .defaults = std::move(oversized_defaults)}),
+        ErrorCategory::ResourceExhausted,
+        "jobu.protocol.value_too_large");
+    CHECK(oversized_error.message == "Queue attribute document exceeds its size limit");
+
+    auto invalid_utf8_defaults = AttributeSet{
+        {"test.map", {.data = AttributeValue::Map{{"value", {.data = std::string{"\xc3", 1U}}}}}}
+    };
+    require_error(
+        map_service.create_queue({.name = "invalid-utf8-default", .defaults = std::move(invalid_utf8_defaults)}),
+        ErrorCategory::InvalidArgument,
+        "jobu.attribute.invalid_value");
 
     auto created = service.create_queue({.name = "valid"});
     REQUIRE(created);

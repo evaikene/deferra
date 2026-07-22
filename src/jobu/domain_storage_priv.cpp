@@ -411,7 +411,7 @@ auto json_to_storage(jb::rpc::JsonValue const& value, bool require_object, std::
     if (serialized->size() > max_size) {
         return StorageResult<jb::db::Value>::failure(json_error({}, "too_large"));
     }
-    return StorageResult<jb::db::Value>::success(jb::db::make_text(*serialized));
+    return StorageResult<jb::db::Value>::success(jb::db::Value{std::move(serialized).value()});
 }
 
 auto read_json(jb::db::Record const& record, std::string_view field, bool require_object, std::size_t max_size)
