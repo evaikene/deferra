@@ -347,6 +347,28 @@ TEST_CASE("Queue create idempotency replays canonical results and rolls back rec
     CHECK(count_rows(fixture.database, "jobu_idempotency") == 1);
 }
 
+TEST_CASE("Queue create idempotency replay does not require a fresh UUID", "[jobu][queue][idempotency]")
+{
+    ServiceFixture    fixture{{sequence_id(1)}};
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    auto const        request = CreateQueueRequest{
+        .name            = "replay",
+        .idempotency_key = "queue-key",
+    };
+
+    auto original = service.create_queue(request);
+    REQUIRE(original);
+    CHECK(original->id == sequence_id(1));
+
+    auto replay = service.create_queue(request);
+    REQUIRE(replay);
+    CHECK(replay->id == original->id);
+
+    require_error(service.create_queue({.name = "different", .idempotency_key = "queue-key"}),
+                  ErrorCategory::Conflict,
+                  "jobu.idempotency.conflict");
+}
+
 TEST_CASE("Queue lifecycle persists draining suspension resume and idempotent no-ops", "[jobu][queue][lifecycle]")
 {
     auto const     immediate_queue = uuid("00000000-0000-7000-8000-000000000050");

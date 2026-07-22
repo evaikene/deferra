@@ -450,6 +450,42 @@ auto ManagementService::create_queue(CreateQueueRequest request) -> jb::core::Re
         }
         canonical_request = std::move(encoded).value();
     }
+
+    auto transaction = std::optional<jb::db::Transaction>{};
+    if (request.idempotency_key) {
+        auto begun = jb::db::Transaction::begin(_data->database);
+        if (!begun) {
+            return ServiceResult<Queue>::failure(std::move(begun).error());
+        }
+        transaction.emplace(std::move(begun).value());
+
+        auto record = _data->idempotency.find("queue.create", jb::core::Uuid{}, *request.idempotency_key);
+        if (!record) {
+            return ServiceResult<Queue>::failure(std::move(record).error());
+        }
+        if (record->has_value()) {
+            auto valid = detail::validate_queue_create_idempotency_request((**record).request_json, _data->attributes);
+            if (!valid) {
+                return ServiceResult<Queue>::failure(std::move(valid).error());
+            }
+            if ((**record).request_json != *canonical_request) {
+                return ServiceResult<Queue>::failure(idempotency_conflict());
+            }
+            auto replay = detail::decode_queue_idempotency_result((**record).result_json, _data->attributes);
+            if (!replay) {
+                return ServiceResult<Queue>::failure(std::move(replay).error());
+            }
+            if (replay->id != (**record).resource_id) {
+                return ServiceResult<Queue>::failure(invalid_idempotency_record("queue_resource_id_mismatch"));
+            }
+            auto committed = transaction->commit();
+            if (!committed) {
+                return ServiceResult<Queue>::failure(std::move(committed).error());
+            }
+            return ServiceResult<Queue>::success(std::move(replay).value());
+        }
+    }
+
     auto id = _data->uuid_generator.generate();
     if (!id) {
         return ServiceResult<Queue>::failure(std::move(id).error());
@@ -470,37 +506,12 @@ auto ManagementService::create_queue(CreateQueueRequest request) -> jb::core::Re
         .deleted_at            = std::nullopt,
     };
 
-    auto begun = jb::db::Transaction::begin(_data->database);
-    if (!begun) {
-        return ServiceResult<Queue>::failure(std::move(begun).error());
-    }
-    auto transaction = std::move(begun).value();
-    if (request.idempotency_key) {
-        auto record = _data->idempotency.find("queue.create", jb::core::Uuid{}, *request.idempotency_key);
-        if (!record) {
-            return ServiceResult<Queue>::failure(std::move(record).error());
+    if (!transaction) {
+        auto begun = jb::db::Transaction::begin(_data->database);
+        if (!begun) {
+            return ServiceResult<Queue>::failure(std::move(begun).error());
         }
-        if (record->has_value()) {
-            auto valid = detail::validate_queue_create_idempotency_request((**record).request_json, _data->attributes);
-            if (!valid) {
-                return ServiceResult<Queue>::failure(std::move(valid).error());
-            }
-            if ((**record).request_json != *canonical_request) {
-                return ServiceResult<Queue>::failure(idempotency_conflict());
-            }
-            auto replay = detail::decode_queue_idempotency_result((**record).result_json, _data->attributes);
-            if (!replay) {
-                return ServiceResult<Queue>::failure(std::move(replay).error());
-            }
-            if (replay->id != (**record).resource_id) {
-                return ServiceResult<Queue>::failure(invalid_idempotency_record("queue_resource_id_mismatch"));
-            }
-            auto committed = transaction.commit();
-            if (!committed) {
-                return ServiceResult<Queue>::failure(std::move(committed).error());
-            }
-            return ServiceResult<Queue>::success(std::move(replay).value());
-        }
+        transaction.emplace(std::move(begun).value());
     }
     auto existing = _data->queues.find_by_name(queue.name, false);
     if (!existing) {
@@ -532,7 +543,7 @@ auto ManagementService::create_queue(CreateQueueRequest request) -> jb::core::Re
             return ServiceResult<Queue>::failure(std::move(recorded).error());
         }
     }
-    auto committed = transaction.commit();
+    auto committed = transaction->commit();
     if (!committed) {
         return ServiceResult<Queue>::failure(std::move(committed).error());
     }
@@ -910,15 +921,30 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
     if (!idempotency) {
         return ServiceResult<JobDefinition>::failure(std::move(idempotency).error());
     }
-    auto job_id = _data->uuid_generator.generate();
-    if (!job_id) {
-        return ServiceResult<JobDefinition>::failure(std::move(job_id).error());
+
+    auto job_id            = std::optional<jb::core::Uuid>{};
+    auto run_id            = std::optional<jb::core::Uuid>{};
+    auto now               = std::optional<jb::core::UtcTimePoint>{};
+    auto generate_identity = [&]() -> ServiceResult<void> {
+        auto generated_job_id = _data->uuid_generator.generate();
+        if (!generated_job_id) {
+            return ServiceResult<void>::failure(std::move(generated_job_id).error());
+        }
+        auto generated_run_id = _data->uuid_generator.generate();
+        if (!generated_run_id) {
+            return ServiceResult<void>::failure(std::move(generated_run_id).error());
+        }
+        job_id = *generated_job_id;
+        run_id = *generated_run_id;
+        now    = _data->time_source.utc_now();
+        return ServiceResult<void>::success();
+    };
+    if (!request.idempotency_key) {
+        auto generated = generate_identity();
+        if (!generated) {
+            return ServiceResult<JobDefinition>::failure(std::move(generated).error());
+        }
     }
-    auto run_id = _data->uuid_generator.generate();
-    if (!run_id) {
-        return ServiceResult<JobDefinition>::failure(std::move(run_id).error());
-    }
-    auto const now = _data->time_source.utc_now();
 
     auto begun = jb::db::Transaction::begin(_data->database);
     if (!begun) {
@@ -969,6 +995,11 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
             }
             return ServiceResult<JobDefinition>::success(std::move(replay).value());
         }
+
+        auto generated = generate_identity();
+        if (!generated) {
+            return ServiceResult<JobDefinition>::failure(std::move(generated).error());
+        }
     }
 
     auto materialized =
@@ -995,8 +1026,8 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
         .priority   = request.priority,
         .attributes = std::move(materialized).value(),
         .payload    = std::move(request.payload),
-        .created_at = now,
-        .updated_at = now,
+        .created_at = *now,
+        .updated_at = *now,
         .deleted_at = std::nullopt,
     };
     auto const planned_at = std::get<OnceSchedule>(job.schedule).planned_at;
@@ -1033,7 +1064,7 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
             .request_json = *canonical_request,
             .result_json  = std::move(result_json).value(),
             .resource_id  = job.id,
-            .created_at   = now,
+            .created_at   = *now,
             .expires_at   = std::nullopt,
         });
         if (!recorded) {

@@ -442,6 +442,37 @@ TEST_CASE("Job create idempotency is queue-scoped and replays the original defin
     CHECK(count_rows(fixture.database, "jobu_idempotency") == 2);
 }
 
+TEST_CASE("Job create idempotency replay does not require fresh UUIDs", "[jobu][job][idempotency]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+
+    auto queue = service.create_queue({.name = "queue"});
+    REQUIRE(queue);
+    auto const request = CreateJobRequest{
+        .queue           = queue->id,
+        .name            = "replay",
+        .type            = JobType::Cli,
+        .schedule        = once_at(UtcTimePoint{20s}),
+        .payload         = cli_payload("true"),
+        .idempotency_key = "job-key",
+    };
+
+    auto original = service.create_job(request);
+    REQUIRE(original);
+    CHECK(original->id == sequence_id(2));
+
+    auto replay = service.create_job(request);
+    REQUIRE(replay);
+    CHECK(replay->id == original->id);
+
+    auto different     = request;
+    different.priority = 1;
+    require_error(service.create_job(std::move(different)), ErrorCategory::Conflict, "jobu.idempotency.conflict");
+}
+
 TEST_CASE("Job management lists filtered keyset pages and controls deleted visibility", "[jobu][job][sqlite]")
 {
     auto const     first_queue  = uuid("00000000-0000-7000-8000-000000000010");
