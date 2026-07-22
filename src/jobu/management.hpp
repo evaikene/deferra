@@ -171,14 +171,32 @@ struct JobListRequest {
     PageOptions                  page;
 };
 
+/// Values used to move one suspended job to a different queue using optimistic concurrency.
+struct MoveJobRequest {
+    /// Stable job-definition UUID to move.
+    jb::core::Uuid job_id;
+    /// Positive revision that must match the durable definition.
+    JobRevision    expected_revision{0};
+    /// Existing active or suspended destination queue selected by UUID or exact user-facing name.
+    QueueSelector  target_queue;
+};
+
+/// Values used to soft-delete one suspended job using optimistic concurrency.
+struct DeleteJobRequest {
+    /// Stable job-definition UUID to delete.
+    jb::core::Uuid job_id;
+    /// Positive revision that must match the durable definition.
+    JobRevision    expected_revision{0};
+};
+
 /** Synchronous owner-thread service for durable JobU management operations.
  *
  * The service borrows an already-open Database, AttributeRegistry, UuidGenerator, and TimeSource; each collaborator
  * must outlive the service. All calls must run on the Database owner thread. The daemon-default attribute layer is
  * validated and copied during construction; a validation failure is returned by subsequent operations.
  *
- * Queue/job gets and lists use bounded repository reads without an explicit transaction. Creates, updates, and
- * lifecycle changes use one immediate transaction and return only after commit. Errors include stable
+ * Queue/job gets and lists use bounded repository reads without an explicit transaction. Creates, updates, lifecycle
+ * changes, moves, and deletions use one immediate transaction and return only after commit. Errors include stable
  * `jobu.queue.*`, `jobu.job.*`, `jobu.attribute.*`, and `jobu.idempotency.*` codes plus unchanged database errors when
  * no domain mapping applies. Methods invoke no callbacks, start no threads, and perform no event-loop processing or
  * external I/O.
@@ -254,6 +272,14 @@ public:
      */
     [[nodiscard]] auto resume_queue(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>;
 
+    /** Soft-deletes a fully suspended queue and all of its non-deleted jobs in one immediate transaction.
+     * @param selector Existing queue UUID or exact user-facing name, borrowed only for this call.
+     * @return Success after pending work is cancelled, current secret references are removed, and the active name is
+     * released. Not-found, not-suspended, running-work, revision-exhausted, state, invariant, and database failures
+     * are returned as Error values. Definitions and terminal history remain durable for retention.
+     */
+    [[nodiscard]] auto delete_queue(QueueSelector const& selector) -> jb::core::Result<void, jb::core::Error>;
+
     /** Creates one active one-time job and its scheduled run in one immediate transaction.
      * @param request Queue selector, definition fields, partial attributes, owning payload, and optional idempotency
      * key consumed after validation. The key is syntax-checked; durable replay semantics are introduced with the
@@ -286,6 +312,22 @@ public:
      * or a deleted, not-found, state-conflict, revision-exhausted, or database Error.
      */
     [[nodiscard]] auto resume_job(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>;
+
+    /** Moves one fully suspended job and its non-terminal execution snapshots in one immediate transaction.
+     * @param request Job ID, positive expected revision, and distinct active or suspended destination queue.
+     * @return Committed suspended definition with one revision increment, or a validation, not-found, deleted,
+     * not-suspended, revision, queue-state, invariant, or database Error. Complete definition fields are preserved,
+     * destination defaults are not applied, and terminal run queue IDs are unchanged.
+     */
+    [[nodiscard]] auto move_job(MoveJobRequest const& request) -> jb::core::Result<JobDefinition, jb::core::Error>;
+
+    /** Soft-deletes one fully suspended job in one immediate transaction.
+     * @param request Job ID and positive expected revision.
+     * @return Success after one revision increment, pending-run cancellation, and current secret-reference cleanup,
+     * or a validation, not-found, deleted, not-suspended, revision, running-work, invariant, or database Error.
+     * Definition and execution history remain durable for retention.
+     */
+    [[nodiscard]] auto delete_job(DeleteJobRequest const& request) -> jb::core::Result<void, jb::core::Error>;
 
     /** Gets one job definition by stable ID without starting an explicit transaction.
      * @param id Stable job-definition UUID.

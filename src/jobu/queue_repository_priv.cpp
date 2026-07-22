@@ -480,4 +480,72 @@ auto QueueRepository::set_state(jb::core::Uuid const&  id,
     return RepositoryResult<bool>::success(query.num_rows_affected() == 1);
 }
 
+auto QueueRepository::count_non_deleted_jobs(jb::core::Uuid const& queue_id)
+    -> jb::core::Result<std::size_t, jb::core::Error>
+{
+    jb::db::Query query{_database};
+    auto          prepared =
+        query.prepare("SELECT COUNT(*) AS job_count FROM jobu_jobs WHERE queue_id = :queue_id AND state <> 'deleted'");
+    if (!prepared) {
+        return RepositoryResult<std::size_t>::failure(std::move(prepared).error());
+    }
+    auto bound = query.bind_value(":queue_id", uuid_to_storage(queue_id));
+    if (!bound) {
+        return RepositoryResult<std::size_t>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<std::size_t>::failure(std::move(executed).error());
+    }
+    auto next = query.next();
+    if (!next) {
+        return RepositoryResult<std::size_t>::failure(std::move(next).error());
+    }
+    if (!*next) {
+        return RepositoryResult<std::size_t>::failure(invalid_queue_row("missing_job_count"));
+    }
+    auto const* value = query.record().value("job_count");
+    auto const* count = value == nullptr ? nullptr : std::get_if<std::int64_t>(value);
+    if (count == nullptr || *count < 0 || !std::in_range<std::size_t>(*count)) {
+        return RepositoryResult<std::size_t>::failure(invalid_queue_row("invalid_job_count"));
+    }
+    return RepositoryResult<std::size_t>::success(static_cast<std::size_t>(*count));
+}
+
+auto QueueRepository::mark_deleted(jb::core::Uuid const&  id,
+                                   std::string_view       internal_name,
+                                   std::string_view       original_name,
+                                   jb::core::UtcTimePoint deleted_at) -> jb::core::Result<bool, jb::core::Error>
+{
+    auto timestamp = timestamp_to_storage(deleted_at);
+    if (!timestamp) {
+        return RepositoryResult<bool>::failure(std::move(timestamp).error());
+    }
+
+    jb::db::Query query{_database};
+    auto          prepared =
+        query.prepare("UPDATE jobu_queues SET name = :internal_name, deleted_name = :original_name, state = 'deleted', "
+                      "updated_at_us = :updated_at_us, deleted_at_us = :deleted_at_us "
+                      "WHERE id = :id AND state = 'suspended' AND deleted_at_us IS NULL");
+    if (!prepared) {
+        return RepositoryResult<bool>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":internal_name", jb::db::make_text(internal_name)},
+                              {":original_name", jb::db::make_text(original_name)},
+                              {":updated_at_us", timestamp.value()               },
+                              {":deleted_at_us", timestamp.value()               },
+                              {":id",            uuid_to_storage(id)             },
+    });
+    if (!bound) {
+        return RepositoryResult<bool>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<bool>::failure(std::move(executed).error());
+    }
+    return RepositoryResult<bool>::success(query.num_rows_affected() == 1);
+}
+
 } // namespace jb::jobu::detail

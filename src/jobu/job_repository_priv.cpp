@@ -65,6 +65,15 @@ auto bind_all(jb::db::Query& query, std::vector<std::pair<std::string_view, jb::
     return RepositoryResult<void>::success();
 }
 
+auto affected_rows(jb::db::Query const& query) -> RepositoryResult<std::size_t>
+{
+    auto const count = query.num_rows_affected();
+    if (count < 0 || !std::in_range<std::size_t>(count)) {
+        return RepositoryResult<std::size_t>::failure(invalid_job("invalid_affected_row_count"));
+    }
+    return RepositoryResult<std::size_t>::success(static_cast<std::size_t>(count));
+}
+
 struct StoredSchedule {
     jb::db::Value kind;
     jb::db::Value scheduled_at;
@@ -406,6 +415,212 @@ auto JobRepository::set_state(jb::core::Uuid const&  id,
         return RepositoryResult<bool>::failure(std::move(executed).error());
     }
     return RepositoryResult<bool>::success(query.num_rows_affected() == 1);
+}
+
+auto JobRepository::move(jb::core::Uuid const&  id,
+                         JobRevision            expected_revision,
+                         jb::core::Uuid const&  target_queue_id,
+                         JobRevision            next_revision,
+                         jb::core::UtcTimePoint updated_at) -> jb::core::Result<bool, jb::core::Error>
+{
+    if (next_revision <= expected_revision || next_revision - expected_revision != 1) {
+        return RepositoryResult<bool>::failure(invalid_job("invalid_move_revision"));
+    }
+    auto expected = revision_to_storage(expected_revision);
+    if (!expected) {
+        return RepositoryResult<bool>::failure(std::move(expected).error());
+    }
+    auto revision = revision_to_storage(next_revision);
+    if (!revision) {
+        return RepositoryResult<bool>::failure(std::move(revision).error());
+    }
+    auto updated = timestamp_to_storage(updated_at);
+    if (!updated) {
+        return RepositoryResult<bool>::failure(std::move(updated).error());
+    }
+
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(
+        "UPDATE jobu_jobs SET queue_id = :target_queue_id, revision = :next_revision, updated_at_us = :updated_at_us "
+        "WHERE id = :id AND queue_id <> :target_queue_id AND state = 'suspended' "
+        "AND revision = :expected_revision AND deleted_at_us IS NULL");
+    if (!prepared) {
+        return RepositoryResult<bool>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":target_queue_id",   uuid_to_storage(target_queue_id)},
+                              {":next_revision",     std::move(revision).value()     },
+                              {":updated_at_us",     std::move(updated).value()      },
+                              {":id",                uuid_to_storage(id)             },
+                              {":expected_revision", std::move(expected).value()     },
+    });
+    if (!bound) {
+        return RepositoryResult<bool>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<bool>::failure(std::move(executed).error());
+    }
+    return RepositoryResult<bool>::success(query.num_rows_affected() == 1);
+}
+
+auto JobRepository::mark_deleted(jb::core::Uuid const&  id,
+                                 JobRevision            expected_revision,
+                                 JobRevision            next_revision,
+                                 jb::core::UtcTimePoint deleted_at) -> jb::core::Result<bool, jb::core::Error>
+{
+    if (next_revision <= expected_revision || next_revision - expected_revision != 1) {
+        return RepositoryResult<bool>::failure(invalid_job("invalid_delete_revision"));
+    }
+    auto expected = revision_to_storage(expected_revision);
+    if (!expected) {
+        return RepositoryResult<bool>::failure(std::move(expected).error());
+    }
+    auto revision = revision_to_storage(next_revision);
+    if (!revision) {
+        return RepositoryResult<bool>::failure(std::move(revision).error());
+    }
+    auto timestamp = timestamp_to_storage(deleted_at);
+    if (!timestamp) {
+        return RepositoryResult<bool>::failure(std::move(timestamp).error());
+    }
+
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(
+        "UPDATE jobu_jobs SET state = 'deleted', revision = :next_revision, updated_at_us = :updated_at_us, "
+        "deleted_at_us = :deleted_at_us WHERE id = :id AND state = 'suspended' "
+        "AND revision = :expected_revision AND deleted_at_us IS NULL");
+    if (!prepared) {
+        return RepositoryResult<bool>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":next_revision",     std::move(revision).value()},
+                              {":updated_at_us",     timestamp.value()          },
+                              {":deleted_at_us",     timestamp.value()          },
+                              {":id",                uuid_to_storage(id)        },
+                              {":expected_revision", std::move(expected).value()},
+    });
+    if (!bound) {
+        return RepositoryResult<bool>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<bool>::failure(std::move(executed).error());
+    }
+    return RepositoryResult<bool>::success(query.num_rows_affected() == 1);
+}
+
+auto JobRepository::has_exhausted_revision_in_queue(jb::core::Uuid const& queue_id, JobRevision maximum_revision)
+    -> jb::core::Result<bool, jb::core::Error>
+{
+    auto maximum = revision_to_storage(maximum_revision);
+    if (!maximum) {
+        return RepositoryResult<bool>::failure(std::move(maximum).error());
+    }
+    jb::db::Query query{_database};
+    auto          prepared =
+        query.prepare("SELECT EXISTS(SELECT 1 FROM jobu_jobs WHERE queue_id = :queue_id AND state <> 'deleted' "
+                      "AND revision >= :maximum_revision) AS exhausted");
+    if (!prepared) {
+        return RepositoryResult<bool>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":queue_id",         uuid_to_storage(queue_id) },
+                              {":maximum_revision", std::move(maximum).value()},
+    });
+    if (!bound) {
+        return RepositoryResult<bool>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<bool>::failure(std::move(executed).error());
+    }
+    auto next = query.next();
+    if (!next) {
+        return RepositoryResult<bool>::failure(std::move(next).error());
+    }
+    if (!*next) {
+        return RepositoryResult<bool>::failure(invalid_job("missing_revision_preflight"));
+    }
+    auto const* value     = query.record().value("exhausted");
+    auto const* exhausted = value == nullptr ? nullptr : std::get_if<std::int64_t>(value);
+    if (exhausted == nullptr || (*exhausted != 0 && *exhausted != 1)) {
+        return RepositoryResult<bool>::failure(invalid_job("invalid_revision_preflight"));
+    }
+    return RepositoryResult<bool>::success(*exhausted == 1);
+}
+
+auto JobRepository::mark_all_in_queue_deleted(jb::core::Uuid const& queue_id, jb::core::UtcTimePoint deleted_at)
+    -> jb::core::Result<std::size_t, jb::core::Error>
+{
+    auto timestamp = timestamp_to_storage(deleted_at);
+    if (!timestamp) {
+        return RepositoryResult<std::size_t>::failure(std::move(timestamp).error());
+    }
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(
+        "UPDATE jobu_jobs SET state = 'deleted', revision = revision + 1, updated_at_us = :updated_at_us, "
+        "deleted_at_us = :deleted_at_us WHERE queue_id = :queue_id AND state <> 'deleted' "
+        "AND deleted_at_us IS NULL");
+    if (!prepared) {
+        return RepositoryResult<std::size_t>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":updated_at_us", timestamp.value()        },
+                              {":deleted_at_us", timestamp.value()        },
+                              {":queue_id",      uuid_to_storage(queue_id)},
+    });
+    if (!bound) {
+        return RepositoryResult<std::size_t>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<std::size_t>::failure(std::move(executed).error());
+    }
+    return affected_rows(query);
+}
+
+auto JobRepository::erase_secret_references_for_job(jb::core::Uuid const& job_id)
+    -> jb::core::Result<std::size_t, jb::core::Error>
+{
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare("DELETE FROM jobu_secret_refs WHERE job_id = :job_id");
+    if (!prepared) {
+        return RepositoryResult<std::size_t>::failure(std::move(prepared).error());
+    }
+    auto bound = query.bind_value(":job_id", uuid_to_storage(job_id));
+    if (!bound) {
+        return RepositoryResult<std::size_t>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<std::size_t>::failure(std::move(executed).error());
+    }
+    return affected_rows(query);
+}
+
+auto JobRepository::erase_secret_references_for_queue(jb::core::Uuid const& queue_id)
+    -> jb::core::Result<std::size_t, jb::core::Error>
+{
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare("DELETE FROM jobu_secret_refs WHERE job_id IN (SELECT id FROM jobu_jobs "
+                                           "WHERE queue_id = :queue_id AND state <> 'deleted')");
+    if (!prepared) {
+        return RepositoryResult<std::size_t>::failure(std::move(prepared).error());
+    }
+    auto bound = query.bind_value(":queue_id", uuid_to_storage(queue_id));
+    if (!bound) {
+        return RepositoryResult<std::size_t>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<std::size_t>::failure(std::move(executed).error());
+    }
+    return affected_rows(query);
 }
 
 auto JobRepository::find_by_id(jb::core::Uuid const& id, bool include_deleted)
