@@ -33,6 +33,8 @@ target_sources(${TARGET}
         run_repository_priv.hpp
         system_info.cpp
         system_info_priv.hpp
+        text_validation_priv.cpp
+        text_validation_priv.hpp
         utc_timestamp.cpp
     PUBLIC
         attempt.hpp

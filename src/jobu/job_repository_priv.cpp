@@ -241,9 +241,9 @@ auto JobRepository::insert(JobDefinition const& job) -> jb::core::Result<void, j
     if ((job.state == JobState::Deleted) != job.deleted_at.has_value()) {
         return RepositoryResult<void>::failure(invalid_job("deleted_state_mismatch"));
     }
-    auto payload_issue = job_payload_issue(job.type, job.payload);
-    if (payload_issue != JobPayloadIssue::None) {
-        return RepositoryResult<void>::failure(invalid_job(job_payload_issue_text(payload_issue)));
+    auto payload = validate_and_serialize_job_payload(job.type, job.payload);
+    if (!payload) {
+        return RepositoryResult<void>::failure(invalid_job(job_payload_issue_text(payload.error())));
     }
 
     auto revision = revision_to_storage(job.revision);
@@ -257,10 +257,6 @@ auto JobRepository::insert(JobDefinition const& job) -> jb::core::Result<void, j
     auto attributes = attributes_to_storage(_attributes, job.attributes);
     if (!attributes) {
         return RepositoryResult<void>::failure(std::move(attributes).error());
-    }
-    auto payload = json_to_storage(job.payload, true, maximum_job_document_bytes);
-    if (!payload) {
-        return RepositoryResult<void>::failure(std::move(payload).error());
     }
     auto created = timestamp_to_storage(job.created_at);
     if (!created) {
@@ -304,7 +300,7 @@ auto JobRepository::insert(JobDefinition const& job) -> jb::core::Result<void, j
                               {":cron_timezone",   std::move(schedule->cron_timezone)        },
                               {":priority",        int32_to_storage(job.priority)            },
                               {":attributes_json", std::move(attributes).value()             },
-                              {":payload_json",    std::move(payload).value()                },
+                              {":payload_json",    jb::db::Value{std::move(payload).value()} },
                               {":created_at_us",   std::move(created).value()                },
                               {":updated_at_us",   std::move(updated).value()                },
                               {":deleted_at_us",   std::move(deleted_at)                     },
