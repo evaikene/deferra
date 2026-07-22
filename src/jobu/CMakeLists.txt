@@ -15,6 +15,8 @@ target_sources(${TARGET}
         attribute_codec_priv.cpp
         attribute_codec_priv.hpp
         attribute_registry.cpp
+        attempt_repository_priv.cpp
+        attempt_repository_priv.hpp
         domain_storage_priv.cpp
         domain_storage_priv.hpp
         jobu.cpp
@@ -23,6 +25,8 @@ target_sources(${TARGET}
         queue_repository_priv.hpp
         queue_validation_priv.cpp
         queue_validation_priv.hpp
+        run_repository_priv.cpp
+        run_repository_priv.hpp
         system_info.cpp
         system_info_priv.hpp
         utc_timestamp.cpp
