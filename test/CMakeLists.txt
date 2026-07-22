@@ -44,6 +44,12 @@ add_executable(${TARGET} management-json-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU transport-independent job management JSON test
+set(TARGET "job-management-json-test")
+add_executable(${TARGET} job-management-json-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Test support test
 set(TARGET "test-support-test")
 add_executable(${TARGET}
