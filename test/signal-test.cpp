@@ -9,7 +9,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <memory>
 #include <thread>
+#include <type_traits>
+#include <vector>
 
 using namespace jb::core;
 
@@ -62,6 +66,62 @@ public:
     void set_value(int value) { received = value; }
 
     int received{0};
+};
+
+class CopyCountingValue {
+public:
+
+    explicit CopyCountingValue(int value)
+        : value{value}
+        , instance{++instances}
+        , lifetime{std::make_shared<int>(0)}
+    {}
+
+    CopyCountingValue(CopyCountingValue const& other)
+        : value{other.value}
+        , instance{++instances}
+        , lifetime{other.lifetime}
+    {
+        ++copies;
+    }
+
+    CopyCountingValue(CopyCountingValue&&) noexcept                    = default;
+    auto operator=(CopyCountingValue const&) -> CopyCountingValue&     = default;
+    auto operator=(CopyCountingValue&&) noexcept -> CopyCountingValue& = default;
+
+    static void reset()
+    {
+        copies    = 0;
+        instances = 0;
+    }
+
+    int                  value;
+    std::size_t          instance;
+    std::shared_ptr<int> lifetime;
+
+    static inline std::size_t copies{0};
+    static inline std::size_t instances{0};
+};
+
+class CopyCountingSender : public Object {
+public:
+
+    Signal<CopyCountingValue> value_changed;
+
+    void notify(CopyCountingValue const& value) { emit(value_changed, value); }
+};
+
+class CopyCountingReceiver : public Object {
+public:
+
+    void receive(CopyCountingValue const& value)
+    {
+        received_value    = value.value;
+        received_instance = value.instance;
+    }
+
+    int         received_value{0};
+    std::size_t received_instance{0};
 };
 
 int captured_value = 0;
@@ -136,6 +196,191 @@ TEST_CASE("Direct signal-slot connection", "[core]")
         delete receiver;
         delete obj;
     }
+}
+
+TEST_CASE("Direct signal slots borrow owning arguments", "[core][signal]")
+{
+    CopyCountingSender       sender;
+    CopyCountingReceiver     receiver;
+    std::vector<int>         values;
+    std::vector<std::size_t> instances;
+
+    sender.value_changed.connect([&](CopyCountingValue const& value) {
+        using Argument = std::remove_reference_t<decltype(value)>;
+        static_assert(std::is_const_v<Argument>);
+
+        values.push_back(value.value);
+        instances.push_back(value.instance);
+    });
+    sender.value_changed.connect([&](CopyCountingValue const& value) {
+        values.push_back(value.value);
+        instances.push_back(value.instance);
+    });
+    sender.value_changed.connect(&receiver, &CopyCountingReceiver::receive);
+
+    CopyCountingValue::reset();
+    CopyCountingValue value{42};
+    sender.notify(value);
+
+    CHECK(values == std::vector<int>{42, 42});
+    REQUIRE(instances.size() == 2);
+    CHECK(instances[0] == instances[1]);
+    CHECK(receiver.received_value == 42);
+    CHECK(receiver.received_instance == instances[0]);
+    CHECK(CopyCountingValue::copies == 0);
+}
+
+TEST_CASE("Direct signal slots may copy owning arguments intentionally", "[core][signal]")
+{
+    CopyCountingSender sender;
+    std::size_t        borrowed_instance{0};
+    std::size_t        copied_instance{0};
+
+    sender.value_changed.connect([&](CopyCountingValue const& value) { borrowed_instance = value.instance; });
+    sender.value_changed.connect([&](CopyCountingValue value) { copied_instance = value.instance; });
+
+    CopyCountingValue::reset();
+    CopyCountingValue value{42};
+    sender.notify(value);
+
+    CHECK(borrowed_instance != 0);
+    CHECK(copied_instance != 0);
+    CHECK(copied_instance != borrowed_instance);
+    CHECK(CopyCountingValue::copies == 1);
+}
+
+TEST_CASE("Queued signal delivery owns local arguments", "[core][signal]")
+{
+    Application          app{0, nullptr};
+    CopyCountingSender   sender;
+    CopyCountingReceiver receiver;
+    std::weak_ptr<int>   argument_lifetime;
+
+    sender.value_changed.connect(&receiver, &CopyCountingReceiver::receive, ConnectionType::Queued);
+
+    CopyCountingValue::reset();
+    {
+        CopyCountingValue value{42};
+        argument_lifetime = value.lifetime;
+        sender.notify(value);
+
+        CHECK(receiver.received_value == 0);
+        CHECK(CopyCountingValue::copies == 1);
+    }
+
+    CHECK_FALSE(argument_lifetime.expired());
+    CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
+    CHECK(receiver.received_value == 42);
+    CHECK(argument_lifetime.expired());
+}
+
+TEST_CASE("Queued signal slots share one owning snapshot", "[core][signal]")
+{
+    Application              app{0, nullptr};
+    CopyCountingSender       sender;
+    Object                   first_receiver;
+    Object                   second_receiver;
+    std::vector<int>         values;
+    std::vector<std::size_t> instances;
+
+    sender.value_changed.connect(
+        &first_receiver,
+        [&](CopyCountingValue const& value) {
+            values.push_back(value.value);
+            instances.push_back(value.instance);
+        },
+        ConnectionType::Queued);
+    sender.value_changed.connect(
+        &second_receiver,
+        [&](CopyCountingValue const& value) {
+            values.push_back(value.value);
+            instances.push_back(value.instance);
+        },
+        ConnectionType::Queued);
+
+    CopyCountingValue::reset();
+    CopyCountingValue value{42};
+    sender.notify(value);
+
+    CHECK(values.empty());
+    CHECK(CopyCountingValue::copies == 1);
+    CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
+
+    CHECK(values == std::vector<int>{42, 42});
+    REQUIRE(instances.size() == 2);
+    CHECK(instances[0] == instances[1]);
+    CHECK(CopyCountingValue::copies == 1);
+}
+
+TEST_CASE("Queued signal slots observe the pre-dispatch snapshot", "[core][signal]")
+{
+    Application        app{0, nullptr};
+    CopyCountingSender sender;
+    Object             receiver;
+    int                direct_value{0};
+    int                queued_value{0};
+    std::size_t        direct_instance{0};
+    std::size_t        queued_instance{0};
+
+    CopyCountingValue::reset();
+    CopyCountingValue value{42};
+
+    sender.value_changed.connect([&](CopyCountingValue const& observed) {
+        direct_value    = observed.value;
+        direct_instance = observed.instance;
+        value.value     = 99;
+    });
+    sender.value_changed.connect(
+        &receiver,
+        [&](CopyCountingValue const& observed) {
+            queued_value    = observed.value;
+            queued_instance = observed.instance;
+        },
+        ConnectionType::Queued);
+
+    sender.notify(value);
+
+    CHECK(direct_value == 42);
+    CHECK(direct_instance == value.instance);
+    CHECK(value.value == 99);
+    CHECK(CopyCountingValue::copies == 1);
+
+    CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
+    CHECK(queued_value == 42);
+    CHECK(queued_instance != direct_instance);
+}
+
+TEST_CASE("Cancelled queued signal slots release their shared snapshot", "[core][signal]")
+{
+    Application        app{0, nullptr};
+    CopyCountingSender sender;
+    Object             first_receiver;
+    auto*              second_receiver = new Object;
+    int                deliveries{0};
+    std::weak_ptr<int> argument_lifetime;
+
+    auto first_connection = sender.value_changed.connect(
+        &first_receiver,
+        [&](CopyCountingValue const&) { ++deliveries; },
+        ConnectionType::Queued);
+    sender.value_changed.connect(
+        second_receiver,
+        [&](CopyCountingValue const&) { ++deliveries; },
+        ConnectionType::Queued);
+
+    {
+        CopyCountingValue value{42};
+        argument_lifetime = value.lifetime;
+        sender.notify(value);
+    }
+
+    first_connection.disconnect();
+    delete second_receiver;
+
+    CHECK_FALSE(argument_lifetime.expired());
+    CHECK(app.process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
+    CHECK(deliveries == 0);
+    CHECK(argument_lifetime.expired());
 }
 
 TEST_CASE("Queued signal-slot connection", "[core]")

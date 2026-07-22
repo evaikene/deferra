@@ -91,8 +91,8 @@ public:
     {
         local_server.new_connection.connect([this]() -> void { drain_connections(); });
         rpc_server.connection_opened.connect([this](ConnectionId id) -> void { opened_ids.push_back(id); });
-        rpc_server.connection_error.connect([this](ConnectionId id, Error error) -> void {
-            connection_errors.emplace_back(id, std::move(error));
+        rpc_server.connection_error.connect([this](ConnectionId id, Error const& error) -> void {
+            connection_errors.emplace_back(id, error);
             terminal_events.push_back("error:" + std::to_string(id));
         });
         rpc_server.connection_closed.connect([this](ConnectionId id) -> void {
@@ -123,8 +123,8 @@ public:
         peer->socket->connected.connect([events]() -> void { ++events->connected_count; });
         peer->socket->disconnected.connect([events]() -> void { ++events->disconnected_count; });
         peer->socket->closed.connect([events]() -> void { ++events->closed_count; });
-        peer->socket->error_occurred.connect([events](IOError error, std::string message) -> void {
-            events->socket_errors.emplace_back(error, std::move(message));
+        peer->socket->error_occurred.connect([events](IOError error, std::string const& message) -> void {
+            events->socket_errors.emplace_back(error, message);
         });
 
         auto& result = *peer;
@@ -141,17 +141,16 @@ public:
 
         peer.client  = std::make_unique<Client>(*peer.socket);
         auto* events = &peer.events;
-        peer.client->result_received.connect([events](RequestId id, JsonValue value) -> void {
-            events->results.emplace_back(std::move(id), std::move(value));
+        peer.client->result_received.connect(
+            [events](RequestId const& id, JsonValue const& value) -> void { events->results.emplace_back(id, value); });
+        peer.client->error_received.connect([events](RequestId const& id, RpcError const& error) -> void {
+            events->remote_errors.emplace_back(id, error);
         });
-        peer.client->error_received.connect([events](RequestId id, RpcError error) -> void {
-            events->remote_errors.emplace_back(std::move(id), std::move(error));
-        });
-        peer.client->request_failed.connect([events](RequestId id, Error error) -> void {
-            events->request_failures.emplace_back(std::move(id), std::move(error));
+        peer.client->request_failed.connect([events](RequestId const& id, Error const& error) -> void {
+            events->request_failures.emplace_back(id, error);
         });
         peer.client->protocol_error.connect(
-            [events](Error error) -> void { events->protocol_errors.push_back(std::move(error)); });
+            [events](Error const& error) -> void { events->protocol_errors.push_back(error); });
     }
 
     auto connect_client(std::size_t read_buffer_limit = 0U) -> ClientPeer&

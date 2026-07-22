@@ -164,7 +164,7 @@ TEST_CASE("Notifications encode without IDs or pending entries", "[rpc][client][
     device.open();
     Client client{device};
     auto   results = 0;
-    client.result_received.connect([&](RequestId, JsonValue) { ++results; });
+    client.result_received.connect([&](RequestId const&, JsonValue const&) { ++results; });
 
     REQUIRE(client.notify("none"));
     REQUIRE(client.notify("object", make_json(JsonValue::Object{})));
@@ -309,11 +309,11 @@ TEST_CASE("Results and remote errors correlate exactly and out of order", "[rpc]
     device.open();
     Client client{device};
     auto   events = std::vector<std::string>{};
-    client.result_received.connect([&](RequestId id, JsonValue result) {
+    client.result_received.connect([&](RequestId const& id, JsonValue const& result) {
         events.push_back("result:" + std::to_string(require_unsigned(id)) + ":" + result.as_string());
         CHECK(client.pending_request_count() == 1U);
     });
-    client.error_received.connect([&](RequestId id, RpcError error) {
+    client.error_received.connect([&](RequestId const& id, RpcError const& error) {
         events.push_back("error:" + std::to_string(require_unsigned(id)) + ":" + std::to_string(error.code));
         CHECK(client.pending_request_count() == 0U);
     });
@@ -337,10 +337,12 @@ TEST_CASE("Response batches are preflighted and delivered in wire order", "[rpc]
     device.open();
     Client client{device, {.max_batch_entries = 3U}};
     auto   events = std::vector<std::string>{};
-    client.result_received.connect(
-        [&](RequestId id, JsonValue) { events.push_back("result:" + std::to_string(require_unsigned(id))); });
-    client.error_received.connect(
-        [&](RequestId id, RpcError) { events.push_back("error:" + std::to_string(require_unsigned(id))); });
+    client.result_received.connect([&](RequestId const& id, JsonValue const&) {
+        events.push_back("result:" + std::to_string(require_unsigned(id)));
+    });
+    client.error_received.connect([&](RequestId const& id, RpcError const&) {
+        events.push_back("error:" + std::to_string(require_unsigned(id)));
+    });
 
     REQUIRE(client.call("one"));
     REQUIRE(client.call("two"));
@@ -363,12 +365,12 @@ TEST_CASE("Additive response members are accepted and completed IDs cannot repea
     Client client{device};
     auto   results   = 0;
     auto   protocols = 0;
-    client.result_received.connect([&](RequestId id, JsonValue value) {
+    client.result_received.connect([&](RequestId const& id, JsonValue const& value) {
         ++results;
         CHECK(id == RequestId{std::uint64_t{1}});
         CHECK(value.as_string() == "accepted");
     });
-    client.protocol_error.connect([&](Error error) {
+    client.protocol_error.connect([&](Error const& error) {
         ++protocols;
         CHECK(error.code == "rpc.protocol_error");
     });
@@ -397,12 +399,12 @@ TEST_CASE("Invalid response batches never partially complete", "[rpc][client][ba
     device.open();
     Client client{device};
     auto   events = std::vector<std::string>{};
-    client.result_received.connect([&](RequestId, JsonValue) { events.emplace_back("result"); });
-    client.protocol_error.connect([&](Error error) {
+    client.result_received.connect([&](RequestId const&, JsonValue const&) { events.emplace_back("result"); });
+    client.protocol_error.connect([&](Error const& error) {
         events.push_back("protocol:" + error.code);
         client.close();
     });
-    client.request_failed.connect([&](RequestId id, Error error) {
+    client.request_failed.connect([&](RequestId const& id, Error const& error) {
         events.push_back("failed:" + std::to_string(require_unsigned(id)) + ":" + error.code);
     });
 
@@ -427,7 +429,7 @@ TEST_CASE("Cancellation is local and a later response becomes terminal", "[rpc][
     device.open();
     Client client{device};
     auto   protocol_errors = 0;
-    client.protocol_error.connect([&](Error error) {
+    client.protocol_error.connect([&](Error const& error) {
         ++protocol_errors;
         CHECK(error.code == "rpc.protocol_error");
     });
@@ -469,7 +471,7 @@ TEST_CASE("Every invalid or uncorrelatable response ID is terminal", "[rpc][clie
         device.open();
         Client client{device};
         auto   errors = 0;
-        client.protocol_error.connect([&](Error error) {
+        client.protocol_error.connect([&](Error const& error) {
             ++errors;
             CHECK(error.code == "rpc.protocol_error");
         });
@@ -496,11 +498,12 @@ TEST_CASE("Malformed response framing JSON and envelopes are terminal", "[rpc][c
         device.open();
         Client client{device};
         auto   events = std::vector<std::string>{};
-        client.protocol_error.connect([&](Error error) {
+        client.protocol_error.connect([&](Error const& error) {
             CHECK(error.detail.empty());
             events.push_back("protocol:" + error.code);
         });
-        client.request_failed.connect([&](RequestId, Error error) { events.push_back("failed:" + error.code); });
+        client.request_failed.connect(
+            [&](RequestId const&, Error const& error) { events.push_back("failed:" + error.code); });
         REQUIRE(client.call("pending"));
         static_cast<void>(device.take_written_data());
         device.inject_input(input);
@@ -527,7 +530,7 @@ TEST_CASE("Response batch and JSON depth limits are enforced independently", "[r
                                   encode_success_response(std::uint64_t{3}, make_json(JsonNull{}))});
         REQUIRE(over);
         auto errors = 0;
-        client.protocol_error.connect([&](Error) { ++errors; });
+        client.protocol_error.connect([&](Error const&) { ++errors; });
         device.inject_input(encode_frame(*over));
         CHECK(errors == 1);
     }
@@ -544,7 +547,7 @@ TEST_CASE("Response batch and JSON depth limits are enforced independently", "[r
         auto batch = encode_batch({encode_success_response(std::uint64_t{2}, make_json(JsonNull{}))});
         REQUIRE(batch);
         auto errors = 0;
-        client.protocol_error.connect([&](Error) { ++errors; });
+        client.protocol_error.connect([&](Error const&) { ++errors; });
         device.inject_input(encode_frame(*batch));
         CHECK(errors == 1);
     }
@@ -559,7 +562,7 @@ TEST_CASE("Response batch and JSON depth limits are enforced independently", "[r
         Client client{device, options};
         REQUIRE(client.call("nested"));
         auto errors = std::vector<std::string>{};
-        client.protocol_error.connect([&](Error error) { errors.push_back(error.code); });
+        client.protocol_error.connect([&](Error const& error) { errors.push_back(error.code); });
         device.inject_input(
             success_frame(std::uint64_t{1},
                           make_json(JsonValue::Array{make_json(JsonValue::Array{make_json(JsonNull{})})})));
@@ -576,7 +579,7 @@ TEST_CASE("Fragmented and coalesced response frames are non-recursive", "[rpc][c
     auto   depth         = 0;
     auto   maximum_depth = 0;
     auto   ids           = std::vector<std::uint64_t>{};
-    client.result_received.connect([&](RequestId id, JsonValue) {
+    client.result_received.connect([&](RequestId const& id, JsonValue const&) {
         ++depth;
         maximum_depth = std::max(maximum_depth, depth);
         ids.push_back(require_unsigned(id));
@@ -613,7 +616,7 @@ TEST_CASE("Synchronous input during write waits until the call is pending", "[rp
     Client client{device};
     auto   pending_during_signal = std::size_t{};
     auto   result                = std::string{};
-    client.result_received.connect([&](RequestId id, JsonValue value) {
+    client.result_received.connect([&](RequestId const& id, JsonValue const& value) {
         CHECK(id == RequestId{std::uint64_t{1}});
         pending_during_signal = client.pending_request_count();
         result                = value.as_string();
@@ -667,8 +670,8 @@ TEST_CASE("Queued output accounting observes inclusive boundaries and acknowledg
         device.set_auto_acknowledge_writes(false);
         Client client{device, {.max_queued_output_bytes = 2U * frame_size - 1U}};
         auto   events = std::vector<std::string>{};
-        client.protocol_error.connect([&](Error error) { events.push_back("protocol:" + error.code); });
-        client.request_failed.connect([&](RequestId id, Error error) {
+        client.protocol_error.connect([&](Error const& error) { events.push_back("protocol:" + error.code); });
+        client.request_failed.connect([&](RequestId const& id, Error const& error) {
             events.push_back("failed:" + std::to_string(require_unsigned(id)) + ":" + error.code);
         });
         REQUIRE(client.call("one"));
@@ -698,7 +701,7 @@ TEST_CASE("Queued output accounting observes inclusive boundaries and acknowledg
             device.open();
             Client client{device, {.max_queued_output_bytes = limit}};
             auto   codes = std::vector<std::string>{};
-            client.protocol_error.connect([&](Error error) { codes.push_back(error.code); });
+            client.protocol_error.connect([&](Error const& error) { codes.push_back(error.code); });
             auto result = client.call("one");
             REQUIRE_FALSE(result);
             CHECK(result.error().category == ErrorCategory::ResourceExhausted);
@@ -733,8 +736,8 @@ TEST_CASE("Short writes are terminal and fail only established pending calls", "
         static_cast<void>(device.take_written_data());
         device.set_write_limit(limit);
         auto events = std::vector<std::string>{};
-        client.protocol_error.connect([&](Error error) { events.push_back("protocol:" + error.code); });
-        client.request_failed.connect([&](RequestId id, Error error) {
+        client.protocol_error.connect([&](Error const& error) { events.push_back("protocol:" + error.code); });
+        client.request_failed.connect([&](RequestId const& id, Error const& error) {
             events.push_back("failed:" + std::to_string(require_unsigned(id)) + ":" + error.code);
         });
 
@@ -757,7 +760,7 @@ TEST_CASE("Explicit close is idempotent and preserves the borrowed device", "[rp
         Client client{device};
         REQUIRE(client.call("one"));
         REQUIRE(client.call("two"));
-        client.request_failed.connect([&](RequestId id, Error error) {
+        client.request_failed.connect([&](RequestId const& id, Error const& error) {
             CHECK(error.category == ErrorCategory::Cancelled);
             CHECK(error.code == "rpc.connection_closed");
             CHECK(error.message == "RPC client was closed");
@@ -792,7 +795,7 @@ TEST_CASE("Client destruction disconnects and fails pending work without owning 
     {
         Client client{device};
         REQUIRE(client.call("one"));
-        client.request_failed.connect([&](RequestId id, Error error) {
+        client.request_failed.connect([&](RequestId const& id, Error const& error) {
             CHECK(error.category == ErrorCategory::Cancelled);
             failures.push_back(require_unsigned(id));
         });
@@ -815,7 +818,7 @@ TEST_CASE("Device close and errors fail pending calls exactly once", "[rpc][clie
         REQUIRE(client.call("one"));
         REQUIRE(client.call("two"));
         auto events = std::vector<std::string>{};
-        client.request_failed.connect([&](RequestId id, Error error) {
+        client.request_failed.connect([&](RequestId const& id, Error const& error) {
             CHECK(error.category == ErrorCategory::Unavailable);
             CHECK(error.code == "rpc.connection_closed");
             CHECK(error.message == "RPC connection closed");
@@ -843,8 +846,8 @@ TEST_CASE("Device close and errors fail pending calls exactly once", "[rpc][clie
             REQUIRE(client.call("pending"));
             auto failures  = 0;
             auto protocols = 0;
-            client.protocol_error.connect([&](Error) { ++protocols; });
-            client.request_failed.connect([&](RequestId, Error error) {
+            client.protocol_error.connect([&](Error const&) { ++protocols; });
+            client.request_failed.connect([&](RequestId const&, Error const& error) {
                 ++failures;
                 CHECK(error.category == category);
                 CHECK(error.code == "rpc.connection_closed");
@@ -872,7 +875,7 @@ TEST_CASE("Completion listeners can cancel close and create calls safely", "[rpc
         REQUIRE(client.call("one"));
         REQUIRE(client.call("two"));
         auto completed = std::vector<std::uint64_t>{};
-        client.result_received.connect([&](RequestId id, JsonValue) {
+        client.result_received.connect([&](RequestId const& id, JsonValue const&) {
             auto value = require_unsigned(id);
             completed.push_back(value);
             if (value == 1U) {
@@ -900,12 +903,13 @@ TEST_CASE("Completion listeners can cancel close and create calls safely", "[rpc
         REQUIRE(client.call("two"));
         REQUIRE(client.call("three"));
         auto events = std::vector<std::string>{};
-        client.result_received.connect([&](RequestId id, JsonValue) {
+        client.result_received.connect([&](RequestId const& id, JsonValue const&) {
             events.push_back("result:" + std::to_string(require_unsigned(id)));
             client.close();
         });
-        client.request_failed.connect(
-            [&](RequestId id, Error) { events.push_back("failed:" + std::to_string(require_unsigned(id))); });
+        client.request_failed.connect([&](RequestId const& id, Error const&) {
+            events.push_back("failed:" + std::to_string(require_unsigned(id)));
+        });
         auto batch = encode_batch({encode_success_response(std::uint64_t{1}, make_json(JsonNull{})),
                                    encode_success_response(std::uint64_t{2}, make_json(JsonNull{}))});
         REQUIRE(batch);
@@ -939,10 +943,10 @@ TEST_CASE("Client and Server complete transport-independent in-memory round trip
     client_device.open();
     Client client{client_device};
     auto   events = std::vector<std::string>{};
-    client.result_received.connect([&](RequestId id, JsonValue value) {
+    client.result_received.connect([&](RequestId const& id, JsonValue const& value) {
         events.push_back("result:" + std::to_string(require_unsigned(id)) + ":" + value.as_array().front().as_string());
     });
-    client.error_received.connect([&](RequestId id, RpcError error) {
+    client.error_received.connect([&](RequestId const& id, RpcError const& error) {
         events.push_back("error:" + std::to_string(require_unsigned(id)) + ":" + std::to_string(error.code));
     });
 
@@ -980,7 +984,7 @@ TEST_CASE("Several server responses may return to the client out of order", "[rp
     client_device.open();
     Client client{client_device};
     auto   ids = std::vector<std::uint64_t>{};
-    client.result_received.connect([&](RequestId id, JsonValue) { ids.push_back(require_unsigned(id)); });
+    client.result_received.connect([&](RequestId const& id, JsonValue const&) { ids.push_back(require_unsigned(id)); });
     REQUIRE(client.call("echo", make_json(JsonValue::Array{make_json(std::string{"one"})})));
     REQUIRE(client.call("echo", make_json(JsonValue::Array{make_json(std::string{"two"})})));
     pump(client_device, *server_raw);

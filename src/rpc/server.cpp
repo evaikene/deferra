@@ -476,7 +476,7 @@ auto Server::add_connection(std::unique_ptr<jb::core::IODevice> device, Operatio
             private_data->acknowledge_output(id, bytes);
         });
     iterator->second.error_connection =
-        raw->error_occurred.connect(this, [private_data, id](jb::core::IOError error, std::string) -> void {
+        raw->error_occurred.connect(this, [private_data, id](jb::core::IOError error, std::string const&) -> void {
             private_data->handle_device_error(id, error);
         });
     iterator->second.closed_connection =
