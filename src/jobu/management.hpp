@@ -177,10 +177,11 @@ struct JobListRequest {
  * must outlive the service. All calls must run on the Database owner thread. The daemon-default attribute layer is
  * validated and copied during construction; a validation failure is returned by subsequent operations.
  *
- * Queue/job gets and lists use bounded repository reads without an explicit transaction. Creates and updates use one
- * immediate transaction and return only after commit. Errors include stable `jobu.queue.*`, `jobu.job.*`,
- * `jobu.attribute.*`, and `jobu.idempotency.*` codes plus unchanged database errors when no domain mapping applies.
- * Methods invoke no callbacks, start no threads, and perform no event-loop processing or external I/O.
+ * Queue/job gets and lists use bounded repository reads without an explicit transaction. Creates, updates, and
+ * lifecycle changes use one immediate transaction and return only after commit. Errors include stable
+ * `jobu.queue.*`, `jobu.job.*`, `jobu.attribute.*`, and `jobu.idempotency.*` codes plus unchanged database errors when
+ * no domain mapping applies. Methods invoke no callbacks, start no threads, and perform no event-loop processing or
+ * external I/O.
  */
 class ManagementService final {
 public:
@@ -238,6 +239,21 @@ public:
      */
     [[nodiscard]] auto update_queue(UpdateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>;
 
+    /** Suspends a queue without changing its jobs or runs.
+     * @param selector Existing queue UUID or exact user-facing name, borrowed only for this call.
+     * @return Committed queue. Active queues pass through suspending and complete immediately when no running work is
+     * present; suspending queues complete when running work has drained. Suspended queues are returned unchanged.
+     * Deleted, not-found, state-conflict, and database failures are reported as Error values.
+     */
+    [[nodiscard]] auto suspend_queue(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>;
+
+    /** Resumes a suspending or suspended queue without changing its jobs or runs.
+     * @param selector Existing queue UUID or exact user-facing name, borrowed only for this call.
+     * @return Committed active queue, the unchanged queue when already active, or a deleted, not-found,
+     * state-conflict, or database Error.
+     */
+    [[nodiscard]] auto resume_queue(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>;
+
     /** Creates one active one-time job and its scheduled run in one immediate transaction.
      * @param request Queue selector, definition fields, partial attributes, owning payload, and optional idempotency
      * key consumed after validation. The key is syntax-checked; durable replay semantics are introduced with the
@@ -254,6 +270,22 @@ public:
      * state, immutable, schedule-snapshot, attribute, payload, or database Error. No attempt or external work starts.
      */
     [[nodiscard]] auto update_job(UpdateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
+
+    /** Suspends one job without changing its schedule-owned run or execution snapshot.
+     * @param id Stable job-definition UUID, borrowed only for this call.
+     * @return Committed definition. Active jobs pass through suspending and complete immediately when no running work
+     * is present; suspending jobs complete when running work has drained. Each actual transition increments the
+     * revision once, while suspended jobs are returned unchanged. Deleted, not-found, state-conflict,
+     * revision-exhausted, and database failures are reported as Error values.
+     */
+    [[nodiscard]] auto suspend_job(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>;
+
+    /** Resumes one suspending or suspended job without changing its schedule-owned run or execution snapshot.
+     * @param id Stable job-definition UUID, borrowed only for this call.
+     * @return Committed active definition with one revision increment, the unchanged definition when already active,
+     * or a deleted, not-found, state-conflict, revision-exhausted, or database Error.
+     */
+    [[nodiscard]] auto resume_job(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>;
 
     /** Gets one job definition by stable ID without starting an explicit transaction.
      * @param id Stable job-definition UUID.

@@ -35,6 +35,10 @@ public:
         -> jb::core::Result<std::vector<Queue>, jb::core::Error>;
     [[nodiscard]] auto replace_mutable_fields(Queue const& queue, SerializedAttributeDocument const* defaults)
         -> jb::core::Result<bool, jb::core::Error>;
+    [[nodiscard]] auto set_state(jb::core::Uuid const&  id,
+                                 QueueState             expected_state,
+                                 QueueState             next_state,
+                                 jb::core::UtcTimePoint updated_at) -> jb::core::Result<bool, jb::core::Error>;
 
 private:
     jb::db::Database&        _database;

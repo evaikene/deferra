@@ -443,4 +443,41 @@ auto QueueRepository::replace_mutable_fields(Queue const& queue, SerializedAttri
     return RepositoryResult<bool>::success(query.num_rows_affected() == 1);
 }
 
+auto QueueRepository::set_state(jb::core::Uuid const&  id,
+                                QueueState             expected_state,
+                                QueueState             next_state,
+                                jb::core::UtcTimePoint updated_at) -> jb::core::Result<bool, jb::core::Error>
+{
+    if (expected_state == QueueState::Deleted || next_state == QueueState::Deleted || expected_state == next_state ||
+        storage_text(expected_state).empty() || storage_text(next_state).empty()) {
+        return RepositoryResult<bool>::failure(invalid_queue_row("invalid_state_transition"));
+    }
+    auto updated = timestamp_to_storage(updated_at);
+    if (!updated) {
+        return RepositoryResult<bool>::failure(std::move(updated).error());
+    }
+
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare("UPDATE jobu_queues SET state = :next_state, updated_at_us = :updated_at_us "
+                                           "WHERE id = :id AND state = :expected_state AND deleted_at_us IS NULL");
+    if (!prepared) {
+        return RepositoryResult<bool>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":next_state",     jb::db::make_text(storage_text(next_state))    },
+                              {":updated_at_us",  std::move(updated).value()                     },
+                              {":id",             uuid_to_storage(id)                            },
+                              {":expected_state", jb::db::make_text(storage_text(expected_state))},
+    });
+    if (!bound) {
+        return RepositoryResult<bool>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<bool>::failure(std::move(executed).error());
+    }
+    return RepositoryResult<bool>::success(query.num_rows_affected() == 1);
+}
+
 } // namespace jb::jobu::detail

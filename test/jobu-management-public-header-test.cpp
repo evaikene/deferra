@@ -12,12 +12,24 @@ static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::create_queue
 static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::update_queue),
                              jb::core::Result<jb::jobu::Queue, jb::core::Error> (jb::jobu::ManagementService::*)(
                                  jb::jobu::UpdateQueueRequest)>);
+static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::suspend_queue),
+                             jb::core::Result<jb::jobu::Queue, jb::core::Error> (jb::jobu::ManagementService::*)(
+                                 jb::jobu::QueueSelector const&)>);
+static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::resume_queue),
+                             jb::core::Result<jb::jobu::Queue, jb::core::Error> (jb::jobu::ManagementService::*)(
+                                 jb::jobu::QueueSelector const&)>);
 static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::create_job),
                              jb::core::Result<jb::jobu::JobDefinition, jb::core::Error> (
                                  jb::jobu::ManagementService::*)(jb::jobu::CreateJobRequest)>);
 static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::update_job),
                              jb::core::Result<jb::jobu::JobDefinition, jb::core::Error> (
                                  jb::jobu::ManagementService::*)(jb::jobu::UpdateJobRequest)>);
+static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::suspend_job),
+                             jb::core::Result<jb::jobu::JobDefinition, jb::core::Error> (
+                                 jb::jobu::ManagementService::*)(jb::core::Uuid const&)>);
+static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::resume_job),
+                             jb::core::Result<jb::jobu::JobDefinition, jb::core::Error> (
+                                 jb::jobu::ManagementService::*)(jb::core::Uuid const&)>);
 
 int main()
 {

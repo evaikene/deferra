@@ -1,8 +1,10 @@
 #include "management.hpp"
 
+#include "attempt_repository_priv.hpp"
 #include "attribute_registry.hpp"
 #include "database.hpp"
 #include "query.hpp"
+#include "run_repository_priv.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "support/fake_time_source.hpp"
@@ -74,6 +76,22 @@ void execute(Database& database, std::string_view sql)
 {
     Query query{database};
     REQUIRE(query.exec(sql));
+}
+
+auto json_string(std::string value) -> jb::rpc::JsonValue
+{
+    auto json = jb::rpc::JsonValue{};
+    json.data = std::move(value);
+    return json;
+}
+
+auto cli_payload(std::string command) -> jb::rpc::JsonValue
+{
+    auto payload = jb::rpc::JsonValue{};
+    payload.data = jb::rpc::JsonValue::Object{
+        {"command", json_string(std::move(command))}
+    };
+    return payload;
 }
 
 auto max_attempts(std::int64_t value) -> AttributeSet
@@ -255,6 +273,121 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
     require_error(service.create_queue({.name = "beta"}), ErrorCategory::Conflict, "jobu.queue.name_conflict");
 }
 
+TEST_CASE("Queue lifecycle persists draining suspension resume and idempotent no-ops", "[jobu][queue][lifecycle]")
+{
+    auto const     immediate_queue = uuid("00000000-0000-7000-8000-000000000050");
+    auto const     busy_queue      = uuid("00000000-0000-7000-8000-000000000051");
+    auto const     job_id          = uuid("00000000-0000-7000-8000-000000000052");
+    auto const     run_id          = uuid("00000000-0000-7000-8000-000000000053");
+    ServiceFixture fixture{
+        {immediate_queue, busy_queue, job_id, run_id}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "immediate"}));
+    REQUIRE(service.create_queue({.name = "busy"}));
+    REQUIRE(service.create_job({.queue    = busy_queue,
+                                .schedule = OnceSchedule{.planned_at = UtcTimePoint{1s}},
+                                .payload  = cli_payload("busy")}));
+
+    fixture.time.advance(1s);
+    auto immediate = service.suspend_queue(std::string{"immediate"});
+    REQUIRE(immediate);
+    CHECK(immediate->state == QueueState::Suspended);
+    CHECK(immediate->updated_at == UtcTimePoint{2s});
+
+    fixture.time.advance(1s);
+    auto unchanged_suspended = service.suspend_queue(immediate_queue);
+    REQUIRE(unchanged_suspended);
+    CHECK(unchanged_suspended->state == QueueState::Suspended);
+    CHECK(unchanged_suspended->updated_at == UtcTimePoint{2s});
+
+    auto resumed = service.resume_queue(immediate_queue);
+    REQUIRE(resumed);
+    CHECK(resumed->state == QueueState::Active);
+    CHECK(resumed->updated_at == UtcTimePoint{3s});
+
+    fixture.time.advance(1s);
+    auto unchanged_active = service.resume_queue(immediate_queue);
+    REQUIRE(unchanged_active);
+    CHECK(unchanged_active->state == QueueState::Active);
+    CHECK(unchanged_active->updated_at == UtcTimePoint{3s});
+
+    execute(fixture.database,
+            "UPDATE jobu_runs SET state = 'running', started_at_us = 1000000 WHERE id = "
+            "X'00000000000070008000000000000053'");
+    detail::AttemptRepository attempts{fixture.database};
+    REQUIRE(attempts.insert_attempt({
+        .run_id         = run_id,
+        .attempt_number = 1,
+        .due_at         = UtcTimePoint{1s},
+        .started_at     = UtcTimePoint{1s},
+        .state          = AttemptState::Running,
+    }));
+
+    fixture.time.advance(1s);
+    auto draining = service.suspend_queue(busy_queue);
+    REQUIRE(draining);
+    CHECK(draining->state == QueueState::Suspending);
+    CHECK(draining->updated_at == UtcTimePoint{5s});
+
+    fixture.time.advance(1s);
+    auto unchanged_draining = service.suspend_queue(busy_queue);
+    REQUIRE(unchanged_draining);
+    CHECK(unchanged_draining->state == QueueState::Suspending);
+    CHECK(unchanged_draining->updated_at == UtcTimePoint{5s});
+
+    auto resumed_draining = service.resume_queue(busy_queue);
+    REQUIRE(resumed_draining);
+    CHECK(resumed_draining->state == QueueState::Active);
+    CHECK(resumed_draining->updated_at == UtcTimePoint{6s});
+
+    fixture.time.advance(1s);
+    draining = service.suspend_queue(busy_queue);
+    REQUIRE(draining);
+    CHECK(draining->state == QueueState::Suspending);
+    CHECK(draining->updated_at == UtcTimePoint{7s});
+
+    auto job = service.get_job(job_id);
+    REQUIRE(job);
+    CHECK(job->state == JobState::Active);
+    CHECK(job->revision == 1);
+    CHECK(job->updated_at == UtcTimePoint{1s});
+    detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                  stored_run = runs.find_schedule_owned(job_id);
+    REQUIRE(stored_run);
+    REQUIRE(stored_run->has_value());
+    CHECK((**stored_run).state == RunState::Running);
+    CHECK((**stored_run).job_revision == 1);
+
+    execute(fixture.database,
+            "UPDATE jobu_attempts SET state = 'completed', completed_at_us = 8000000, outcome = 'succeeded', "
+            "result_json = '{}' WHERE run_id = X'00000000000070008000000000000053'");
+    execute(fixture.database,
+            "UPDATE jobu_runs SET state = 'succeeded', completed_at_us = 8000000, result_json = '{}' WHERE id = "
+            "X'00000000000070008000000000000053'");
+    fixture.time.advance(1s);
+    auto suspended = service.suspend_queue(busy_queue);
+    REQUIRE(suspended);
+    CHECK(suspended->state == QueueState::Suspended);
+    CHECK(suspended->updated_at == UtcTimePoint{8s});
+
+    job = service.get_job(job_id);
+    REQUIRE(job);
+    CHECK(job->state == JobState::Active);
+    CHECK(job->revision == 1);
+
+    execute(fixture.database,
+            "UPDATE jobu_queues SET name = "
+            "'immediate-deleted#00000000-0000-7000-8000-000000000050', deleted_name = 'immediate', "
+            "state = 'deleted', updated_at_us = 9000000, deleted_at_us = 9000000 WHERE id = "
+            "X'00000000000070008000000000000050'");
+    require_error(service.suspend_queue(immediate_queue), ErrorCategory::Conflict, "jobu.queue.state_conflict");
+    require_error(service.resume_queue(immediate_queue), ErrorCategory::Conflict, "jobu.queue.state_conflict");
+    require_error(service.suspend_queue(uuid("00000000-0000-7000-8000-000000000099")),
+                  ErrorCategory::NotFound,
+                  "jobu.queue.not_found");
+}
+
 TEST_CASE("Queue management rejects invalid input before durable mutation", "[jobu][queue][validation]")
 {
     auto const        generated_id = uuid("00000000-0000-7000-8000-000000000010");
@@ -344,6 +477,10 @@ TEST_CASE("Queue management reports invalid daemon defaults from every operation
     require_error(service.update_queue({.queue = std::string{"queue"}, .weight = 2}),
                   ErrorCategory::InvalidArgument,
                   "jobu.attribute.unknown");
+    require_error(service.suspend_queue(std::string{"queue"}),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.attribute.unknown");
+    require_error(service.resume_queue(std::string{"queue"}), ErrorCategory::InvalidArgument, "jobu.attribute.unknown");
 }
 
 TEST_CASE("Queue lookup exposes original deleted names and detects historical ambiguity", "[jobu][queue][sqlite]")
