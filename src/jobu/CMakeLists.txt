@@ -19,6 +19,10 @@ target_sources(${TARGET}
         attempt_repository_priv.hpp
         domain_storage_priv.cpp
         domain_storage_priv.hpp
+        job_repository_priv.cpp
+        job_repository_priv.hpp
+        job_validation_priv.cpp
+        job_validation_priv.hpp
         jobu.cpp
         management.cpp
         queue_repository_priv.cpp

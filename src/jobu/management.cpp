@@ -1,9 +1,13 @@
 #include "management.hpp"
 
 #include "attribute_codec_priv.hpp"
+#include "attribute_registry.hpp"
+#include "job_repository_priv.hpp"
+#include "job_validation_priv.hpp"
 #include "json.hpp"
 #include "queue_repository_priv.hpp"
 #include "queue_validation_priv.hpp"
+#include "run_repository_priv.hpp"
 #include "transaction.hpp"
 
 #include <cstddef>
@@ -65,6 +69,50 @@ auto queue_state_conflict() -> jb::core::Error
                          "Queue state changed incompatibly during the operation");
 }
 
+auto invalid_job_name() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::InvalidArgument,
+                         "jobu.job.invalid_name",
+                         "Job name must contain at most 256 valid UTF-8 bytes and no ASCII control characters");
+}
+
+auto invalid_job_configuration(std::string_view reason) -> jb::core::Error
+{
+    auto error   = service_error(jb::core::ErrorCategory::InvalidArgument,
+                                 "jobu.job.invalid_configuration",
+                                 "Job configuration is invalid");
+    error.detail = "reason=" + std::string{reason};
+    return error;
+}
+
+auto invalid_job_payload(detail::JobPayloadIssue issue) -> jb::core::Error
+{
+    if (issue == detail::JobPayloadIssue::TooLarge) {
+        auto error   = service_error(jb::core::ErrorCategory::ResourceExhausted,
+                                     "jobu.protocol.value_too_large",
+                                     "Job payload exceeds its size limit");
+        error.detail = "reason=" + std::string{detail::job_payload_issue_text(issue)};
+        return error;
+    }
+    auto error   = service_error(jb::core::ErrorCategory::InvalidArgument,
+                                 "jobu.job.invalid_payload",
+                                 "Job runner type or payload is structurally invalid");
+    error.detail = "reason=" + std::string{detail::job_payload_issue_text(issue)};
+    return error;
+}
+
+auto job_not_found() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::NotFound, "jobu.job.not_found", "Job was not found");
+}
+
+auto cron_unavailable() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::Unsupported,
+                         "jobu.schedule.cron_unavailable",
+                         "Recurring schedules are unavailable in Phase 3");
+}
+
 auto invalid_idempotency_key() -> jb::core::Error
 {
     return service_error(jb::core::ErrorCategory::InvalidArgument,
@@ -84,6 +132,23 @@ auto validate_idempotency_key(std::optional<std::string> const& key) -> ServiceR
 {
     if (key && !detail::is_valid_idempotency_key(*key)) {
         return ServiceResult<void>::failure(invalid_idempotency_key());
+    }
+    return ServiceResult<void>::success();
+}
+
+auto validate_job_name(std::optional<std::string> const& name) -> ServiceResult<void>
+{
+    if (name && !detail::is_valid_job_name(*name)) {
+        return ServiceResult<void>::failure(invalid_job_name());
+    }
+    return ServiceResult<void>::success();
+}
+
+auto validate_job_payload(JobType type, jb::rpc::JsonValue const& payload) -> ServiceResult<void>
+{
+    auto const issue = detail::job_payload_issue(type, payload);
+    if (issue != detail::JobPayloadIssue::None) {
+        return ServiceResult<void>::failure(invalid_job_payload(issue));
     }
     return ServiceResult<void>::success();
 }
@@ -116,6 +181,17 @@ auto valid_queue_state(QueueState value) noexcept -> bool
 {
     return value == QueueState::Active || value == QueueState::Suspending || value == QueueState::Suspended ||
            value == QueueState::Deleted;
+}
+
+auto valid_job_state(JobState value) noexcept -> bool
+{
+    return value == JobState::Active || value == JobState::Suspending || value == JobState::Suspended ||
+           value == JobState::Deleted;
+}
+
+auto valid_job_type(JobType value) noexcept -> bool
+{
+    return value == JobType::Cli || value == JobType::Http;
 }
 
 auto validate_configuration(std::uint32_t                       weight,
@@ -179,6 +255,8 @@ struct ManagementService::Private {
         , time_source{time_source_value}
         , daemon_defaults{std::move(daemon_defaults_value)}
         , queues{database_value, attributes_value}
+        , jobs{database_value, attributes_value}
+        , runs{database_value, attributes_value}
     {
         auto validated = validate_attributes(attributes, daemon_defaults, AttributeScope::DaemonDefault);
         if (!validated) {
@@ -192,6 +270,8 @@ struct ManagementService::Private {
     jb::core::TimeSource&          time_source;
     AttributeSet                   daemon_defaults;
     detail::QueueRepository        queues;
+    detail::JobRepository          jobs;
+    detail::RunRepository          runs;
     std::optional<jb::core::Error> initialization_error;
 };
 
@@ -414,6 +494,182 @@ auto ManagementService::update_queue(UpdateQueueRequest const& request) -> jb::c
         return ServiceResult<Queue>::failure(std::move(committed).error());
     }
     return ServiceResult<Queue>::success(std::move(replacement));
+}
+
+auto ManagementService::create_job(CreateJobRequest const& request) -> jb::core::Result<JobDefinition, jb::core::Error>
+{
+    if (_data->initialization_error) {
+        return ServiceResult<JobDefinition>::failure(*_data->initialization_error);
+    }
+    auto selector = validate_selector(request.queue);
+    if (!selector) {
+        return ServiceResult<JobDefinition>::failure(std::move(selector).error());
+    }
+    auto name = validate_job_name(request.name);
+    if (!name) {
+        return ServiceResult<JobDefinition>::failure(std::move(name).error());
+    }
+    if (std::holds_alternative<CronSchedule>(request.schedule)) {
+        return ServiceResult<JobDefinition>::failure(cron_unavailable());
+    }
+    auto payload = validate_job_payload(request.type, request.payload);
+    if (!payload) {
+        return ServiceResult<JobDefinition>::failure(std::move(payload).error());
+    }
+    auto attributes = validate_attributes(_data->attributes, request.attributes, AttributeScope::Job);
+    if (!attributes) {
+        return ServiceResult<JobDefinition>::failure(std::move(attributes).error());
+    }
+    auto idempotency = validate_idempotency_key(request.idempotency_key);
+    if (!idempotency) {
+        return ServiceResult<JobDefinition>::failure(std::move(idempotency).error());
+    }
+    auto job_id = _data->uuid_generator.generate();
+    if (!job_id) {
+        return ServiceResult<JobDefinition>::failure(std::move(job_id).error());
+    }
+    auto run_id = _data->uuid_generator.generate();
+    if (!run_id) {
+        return ServiceResult<JobDefinition>::failure(std::move(run_id).error());
+    }
+    auto const now = _data->time_source.utc_now();
+
+    auto begun = jb::db::Transaction::begin(_data->database);
+    if (!begun) {
+        return ServiceResult<JobDefinition>::failure(std::move(begun).error());
+    }
+    auto transaction = std::move(begun).value();
+    auto found_queue = find_queue(_data->queues, request.queue, false);
+    if (!found_queue) {
+        return ServiceResult<JobDefinition>::failure(std::move(found_queue).error());
+    }
+    if (!found_queue->has_value()) {
+        return ServiceResult<JobDefinition>::failure(queue_not_found());
+    }
+    auto const& queue = **found_queue;
+    if (queue.state != QueueState::Active && queue.state != QueueState::Suspended) {
+        return ServiceResult<JobDefinition>::failure(queue_state_conflict());
+    }
+
+    auto materialized =
+        materialize_attributes(_data->attributes, _data->daemon_defaults, queue.defaults, request.attributes);
+    if (!materialized) {
+        return ServiceResult<JobDefinition>::failure(std::move(materialized).error());
+    }
+
+    auto job = JobDefinition{
+        .id         = *job_id,
+        .queue_id   = queue.id,
+        .revision   = 1,
+        .name       = request.name,
+        .state      = JobState::Active,
+        .type       = request.type,
+        .schedule   = request.schedule,
+        .priority   = request.priority,
+        .attributes = std::move(materialized).value(),
+        .payload    = request.payload,
+        .created_at = now,
+        .updated_at = now,
+        .deleted_at = std::nullopt,
+    };
+    auto const planned_at = std::get<OnceSchedule>(job.schedule).planned_at;
+    auto       run        = JobRun{
+        .id             = *run_id,
+        .job_id         = job.id,
+        .job_revision   = job.revision,
+        .queue_id       = job.queue_id,
+        .origin         = RunOrigin::Scheduled,
+        .schedule_owned = true,
+        .planned_at     = planned_at,
+        .runnable_at    = planned_at,
+        .started_at     = std::nullopt,
+        .completed_at   = std::nullopt,
+        .type           = job.type,
+        .priority       = job.priority,
+        .attributes     = job.attributes,
+        .payload        = job.payload,
+        .state          = RunState::Scheduled,
+        .result         = std::nullopt,
+    };
+
+    auto inserted_job = _data->jobs.insert(job);
+    if (!inserted_job) {
+        return ServiceResult<JobDefinition>::failure(std::move(inserted_job).error());
+    }
+    auto inserted_run = _data->runs.insert_schedule_owned(run);
+    if (!inserted_run) {
+        return ServiceResult<JobDefinition>::failure(std::move(inserted_run).error());
+    }
+    auto committed = transaction.commit();
+    if (!committed) {
+        return ServiceResult<JobDefinition>::failure(std::move(committed).error());
+    }
+    return ServiceResult<JobDefinition>::success(std::move(job));
+}
+
+auto ManagementService::get_job(jb::core::Uuid const& id, bool include_deleted)
+    -> jb::core::Result<JobDefinition, jb::core::Error>
+{
+    if (_data->initialization_error) {
+        return ServiceResult<JobDefinition>::failure(*_data->initialization_error);
+    }
+    auto found = _data->jobs.find_by_id(id, include_deleted);
+    if (!found) {
+        return ServiceResult<JobDefinition>::failure(std::move(found).error());
+    }
+    if (!found->has_value()) {
+        return ServiceResult<JobDefinition>::failure(job_not_found());
+    }
+    return ServiceResult<JobDefinition>::success(std::move(**found));
+}
+
+auto ManagementService::list_jobs(JobListRequest const& request) -> jb::core::Result<JobPage, jb::core::Error>
+{
+    if (_data->initialization_error) {
+        return ServiceResult<JobPage>::failure(*_data->initialization_error);
+    }
+    if (request.page.limit == 0 || request.page.limit > kMaximumPageSize) {
+        return ServiceResult<JobPage>::failure(invalid_job_configuration("page_limit_out_of_range"));
+    }
+    if (request.state && !valid_job_state(*request.state)) {
+        return ServiceResult<JobPage>::failure(invalid_job_configuration("unknown_job_state"));
+    }
+    if (request.type && !valid_job_type(*request.type)) {
+        return ServiceResult<JobPage>::failure(invalid_job_configuration("unknown_job_type"));
+    }
+
+    auto queue_id = std::optional<jb::core::Uuid>{};
+    if (request.queue) {
+        auto selector = validate_selector(*request.queue);
+        if (!selector) {
+            return ServiceResult<JobPage>::failure(std::move(selector).error());
+        }
+        auto found_queue = find_queue(_data->queues, *request.queue, request.include_deleted);
+        if (!found_queue) {
+            return ServiceResult<JobPage>::failure(std::move(found_queue).error());
+        }
+        if (!found_queue->has_value()) {
+            return ServiceResult<JobPage>::failure(queue_not_found());
+        }
+        queue_id = (**found_queue).id;
+    }
+
+    auto listed = _data->jobs.list(queue_id,
+                                   request.include_deleted,
+                                   request.state,
+                                   request.type,
+                                   request.page.limit + 1U,
+                                   request.page.after_id);
+    if (!listed) {
+        return ServiceResult<JobPage>::failure(std::move(listed).error());
+    }
+
+    auto page = JobPage{.items = std::move(listed).value()};
+    if (page.items.size() > request.page.limit) {
+        page.items.resize(request.page.limit);
+        page.next_after_id = page.items.back().id;
+    }
+    return ServiceResult<JobPage>::success(std::move(page));
 }
 
 } // namespace jb::jobu
