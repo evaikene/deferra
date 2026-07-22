@@ -1,6 +1,7 @@
 #include "attribute_codec_priv.hpp"
 
 #include "attribute_registry.hpp"
+#include "text_validation_priv.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -166,6 +167,9 @@ auto typed_value_to_json(AttributeValue const& value, std::size_t depth) -> Resu
         encoded_value = make_json(*number);
     }
     else if (auto const* text = std::get_if<std::string>(&value.data)) {
+        if (!is_valid_utf8(*text)) {
+            return Result<jb::rpc::JsonValue>::failure(attribute_input_error("JobU attribute text is not valid UTF-8"));
+        }
         tag           = "string";
         encoded_value = make_json(*text);
     }
@@ -201,6 +205,10 @@ auto typed_value_to_json(AttributeValue const& value, std::size_t depth) -> Resu
         else {
             auto object = jb::rpc::JsonValue::Object{};
             for (auto const& [name, entry] : std::get<AttributeValue::Map>(value.data)) {
+                if (!is_valid_utf8(name)) {
+                    return Result<jb::rpc::JsonValue>::failure(
+                        attribute_input_error("JobU attribute text is not valid UTF-8"));
+                }
                 auto encoded = typed_value_to_json(entry, depth + 1U);
                 if (!encoded) {
                     return Result<jb::rpc::JsonValue>::failure(std::move(encoded).error());
@@ -230,6 +238,9 @@ auto typed_value_from_json(jb::rpc::JsonValue const& value, std::size_t depth) -
     }
 
     auto const& tag = type->as_string();
+    if (!is_valid_utf8(tag)) {
+        return document_failure<AttributeValue>("invalid_utf8");
+    }
     if (tag == "boolean") {
         if (payload->is_bool()) {
             return Result<AttributeValue>::success({.data = payload->as_bool()});
@@ -252,6 +263,9 @@ auto typed_value_from_json(jb::rpc::JsonValue const& value, std::size_t depth) -
     if (tag == "string") {
         if (!payload->is_string()) {
             return document_failure<AttributeValue>("string_shape");
+        }
+        if (!is_valid_utf8(payload->as_string())) {
+            return document_failure<AttributeValue>("invalid_utf8");
         }
         return Result<AttributeValue>::success({.data = payload->as_string()});
     }
@@ -296,6 +310,9 @@ auto typed_value_from_json(jb::rpc::JsonValue const& value, std::size_t depth) -
     }
     auto result = AttributeValue::Map{};
     for (auto const& [name, entry] : payload->as_object()) {
+        if (!is_valid_utf8(name)) {
+            return document_failure<AttributeValue>("invalid_utf8");
+        }
         auto decoded = typed_value_from_json(entry, depth + 1U);
         if (!decoded) {
             return Result<AttributeValue>::failure(std::move(decoded).error());
@@ -336,6 +353,10 @@ auto validate_encoding(AttributeRegistry const& registry,
 
 } // anonymous namespace
 
+SerializedAttributeDocument::SerializedAttributeDocument(std::string serialized) noexcept
+    : _serialized{std::move(serialized)}
+{}
+
 auto encode_attribute_document(AttributeRegistry const& registry,
                                AttributeSet const&      values,
                                AttributeScope           scope,
@@ -354,15 +375,29 @@ auto encode_attribute_document(AttributeRegistry const& registry,
         }
         encoded_values.emplace(name, std::move(encoded).value());
     }
-    auto result     = make_json(jb::rpc::JsonValue::Object{
+    auto result = make_json(jb::rpc::JsonValue::Object{
         {"values",  make_json(std::move(encoded_values))},
         {"version", make_json(kAttributeDocumentVersion)},
     });
-    auto serialized = jb::rpc::serialize_json(result);
-    if (!serialized) {
-        return Result<jb::rpc::JsonValue>::failure(attribute_input_error("JobU attribute text is not valid UTF-8"));
-    }
     return Result<jb::rpc::JsonValue>::success(std::move(result));
+}
+
+auto encode_and_serialize_attribute_document(AttributeRegistry const& registry,
+                                             AttributeSet const&      values,
+                                             AttributeScope           scope,
+                                             AttributeDocumentMode    mode)
+    -> jb::core::Result<SerializedAttributeDocument, jb::core::Error>
+{
+    auto encoded = encode_attribute_document(registry, values, scope, mode);
+    if (!encoded) {
+        return Result<SerializedAttributeDocument>::failure(std::move(encoded).error());
+    }
+    auto serialized = jb::rpc::serialize_json(*encoded);
+    if (!serialized) {
+        return Result<SerializedAttributeDocument>::failure(
+            attribute_input_error("JobU attribute text is not valid UTF-8"));
+    }
+    return Result<SerializedAttributeDocument>::success(SerializedAttributeDocument{std::move(serialized).value()});
 }
 
 auto decode_attribute_document(AttributeRegistry const&  registry,
@@ -386,6 +421,9 @@ auto decode_attribute_document(AttributeRegistry const&  registry,
 
     auto result = AttributeSet{};
     for (auto const& [name, encoded] : values->as_object()) {
+        if (!is_valid_utf8(name)) {
+            return document_failure<AttributeSet>("invalid_utf8");
+        }
         auto const* definition = registry.find(name);
         if (definition == nullptr || !definition->scopes.test(scope)) {
             return document_failure<AttributeSet>(definition == nullptr ? "unknown_attribute" : "invalid_scope");
@@ -401,10 +439,6 @@ auto decode_attribute_document(AttributeRegistry const&  registry,
         result.emplace(name, std::move(decoded).value());
     }
 
-    auto serialized = jb::rpc::serialize_json(document);
-    if (!serialized) {
-        return document_failure<AttributeSet>(serialized.error().code);
-    }
     if (mode == AttributeDocumentMode::Partial) {
         return Result<AttributeSet>::success(std::move(result));
     }

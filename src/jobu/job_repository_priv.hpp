@@ -14,14 +14,16 @@ class Database;
 
 namespace jb::jobu::detail {
 
+class SerializedAttributeDocument;
 class ValidatedJobPayload;
 
 class JobRepository final {
 public:
     JobRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept;
 
-    [[nodiscard]] auto insert(JobDefinition const& job, ValidatedJobPayload const& payload)
-        -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto insert(JobDefinition const&               job,
+                              SerializedAttributeDocument const& attributes,
+                              ValidatedJobPayload const&         payload) -> jb::core::Result<void, jb::core::Error>;
     [[nodiscard]] auto find_by_id(jb::core::Uuid const& id, bool include_deleted)
         -> jb::core::Result<std::optional<JobDefinition>, jb::core::Error>;
     [[nodiscard]] auto list(std::optional<jb::core::Uuid> queue_id,

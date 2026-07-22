@@ -11,6 +11,7 @@
 #include "transaction.hpp"
 
 #include <cstddef>
+#include <optional>
 #include <string_view>
 #include <utility>
 
@@ -153,23 +154,28 @@ auto validate_job_payload(JobType type, jb::rpc::JsonValue const& payload) -> Se
     return ServiceResult<detail::ValidatedJobPayload>::success(std::move(validated).value());
 }
 
-auto validate_attributes(AttributeRegistry const& attributes, AttributeSet const& values, AttributeScope scope)
-    -> ServiceResult<void>
+auto serialize_attributes(AttributeRegistry const&      attributes,
+                          AttributeSet const&           values,
+                          AttributeScope                scope,
+                          detail::AttributeDocumentMode mode) -> ServiceResult<detail::SerializedAttributeDocument>
 {
-    auto encoded = detail::encode_attribute_document(attributes, values, scope, detail::AttributeDocumentMode::Partial);
-    if (!encoded) {
-        return ServiceResult<void>::failure(std::move(encoded).error());
-    }
-    auto serialized = jb::rpc::serialize_json(*encoded);
+    auto serialized = detail::encode_and_serialize_attribute_document(attributes, values, scope, mode);
     if (!serialized) {
-        return ServiceResult<void>::failure(std::move(serialized).error());
+        return ServiceResult<detail::SerializedAttributeDocument>::failure(std::move(serialized).error());
     }
-    if (serialized->size() > kMaximumAttributeDocumentBytes) {
-        return ServiceResult<void>::failure(service_error(jb::core::ErrorCategory::ResourceExhausted,
-                                                          "jobu.protocol.value_too_large",
-                                                          "Queue attribute document exceeds its size limit"));
+    if (serialized->serialized().size() > kMaximumAttributeDocumentBytes) {
+        return ServiceResult<detail::SerializedAttributeDocument>::failure(
+            service_error(jb::core::ErrorCategory::ResourceExhausted,
+                          "jobu.protocol.value_too_large",
+                          "Queue attribute document exceeds its size limit"));
     }
-    return ServiceResult<void>::success();
+    return ServiceResult<detail::SerializedAttributeDocument>::success(std::move(serialized).value());
+}
+
+auto validate_attributes(AttributeRegistry const& attributes, AttributeSet const& values, AttributeScope scope)
+    -> ServiceResult<detail::SerializedAttributeDocument>
+{
+    return serialize_attributes(attributes, values, scope, detail::AttributeDocumentMode::Partial);
 }
 
 auto valid_recovery_policy(RecoveryPolicy value) noexcept -> bool
@@ -285,7 +291,7 @@ ManagementService::ManagementService(jb::db::Database&        database,
 
 ManagementService::~ManagementService() = default;
 
-auto ManagementService::create_queue(CreateQueueRequest const& request) -> jb::core::Result<Queue, jb::core::Error>
+auto ManagementService::create_queue(CreateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>
 {
     if (_data->initialization_error) {
         return ServiceResult<Queue>::failure(*_data->initialization_error);
@@ -317,12 +323,12 @@ auto ManagementService::create_queue(CreateQueueRequest const& request) -> jb::c
     auto const now   = _data->time_source.utc_now();
     auto       queue = Queue{
         .id                    = *id,
-        .name                  = request.name,
+        .name                  = std::move(request.name),
         .state                 = QueueState::Active,
         .weight                = request.weight,
         .concurrency_limit     = request.concurrency_limit,
         .recovery_policy       = request.recovery_policy,
-        .defaults              = request.defaults,
+        .defaults              = std::move(request.defaults),
         .history_retention     = request.history_retention,
         .runnable_wait_warning = request.runnable_wait_warning,
         .created_at            = now,
@@ -342,7 +348,7 @@ auto ManagementService::create_queue(CreateQueueRequest const& request) -> jb::c
     if (existing->has_value()) {
         return ServiceResult<Queue>::failure(queue_name_conflict());
     }
-    auto inserted = _data->queues.insert(queue, queue.name);
+    auto inserted = _data->queues.insert(queue, queue.name, *defaults);
     if (!inserted) {
         return ServiceResult<Queue>::failure(std::move(inserted).error());
     }
@@ -398,7 +404,7 @@ auto ManagementService::list_queues(QueueListRequest const& request) -> jb::core
     return ServiceResult<QueuePage>::success(std::move(page));
 }
 
-auto ManagementService::update_queue(UpdateQueueRequest const& request) -> jb::core::Result<Queue, jb::core::Error>
+auto ManagementService::update_queue(UpdateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>
 {
     if (_data->initialization_error) {
         return ServiceResult<Queue>::failure(*_data->initialization_error);
@@ -425,11 +431,13 @@ auto ManagementService::update_queue(UpdateQueueRequest const& request) -> jb::c
     if (request.recovery_policy && !valid_recovery_policy(*request.recovery_policy)) {
         return ServiceResult<Queue>::failure(invalid_configuration("unknown_recovery_policy"));
     }
+    auto serialized_defaults = std::optional<detail::SerializedAttributeDocument>{};
     if (request.defaults) {
-        auto defaults = validate_attributes(_data->attributes, *request.defaults, AttributeScope::QueueDefault);
-        if (!defaults) {
-            return ServiceResult<Queue>::failure(std::move(defaults).error());
+        auto validated = validate_attributes(_data->attributes, *request.defaults, AttributeScope::QueueDefault);
+        if (!validated) {
+            return ServiceResult<Queue>::failure(std::move(validated).error());
         }
+        serialized_defaults.emplace(std::move(validated).value());
     }
     if (request.history_retention && *request.history_retention && (*request.history_retention)->count() < 0) {
         return ServiceResult<Queue>::failure(invalid_configuration("negative_history_retention"));
@@ -460,7 +468,7 @@ auto ManagementService::update_queue(UpdateQueueRequest const& request) -> jb::c
         if (conflict->has_value() && (**conflict).id != replacement.id) {
             return ServiceResult<Queue>::failure(queue_name_conflict());
         }
-        replacement.name = *request.name;
+        replacement.name = std::move(*request.name);
     }
     if (request.weight) {
         replacement.weight = *request.weight;
@@ -472,7 +480,7 @@ auto ManagementService::update_queue(UpdateQueueRequest const& request) -> jb::c
         replacement.recovery_policy = *request.recovery_policy;
     }
     if (request.defaults) {
-        replacement.defaults = *request.defaults;
+        replacement.defaults = std::move(*request.defaults);
     }
     if (request.history_retention) {
         replacement.history_retention = *request.history_retention;
@@ -482,7 +490,8 @@ auto ManagementService::update_queue(UpdateQueueRequest const& request) -> jb::c
     }
     replacement.updated_at = now;
 
-    auto replaced = _data->queues.replace_mutable_fields(replacement);
+    auto replaced =
+        _data->queues.replace_mutable_fields(replacement, serialized_defaults ? &*serialized_defaults : nullptr);
     if (!replaced) {
         return ServiceResult<Queue>::failure(std::move(replaced).error());
     }
@@ -496,7 +505,7 @@ auto ManagementService::update_queue(UpdateQueueRequest const& request) -> jb::c
     return ServiceResult<Queue>::success(std::move(replacement));
 }
 
-auto ManagementService::create_job(CreateJobRequest const& request) -> jb::core::Result<JobDefinition, jb::core::Error>
+auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>
 {
     if (_data->initialization_error) {
         return ServiceResult<JobDefinition>::failure(*_data->initialization_error);
@@ -516,9 +525,9 @@ auto ManagementService::create_job(CreateJobRequest const& request) -> jb::core:
     if (!payload) {
         return ServiceResult<JobDefinition>::failure(std::move(payload).error());
     }
-    auto attributes = validate_attributes(_data->attributes, request.attributes, AttributeScope::Job);
-    if (!attributes) {
-        return ServiceResult<JobDefinition>::failure(std::move(attributes).error());
+    auto partial_attributes = validate_attributes(_data->attributes, request.attributes, AttributeScope::Job);
+    if (!partial_attributes) {
+        return ServiceResult<JobDefinition>::failure(std::move(partial_attributes).error());
     }
     auto idempotency = validate_idempotency_key(request.idempotency_key);
     if (!idempotency) {
@@ -556,47 +565,48 @@ auto ManagementService::create_job(CreateJobRequest const& request) -> jb::core:
     if (!materialized) {
         return ServiceResult<JobDefinition>::failure(std::move(materialized).error());
     }
+    auto serialized_attributes = serialize_attributes(_data->attributes,
+                                                      *materialized,
+                                                      AttributeScope::Job,
+                                                      detail::AttributeDocumentMode::Materialized);
+    if (!serialized_attributes) {
+        return ServiceResult<JobDefinition>::failure(std::move(serialized_attributes).error());
+    }
 
     auto job = JobDefinition{
         .id         = *job_id,
         .queue_id   = queue.id,
         .revision   = 1,
-        .name       = request.name,
+        .name       = std::move(request.name),
         .state      = JobState::Active,
         .type       = request.type,
-        .schedule   = request.schedule,
+        .schedule   = std::move(request.schedule),
         .priority   = request.priority,
         .attributes = std::move(materialized).value(),
-        .payload    = request.payload,
+        .payload    = std::move(request.payload),
         .created_at = now,
         .updated_at = now,
         .deleted_at = std::nullopt,
     };
     auto const planned_at = std::get<OnceSchedule>(job.schedule).planned_at;
-    auto       run        = JobRun{
-        .id             = *run_id,
-        .job_id         = job.id,
-        .job_revision   = job.revision,
-        .queue_id       = job.queue_id,
-        .origin         = RunOrigin::Scheduled,
-        .schedule_owned = true,
-        .planned_at     = planned_at,
-        .runnable_at    = planned_at,
-        .started_at     = std::nullopt,
-        .completed_at   = std::nullopt,
-        .type           = job.type,
-        .priority       = job.priority,
-        .attributes     = job.attributes,
-        .payload        = job.payload,
-        .state          = RunState::Scheduled,
-        .result         = std::nullopt,
+    auto       run        = detail::ScheduleOwnedRunInsert{
+        .id              = *run_id,
+        .job_id          = job.id,
+        .job_revision    = job.revision,
+        .queue_id        = job.queue_id,
+        .planned_at      = planned_at,
+        .runnable_at     = planned_at,
+        .type            = job.type,
+        .priority        = job.priority,
+        .attributes_json = serialized_attributes->serialized(),
+        .payload_json    = payload->serialized(),
     };
 
-    auto inserted_job = _data->jobs.insert(job, *payload);
+    auto inserted_job = _data->jobs.insert(job, *serialized_attributes, *payload);
     if (!inserted_job) {
         return ServiceResult<JobDefinition>::failure(std::move(inserted_job).error());
     }
-    auto inserted_run = _data->runs.insert_schedule_owned(run, *payload);
+    auto inserted_run = _data->runs.insert_schedule_owned(run);
     if (!inserted_run) {
         return ServiceResult<JobDefinition>::failure(std::move(inserted_run).error());
     }

@@ -185,11 +185,11 @@ public:
     auto operator=(ManagementService&&) -> ManagementService&      = delete;
 
     /** Creates one active queue in an immediate transaction.
-     * @param request Validated queue configuration; the optional idempotency key is syntax-checked but durable replay
-     * semantics are introduced with the idempotency repository.
+     * @param request Queue configuration consumed after validation; the optional idempotency key is syntax-checked
+     * but durable replay semantics are introduced with the idempotency repository.
      * @return Committed queue, or a validation, name-conflict, generator, attribute, or database Error.
      */
-    [[nodiscard]] auto create_queue(CreateQueueRequest const& request) -> jb::core::Result<Queue, jb::core::Error>;
+    [[nodiscard]] auto create_queue(CreateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>;
 
     /** Gets one queue by exact ID or exact name without starting an explicit transaction.
      * @param selector Queue UUID or user-facing name. Name lookup prefers a non-deleted queue.
@@ -207,19 +207,20 @@ public:
     [[nodiscard]] auto list_queues(QueueListRequest const& request) -> jb::core::Result<QueuePage, jb::core::Error>;
 
     /** Replaces supplied mutable fields in one immediate transaction.
-     * @param request Non-empty update targeting an existing non-deleted queue.
+     * @param request Non-empty update consumed after validation and targeting an existing non-deleted queue.
      * @return Committed replacement queue, or a validation, not-found, name-conflict, state, attribute, or database
      * Error. Queue-default changes affect only jobs created later.
      */
-    [[nodiscard]] auto update_queue(UpdateQueueRequest const& request) -> jb::core::Result<Queue, jb::core::Error>;
+    [[nodiscard]] auto update_queue(UpdateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>;
 
     /** Creates one active one-time job and its scheduled run in one immediate transaction.
      * @param request Queue selector, definition fields, partial attributes, owning payload, and optional idempotency
-     * key. The key is syntax-checked; durable replay semantics are introduced with the idempotency repository.
+     * key consumed after validation. The key is syntax-checked; durable replay semantics are introduced with the
+     * idempotency repository.
      * @return Committed revision-1 definition, or a queue, schedule, validation, generator, attribute, run, or database
      * Error. No attempt is created and no external work starts.
      */
-    [[nodiscard]] auto create_job(CreateJobRequest const& request) -> jb::core::Result<JobDefinition, jb::core::Error>;
+    [[nodiscard]] auto create_job(CreateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
 
     /** Gets one job definition by stable ID without starting an explicit transaction.
      * @param id Stable job-definition UUID.
