@@ -55,24 +55,47 @@ auto invalid_limit() -> jb::core::Error
                             "Repository limit is outside its supported range");
 }
 
-auto schedule_conflict(jb::core::Error const& cause) -> jb::core::Error
+auto schedule_conflict() -> jb::core::Error
 {
-    auto detail = "cause=" + cause.code;
-    if (!cause.detail.empty()) {
-        detail += " " + cause.detail;
-    }
     return {
         .category = jb::core::ErrorCategory::Conflict,
         .code     = "jobu.run.schedule_conflict",
         .message  = "The job already has a schedule-owned non-terminal run",
-        .detail   = std::move(detail),
     };
+}
+
+auto schedule_conflict(jb::core::Error const& cause) -> jb::core::Error
+{
+    auto error  = schedule_conflict();
+    auto detail = "cause=" + cause.code;
+    if (!cause.detail.empty()) {
+        detail += " " + cause.detail;
+    }
+    error.detail = std::move(detail);
+    return error;
 }
 
 auto is_terminal(RunState state) noexcept -> bool
 {
     return state == RunState::Succeeded || state == RunState::Failed || state == RunState::Interrupted ||
            state == RunState::Cancelled;
+}
+
+auto valid_started_at(RunState state, bool has_started_at) noexcept -> bool
+{
+    switch (state) {
+        case RunState::Scheduled:
+            return !has_started_at;
+        case RunState::Running:
+        case RunState::RetryWait:
+        case RunState::Succeeded:
+        case RunState::Failed:
+        case RunState::Interrupted:
+            return has_started_at;
+        case RunState::Cancelled:
+            return true;
+    }
+    return false;
 }
 
 auto bind_all(jb::db::Query& query, std::vector<std::pair<std::string_view, jb::db::Value>> values)
@@ -197,11 +220,8 @@ auto decode_run(jb::db::Record const& record, AttributeRegistry const& attribute
     if (!is_terminal(*state) && result->has_value()) {
         return RepositoryResult<JobRun>::failure(invalid_run("non_terminal_result"));
     }
-    if (*state == RunState::Scheduled && started->has_value()) {
-        return RepositoryResult<JobRun>::failure(invalid_run("scheduled_started"));
-    }
-    if (*state == RunState::Running && !started->has_value()) {
-        return RepositoryResult<JobRun>::failure(invalid_run("running_not_started"));
+    if (!valid_started_at(*state, started->has_value())) {
+        return RepositoryResult<JobRun>::failure(invalid_run("started_state_mismatch"));
     }
 
     return RepositoryResult<JobRun>::success(JobRun{
@@ -333,8 +353,17 @@ auto RunRepository::insert_schedule_owned(JobRun const& run) -> jb::core::Result
         return RepositoryResult<void>::failure(invalid_run("insert_not_schedule_owned"));
     }
     if (is_terminal(run.state) != run.completed_at.has_value() || (!is_terminal(run.state) && run.result) ||
-        (run.state == RunState::Scheduled && run.started_at) || (run.state == RunState::Running && !run.started_at)) {
+        !valid_started_at(run.state, run.started_at.has_value())) {
         return RepositoryResult<void>::failure(invalid_run("insert_state_mismatch"));
+    }
+    if (!is_terminal(run.state)) {
+        auto existing = find_schedule_owned(run.job_id);
+        if (!existing) {
+            return RepositoryResult<void>::failure(std::move(existing).error());
+        }
+        if (existing->has_value()) {
+            return RepositoryResult<void>::failure(schedule_conflict());
+        }
     }
 
     auto revision = revision_to_storage(run.job_revision);
@@ -403,8 +432,14 @@ auto RunRepository::insert_schedule_owned(JobRun const& run) -> jb::core::Result
         return bound;
     }
     auto executed = query.exec();
-    if (!executed && executed.error().code == "db.constraint.unique") {
-        return RepositoryResult<void>::failure(schedule_conflict(executed.error()));
+    if (!executed && executed.error().code == "db.constraint.unique" && !is_terminal(run.state)) {
+        auto existing = find_schedule_owned(run.job_id);
+        if (!existing) {
+            return RepositoryResult<void>::failure(std::move(existing).error());
+        }
+        if (existing->has_value()) {
+            return RepositoryResult<void>::failure(schedule_conflict(executed.error()));
+        }
     }
     return executed;
 }

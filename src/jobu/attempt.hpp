@@ -27,7 +27,7 @@ enum class AttemptOutcome : std::uint8_t {
     Succeeded,   ///< The external operation met its success criteria.
     Failed,      ///< The external operation produced an observed failure.
     Interrupted, ///< The final external outcome could not be established safely.
-    Cancelled,   ///< Execution was cancelled explicitly.
+    Cancelled,   ///< Execution was cancelled explicitly before or after it started.
 };
 
 /** One durable execution attempt within a run.
@@ -42,7 +42,7 @@ struct JobAttempt {
     AttemptNumber                         attempt_number{1};
     /// Earliest time the attempt may start, in UTC.
     jb::core::UtcTimePoint                due_at;
-    /// Actual start time, or no value before execution starts.
+    /// Actual start time, or no value if execution did not start.
     std::optional<jb::core::UtcTimePoint> started_at;
     /// Terminal completion time, or no value while incomplete.
     std::optional<jb::core::UtcTimePoint> completed_at;

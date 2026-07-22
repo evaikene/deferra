@@ -126,7 +126,8 @@ auto valid_attempt_state(JobAttempt const& attempt) noexcept -> bool
         return attempt.started_at.has_value() && !attempt.completed_at && !attempt.outcome && !attempt.result;
     }
     if (attempt.state == AttemptState::Completed) {
-        return attempt.completed_at.has_value() && attempt.outcome.has_value();
+        return attempt.completed_at.has_value() && attempt.outcome.has_value() &&
+               (attempt.started_at.has_value() || *attempt.outcome == AttemptOutcome::Cancelled);
     }
     return false;
 }

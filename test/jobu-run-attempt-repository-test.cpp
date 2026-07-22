@@ -216,9 +216,122 @@ TEST_CASE("Run repository round-trips schedule-owned snapshots and enforces uniq
     duplicate.id   = id(4);
     require_error(fixture.runs.insert_schedule_owned(duplicate), ErrorCategory::Conflict, "jobu.run.schedule_conflict");
 
+    auto const second_job_id = id(5);
+    insert_job(fixture.database, second_job_id, queue_id);
+    auto duplicate_id   = run;
+    duplicate_id.job_id = second_job_id;
+    require_error(fixture.runs.insert_schedule_owned(duplicate_id), ErrorCategory::Conflict, "db.constraint.unique");
+
     auto missing = fixture.runs.find_by_id(id(99));
     REQUIRE(missing);
     CHECK_FALSE(missing->has_value());
+}
+
+TEST_CASE("Run repository enforces execution start lifecycle invariants", "[jobu][run][sqlite]")
+{
+    RepositoryFixture fixture;
+    auto const        queue_id = id(49);
+    auto              suffix   = std::uint8_t{50};
+    insert_queue(fixture.database, queue_id, "primary");
+
+    constexpr RunState requires_started_at[] = {
+        RunState::Running,
+        RunState::RetryWait,
+        RunState::Succeeded,
+        RunState::Failed,
+        RunState::Interrupted,
+    };
+    for (auto const state : requires_started_at) {
+        auto const job_id = id(suffix++);
+        auto const run_id = id(suffix++);
+        insert_job(fixture.database, job_id, queue_id);
+
+        auto run = make_run(fixture.registry, run_id, job_id, queue_id, state);
+        run.started_at.reset();
+        auto insertion_error =
+            require_error(fixture.runs.insert_schedule_owned(run), ErrorCategory::Internal, "jobu.storage.invariant");
+        CHECK(insertion_error.detail == "reason=insert_state_mismatch");
+
+        run.started_at = run.planned_at + 1s;
+        REQUIRE(fixture.runs.insert_schedule_owned(run));
+        {
+            Query query{fixture.database};
+            REQUIRE(query.prepare("UPDATE jobu_runs SET started_at_us = NULL WHERE id = :id"));
+            REQUIRE(query.bind_value(":id", uuid_to_storage(run_id)));
+            REQUIRE(query.exec());
+        }
+        auto decoding_error =
+            require_error(fixture.runs.find_by_id(run_id), ErrorCategory::Internal, "jobu.storage.invariant");
+        CHECK(decoding_error.detail == "reason=started_state_mismatch");
+    }
+
+    auto const cancelled_job_id = id(suffix++);
+    auto const cancelled_run_id = id(suffix);
+    insert_job(fixture.database, cancelled_job_id, queue_id);
+    auto cancelled = make_run(fixture.registry, cancelled_run_id, cancelled_job_id, queue_id, RunState::Cancelled);
+    REQUIRE_FALSE(cancelled.started_at);
+    REQUIRE(fixture.runs.insert_schedule_owned(cancelled));
+    auto persisted_cancelled = fixture.runs.find_by_id(cancelled_run_id);
+    REQUIRE(persisted_cancelled);
+    REQUIRE(persisted_cancelled->has_value());
+    CHECK_FALSE((*persisted_cancelled)->started_at);
+}
+
+TEST_CASE("Attempt repository enforces execution start outcome invariants", "[jobu][attempt][sqlite]")
+{
+    RepositoryFixture fixture;
+    auto const        queue_id = id(62);
+    auto const        job_id   = id(63);
+    auto const        run_id   = id(64);
+    insert_queue(fixture.database, queue_id, "primary");
+    insert_job(fixture.database, job_id, queue_id);
+    REQUIRE(fixture.runs.insert_schedule_owned(make_run(fixture.registry, run_id, job_id, queue_id)));
+
+    constexpr AttemptOutcome requires_started_at[] = {
+        AttemptOutcome::Succeeded,
+        AttemptOutcome::Failed,
+        AttemptOutcome::Interrupted,
+    };
+    auto attempt_number = AttemptNumber{1};
+    for (auto const outcome : requires_started_at) {
+        auto attempt = JobAttempt{
+            .run_id         = run_id,
+            .attempt_number = attempt_number,
+            .due_at         = UtcTimePoint{30s},
+            .completed_at   = UtcTimePoint{30s} + 2ms,
+            .state          = AttemptState::Completed,
+            .outcome        = outcome,
+        };
+        auto insertion_error =
+            require_error(fixture.attempts.insert_attempt(attempt), ErrorCategory::Internal, "jobu.storage.invariant");
+        CHECK(insertion_error.detail == "reason=insert_state_fields_mismatch");
+
+        attempt.started_at = UtcTimePoint{30s} + 1ms;
+        REQUIRE(fixture.attempts.insert_attempt(attempt));
+        ++attempt_number;
+    }
+
+    execute(fixture.database, "UPDATE jobu_attempts SET started_at_us = NULL");
+    for (auto number = AttemptNumber{1}; number < attempt_number; ++number) {
+        auto decoding_error =
+            require_error(fixture.attempts.find(run_id, number), ErrorCategory::Internal, "jobu.storage.invariant");
+        CHECK(decoding_error.detail == "reason=state_fields_mismatch");
+    }
+
+    auto cancelled = JobAttempt{
+        .run_id         = run_id,
+        .attempt_number = attempt_number,
+        .due_at         = UtcTimePoint{30s},
+        .completed_at   = UtcTimePoint{30s} + 2ms,
+        .state          = AttemptState::Completed,
+        .outcome        = AttemptOutcome::Cancelled,
+    };
+    REQUIRE(fixture.attempts.insert_attempt(cancelled));
+    auto persisted_cancelled = fixture.attempts.find(run_id, attempt_number);
+    REQUIRE(persisted_cancelled);
+    REQUIRE(persisted_cancelled->has_value());
+    CHECK_FALSE((*persisted_cancelled)->started_at);
+    CHECK((*persisted_cancelled)->outcome == AttemptOutcome::Cancelled);
 }
 
 TEST_CASE("Run refresh and attempt persistence preserve guarded snapshots and binary output", "[jobu][attempt][sqlite]")
