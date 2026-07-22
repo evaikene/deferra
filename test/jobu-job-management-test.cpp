@@ -42,6 +42,15 @@ auto uuid(std::string_view text) -> Uuid
     return *parsed;
 }
 
+auto sequence_id(std::uint8_t suffix) -> Uuid
+{
+    auto bytes = Uuid::Storage{};
+    bytes[6]   = std::byte{0x70};
+    bytes[8]   = std::byte{0x80};
+    bytes[15]  = static_cast<std::byte>(suffix);
+    return Uuid{bytes};
+}
+
 auto make_database(std::filesystem::path database_file) -> Database
 {
     return Database{std::make_unique<jb::db::sqlite::Driver>(jb::db::sqlite::Options{
@@ -368,6 +377,102 @@ TEST_CASE("Job management creates durable one-time definitions and immutable run
     CHECK(count_rows(fixture.database, "jobu_attempts") == 0);
 }
 
+TEST_CASE("Job create idempotency is queue-scoped and replays the original definition", "[jobu][job][idempotency]")
+{
+    auto ids = std::vector<Uuid>{};
+    for (std::uint8_t suffix = 1; suffix <= 14; ++suffix) {
+        ids.push_back(sequence_id(suffix));
+    }
+    ServiceFixture    fixture{std::move(ids)};
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+
+    auto first_queue = service.create_queue({.name = "first"});
+    REQUIRE(first_queue);
+    auto request = CreateJobRequest{
+        .queue           = first_queue->id,
+        .name            = "replay",
+        .type            = JobType::Cli,
+        .schedule        = once_at(UtcTimePoint{20s}),
+        .priority        = 0,
+        .attributes      = {},
+        .payload         = cli_payload("true"),
+        .idempotency_key = "job-key",
+    };
+    auto original = service.create_job(request);
+    REQUIRE(original);
+    CHECK(original->id == sequence_id(2));
+    auto updated = service.update_job({.job_id = original->id, .expected_revision = 1, .priority = 7});
+    REQUIRE(updated);
+    CHECK(updated->revision == 2);
+
+    auto replay = service.create_job(request);
+    REQUIRE(replay);
+    CHECK(replay->id == original->id);
+    CHECK(replay->revision == 1);
+    CHECK(replay->priority == 0);
+    CHECK(count_rows(fixture.database, "jobu_jobs") == 1);
+    CHECK(count_rows(fixture.database, "jobu_runs") == 1);
+
+    auto different     = request;
+    different.priority = 1;
+    require_error(service.create_job(std::move(different)), ErrorCategory::Conflict, "jobu.idempotency.conflict");
+
+    auto second_queue = service.create_queue({.name = "second"});
+    REQUIRE(second_queue);
+    auto second_scope  = request;
+    second_scope.queue = second_queue->id;
+    auto second_job    = service.create_job(std::move(second_scope));
+    REQUIRE(second_job);
+    CHECK(second_job->id != original->id);
+    CHECK(count_rows(fixture.database, "jobu_idempotency") == 2);
+
+    execute(fixture.database,
+            "UPDATE jobu_idempotency SET result_json = '{}' WHERE method = 'job.create' AND key = 'job-key' "
+            "AND resource_id = X'00000000000070008000000000000002'");
+    require_error(service.create_job(request), ErrorCategory::Internal, "jobu.idempotency.invalid_record");
+
+    execute(fixture.database,
+            "CREATE TRIGGER fail_job_idempotency_insert BEFORE INSERT ON jobu_idempotency "
+            "WHEN NEW.key = 'fail-key' BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
+    auto rollback_request            = request;
+    rollback_request.idempotency_key = "fail-key";
+    require_error(service.create_job(std::move(rollback_request)), ErrorCategory::Conflict, "db.constraint");
+    CHECK(count_rows(fixture.database, "jobu_jobs") == 2);
+    CHECK(count_rows(fixture.database, "jobu_runs") == 2);
+    CHECK(count_rows(fixture.database, "jobu_idempotency") == 2);
+}
+
+TEST_CASE("Job create idempotency replay does not require fresh UUIDs", "[jobu][job][idempotency]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+
+    auto queue = service.create_queue({.name = "queue"});
+    REQUIRE(queue);
+    auto const request = CreateJobRequest{
+        .queue           = queue->id,
+        .name            = "replay",
+        .type            = JobType::Cli,
+        .schedule        = once_at(UtcTimePoint{20s}),
+        .payload         = cli_payload("true"),
+        .idempotency_key = "job-key",
+    };
+
+    auto original = service.create_job(request);
+    REQUIRE(original);
+    CHECK(original->id == sequence_id(2));
+
+    auto replay = service.create_job(request);
+    REQUIRE(replay);
+    CHECK(replay->id == original->id);
+
+    auto different     = request;
+    different.priority = 1;
+    require_error(service.create_job(std::move(different)), ErrorCategory::Conflict, "jobu.idempotency.conflict");
+}
+
 TEST_CASE("Job management lists filtered keyset pages and controls deleted visibility", "[jobu][job][sqlite]")
 {
     auto const     first_queue  = uuid("00000000-0000-7000-8000-000000000010");
@@ -665,7 +770,8 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
         .expected_revision = 1,
         .name              = std::optional<std::optional<std::string>>{std::in_place, std::nullopt},
         .type              = JobType::Http,
-        .schedule          = once_at(UtcTimePoint{20s}),
+        .schedule          = once_at(UtcTimePoint{20s}
+                       ),
         .priority          = 9,
         .attribute_changes = {{"job.timeout", {.data = 30s}}},
         .payload           = replacement_payload,

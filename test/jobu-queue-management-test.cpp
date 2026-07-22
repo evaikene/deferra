@@ -39,6 +39,15 @@ auto uuid(std::string_view text) -> Uuid
     return *parsed;
 }
 
+auto sequence_id(std::uint8_t suffix) -> Uuid
+{
+    auto bytes = Uuid::Storage{};
+    bytes[6]   = std::byte{0x70};
+    bytes[8]   = std::byte{0x80};
+    bytes[15]  = static_cast<std::byte>(suffix);
+    return Uuid{bytes};
+}
+
 auto make_database(std::filesystem::path database_file) -> Database
 {
     return Database{std::make_unique<jb::db::sqlite::Driver>(jb::db::sqlite::Options{
@@ -284,6 +293,80 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
     CHECK(persisted->name == "renamed-alpha");
 
     require_error(service.create_queue({.name = "beta"}), ErrorCategory::Conflict, "jobu.queue.name_conflict");
+}
+
+TEST_CASE("Queue create idempotency replays canonical results and rolls back records", "[jobu][queue][idempotency]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3), sequence_id(4), sequence_id(5)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+
+    auto original_request = CreateQueueRequest{
+        .name            = "replay",
+        .idempotency_key = "queue-key",
+    };
+    auto original = service.create_queue(original_request);
+    REQUIRE(original);
+    CHECK(original->id == sequence_id(1));
+    REQUIRE(service.update_queue({.queue = original->id, .name = "renamed"}));
+
+    auto explicit_defaults = CreateQueueRequest{
+        .name                  = "replay",
+        .weight                = 1,
+        .concurrency_limit     = 1,
+        .recovery_policy       = RecoveryPolicy::FailInterrupted,
+        .defaults              = {},
+        .history_retention     = std::nullopt,
+        .runnable_wait_warning = 10000ms,
+        .idempotency_key       = "queue-key",
+    };
+    auto replay = service.create_queue(explicit_defaults);
+    REQUIRE(replay);
+    CHECK(replay->id == original->id);
+    CHECK(replay->name == "replay");
+    CHECK(replay->weight == 1);
+    CHECK(count_rows(fixture.database, "jobu_queues") == 1);
+    CHECK(count_rows(fixture.database, "jobu_idempotency") == 1);
+
+    require_error(service.create_queue({.name = "different", .idempotency_key = "queue-key"}),
+                  ErrorCategory::Conflict,
+                  "jobu.idempotency.conflict");
+
+    execute(fixture.database,
+            "UPDATE jobu_idempotency SET result_json = '{}' WHERE method = 'queue.create' AND key = 'queue-key'");
+    require_error(service.create_queue(explicit_defaults), ErrorCategory::Internal, "jobu.idempotency.invalid_record");
+
+    execute(fixture.database,
+            "CREATE TRIGGER fail_idempotency_insert BEFORE INSERT ON jobu_idempotency "
+            "WHEN NEW.key = 'fail-key' BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
+    require_error(service.create_queue({.name = "rolled-back", .idempotency_key = "fail-key"}),
+                  ErrorCategory::Conflict,
+                  "db.constraint");
+    CHECK(count_rows(fixture.database, "jobu_queues") == 1);
+    CHECK(count_rows(fixture.database, "jobu_idempotency") == 1);
+}
+
+TEST_CASE("Queue create idempotency replay does not require a fresh UUID", "[jobu][queue][idempotency]")
+{
+    ServiceFixture    fixture{{sequence_id(1)}};
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    auto const        request = CreateQueueRequest{
+        .name            = "replay",
+        .idempotency_key = "queue-key",
+    };
+
+    auto original = service.create_queue(request);
+    REQUIRE(original);
+    CHECK(original->id == sequence_id(1));
+
+    auto replay = service.create_queue(request);
+    REQUIRE(replay);
+    CHECK(replay->id == original->id);
+
+    require_error(service.create_queue({.name = "different", .idempotency_key = "queue-key"}),
+                  ErrorCategory::Conflict,
+                  "jobu.idempotency.conflict");
 }
 
 TEST_CASE("Queue lifecycle persists draining suspension resume and idempotent no-ops", "[jobu][queue][lifecycle]")

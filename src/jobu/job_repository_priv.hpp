@@ -47,10 +47,6 @@ public:
         -> jb::core::Result<bool, jb::core::Error>;
     [[nodiscard]] auto mark_all_in_queue_deleted(jb::core::Uuid const& queue_id, jb::core::UtcTimePoint deleted_at)
         -> jb::core::Result<std::size_t, jb::core::Error>;
-    [[nodiscard]] auto erase_secret_references_for_job(jb::core::Uuid const& job_id)
-        -> jb::core::Result<std::size_t, jb::core::Error>;
-    [[nodiscard]] auto erase_secret_references_for_queue(jb::core::Uuid const& queue_id)
-        -> jb::core::Result<std::size_t, jb::core::Error>;
     [[nodiscard]] auto find_by_id(jb::core::Uuid const& id, bool include_deleted)
         -> jb::core::Result<std::optional<JobDefinition>, jb::core::Error>;
     [[nodiscard]] auto list(std::optional<jb::core::Uuid> queue_id,

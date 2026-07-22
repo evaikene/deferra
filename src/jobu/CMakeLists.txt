@@ -19,6 +19,10 @@ target_sources(${TARGET}
         attempt_repository_priv.hpp
         domain_storage_priv.cpp
         domain_storage_priv.hpp
+        idempotency_codec_priv.cpp
+        idempotency_codec_priv.hpp
+        idempotency_repository_priv.cpp
+        idempotency_repository_priv.hpp
         job_repository_priv.cpp
         job_repository_priv.hpp
         job_validation_priv.cpp
@@ -29,8 +33,12 @@ target_sources(${TARGET}
         queue_repository_priv.hpp
         queue_validation_priv.cpp
         queue_validation_priv.hpp
+        retention_repository_priv.cpp
+        retention_repository_priv.hpp
         run_repository_priv.cpp
         run_repository_priv.hpp
+        secret_repository_priv.cpp
+        secret_repository_priv.hpp
         system_info.cpp
         system_info_priv.hpp
         text_validation_priv.cpp
