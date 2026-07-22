@@ -584,45 +584,6 @@ auto JobRepository::mark_all_in_queue_deleted(jb::core::Uuid const& queue_id, jb
     return affected_rows(query);
 }
 
-auto JobRepository::erase_secret_references_for_job(jb::core::Uuid const& job_id)
-    -> jb::core::Result<std::size_t, jb::core::Error>
-{
-    jb::db::Query query{_database};
-    auto          prepared = query.prepare("DELETE FROM jobu_secret_refs WHERE job_id = :job_id");
-    if (!prepared) {
-        return RepositoryResult<std::size_t>::failure(std::move(prepared).error());
-    }
-    auto bound = query.bind_value(":job_id", uuid_to_storage(job_id));
-    if (!bound) {
-        return RepositoryResult<std::size_t>::failure(std::move(bound).error());
-    }
-    auto executed = query.exec();
-    if (!executed) {
-        return RepositoryResult<std::size_t>::failure(std::move(executed).error());
-    }
-    return affected_rows(query);
-}
-
-auto JobRepository::erase_secret_references_for_queue(jb::core::Uuid const& queue_id)
-    -> jb::core::Result<std::size_t, jb::core::Error>
-{
-    jb::db::Query query{_database};
-    auto          prepared = query.prepare("DELETE FROM jobu_secret_refs WHERE job_id IN (SELECT id FROM jobu_jobs "
-                                           "WHERE queue_id = :queue_id AND state <> 'deleted')");
-    if (!prepared) {
-        return RepositoryResult<std::size_t>::failure(std::move(prepared).error());
-    }
-    auto bound = query.bind_value(":queue_id", uuid_to_storage(queue_id));
-    if (!bound) {
-        return RepositoryResult<std::size_t>::failure(std::move(bound).error());
-    }
-    auto executed = query.exec();
-    if (!executed) {
-        return RepositoryResult<std::size_t>::failure(std::move(executed).error());
-    }
-    return affected_rows(query);
-}
-
 auto JobRepository::find_by_id(jb::core::Uuid const& id, bool include_deleted)
     -> jb::core::Result<std::optional<JobDefinition>, jb::core::Error>
 {

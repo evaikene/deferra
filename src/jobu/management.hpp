@@ -229,9 +229,10 @@ public:
     auto operator=(ManagementService&&) -> ManagementService&      = delete;
 
     /** Creates one active queue in an immediate transaction.
-     * @param request Queue configuration consumed after validation; the optional idempotency key is syntax-checked
-     * but durable replay semantics are introduced with the idempotency repository.
-     * @return Committed queue, or a validation, name-conflict, generator, attribute, or database Error.
+     * @param request Queue configuration consumed after validation. An optional idempotency key durably replays the
+     * original successful result when the normalized request matches.
+     * @return Committed or replayed queue, or a validation, idempotency, name-conflict, generator, attribute, or
+     * database Error.
      */
     [[nodiscard]] auto create_queue(CreateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>;
 
@@ -282,10 +283,10 @@ public:
 
     /** Creates one active one-time job and its scheduled run in one immediate transaction.
      * @param request Queue selector, definition fields, partial attributes, owning payload, and optional idempotency
-     * key consumed after validation. The key is syntax-checked; durable replay semantics are introduced with the
-     * idempotency repository.
-     * @return Committed revision-1 definition, or a queue, schedule, validation, generator, attribute, run, or database
-     * Error. No attempt is created and no external work starts.
+     * key consumed after validation. A matching key in the resolved queue scope replays the original successful
+     * result.
+     * @return Committed or replayed revision-1 definition, or a queue, schedule, validation, idempotency, generator,
+     * attribute, run, or database Error. No attempt is created and no external work starts.
      */
     [[nodiscard]] auto create_job(CreateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
 

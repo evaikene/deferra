@@ -92,6 +92,15 @@ if(TARGET db-sqlite)
 endif()
 
 if(TARGET jobu-sqlite)
+    # JobU SQLite-backed idempotency, secret, and retention repository test
+    set(TARGET "jobu-idempotency-secret-retention-test")
+    add_executable(${TARGET}
+        jobu-idempotency-secret-retention-test.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
     # JobU SQLite-backed run, attempt, and output repository test
     set(TARGET "jobu-run-attempt-repository-test")
     add_executable(${TARGET}
