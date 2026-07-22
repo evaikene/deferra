@@ -357,6 +357,57 @@ auto JobRepository::update_definition(JobDefinition const&               replace
     return RepositoryResult<bool>::success(query.num_rows_affected() == 1);
 }
 
+auto JobRepository::set_state(jb::core::Uuid const&  id,
+                              JobState               expected_state,
+                              JobState               next_state,
+                              JobRevision            expected_revision,
+                              JobRevision            next_revision,
+                              jb::core::UtcTimePoint updated_at) -> jb::core::Result<bool, jb::core::Error>
+{
+    if (expected_state == JobState::Deleted || next_state == JobState::Deleted || expected_state == next_state ||
+        storage_text(expected_state).empty() || storage_text(next_state).empty() ||
+        next_revision <= expected_revision || next_revision - expected_revision != 1) {
+        return RepositoryResult<bool>::failure(invalid_job("invalid_state_transition"));
+    }
+    auto expected = revision_to_storage(expected_revision);
+    if (!expected) {
+        return RepositoryResult<bool>::failure(std::move(expected).error());
+    }
+    auto revision = revision_to_storage(next_revision);
+    if (!revision) {
+        return RepositoryResult<bool>::failure(std::move(revision).error());
+    }
+    auto updated = timestamp_to_storage(updated_at);
+    if (!updated) {
+        return RepositoryResult<bool>::failure(std::move(updated).error());
+    }
+
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(
+        "UPDATE jobu_jobs SET state = :next_state, revision = :next_revision, updated_at_us = :updated_at_us "
+        "WHERE id = :id AND state = :expected_state AND revision = :expected_revision AND deleted_at_us IS NULL");
+    if (!prepared) {
+        return RepositoryResult<bool>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":next_state",        jb::db::make_text(storage_text(next_state))    },
+                              {":next_revision",     std::move(revision).value()                    },
+                              {":updated_at_us",     std::move(updated).value()                     },
+                              {":id",                uuid_to_storage(id)                            },
+                              {":expected_state",    jb::db::make_text(storage_text(expected_state))},
+                              {":expected_revision", std::move(expected).value()                    },
+    });
+    if (!bound) {
+        return RepositoryResult<bool>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<bool>::failure(std::move(executed).error());
+    }
+    return RepositoryResult<bool>::success(query.num_rows_affected() == 1);
+}
+
 auto JobRepository::find_by_id(jb::core::Uuid const& id, bool include_deleted)
     -> jb::core::Result<std::optional<JobDefinition>, jb::core::Error>
 {

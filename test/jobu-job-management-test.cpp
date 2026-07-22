@@ -726,6 +726,171 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
     CHECK(suspended->updated_at == UtcTimePoint{12s});
 }
 
+TEST_CASE("Job lifecycle persists revisions draining suspension and idempotent no-ops", "[jobu][job][lifecycle]")
+{
+    auto const     queue_id      = uuid("00000000-0000-7000-8000-000000000100");
+    auto const     immediate_job = uuid("00000000-0000-7000-8000-000000000101");
+    auto const     immediate_run = uuid("00000000-0000-7000-8000-000000000102");
+    auto const     busy_job      = uuid("00000000-0000-7000-8000-000000000103");
+    auto const     busy_run      = uuid("00000000-0000-7000-8000-000000000104");
+    ServiceFixture fixture{
+        {queue_id, immediate_job, immediate_run, busy_job, busy_run}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "jobs"}));
+    REQUIRE(service.create_job({.queue    = queue_id,
+                                .name     = "immediate",
+                                .schedule = once_at(UtcTimePoint{20s}),
+                                .payload  = cli_payload("immediate")}));
+    REQUIRE(service.create_job(
+        {.queue = queue_id, .name = "busy", .schedule = once_at(UtcTimePoint{30s}), .payload = cli_payload("busy")}));
+
+    detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                  original_run = runs.find_schedule_owned(immediate_job);
+    REQUIRE(original_run);
+    REQUIRE(original_run->has_value());
+
+    fixture.time.advance(1s);
+    auto immediate = service.suspend_job(immediate_job);
+    REQUIRE(immediate);
+    CHECK(immediate->state == JobState::Suspended);
+    CHECK(immediate->revision == 3);
+    CHECK(immediate->updated_at == UtcTimePoint{11s});
+
+    auto unchanged_run = runs.find_schedule_owned(immediate_job);
+    REQUIRE(unchanged_run);
+    REQUIRE(unchanged_run->has_value());
+    CHECK((**unchanged_run).job_revision == (**original_run).job_revision);
+    CHECK((**unchanged_run).state == RunState::Scheduled);
+    CHECK((**unchanged_run).planned_at == (**original_run).planned_at);
+    CHECK((**unchanged_run).runnable_at == (**original_run).runnable_at);
+    CHECK((**unchanged_run).payload == (**original_run).payload);
+
+    fixture.time.advance(1s);
+    auto unchanged_suspended = service.suspend_job(immediate_job);
+    REQUIRE(unchanged_suspended);
+    CHECK(unchanged_suspended->revision == 3);
+    CHECK(unchanged_suspended->updated_at == UtcTimePoint{11s});
+
+    auto resumed = service.resume_job(immediate_job);
+    REQUIRE(resumed);
+    CHECK(resumed->state == JobState::Active);
+    CHECK(resumed->revision == 4);
+    CHECK(resumed->updated_at == UtcTimePoint{12s});
+
+    fixture.time.advance(1s);
+    auto unchanged_active = service.resume_job(immediate_job);
+    REQUIRE(unchanged_active);
+    CHECK(unchanged_active->revision == 4);
+    CHECK(unchanged_active->updated_at == UtcTimePoint{12s});
+
+    execute(fixture.database,
+            "UPDATE jobu_runs SET state = 'running', started_at_us = 10000000 WHERE id = "
+            "X'00000000000070008000000000000104'");
+    detail::AttemptRepository attempts{fixture.database};
+    REQUIRE(attempts.insert_attempt({
+        .run_id         = busy_run,
+        .attempt_number = 1,
+        .due_at         = UtcTimePoint{10s},
+        .started_at     = UtcTimePoint{10s},
+        .state          = AttemptState::Running,
+    }));
+
+    fixture.time.advance(1s);
+    auto draining = service.suspend_job(busy_job);
+    REQUIRE(draining);
+    CHECK(draining->state == JobState::Suspending);
+    CHECK(draining->revision == 2);
+    CHECK(draining->updated_at == UtcTimePoint{14s});
+
+    fixture.time.advance(1s);
+    auto unchanged_draining = service.suspend_job(busy_job);
+    REQUIRE(unchanged_draining);
+    CHECK(unchanged_draining->state == JobState::Suspending);
+    CHECK(unchanged_draining->revision == 2);
+    CHECK(unchanged_draining->updated_at == UtcTimePoint{14s});
+
+    auto resumed_draining = service.resume_job(busy_job);
+    REQUIRE(resumed_draining);
+    CHECK(resumed_draining->state == JobState::Active);
+    CHECK(resumed_draining->revision == 3);
+    CHECK(resumed_draining->updated_at == UtcTimePoint{15s});
+
+    fixture.time.advance(1s);
+    draining = service.suspend_job(busy_job);
+    REQUIRE(draining);
+    CHECK(draining->state == JobState::Suspending);
+    CHECK(draining->revision == 4);
+    CHECK(draining->updated_at == UtcTimePoint{16s});
+
+    auto running_snapshot = runs.find_schedule_owned(busy_job);
+    REQUIRE(running_snapshot);
+    REQUIRE(running_snapshot->has_value());
+    CHECK((**running_snapshot).state == RunState::Running);
+    CHECK((**running_snapshot).job_revision == 1);
+
+    execute(fixture.database,
+            "UPDATE jobu_attempts SET state = 'completed', completed_at_us = 17000000, outcome = 'succeeded', "
+            "result_json = '{}' WHERE run_id = X'00000000000070008000000000000104'");
+    execute(fixture.database,
+            "UPDATE jobu_runs SET state = 'succeeded', completed_at_us = 17000000, result_json = '{}' WHERE id = "
+            "X'00000000000070008000000000000104'");
+    fixture.time.advance(1s);
+    auto suspended = service.suspend_job(busy_job);
+    REQUIRE(suspended);
+    CHECK(suspended->state == JobState::Suspended);
+    CHECK(suspended->revision == 5);
+    CHECK(suspended->updated_at == UtcTimePoint{17s});
+
+    auto terminal_snapshot = runs.find_by_id(busy_run);
+    REQUIRE(terminal_snapshot);
+    REQUIRE(terminal_snapshot->has_value());
+    CHECK((**terminal_snapshot).state == RunState::Succeeded);
+    CHECK((**terminal_snapshot).job_revision == 1);
+}
+
+TEST_CASE("Job lifecycle rolls back revision exhaustion and rejects deleted definitions", "[jobu][job][lifecycle]")
+{
+    auto const     queue_id = uuid("00000000-0000-7000-8000-000000000110");
+    auto const     job_id   = uuid("00000000-0000-7000-8000-000000000111");
+    auto const     run_id   = uuid("00000000-0000-7000-8000-000000000112");
+    ServiceFixture fixture{
+        {queue_id, job_id, run_id}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "jobs"}));
+    REQUIRE(
+        service.create_job({.queue = queue_id, .schedule = once_at(UtcTimePoint{20s}), .payload = cli_payload("job")}));
+
+    execute(fixture.database,
+            "UPDATE jobu_jobs SET revision = 9223372036854775806 WHERE id = "
+            "X'00000000000070008000000000000111'");
+    require_error(service.suspend_job(job_id), ErrorCategory::ResourceExhausted, "jobu.job.revision_exhausted");
+    auto rolled_back = service.get_job(job_id);
+    REQUIRE(rolled_back);
+    CHECK(rolled_back->state == JobState::Active);
+    CHECK(rolled_back->revision == static_cast<JobRevision>(std::numeric_limits<std::int64_t>::max()) - 1);
+    CHECK(rolled_back->updated_at == UtcTimePoint{10s});
+
+    execute(fixture.database,
+            "UPDATE jobu_jobs SET state = 'suspended', revision = 9223372036854775807 WHERE id = "
+            "X'00000000000070008000000000000111'");
+    require_error(service.resume_job(job_id), ErrorCategory::ResourceExhausted, "jobu.job.revision_exhausted");
+    auto exhausted = service.get_job(job_id);
+    REQUIRE(exhausted);
+    CHECK(exhausted->state == JobState::Suspended);
+    CHECK(exhausted->revision == static_cast<JobRevision>(std::numeric_limits<std::int64_t>::max()));
+
+    execute(fixture.database,
+            "UPDATE jobu_jobs SET state = 'deleted', updated_at_us = 12000000, deleted_at_us = 12000000 WHERE id = "
+            "X'00000000000070008000000000000111'");
+    require_error(service.suspend_job(job_id), ErrorCategory::Conflict, "jobu.job.deleted");
+    require_error(service.resume_job(job_id), ErrorCategory::Conflict, "jobu.job.deleted");
+    require_error(service.suspend_job(uuid("00000000-0000-7000-8000-000000000199")),
+                  ErrorCategory::NotFound,
+                  "jobu.job.not_found");
+}
+
 TEST_CASE("Job update validates revisions state and replacement fields", "[jobu][job][update][validation]")
 {
     auto const     queue_id = uuid("00000000-0000-7000-8000-000000000080");
@@ -883,4 +1048,10 @@ TEST_CASE("Job methods report invalid daemon defaults consistently", "[jobu][job
                   ErrorCategory::InvalidArgument,
                   "jobu.attribute.unknown");
     require_error(invalid_service.list_jobs({}), ErrorCategory::InvalidArgument, "jobu.attribute.unknown");
+    require_error(invalid_service.suspend_job(uuid("00000000-0000-7000-8000-000000000099")),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.attribute.unknown");
+    require_error(invalid_service.resume_job(uuid("00000000-0000-7000-8000-000000000099")),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.attribute.unknown");
 }

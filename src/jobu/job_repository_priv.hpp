@@ -28,6 +28,12 @@ public:
                                          JobRevision                        expected_revision,
                                          SerializedAttributeDocument const& attributes,
                                          ValidatedJobPayload const& payload) -> jb::core::Result<bool, jb::core::Error>;
+    [[nodiscard]] auto set_state(jb::core::Uuid const&  id,
+                                 JobState               expected_state,
+                                 JobState               next_state,
+                                 JobRevision            expected_revision,
+                                 JobRevision            next_revision,
+                                 jb::core::UtcTimePoint updated_at) -> jb::core::Result<bool, jb::core::Error>;
     [[nodiscard]] auto find_by_id(jb::core::Uuid const& id, bool include_deleted)
         -> jb::core::Result<std::optional<JobDefinition>, jb::core::Error>;
     [[nodiscard]] auto list(std::optional<jb::core::Uuid> queue_id,
