@@ -452,3 +452,18 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
         set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
     endif()
 endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
+    # Linux queue management executable lifecycle and restart integration test
+    set(TARGET "jobuctl-queue-management-test")
+    add_executable(${TARGET}
+        jobuctl-queue-management-test.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET} PRIVATE core)
+    add_dependencies(${TARGET} jobud jobuctl)
+    add_test(NAME ${TARGET}
+        COMMAND $<TARGET_FILE:${TARGET}> $<TARGET_FILE:jobud> $<TARGET_FILE:jobuctl>
+    )
+    set_tests_properties(${TARGET} PROPERTIES TIMEOUT 60)
+endif()
