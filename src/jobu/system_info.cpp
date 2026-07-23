@@ -1,7 +1,5 @@
 #include "system_info.hpp"
 
-#include "system_info_priv.hpp"
-
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -107,21 +105,5 @@ auto system_info_from_json(jb::rpc::JsonValue const& value) -> jb::core::Result<
     result.capabilities = canonical_capabilities(std::move(result.capabilities));
     return Result::success(std::move(result));
 }
-
-namespace detail {
-
-auto handle_system_info(SystemInfo const& info, std::optional<jb::rpc::JsonValue> const& params)
-    -> jb::rpc::MethodResult
-{
-    if (params && (!params->is_object() || !params->as_object().empty())) {
-        return jb::rpc::MethodResult::failure({
-            .code    = static_cast<std::int64_t>(jb::rpc::ErrorCode::InvalidParams),
-            .message = "Invalid params",
-        });
-    }
-    return jb::rpc::MethodResult::success(system_info_to_json(info));
-}
-
-} // namespace detail
 
 } // namespace jb::jobu

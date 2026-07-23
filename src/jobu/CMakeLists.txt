@@ -42,7 +42,7 @@ target_sources(${TARGET}
         secret_repository_priv.cpp
         secret_repository_priv.hpp
         system_info.cpp
-        system_info_priv.hpp
+        system_info_rpc.cpp
         text_validation_priv.cpp
         text_validation_priv.hpp
         utc_timestamp.cpp
@@ -59,6 +59,7 @@ target_sources(${TARGET}
         run.hpp
         secret.hpp
         system_info.hpp
+        system_info_rpc.hpp
         utc_timestamp.hpp
 )
 
