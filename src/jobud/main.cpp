@@ -7,6 +7,7 @@
 #include "local_server.hpp"
 #include "logging.hpp"
 #include "management.hpp"
+#include "management_rpc.hpp"
 #include "protocol.hpp"
 #include "server.hpp"
 #include "sqlite/sqlite_driver.hpp"
@@ -27,6 +28,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -122,10 +124,16 @@ auto main(int argc, char* argv[]) -> int
     LocalServer               local_server;
     Server                    rpc_server;
 
+    auto capabilities = std::vector<std::string>{"system.info"};
+    capabilities.reserve(capabilities.size() + management_rpc_method_names().size());
+    for (auto const method : management_rpc_method_names()) {
+        capabilities.emplace_back(method);
+    }
+
     auto const info = SystemInfo{
         .daemon_version = std::string{jb::jobu::detail::project_version},
-        .api_version    = {.major = 1, .minor = 0},
-        .capabilities   = {"system.info"},
+        .api_version    = {.major = 1, .minor = 1},
+        .capabilities   = std::move(capabilities),
     };
     if (!rpc_server.register_method(
             "system.info",
@@ -133,6 +141,10 @@ auto main(int argc, char* argv[]) -> int
                 return jb::jobu::detail::handle_system_info(info, params);
             })) {
         log_fatal("Unable to register the jobud system.info handler");
+        return EXIT_FAILURE;
+    }
+    if (!register_management_methods(rpc_server, management_service, attribute_registry)) {
+        log_fatal("Unable to register the jobud management handlers");
         return EXIT_FAILURE;
     }
 

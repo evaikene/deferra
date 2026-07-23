@@ -104,6 +104,16 @@ if(TARGET db-sqlite)
 endif()
 
 if(TARGET jobu-sqlite)
+    # JobU SQLite-backed transport-independent management RPC test
+    set(TARGET "management-rpc-test")
+    add_executable(${TARGET}
+        management-rpc-test.cpp
+        support/memory_io_device.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
     # JobU SQLite-backed idempotency, secret, and retention repository test
     set(TARGET "jobu-idempotency-secret-retention-test")
     add_executable(${TARGET}
@@ -164,7 +174,18 @@ target_link_libraries(${TARGET} PRIVATE jobu)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JobU public headers added by Phase 3 must each compile as the first include.
-foreach(JOBU_DOMAIN_HEADER IN ITEMS attempt attribute-registry job management management-json queue run secret utc-timestamp)
+foreach(JOBU_DOMAIN_HEADER IN ITEMS
+        attempt
+        attribute-registry
+        job
+        management
+        management-json
+        management-rpc
+        queue
+        run
+        secret
+        utc-timestamp
+)
     set(TARGET "jobu-${JOBU_DOMAIN_HEADER}-public-header-test")
     add_executable(${TARGET} "${TARGET}.cpp")
     target_link_libraries(${TARGET} PRIVATE jobu)

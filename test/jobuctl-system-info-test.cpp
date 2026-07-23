@@ -111,6 +111,22 @@ auto fail(std::string_view message) -> int
     return EXIT_FAILURE;
 }
 
+auto expected_system_info(std::string_view version) -> std::string
+{
+    return fmt::format("Daemon version: {}\n"
+                       "API version: 1.1\n"
+                       "Capabilities:\n"
+                       "  queue.create\n"
+                       "  queue.delete\n"
+                       "  queue.get\n"
+                       "  queue.list\n"
+                       "  queue.resume\n"
+                       "  queue.suspend\n"
+                       "  queue.update\n"
+                       "  system.info\n",
+                       version);
+}
+
 auto spawn_jobud(std::filesystem::path const& executable,
                  std::filesystem::path const& socket_path,
                  std::filesystem::path const& database_path) -> std::optional<ChildProcess>
@@ -288,9 +304,7 @@ auto main(int argc, char* argv[]) -> int
         fmt::print(stderr, "{}", command.output);
         return fail("jobuctl exited unsuccessfully");
     }
-    if (command.output.find("Daemon version: " + std::string{argv[3]}) == std::string::npos ||
-        command.output.find("API version: 1.0") == std::string::npos ||
-        command.output.find("system.info") == std::string::npos) {
+    if (command.output != expected_system_info(argv[3])) {
         fmt::print(stderr, "{}", command.output);
         return fail("jobuctl output did not contain the expected system information");
     }
@@ -314,6 +328,10 @@ auto main(int argc, char* argv[]) -> int
         WEXITSTATUS(reopened_command.status) != EXIT_SUCCESS) {
         fmt::print(stderr, "{}", reopened_command.output);
         return fail("jobuctl could not query the reopened daemon");
+    }
+    if (reopened_command.output != expected_system_info(argv[3])) {
+        fmt::print(stderr, "{}", reopened_command.output);
+        return fail("reopened jobud advertised unexpected system information");
     }
     reopened->terminate();
 
