@@ -591,7 +591,7 @@ auto parse_posix_footer(std::string_view footer) -> std::optional<std::optional<
 auto valid_timezone_name(std::string_view timezone) noexcept -> bool
 {
     if (timezone.empty() || timezone.size() > 255 || !detail::is_valid_utf8(timezone) ||
-        timezone.find('\\') != std::string_view::npos || timezone.find('\0') != std::string_view::npos ||
+        detail::has_ascii_control(timezone) || timezone.find('\\') != std::string_view::npos ||
         timezone.front() == '/') {
         return false;
     }

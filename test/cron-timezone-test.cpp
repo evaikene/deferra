@@ -499,6 +499,10 @@ TEST_CASE("Timezone lookup validates names and keeps canonical targets inside th
              std::string{"Region/./Test"},
              std::string{"Region/../Test"},
              std::string{"Region\\Test"},
+             std::string{"Region/\nTest"},
+             std::string{"Region/\rTest"},
+             std::string{"Region/\tTest"},
+             std::string{"Region/\x7f", 8},
              std::string(256, 'x'),
              std::string{"\xc0\x80", 2},
     }) {
