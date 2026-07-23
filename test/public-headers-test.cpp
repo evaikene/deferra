@@ -2,6 +2,7 @@
 #include "attribute.hpp"
 #include "attribute_registry.hpp"
 #include "byte_buffer.hpp"
+#include "cron.hpp"
 #include "database.hpp"
 #include "db.hpp"
 #include "driver.hpp"

@@ -26,6 +26,12 @@ add_executable(${TARGET} utc-timestamp-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU cron expression and local calendar search test
+set(TARGET "cron-expression-test")
+add_executable(${TARGET} cron-expression-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # JobU domain storage adapter test
 set(TARGET "domain-storage-test")
 add_executable(${TARGET} domain-storage-test.cpp)
@@ -182,10 +188,11 @@ add_executable(${TARGET} public-headers-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
-# JobU public headers added by Phase 3 must each compile as the first include.
+# JobU domain public headers must each compile as the first include.
 foreach(JOBU_DOMAIN_HEADER IN ITEMS
         attempt
         attribute-registry
+        cron
         job
         management
         management-json

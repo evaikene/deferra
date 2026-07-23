@@ -17,6 +17,8 @@ target_sources(${TARGET}
         attribute_registry.cpp
         attempt_repository_priv.cpp
         attempt_repository_priv.hpp
+        cron_expression_priv.cpp
+        cron_expression_priv.hpp
         domain_storage_priv.cpp
         domain_storage_priv.hpp
         idempotency_codec_priv.cpp
@@ -50,6 +52,7 @@ target_sources(${TARGET}
         attempt.hpp
         attribute.hpp
         attribute_registry.hpp
+        cron.hpp
         job.hpp
         jobu.hpp
         management.hpp
