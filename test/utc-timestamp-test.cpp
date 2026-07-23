@@ -4,6 +4,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <string_view>
 
 using namespace jb::core;
@@ -63,14 +64,32 @@ TEST_CASE("UTC timestamps reject invalid syntax and civil values", "[jobu][time]
     }
 }
 
-TEST_CASE("UTC timestamps report values outside the clock range", "[jobu][time]")
+TEST_CASE("UTC timestamps honor the platform clock range", "[jobu][time]")
 {
-    for (auto const text : {
-             std::string_view{"0000-01-01T00:00:00Z"},
-             std::string_view{"9999-12-31T23:59:59.999999Z"},
-         }) {
-        auto const parsed = parse_utc_timestamp(text);
-        REQUIRE_FALSE(parsed);
-        CHECK(parsed.error().code == "jobu.time.out_of_range");
+    using Microseconds = std::chrono::microseconds;
+
+    struct Boundary {
+        std::string_view text;
+        std::int64_t     microseconds;
+    };
+
+    constexpr auto boundaries = std::array{
+        Boundary{"0000-01-01T00:00:00Z",        -62167219200000000},
+        Boundary{"9999-12-31T23:59:59.999999Z", 253402300799999999},
+    };
+    auto const minimum = std::chrono::ceil<Microseconds>(UtcTimePoint::min().time_since_epoch()).count();
+    auto const maximum = std::chrono::floor<Microseconds>(UtcTimePoint::max().time_since_epoch()).count();
+
+    for (auto const& boundary : boundaries) {
+        auto const parsed = parse_utc_timestamp(boundary.text);
+        if (boundary.microseconds < minimum || boundary.microseconds > maximum) {
+            REQUIRE_FALSE(parsed);
+            CHECK(parsed.error().code == "jobu.time.out_of_range");
+        }
+        else {
+            REQUIRE(parsed);
+            CHECK(std::chrono::duration_cast<Microseconds>(parsed->time_since_epoch()).count() ==
+                  boundary.microseconds);
+        }
     }
 }
