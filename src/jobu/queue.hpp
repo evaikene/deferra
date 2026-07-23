@@ -36,8 +36,11 @@ enum class RecoveryPolicy : std::uint8_t {
  */
 struct Queue {
 
+    /// Default scheduler weight for newly constructed queues.
     static constexpr std::uint32_t kDefaultWeight           = 1;
+    /// Default combined concurrency limit for newly constructed queues.
     static constexpr std::uint32_t kDefaultConcurrencyLimit = 1;
+    /// Default runnable-work warning delay in milliseconds.
     static constexpr long          kDefaultRunnableWaitTime = 10000;
 
     /// Stable queue identity.
