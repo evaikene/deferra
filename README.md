@@ -55,7 +55,7 @@ install `sudo` first):
 
 ```sh
 apk add --no-cache \
-    catch2-3 cmake fmt-dev g++ nlohmann-json samurai sqlite-dev
+    catch2-3 cmake fmt-dev g++ nlohmann-json samurai sqlite-dev tzdata
 ```
 
 ### macOS
