@@ -13,7 +13,7 @@
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "system_info.hpp"
-#include "system_info_priv.hpp"
+#include "system_info_rpc.hpp"
 #include "time_source.hpp"
 #include "uuid.hpp"
 
@@ -124,22 +124,18 @@ auto main(int argc, char* argv[]) -> int
     LocalServer               local_server;
     Server                    rpc_server;
 
-    auto capabilities = std::vector<std::string>{"system.info"};
+    auto capabilities = std::vector<std::string>{std::string{system_info_rpc_method_name()}};
     capabilities.reserve(capabilities.size() + management_rpc_method_names().size());
     for (auto const method : management_rpc_method_names()) {
         capabilities.emplace_back(method);
     }
 
-    auto const info = SystemInfo{
+    auto info = SystemInfo{
         .daemon_version = std::string{jb::jobu::detail::project_version},
         .api_version    = {.major = 1, .minor = 1},
         .capabilities   = std::move(capabilities),
     };
-    if (!rpc_server.register_method(
-            "system.info",
-            [info](RequestContext const&, std::optional<JsonValue> const& params) -> MethodResult {
-                return jb::jobu::detail::handle_system_info(info, params);
-            })) {
+    if (!register_system_info_method(rpc_server, std::move(info))) {
         log_fatal("Unable to register the jobud system.info handler");
         return EXIT_FAILURE;
     }

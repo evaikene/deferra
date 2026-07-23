@@ -20,6 +20,7 @@
 #include "run.hpp"
 #include "secret.hpp"
 #include "system_info.hpp"
+#include "system_info_rpc.hpp"
 #include "time_source.hpp"
 #include "transaction.hpp"
 #include "utc_timestamp.hpp"

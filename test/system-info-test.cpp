@@ -1,7 +1,5 @@
 #include "system_info.hpp"
 
-#include "system_info_priv.hpp"
-
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
@@ -98,30 +96,4 @@ TEST_CASE("SystemInfo rejects missing and mistyped required fields", "[jobu][sys
     std::get<JsonValue::Array>(std::get<JsonValue::Object>(capabilities.data).at("capabilities").data)
         .push_back(make_json(std::uint64_t{1}));
     check_invalid(capabilities);
-}
-
-TEST_CASE("system.info accepts no params or an empty object only", "[jobu][system-info][handler]")
-{
-    auto const info = SystemInfo{
-        .daemon_version = "0.1.0",
-        .capabilities   = {"system.info"},
-    };
-
-    CHECK(jb::jobu::detail::handle_system_info(info, std::nullopt));
-    CHECK(jb::jobu::detail::handle_system_info(info, make_json(JsonValue::Object{})));
-
-    auto const invalid_values = std::vector<JsonValue>{
-        make_json(JsonValue::Object{{"unexpected", make_json(true)}}
-        ),
-        make_json(JsonValue::Array{                              }
-        ),
-        make_json(JsonNull{}
-        ),
-    };
-    for (auto const& params : invalid_values) {
-        auto result = jb::jobu::detail::handle_system_info(info, params);
-        REQUIRE_FALSE(result);
-        CHECK(result.error().code == static_cast<std::int64_t>(ErrorCode::InvalidParams));
-        CHECK(result.error().message == "Invalid params");
-    }
 }

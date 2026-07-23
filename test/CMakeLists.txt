@@ -38,6 +38,15 @@ add_executable(${TARGET} system-info-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU transport-independent system information RPC test
+set(TARGET "system-info-rpc-test")
+add_executable(${TARGET}
+    system-info-rpc-test.cpp
+    support/memory_io_device.cpp
+)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # JobU transport-independent management JSON test
 set(TARGET "management-json-test")
 add_executable(${TARGET} management-json-test.cpp)
@@ -184,6 +193,7 @@ foreach(JOBU_DOMAIN_HEADER IN ITEMS
         queue
         run
         secret
+        system-info-rpc
         utc-timestamp
 )
     set(TARGET "jobu-${JOBU_DOMAIN_HEADER}-public-header-test")
