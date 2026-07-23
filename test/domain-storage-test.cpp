@@ -285,6 +285,8 @@ TEST_CASE("Domain storage preserves UUID bytes and rejects malformed fields", "[
 
 TEST_CASE("Domain storage preserves signed Unix microseconds", "[jobu][storage]")
 {
+    using Microseconds = std::chrono::microseconds;
+
     auto const time   = UtcTimePoint{-1us};
     auto const stored = timestamp_to_storage(time);
     REQUIRE(stored);
@@ -298,10 +300,32 @@ TEST_CASE("Domain storage preserves signed Unix microseconds", "[jobu][storage]"
     REQUIRE(absent);
     CHECK_FALSE(absent->has_value());
 
-    auto const invalid =
-        read_timestamp(record("created_at_us", std::numeric_limits<std::int64_t>::min()), "created_at_us");
-    REQUIRE_FALSE(invalid);
-    CHECK(invalid.error().code == "jobu.storage.invalid_time");
+    auto const minimum = std::chrono::ceil<Microseconds>(UtcTimePoint::min().time_since_epoch()).count();
+    auto const maximum = std::chrono::floor<Microseconds>(UtcTimePoint::max().time_since_epoch()).count();
+    for (auto const boundary : {minimum, maximum}) {
+        auto const decoded_boundary = read_timestamp(record("created_at_us", boundary), "created_at_us");
+        REQUIRE(decoded_boundary);
+        CHECK(std::chrono::duration_cast<Microseconds>(decoded_boundary->time_since_epoch()).count() == boundary);
+    }
+
+    auto const wrong_type = read_timestamp(record("created_at_us", std::string{"invalid"}), "created_at_us");
+    REQUIRE_FALSE(wrong_type);
+    CHECK(wrong_type.error().code == "jobu.storage.invalid_time");
+
+    if (minimum > std::numeric_limits<std::int64_t>::min()) {
+        auto below_minimum_value = minimum;
+        --below_minimum_value;
+        auto const below_minimum = read_timestamp(record("created_at_us", below_minimum_value), "created_at_us");
+        REQUIRE_FALSE(below_minimum);
+        CHECK(below_minimum.error().code == "jobu.storage.invalid_time");
+    }
+    if (maximum < std::numeric_limits<std::int64_t>::max()) {
+        auto above_maximum_value = maximum;
+        ++above_maximum_value;
+        auto const above_maximum = read_timestamp(record("created_at_us", above_maximum_value), "created_at_us");
+        REQUIRE_FALSE(above_maximum);
+        CHECK(above_maximum.error().code == "jobu.storage.invalid_time");
+    }
 }
 
 TEST_CASE("Domain storage checks booleans and bounded integers", "[jobu][storage]")
