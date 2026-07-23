@@ -16,7 +16,7 @@ namespace jb::jobu {
 
 namespace {
 
-constexpr std::array<std::string_view, 7> management_methods{
+constexpr std::array<std::string_view, 15> management_methods{
     "queue.create",
     "queue.get",
     "queue.list",
@@ -24,6 +24,14 @@ constexpr std::array<std::string_view, 7> management_methods{
     "queue.suspend",
     "queue.resume",
     "queue.delete",
+    "job.create",
+    "job.get",
+    "job.list",
+    "job.update",
+    "job.suspend",
+    "job.resume",
+    "job.move",
+    "job.delete",
 };
 
 auto invalid_params() -> jb::rpc::MethodResult
@@ -180,6 +188,107 @@ auto register_management_methods(jb::rpc::Server&         server,
                        params,
                        [](jb::rpc::JsonValue const& value) { return queue_selector_from_json(value); },
                        [&service](QueueSelector selector) { return service.delete_queue(selector); });
+               }) &&
+           server.register_method(
+               std::string{management_methods[7]},
+               [&service,
+                attribute_registry](jb::rpc::RequestContext const&,
+                                    std::optional<jb::rpc::JsonValue> const& params) -> jb::rpc::MethodResult {
+                   return handle_value(
+                       params,
+                       [attribute_registry](jb::rpc::JsonValue const& value) {
+                           return create_job_request_from_json(value, *attribute_registry);
+                       },
+                       [&service](CreateJobRequest request) { return service.create_job(std::move(request)); },
+                       [attribute_registry](JobDefinition const& job) {
+                           return job_to_json(job, *attribute_registry);
+                       });
+               }) &&
+           server.register_method(std::string{management_methods[8]},
+                                  [&service, attribute_registry](
+                                      jb::rpc::RequestContext const&,
+                                      std::optional<jb::rpc::JsonValue> const& params) -> jb::rpc::MethodResult {
+                                      return handle_value(
+                                          params,
+                                          [](jb::rpc::JsonValue const& value) { return job_id_from_json(value); },
+                                          [&service](jb::core::Uuid id) { return service.get_job(id); },
+                                          [attribute_registry](JobDefinition const& job) {
+                                              return job_to_json(job, *attribute_registry);
+                                          });
+                                  }) &&
+           server.register_method(
+               std::string{management_methods[9]},
+               [&service,
+                attribute_registry](jb::rpc::RequestContext const&,
+                                    std::optional<jb::rpc::JsonValue> const& params) -> jb::rpc::MethodResult {
+                   return handle_value(
+                       params,
+                       [](jb::rpc::JsonValue const& value) { return job_list_request_from_json(value); },
+                       [&service](JobListRequest const& request) { return service.list_jobs(request); },
+                       [attribute_registry](JobPage const& page) {
+                           return job_page_to_json(page, *attribute_registry);
+                       });
+               }) &&
+           server.register_method(
+               std::string{management_methods[10]},
+               [&service,
+                attribute_registry](jb::rpc::RequestContext const&,
+                                    std::optional<jb::rpc::JsonValue> const& params) -> jb::rpc::MethodResult {
+                   return handle_value(
+                       params,
+                       [attribute_registry](jb::rpc::JsonValue const& value) {
+                           return update_job_request_from_json(value, *attribute_registry);
+                       },
+                       [&service](UpdateJobRequest request) { return service.update_job(std::move(request)); },
+                       [attribute_registry](JobDefinition const& job) {
+                           return job_to_json(job, *attribute_registry);
+                       });
+               }) &&
+           server.register_method(std::string{management_methods[11]},
+                                  [&service, attribute_registry](
+                                      jb::rpc::RequestContext const&,
+                                      std::optional<jb::rpc::JsonValue> const& params) -> jb::rpc::MethodResult {
+                                      return handle_value(
+                                          params,
+                                          [](jb::rpc::JsonValue const& value) { return job_id_from_json(value); },
+                                          [&service](jb::core::Uuid id) { return service.suspend_job(id); },
+                                          [attribute_registry](JobDefinition const& job) {
+                                              return job_to_json(job, *attribute_registry);
+                                          });
+                                  }) &&
+           server.register_method(std::string{management_methods[12]},
+                                  [&service, attribute_registry](
+                                      jb::rpc::RequestContext const&,
+                                      std::optional<jb::rpc::JsonValue> const& params) -> jb::rpc::MethodResult {
+                                      return handle_value(
+                                          params,
+                                          [](jb::rpc::JsonValue const& value) { return job_id_from_json(value); },
+                                          [&service](jb::core::Uuid id) { return service.resume_job(id); },
+                                          [attribute_registry](JobDefinition const& job) {
+                                              return job_to_json(job, *attribute_registry);
+                                          });
+                                  }) &&
+           server.register_method(
+               std::string{management_methods[13]},
+               [&service,
+                attribute_registry](jb::rpc::RequestContext const&,
+                                    std::optional<jb::rpc::JsonValue> const& params) -> jb::rpc::MethodResult {
+                   return handle_value(
+                       params,
+                       [](jb::rpc::JsonValue const& value) { return move_job_request_from_json(value); },
+                       [&service](MoveJobRequest const& request) { return service.move_job(request); },
+                       [attribute_registry](JobDefinition const& job) {
+                           return job_to_json(job, *attribute_registry);
+                       });
+               }) &&
+           server.register_method(
+               std::string{management_methods[14]},
+               [&service](jb::rpc::RequestContext const&,
+                          std::optional<jb::rpc::JsonValue> const& params) -> jb::rpc::MethodResult {
+                   return handle_void(
+                       params,
+                       [](jb::rpc::JsonValue const& value) { return delete_job_request_from_json(value); },
+                       [&service](DeleteJobRequest const& request) { return service.delete_job(request); });
                });
 }
 

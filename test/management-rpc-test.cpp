@@ -17,6 +17,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -176,9 +177,28 @@ auto max_attempts(std::int64_t value) -> AttributeSet
     };
 }
 
+auto once_at(UtcTimePoint planned_at) -> JobSchedule
+{
+    return OnceSchedule{.planned_at = planned_at};
+}
+
+auto cli_payload(std::string command) -> JsonValue
+{
+    return make_json(JsonValue::Object{
+        {"command", make_json(std::move(command))}
+    });
+}
+
 auto encode_create(CreateQueueRequest const& request, AttributeRegistry const& registry) -> JsonValue
 {
     auto encoded = create_queue_request_to_json(request, registry);
+    REQUIRE(encoded);
+    return std::move(encoded).value();
+}
+
+auto encode_create(CreateJobRequest const& request, AttributeRegistry const& registry) -> JsonValue
+{
+    auto encoded = create_job_request_to_json(request, registry);
     REQUIRE(encoded);
     return std::move(encoded).value();
 }
@@ -190,6 +210,13 @@ auto encode_selector(QueueSelector const& selector) -> JsonValue
     return std::move(encoded).value();
 }
 
+auto encode_job_id(Uuid const& id) -> JsonValue
+{
+    auto encoded = job_id_to_json(id);
+    REQUIRE(encoded);
+    return std::move(encoded).value();
+}
+
 auto decode_queue(ResponseEnvelope const& response, AttributeRegistry const& registry) -> Queue
 {
     auto decoded = queue_from_json(require_result(response), registry);
@@ -197,26 +224,57 @@ auto decode_queue(ResponseEnvelope const& response, AttributeRegistry const& reg
     return std::move(decoded).value();
 }
 
+auto decode_job(ResponseEnvelope const& response, AttributeRegistry const& registry) -> JobDefinition
+{
+    auto decoded = job_from_json(require_result(response), registry);
+    REQUIRE(decoded);
+    return std::move(decoded).value();
+}
+
 } // anonymous namespace
 
-TEST_CASE("Queue management RPC registration is exact and reports duplicate failure", "[jobu][management-rpc]")
+TEST_CASE("Management RPC registration is exact and reports duplicate failure", "[jobu][management-rpc]")
 {
     Application       app{0, nullptr};
     ServiceFixture    fixture{{sequence_id(1)}};
     ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
     Server            server;
 
+    constexpr std::array<std::string_view, 15> expected_methods{
+        "queue.create",
+        "queue.get",
+        "queue.list",
+        "queue.update",
+        "queue.suspend",
+        "queue.resume",
+        "queue.delete",
+        "job.create",
+        "job.get",
+        "job.list",
+        "job.update",
+        "job.suspend",
+        "job.resume",
+        "job.move",
+        "job.delete",
+    };
+
+    auto const methods = management_rpc_method_names();
+    REQUIRE(methods.size() == expected_methods.size());
     REQUIRE(register_management_methods(server, service, fixture.registry));
-    for (auto const method : management_rpc_method_names()) {
-        CHECK(server.has_method(method));
+    for (auto index = std::size_t{0}; index < expected_methods.size(); ++index) {
+        CHECK(methods[index] == expected_methods[index]);
+        CHECK(server.has_method(expected_methods[index]));
     }
     CHECK_FALSE(server.has_method("system.info"));
-    CHECK_FALSE(server.has_method("job.create"));
+    CHECK_FALSE(server.has_method("job.run_now"));
     CHECK_FALSE(server.has_method("run.get"));
+    CHECK_FALSE(server.has_method("attempt.list"));
     CHECK_FALSE(server.has_method("secret.list"));
+    CHECK_FALSE(server.has_method("schedule.cron"));
+    CHECK_FALSE(server.has_method("stats.get"));
 
     Server duplicate;
-    REQUIRE(duplicate.register_method("queue.update", [](auto const&, auto const&) {
+    REQUIRE(duplicate.register_method("job.update", [](auto const&, auto const&) {
         return MethodResult::success(make_json(JsonNull{}));
     }));
     CHECK_FALSE(register_management_methods(duplicate, service, fixture.registry));
@@ -224,7 +282,14 @@ TEST_CASE("Queue management RPC registration is exact and reports duplicate fail
     CHECK(duplicate.has_method("queue.get"));
     CHECK(duplicate.has_method("queue.list"));
     CHECK(duplicate.has_method("queue.update"));
-    CHECK_FALSE(duplicate.has_method("queue.suspend"));
+    CHECK(duplicate.has_method("queue.suspend"));
+    CHECK(duplicate.has_method("queue.resume"));
+    CHECK(duplicate.has_method("queue.delete"));
+    CHECK(duplicate.has_method("job.create"));
+    CHECK(duplicate.has_method("job.get"));
+    CHECK(duplicate.has_method("job.list"));
+    CHECK(duplicate.has_method("job.update"));
+    CHECK_FALSE(duplicate.has_method("job.suspend"));
 }
 
 TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "[jobu][management-rpc][sqlite]")
@@ -331,8 +396,159 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
     }
 }
 
-TEST_CASE("Queue management RPC separates invalid params from safe application errors",
-          "[jobu][management-rpc][errors]")
+TEST_CASE("Job management RPC completes revisions idempotency and a durable lifecycle",
+          "[jobu][management-rpc][sqlite]")
+{
+    Application    app{0, nullptr};
+    auto const     source_queue_id = sequence_id(1);
+    auto const     target_queue_id = sequence_id(2);
+    auto const     job_id          = sequence_id(3);
+    ServiceFixture fixture{
+        {source_queue_id, target_queue_id, job_id, sequence_id(4)}
+    };
+
+    auto const create_request = CreateJobRequest{
+        .queue           = source_queue_id,
+        .name            = "rpc-job",
+        .type            = JobType::Cli,
+        .schedule        = once_at(UtcTimePoint{20s}),
+        .priority        = 1,
+        .attributes      = max_attempts(4),
+        .payload         = cli_payload("/usr/bin/true"),
+        .idempotency_key = "create-rpc-job",
+    };
+    auto const create_params = encode_create(create_request, fixture.registry);
+
+    {
+        RpcEndpoint endpoint{fixture};
+
+        auto source = decode_queue(
+            endpoint.call("queue.create", encode_create(CreateQueueRequest{.name = "source"}, fixture.registry)),
+            fixture.registry);
+        CHECK(source.id == source_queue_id);
+        auto target = decode_queue(
+            endpoint.call("queue.create", encode_create(CreateQueueRequest{.name = "target"}, fixture.registry)),
+            fixture.registry);
+        CHECK(target.id == target_queue_id);
+
+        auto created = decode_job(endpoint.call("job.create", create_params), fixture.registry);
+        CHECK(created.id == job_id);
+        CHECK(created.queue_id == source_queue_id);
+        CHECK(created.revision == 1);
+        CHECK(created.name == "rpc-job");
+        CHECK(created.state == JobState::Active);
+        CHECK(created.priority == 1);
+        CHECK(std::get<std::int64_t>(created.attributes.at("retry.max_attempts").data) == 4);
+        CHECK(created.payload == create_request.payload);
+
+        auto fetched = decode_job(endpoint.call("job.get", encode_job_id(job_id)), fixture.registry);
+        CHECK(fetched.id == created.id);
+        CHECK(fetched.revision == created.revision);
+
+        auto list_params = job_list_request_to_json({
+            .queue = source_queue_id,
+            .page  = {.limit = 1},
+        });
+        REQUIRE(list_params);
+        auto listed = endpoint.call("job.list", std::move(list_params).value());
+        auto page   = job_page_from_json(require_result(listed), fixture.registry);
+        REQUIRE(page);
+        REQUIRE(page->items.size() == 1U);
+        CHECK(page->items.front().id == job_id);
+        CHECK_FALSE(page->next_after_id);
+
+        auto update_params = update_job_request_to_json(
+            {
+                .job_id            = job_id,
+                .expected_revision = 1,
+                .priority          = 7,
+                .attribute_changes = max_attempts(6),
+            },
+            fixture.registry);
+        REQUIRE(update_params);
+        auto updated = decode_job(endpoint.call("job.update", update_params.value()), fixture.registry);
+        CHECK(updated.revision == 2);
+        CHECK(updated.priority == 7);
+        CHECK(std::get<std::int64_t>(updated.attributes.at("retry.max_attempts").data) == 6);
+
+        require_application_error(endpoint.call("job.update", update_params.value()),
+                                  "conflict",
+                                  "jobu.job.revision_conflict");
+
+        auto suspended = decode_job(endpoint.call("job.suspend", encode_job_id(job_id)), fixture.registry);
+        CHECK(suspended.state == JobState::Suspended);
+        CHECK(suspended.revision == 4);
+        auto resumed = decode_job(endpoint.call("job.resume", encode_job_id(job_id)), fixture.registry);
+        CHECK(resumed.state == JobState::Active);
+        CHECK(resumed.revision == 5);
+        suspended = decode_job(endpoint.call("job.suspend", encode_job_id(job_id)), fixture.registry);
+        CHECK(suspended.state == JobState::Suspended);
+        CHECK(suspended.revision == 7);
+
+        auto move_params = move_job_request_to_json({
+            .job_id            = job_id,
+            .expected_revision = 7,
+            .target_queue      = target_queue_id,
+        });
+        REQUIRE(move_params);
+        auto moved = decode_job(endpoint.call("job.move", std::move(move_params).value()), fixture.registry);
+        CHECK(moved.queue_id == target_queue_id);
+        CHECK(moved.revision == 8);
+        CHECK(moved.state == JobState::Suspended);
+    }
+
+    REQUIRE(fixture.database.close());
+    REQUIRE(fixture.database.open());
+    auto schema = jb::jobu::sqlite::ensure_schema(fixture.database);
+    REQUIRE(schema);
+    CHECK_FALSE(schema->created);
+
+    {
+        RpcEndpoint endpoint{fixture};
+
+        auto replayed = decode_job(endpoint.call("job.create", create_params), fixture.registry);
+        CHECK(replayed.id == job_id);
+        CHECK(replayed.queue_id == source_queue_id);
+        CHECK(replayed.revision == 1);
+        CHECK(replayed.priority == 1);
+
+        auto persisted = decode_job(endpoint.call("job.get", encode_job_id(job_id)), fixture.registry);
+        CHECK(persisted.queue_id == target_queue_id);
+        CHECK(persisted.revision == 8);
+        CHECK(persisted.state == JobState::Suspended);
+
+        auto resumed = decode_job(endpoint.call("job.resume", encode_job_id(job_id)), fixture.registry);
+        CHECK(resumed.state == JobState::Active);
+        CHECK(resumed.revision == 9);
+        auto suspended = decode_job(endpoint.call("job.suspend", encode_job_id(job_id)), fixture.registry);
+        CHECK(suspended.state == JobState::Suspended);
+        CHECK(suspended.revision == 11);
+
+        auto delete_params = delete_job_request_to_json({
+            .job_id            = job_id,
+            .expected_revision = 11,
+        });
+        REQUIRE(delete_params);
+        CHECK(require_result(endpoint.call("job.delete", std::move(delete_params).value())).is_null());
+
+        auto list_params = job_list_request_to_json({
+            .queue           = target_queue_id,
+            .include_deleted = true,
+            .page            = {.limit = 10},
+        });
+        REQUIRE(list_params);
+        auto listed = endpoint.call("job.list", std::move(list_params).value());
+        auto page   = job_page_from_json(require_result(listed), fixture.registry);
+        REQUIRE(page);
+        REQUIRE(page->items.size() == 1U);
+        CHECK(page->items.front().id == job_id);
+        CHECK(page->items.front().queue_id == target_queue_id);
+        CHECK(page->items.front().state == JobState::Deleted);
+        CHECK(page->items.front().revision == 12);
+    }
+}
+
+TEST_CASE("Management RPC separates invalid params from safe application errors", "[jobu][management-rpc][errors]")
 {
     Application    app{0, nullptr};
     auto const     queue_id = sequence_id(1);
@@ -370,6 +586,33 @@ TEST_CASE("Queue management RPC separates invalid params from safe application e
     require_standard_error(endpoint.call("queue.update",
                                          make_json(JsonValue::Object{
                                              {"queue_id", make_json(queue_id.to_string())},
+    })),
+                           ErrorCode::InvalidParams);
+
+    require_standard_error(endpoint.call("job.create",
+                                         make_json(JsonValue::Object{
+                                             {"queue_id",   make_json(queue_id.to_string())},
+                                             {"unexpected", make_json(true)                },
+    })),
+                           ErrorCode::InvalidParams);
+
+    require_application_error(
+        endpoint.call("job.create",
+                      encode_create(
+                          CreateJobRequest{
+                              .queue    = queue_id,
+                              .schedule = CronSchedule{.expression = "0 * * * *", .timezone = "UTC"},
+                              .payload  = cli_payload("/usr/bin/true"),
+    },
+                          fixture.registry)),
+        "unsupported",
+        "jobu.schedule.cron_unavailable");
+
+    require_application_error(endpoint.call("job.get", encode_job_id(missing_id)), "not_found", "jobu.job.not_found");
+
+    require_standard_error(endpoint.call("job.update",
+                                         make_json(JsonValue::Object{
+                                             {"job_id", make_json(missing_id.to_string())},
     })),
                            ErrorCode::InvalidParams);
 }
