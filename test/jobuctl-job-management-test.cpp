@@ -169,12 +169,16 @@ public:
 
     [[nodiscard]] auto received_connection() const -> bool
     {
-        auto const client = ::accept4(_fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
-        if (client >= 0) {
-            static_cast<void>(::close(client));
-            return true;
+        for (;;) {
+            auto const client = ::accept4(_fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+            if (client >= 0) {
+                static_cast<void>(::close(client));
+                return true;
+            }
+            if (errno != EINTR) {
+                return errno != EAGAIN && errno != EWOULDBLOCK;
+            }
         }
-        return errno != EAGAIN && errno != EWOULDBLOCK;
     }
 
 private:
