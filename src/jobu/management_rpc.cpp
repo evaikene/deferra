@@ -224,7 +224,7 @@ auto register_management_methods(jb::rpc::Server&         server,
                    return handle_value(
                        params,
                        [](jb::rpc::JsonValue const& value) { return job_list_request_from_json(value); },
-                       [&service](JobListRequest request) { return service.list_jobs(request); },
+                       [&service](JobListRequest const& request) { return service.list_jobs(request); },
                        [attribute_registry](JobPage const& page) {
                            return job_page_to_json(page, *attribute_registry);
                        });
@@ -276,7 +276,7 @@ auto register_management_methods(jb::rpc::Server&         server,
                    return handle_value(
                        params,
                        [](jb::rpc::JsonValue const& value) { return move_job_request_from_json(value); },
-                       [&service](MoveJobRequest request) { return service.move_job(request); },
+                       [&service](MoveJobRequest const& request) { return service.move_job(request); },
                        [attribute_registry](JobDefinition const& job) {
                            return job_to_json(job, *attribute_registry);
                        });
@@ -288,7 +288,7 @@ auto register_management_methods(jb::rpc::Server&         server,
                    return handle_void(
                        params,
                        [](jb::rpc::JsonValue const& value) { return delete_job_request_from_json(value); },
-                       [&service](DeleteJobRequest request) { return service.delete_job(request); });
+                       [&service](DeleteJobRequest const& request) { return service.delete_job(request); });
                });
 }
 
