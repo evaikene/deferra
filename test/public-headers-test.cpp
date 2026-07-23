@@ -11,6 +11,7 @@
 #include "jobu.hpp"
 #include "management.hpp"
 #include "management_json.hpp"
+#include "management_rpc.hpp"
 #include "query.hpp"
 #include "queue.hpp"
 #include "record.hpp"

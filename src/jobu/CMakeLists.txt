@@ -30,6 +30,7 @@ target_sources(${TARGET}
         jobu.cpp
         management.cpp
         management_json.cpp
+        management_rpc.cpp
         queue_repository_priv.cpp
         queue_repository_priv.hpp
         queue_validation_priv.cpp
@@ -53,6 +54,7 @@ target_sources(${TARGET}
         jobu.hpp
         management.hpp
         management_json.hpp
+        management_rpc.hpp
         queue.hpp
         run.hpp
         secret.hpp
