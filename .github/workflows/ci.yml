@@ -57,7 +57,8 @@ jobs:
             git \
             nlohmann-json \
             samurai \
-            sqlite-dev
+            sqlite-dev \
+            tzdata
 
       - name: Check out sources
         uses: actions/checkout@v5

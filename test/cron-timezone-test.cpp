@@ -235,10 +235,9 @@ void check_next(SystemCronEngine const& engine,
 {
     auto next = engine.next_after(schedule, parsed_time(lower_bound));
     if (!next) {
-        INFO("Required Linux timezone '" << schedule.timezone << "' failed: " << next.error().code << " ("
+        FAIL("Required Linux timezone '" << schedule.timezone << "' failed: " << next.error().code << " ("
                                          << next.error().message << ')');
     }
-    REQUIRE(next);
     CHECK(*next == parsed_time(expected));
 }
 
