@@ -2,7 +2,9 @@
 
 #include "error.hpp"
 #include "result.hpp"
+#include "time_source.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -70,11 +72,19 @@ struct TimezoneData {
     auto operator==(TimezoneData const&) const -> bool = default;
 };
 
+using TimezoneLocalTimePoint = std::chrono::local_time<jb::core::UtcClock::duration>;
+
 [[nodiscard]] auto parse_timezone_data(std::string_view bytes) -> jb::core::Result<TimezoneData, jb::core::Error>;
 
 [[nodiscard]] auto load_timezone_data(std::string_view timezone) -> jb::core::Result<TimezoneData, jb::core::Error>;
 
 [[nodiscard]] auto load_timezone_data(std::string_view timezone, std::span<std::filesystem::path const> roots)
     -> jb::core::Result<TimezoneData, jb::core::Error>;
+
+[[nodiscard]] auto timezone_local_time(TimezoneData const& data, jb::core::UtcTimePoint utc)
+    -> jb::core::Result<TimezoneLocalTimePoint, jb::core::Error>;
+
+[[nodiscard]] auto timezone_utc_time(TimezoneData const& data, TimezoneLocalTimePoint local)
+    -> jb::core::Result<jb::core::UtcTimePoint, jb::core::Error>;
 
 } // namespace jb::jobu

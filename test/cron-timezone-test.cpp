@@ -1,11 +1,15 @@
 #include "cron_timezone_priv.hpp"
 
+#include "cron.hpp"
 #include "support/temporary_directory.hpp"
+#include "utc_timestamp.hpp"
 
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -191,6 +195,51 @@ void write_file(std::filesystem::path const& path, std::string_view bytes)
     REQUIRE(output.is_open());
     output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     REQUIRE(output.good());
+}
+
+auto parsed_time(std::string_view text) -> UtcTimePoint
+{
+    auto parsed = parse_utc_timestamp(text);
+    REQUIRE(parsed);
+    return *parsed;
+}
+
+auto unix_seconds(std::string_view text) -> std::int64_t
+{
+    return std::chrono::floor<std::chrono::seconds>(parsed_time(text).time_since_epoch()).count();
+}
+
+auto local_time(std::string_view text) -> TimezoneLocalTimePoint
+{
+    return TimezoneLocalTimePoint{parsed_time(text).time_since_epoch()};
+}
+
+void check_local_mapping(TimezoneData const& data, std::string_view local, std::string_view expected_utc)
+{
+    auto mapped = timezone_utc_time(data, local_time(local));
+    REQUIRE(mapped);
+    CHECK(*mapped == parsed_time(expected_utc));
+}
+
+void check_utc_mapping(TimezoneData const& data, std::string_view utc, std::string_view expected_local)
+{
+    auto mapped = timezone_local_time(data, parsed_time(utc));
+    REQUIRE(mapped);
+    CHECK(*mapped == local_time(expected_local));
+}
+
+void check_next(SystemCronEngine const& engine,
+                CronSchedule const&     schedule,
+                std::string_view        lower_bound,
+                std::string_view        expected)
+{
+    auto next = engine.next_after(schedule, parsed_time(lower_bound));
+    if (!next) {
+        INFO("Required Linux timezone '" << schedule.timezone << "' failed: " << next.error().code << " ("
+                                         << next.error().message << ')');
+    }
+    REQUIRE(next);
+    CHECK(*next == parsed_time(expected));
 }
 
 } // namespace
@@ -571,4 +620,304 @@ TEST_CASE("Timezone lookup uses the first valid root and bounds files before rea
     auto const oversized = load_timezone_data("TooLarge", roots);
     REQUIRE_FALSE(oversized);
     CHECK(oversized.error().code == "jobu.schedule.invalid_timezone_data");
+}
+
+TEST_CASE("Timezone mapping uses explicit intervals, the pre-transition type, and overlap policy",
+          "[jobu][cron][timezone]")
+{
+    auto const data = TimezoneData{
+        .transitions =
+            {
+                          {.unix_seconds = unix_seconds("2024-03-31T01:00:00Z"), .local_time_type = 1},
+                          {.unix_seconds = unix_seconds("2024-10-27T01:00:00Z"), .local_time_type = 0},
+                          },
+        .local_time_types =
+            {
+                          {.utc_offset_seconds = 0, .daylight = false},
+                          {.utc_offset_seconds = 3600, .daylight = true},
+                          },
+        .default_local_time_type = 0,
+        .future_rule             = std::nullopt,
+    };
+
+    check_utc_mapping(data, "2024-01-15T12:00:00Z", "2024-01-15T12:00:00Z");
+    check_utc_mapping(data, "2024-06-15T12:00:00Z", "2024-06-15T13:00:00Z");
+    check_local_mapping(data, "2024-06-15T13:00:00Z", "2024-06-15T12:00:00Z");
+
+    check_local_mapping(data, "2024-03-31T01:30:00Z", "2024-03-31T01:30:00Z");
+    check_local_mapping(data, "2024-10-27T01:30:00Z", "2024-10-27T00:30:00Z");
+}
+
+TEST_CASE("Timezone gaps shift by their exact non-hour offset change", "[jobu][cron][timezone]")
+{
+    auto const data = TimezoneData{
+        .transitions =
+            {
+                          {.unix_seconds = unix_seconds("2024-03-31T01:00:00Z"), .local_time_type = 1},
+                          {.unix_seconds = unix_seconds("2024-10-27T10:00:00Z"), .local_time_type = 0},
+                          },
+        .local_time_types =
+            {
+                          {.utc_offset_seconds = 0, .daylight = false},
+                          {.utc_offset_seconds = 1800, .daylight = true},
+                          },
+        .default_local_time_type = 0,
+        .future_rule             = std::nullopt,
+    };
+
+    check_local_mapping(data, "2024-03-31T01:15:00Z", "2024-03-31T01:15:00Z");
+    check_local_mapping(data, "2024-10-27T10:15:00Z", "2024-10-27T09:45:00Z");
+}
+
+TEST_CASE("POSIX future rules cover leap-sensitive dates and out-of-day transitions", "[jobu][cron][timezone]")
+{
+    auto leap_rule = [](PosixDateRuleKind kind, std::uint16_t day) {
+        return TimezoneData{
+            .transitions             = {},
+            .local_time_types        = {{.utc_offset_seconds = 0, .daylight = false}},
+            .default_local_time_type = 0,
+            .future_rule =
+                PosixFutureRule{
+                                        .standard_abbreviation       = "STD",
+                                        .standard_utc_offset_seconds = 0,
+                                        .daylight =
+                        PosixDaylightRule{
+                            .abbreviation       = "DST",
+                            .utc_offset_seconds = 3600,
+                            .start =
+                                PosixDateRule{
+                                    .kind                    = kind,
+                                    .day                     = day,
+                                    .transition_time_seconds = 0,
+                                },
+                            .end =
+                                PosixDateRule{
+                                    .kind                    = kind,
+                                    .day                     = static_cast<std::uint16_t>(day + 1),
+                                    .transition_time_seconds = 0,
+                                },
+                        }, },
+        };
+    };
+
+    auto const julian = leap_rule(PosixDateRuleKind::JulianWithoutLeapDay, 60);
+    check_local_mapping(julian, "2024-03-01T00:30:00Z", "2024-03-01T00:30:00Z");
+
+    auto const numeric = leap_rule(PosixDateRuleKind::JulianWithLeapDay, 59);
+    check_local_mapping(numeric, "2024-02-29T00:30:00Z", "2024-02-29T00:30:00Z");
+    check_local_mapping(numeric, "2023-03-01T00:30:00Z", "2023-03-01T00:30:00Z");
+
+    auto const outside_day = TimezoneData{
+        .transitions             = {},
+        .local_time_types        = {{.utc_offset_seconds = 0, .daylight = false}},
+        .default_local_time_type = 0,
+        .future_rule =
+            PosixFutureRule{
+                                    .standard_abbreviation       = "STD",
+                                    .standard_utc_offset_seconds = 0,
+                                    .daylight =
+                    PosixDaylightRule{
+                        .abbreviation       = "DST",
+                        .utc_offset_seconds = 3600,
+                        .start =
+                            PosixDateRule{
+                                .kind                    = PosixDateRuleKind::MonthWeekday,
+                                .month                   = 3,
+                                .week                    = 2,
+                                .weekday                 = 0,
+                                .transition_time_seconds = -3600,
+                            },
+                        .end =
+                            PosixDateRule{
+                                .kind                    = PosixDateRuleKind::MonthWeekday,
+                                .month                   = 11,
+                                .week                    = 1,
+                                .weekday                 = 0,
+                                .transition_time_seconds = 26 * 3600,
+                            },
+                    }, },
+    };
+    check_local_mapping(outside_day, "2024-03-09T23:30:00Z", "2024-03-09T23:30:00Z");
+    check_local_mapping(outside_day, "2024-11-04T01:30:00Z", "2024-11-04T00:30:00Z");
+}
+
+TEST_CASE("POSIX future rules take over only after the last explicit transition", "[jobu][cron][timezone]")
+{
+    auto const data = TimezoneData{
+        .transitions =
+            {
+                          {.unix_seconds = unix_seconds("2037-11-01T06:00:00Z"), .local_time_type = 0},
+                          },
+        .local_time_types =
+            {
+                          {.utc_offset_seconds = -18000, .daylight = false},
+                          {.utc_offset_seconds = -14400, .daylight = true},
+                          },
+        .default_local_time_type = 0,
+        .future_rule =
+            PosixFutureRule{
+                          .standard_abbreviation       = "EST",
+                          .standard_utc_offset_seconds = -18000,
+                          .daylight =
+                    PosixDaylightRule{
+                        .abbreviation       = "EDT",
+                        .utc_offset_seconds = -14400,
+                        .start =
+                            PosixDateRule{
+                                .kind                    = PosixDateRuleKind::MonthWeekday,
+                                .month                   = 3,
+                                .week                    = 2,
+                                .weekday                 = 0,
+                                .transition_time_seconds = 7200,
+                            },
+                        .end =
+                            PosixDateRule{
+                                .kind                    = PosixDateRuleKind::MonthWeekday,
+                                .month                   = 11,
+                                .week                    = 1,
+                                .weekday                 = 0,
+                                .transition_time_seconds = 7200,
+                            },
+                    }, },
+    };
+
+    check_utc_mapping(data, "2030-07-01T12:00:00Z", "2030-07-01T07:00:00Z");
+    check_local_mapping(data, "2100-07-01T12:00:00Z", "2100-07-01T16:00:00Z");
+}
+
+TEST_CASE("POSIX future rules select the active season across a year boundary", "[jobu][cron][timezone]")
+{
+    auto const data = TimezoneData{
+        .transitions             = {},
+        .local_time_types        = {{.utc_offset_seconds = 37800, .daylight = false}},
+        .default_local_time_type = 0,
+        .future_rule =
+            PosixFutureRule{
+                                    .standard_abbreviation       = "LHST",
+                                    .standard_utc_offset_seconds = 37800,
+                                    .daylight =
+                    PosixDaylightRule{
+                        .abbreviation       = "LHDT",
+                        .utc_offset_seconds = 39600,
+                        .start =
+                            PosixDateRule{
+                                .kind                    = PosixDateRuleKind::MonthWeekday,
+                                .month                   = 10,
+                                .week                    = 1,
+                                .weekday                 = 0,
+                                .transition_time_seconds = 7200,
+                            },
+                        .end =
+                            PosixDateRule{
+                                .kind                    = PosixDateRuleKind::MonthWeekday,
+                                .month                   = 4,
+                                .week                    = 1,
+                                .weekday                 = 0,
+                                .transition_time_seconds = 7200,
+                            },
+                    }, },
+    };
+
+    check_local_mapping(data, "2024-01-15T12:00:00Z", "2024-01-15T01:00:00Z");
+    check_local_mapping(data, "2024-07-15T12:00:00Z", "2024-07-15T01:30:00Z");
+}
+
+TEST_CASE("Timezone mapping reports malformed data and representable-range exhaustion", "[jobu][cron][timezone]")
+{
+    auto invalid = TimezoneData{};
+    auto mapped  = timezone_utc_time(invalid, TimezoneLocalTimePoint{});
+    REQUIRE_FALSE(mapped);
+    CHECK(mapped.error().code == "jobu.schedule.invalid_timezone_data");
+
+    auto const western = TimezoneData{
+        .transitions             = {},
+        .local_time_types        = {{.utc_offset_seconds = -3600, .daylight = false}},
+        .default_local_time_type = 0,
+        .future_rule             = std::nullopt,
+    };
+    mapped = timezone_utc_time(western, TimezoneLocalTimePoint{UtcTimePoint::max().time_since_epoch()});
+    REQUIRE_FALSE(mapped);
+    CHECK(mapped.error().category == ErrorCategory::ResourceExhausted);
+    CHECK(mapped.error().code == "jobu.schedule.out_of_range");
+}
+
+TEST_CASE("System cron engine validates schedules and handles strict UTC occurrences", "[jobu][cron][system]")
+{
+    SystemCronEngine engine;
+    REQUIRE(engine.validate({.expression = "*/15 * * * *", .timezone = "UTC"}));
+
+    auto invalid_expression = engine.validate({.expression = "* * * *", .timezone = "UTC"});
+    REQUIRE_FALSE(invalid_expression);
+    CHECK(invalid_expression.error().code == "jobu.schedule.invalid_expression");
+
+    auto invalid_timezone = engine.validate({.expression = "* * * * *", .timezone = "../UTC"});
+    REQUIRE_FALSE(invalid_timezone);
+    CHECK(invalid_timezone.error().code == "jobu.schedule.invalid_timezone");
+
+    auto const every_minute = CronSchedule{.expression = "* * * * *", .timezone = "UTC"};
+    check_next(engine, every_minute, "2024-05-17T12:34:00Z", "2024-05-17T12:35:00Z");
+    check_next(engine, every_minute, "2024-05-17T12:34:00.000001Z", "2024-05-17T12:35:00Z");
+
+    auto occurrences = next_cron_occurrences(engine,
+                                             {.expression = "0 * * * *", .timezone = "UTC"},
+                                             parsed_time("2024-05-17T12:00:00Z"),
+                                             3);
+    REQUIRE(occurrences);
+    CHECK(*occurrences == std::vector<UtcTimePoint>{
+                              parsed_time("2024-05-17T13:00:00Z"),
+                              parsed_time("2024-05-17T14:00:00Z"),
+                              parsed_time("2024-05-17T15:00:00Z"),
+                          });
+
+    for (auto const count : {0U, 201U}) {
+        auto invalid_count = next_cron_occurrences(engine, every_minute, UtcTimePoint{}, count);
+        REQUIRE_FALSE(invalid_count);
+        CHECK(invalid_count.error().category == ErrorCategory::InvalidArgument);
+        CHECK(invalid_count.error().code == "jobu.schedule.invalid_count");
+    }
+
+    auto exhausted =
+        engine.next_after({.expression = "0 0 31 FEB *", .timezone = "UTC"}, parsed_time("2024-01-01T00:00:00Z"));
+    REQUIRE_FALSE(exhausted);
+    CHECK(exhausted.error().code == "jobu.schedule.no_future_occurrence");
+
+    auto out_of_range = engine.next_after(every_minute, UtcTimePoint::max());
+    REQUIRE_FALSE(out_of_range);
+    CHECK(out_of_range.error().code == "jobu.schedule.out_of_range");
+}
+
+TEST_CASE("System cron engine applies installed Linux timezone gap and overlap rules", "[jobu][cron][system]")
+{
+    SystemCronEngine engine;
+
+    check_next(engine,
+               {.expression = "30 3 31 MAR *", .timezone = "Europe/Tallinn"},
+               "2024-03-30T00:00:00Z",
+               "2024-03-31T01:30:00Z");
+    check_next(engine,
+               {.expression = "30 3 27 OCT *", .timezone = "Europe/Tallinn"},
+               "2024-10-26T00:00:00Z",
+               "2024-10-27T00:30:00Z");
+
+    check_next(engine,
+               {.expression = "30 2 10 MAR *", .timezone = "America/New_York"},
+               "2024-03-09T00:00:00Z",
+               "2024-03-10T07:30:00Z");
+    check_next(engine,
+               {.expression = "30 1 3 NOV *", .timezone = "America/New_York"},
+               "2024-11-02T00:00:00Z",
+               "2024-11-03T05:30:00Z");
+    check_next(engine,
+               {.expression = "30 1 * * *", .timezone = "America/New_York"},
+               "2024-11-03T06:15:00Z",
+               "2024-11-04T06:30:00Z");
+
+    check_next(engine,
+               {.expression = "15 2 6 OCT *", .timezone = "Australia/Lord_Howe"},
+               "2024-10-05T00:00:00Z",
+               "2024-10-05T15:45:00Z");
+    check_next(engine,
+               {.expression = "45 1 7 APR *", .timezone = "Australia/Lord_Howe"},
+               "2024-04-06T00:00:00Z",
+               "2024-04-06T14:45:00Z");
 }
