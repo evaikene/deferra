@@ -113,8 +113,20 @@ class HttpSentinel {
 public:
     static auto create() -> std::optional<HttpSentinel>
     {
-        auto const fd = ::socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        auto const fd = ::socket(AF_INET, SOCK_STREAM, 0);
         if (fd < 0) {
+            return std::nullopt;
+        }
+
+        auto const status_flags = ::fcntl(fd, F_GETFL, 0);
+        if (status_flags < 0 || ::fcntl(fd, F_SETFL, status_flags | O_NONBLOCK) < 0) {
+            static_cast<void>(::close(fd));
+            return std::nullopt;
+        }
+
+        auto const descriptor_flags = ::fcntl(fd, F_GETFD, 0);
+        if (descriptor_flags < 0 || ::fcntl(fd, F_SETFD, descriptor_flags | FD_CLOEXEC) < 0) {
+            static_cast<void>(::close(fd));
             return std::nullopt;
         }
 
@@ -170,7 +182,7 @@ public:
     [[nodiscard]] auto received_connection() const -> bool
     {
         for (;;) {
-            auto const client = ::accept4(_fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+            auto const client = ::accept(_fd, nullptr, nullptr);
             if (client >= 0) {
                 static_cast<void>(::close(client));
                 return true;
