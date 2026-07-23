@@ -19,6 +19,8 @@ target_sources(${TARGET}
         attempt_repository_priv.hpp
         cron_expression_priv.cpp
         cron_expression_priv.hpp
+        cron_timezone_priv.cpp
+        cron_timezone_priv.hpp
         domain_storage_priv.cpp
         domain_storage_priv.hpp
         idempotency_codec_priv.cpp

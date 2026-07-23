@@ -32,6 +32,15 @@ add_executable(${TARGET} cron-expression-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU checked TZif and POSIX-footer reader test
+set(TARGET "cron-timezone-test")
+add_executable(${TARGET}
+    cron-timezone-test.cpp
+    support/temporary_directory.cpp
+)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # JobU domain storage adapter test
 set(TARGET "domain-storage-test")
 add_executable(${TARGET} domain-storage-test.cpp)
