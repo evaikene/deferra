@@ -3,9 +3,11 @@
 #include "file.hpp"
 #include "text_validation_priv.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -149,6 +151,16 @@ auto invalid_timezone_data(std::string detail) -> jb::core::Error
         .code     = "jobu.schedule.invalid_timezone_data",
         .message  = "Timezone data is invalid",
         .detail   = std::move(detail),
+    };
+}
+
+auto occurrence_out_of_range() -> jb::core::Error
+{
+    return {
+        .category = jb::core::ErrorCategory::ResourceExhausted,
+        .code     = "jobu.schedule.out_of_range",
+        .message  = "Cron occurrence is outside the representable range",
+        .detail   = {},
     };
 }
 
@@ -588,6 +600,371 @@ auto parse_posix_footer(std::string_view footer) -> std::optional<std::optional<
     return parsed;
 }
 
+using OffsetResult = jb::core::Result<std::int32_t, jb::core::Error>;
+
+struct OffsetTransition {
+    std::int64_t utc_seconds{};
+    std::int32_t offset_before{};
+    std::int32_t offset_after{};
+};
+
+struct MappingCandidates {
+    std::vector<jb::core::UtcTimePoint> values;
+    bool                                range_exhausted{false};
+};
+
+using MappingCandidatesResult = jb::core::Result<MappingCandidates, jb::core::Error>;
+
+auto checked_add_i64(std::int64_t left, std::int64_t right, std::int64_t& result) noexcept -> bool
+{
+    if ((right > 0 && left > std::numeric_limits<std::int64_t>::max() - right) ||
+        (right < 0 && left < std::numeric_limits<std::int64_t>::min() - right)) {
+        return false;
+    }
+    result = left + right;
+    return true;
+}
+
+template <typename TimePoint>
+auto shift_time_point(TimePoint value, std::int64_t seconds) -> std::optional<TimePoint>
+{
+    using Duration = typename TimePoint::duration;
+
+    auto const delta = std::chrono::duration_cast<Duration>(std::chrono::seconds{seconds});
+    auto const count = value.time_since_epoch();
+    if ((delta > Duration::zero() && count > Duration::max() - delta) ||
+        (delta < Duration::zero() && count < Duration::min() - delta)) {
+        return std::nullopt;
+    }
+    return TimePoint{count + delta};
+}
+
+auto valid_date_rule(PosixDateRule const& rule) noexcept -> bool
+{
+    constexpr auto maximum_transition_time = kMaximumPosixHour * 3600 + 59 * 60 + 59;
+    if (rule.transition_time_seconds < -maximum_transition_time ||
+        rule.transition_time_seconds > maximum_transition_time) {
+        return false;
+    }
+
+    switch (rule.kind) {
+        case PosixDateRuleKind::MonthWeekday:
+            return rule.month >= 1 && rule.month <= 12 && rule.week >= 1 && rule.week <= 5 && rule.weekday <= 6;
+        case PosixDateRuleKind::JulianWithoutLeapDay:
+            return rule.day >= 1 && rule.day <= 365;
+        case PosixDateRuleKind::JulianWithLeapDay:
+            return rule.day <= 365;
+    }
+    return false;
+}
+
+auto valid_mapping_data(TimezoneData const& data) noexcept -> bool
+{
+    if (data.local_time_types.empty() || data.local_time_types.size() > kMaximumTypeCount ||
+        data.default_local_time_type >= data.local_time_types.size()) {
+        return false;
+    }
+
+    for (auto const& type : data.local_time_types) {
+        if (type.utc_offset_seconds < kMinimumUtcOffset || type.utc_offset_seconds > kMaximumUtcOffset) {
+            return false;
+        }
+    }
+
+    auto first = true;
+    auto last  = std::int64_t{};
+    for (auto const& transition : data.transitions) {
+        if (transition.local_time_type >= data.local_time_types.size() || (!first && transition.unix_seconds <= last)) {
+            return false;
+        }
+        first = false;
+        last  = transition.unix_seconds;
+    }
+
+    if (!data.future_rule) {
+        return true;
+    }
+
+    auto const& future = *data.future_rule;
+    if (future.standard_utc_offset_seconds < kMinimumUtcOffset ||
+        future.standard_utc_offset_seconds > kMaximumUtcOffset) {
+        return false;
+    }
+    if (!future.daylight) {
+        return true;
+    }
+    return future.daylight->utc_offset_seconds >= kMinimumUtcOffset &&
+           future.daylight->utc_offset_seconds <= kMaximumUtcOffset && valid_date_rule(future.daylight->start) &&
+           valid_date_rule(future.daylight->end);
+}
+
+auto transition_local_date(int year_value, PosixDateRule const& rule) -> std::optional<std::chrono::sys_days>
+{
+    using namespace std::chrono;
+
+    auto const current_year = year{year_value};
+    if (!current_year.ok()) {
+        return std::nullopt;
+    }
+
+    if (rule.kind == PosixDateRuleKind::MonthWeekday) {
+        auto const current_month = month{rule.month};
+        auto const first         = sys_days{current_year / current_month / day{1}};
+        auto const first_weekday = weekday{first}.c_encoding();
+        auto       day_value     = 1U + (rule.weekday + 7U - first_weekday) % 7U + 7U * (rule.week - 1U);
+        auto const last_day =
+            static_cast<unsigned>(year_month_day_last{current_year, month_day_last{current_month}}.day());
+        if (day_value > last_day) {
+            day_value -= 7U;
+        }
+        auto const date = current_year / current_month / day{day_value};
+        if (!date.ok()) {
+            return std::nullopt;
+        }
+        return sys_days{date};
+    }
+
+    auto day_offset = static_cast<unsigned>(rule.day);
+    if (rule.kind == PosixDateRuleKind::JulianWithoutLeapDay) {
+        --day_offset;
+        if (current_year.is_leap() && rule.day >= 60) {
+            ++day_offset;
+        }
+    }
+    return sys_days{current_year / January / day{1}} + days{day_offset};
+}
+
+auto transition_utc_seconds(int year_value, PosixDateRule const& rule, std::int32_t offset_before)
+    -> std::optional<std::int64_t>
+{
+    auto const date = transition_local_date(year_value, rule);
+    if (!date) {
+        return std::nullopt;
+    }
+
+    auto seconds = std::chrono::duration_cast<std::chrono::seconds>(date->time_since_epoch()).count();
+    if (!checked_add_i64(seconds, rule.transition_time_seconds, seconds) ||
+        !checked_add_i64(seconds, -static_cast<std::int64_t>(offset_before), seconds)) {
+        return std::nullopt;
+    }
+    return seconds;
+}
+
+auto append_future_transitions(PosixFutureRule const&         rule,
+                               int                            first_year,
+                               int                            last_year,
+                               std::vector<OffsetTransition>& output) -> bool
+{
+    if (!rule.daylight) {
+        return true;
+    }
+
+    for (auto current_year = first_year; current_year <= last_year; ++current_year) {
+        auto const start = transition_utc_seconds(current_year, rule.daylight->start, rule.standard_utc_offset_seconds);
+        auto const end   = transition_utc_seconds(current_year, rule.daylight->end, rule.daylight->utc_offset_seconds);
+        if (!start || !end) {
+            return false;
+        }
+        output.push_back({
+            .utc_seconds   = *start,
+            .offset_before = rule.standard_utc_offset_seconds,
+            .offset_after  = rule.daylight->utc_offset_seconds,
+        });
+        output.push_back({
+            .utc_seconds   = *end,
+            .offset_before = rule.daylight->utc_offset_seconds,
+            .offset_after  = rule.standard_utc_offset_seconds,
+        });
+    }
+    std::stable_sort(output.begin(), output.end(), [](auto const& left, auto const& right) {
+        return left.utc_seconds < right.utc_seconds;
+    });
+    return true;
+}
+
+auto year_containing_seconds(std::int64_t seconds) -> std::optional<int>
+{
+    using namespace std::chrono;
+
+    auto const value = year_month_day{floor<days>(sys_seconds{std::chrono::seconds{seconds}})}.year();
+    if (!value.ok()) {
+        return std::nullopt;
+    }
+    return static_cast<int>(value);
+}
+
+auto future_offset_at(TimezoneData const& data, std::int64_t utc_seconds) -> OffsetResult
+{
+    auto const& rule = *data.future_rule;
+    if (!rule.daylight) {
+        return OffsetResult::success(rule.standard_utc_offset_seconds);
+    }
+
+    auto const candidate_year = year_containing_seconds(utc_seconds);
+    if (!candidate_year || *candidate_year < static_cast<int>(std::chrono::year::min()) + 2 ||
+        *candidate_year > static_cast<int>(std::chrono::year::max()) - 2) {
+        return OffsetResult::failure(occurrence_out_of_range());
+    }
+
+    std::vector<OffsetTransition> transitions;
+    transitions.reserve(10);
+    if (!append_future_transitions(rule, *candidate_year - 2, *candidate_year + 2, transitions)) {
+        return OffsetResult::failure(occurrence_out_of_range());
+    }
+
+    auto offset = rule.standard_utc_offset_seconds;
+    auto cutoff = std::optional<std::int64_t>{};
+    if (!data.transitions.empty()) {
+        auto const& last = data.transitions.back();
+        offset           = data.local_time_types[last.local_time_type].utc_offset_seconds;
+        cutoff           = last.unix_seconds;
+    }
+
+    for (auto const& transition : transitions) {
+        if ((!cutoff || transition.utc_seconds > *cutoff) && transition.utc_seconds <= utc_seconds) {
+            offset = transition.offset_after;
+        }
+    }
+    return OffsetResult::success(offset);
+}
+
+auto offset_at(TimezoneData const& data, jb::core::UtcTimePoint utc) -> OffsetResult
+{
+    auto const utc_seconds = std::chrono::floor<std::chrono::seconds>(utc.time_since_epoch()).count();
+    if (data.transitions.empty()) {
+        if (data.future_rule) {
+            return future_offset_at(data, utc_seconds);
+        }
+        return OffsetResult::success(data.local_time_types[data.default_local_time_type].utc_offset_seconds);
+    }
+
+    if (utc_seconds > data.transitions.back().unix_seconds && data.future_rule) {
+        return future_offset_at(data, utc_seconds);
+    }
+
+    auto const transition = std::upper_bound(
+        data.transitions.begin(),
+        data.transitions.end(),
+        utc_seconds,
+        [](std::int64_t value, TimezoneTransition const& candidate) { return value < candidate.unix_seconds; });
+    auto const type =
+        transition == data.transitions.begin() ? data.default_local_time_type : std::prev(transition)->local_time_type;
+    return OffsetResult::success(data.local_time_types[type].utc_offset_seconds);
+}
+
+auto candidate_offsets(TimezoneData const& data) -> std::vector<std::int32_t>
+{
+    std::vector<std::int32_t> offsets;
+    offsets.reserve(data.local_time_types.size() + 2);
+    for (auto const& type : data.local_time_types) {
+        offsets.push_back(type.utc_offset_seconds);
+    }
+    if (data.future_rule) {
+        offsets.push_back(data.future_rule->standard_utc_offset_seconds);
+        if (data.future_rule->daylight) {
+            offsets.push_back(data.future_rule->daylight->utc_offset_seconds);
+        }
+    }
+    std::sort(offsets.begin(), offsets.end());
+    offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end());
+    return offsets;
+}
+
+auto exact_utc_mappings(TimezoneData const& data, TimezoneLocalTimePoint local) -> MappingCandidatesResult
+{
+    MappingCandidates mappings;
+    for (auto const offset : candidate_offsets(data)) {
+        auto const shifted = shift_time_point(local, -static_cast<std::int64_t>(offset));
+        if (!shifted) {
+            mappings.range_exhausted = true;
+            continue;
+        }
+
+        auto const candidate = jb::core::UtcTimePoint{shifted->time_since_epoch()};
+        auto const active    = offset_at(data, candidate);
+        if (!active) {
+            return MappingCandidatesResult::failure(std::move(active).error());
+        }
+        if (*active == offset) {
+            mappings.values.push_back(candidate);
+        }
+    }
+
+    std::sort(mappings.values.begin(), mappings.values.end());
+    mappings.values.erase(std::unique(mappings.values.begin(), mappings.values.end()), mappings.values.end());
+    return MappingCandidatesResult::success(std::move(mappings));
+}
+
+auto gap_contains(OffsetTransition const& transition, std::int64_t local_seconds) -> bool
+{
+    if (transition.offset_after <= transition.offset_before) {
+        return false;
+    }
+
+    std::int64_t start{};
+    std::int64_t end{};
+    return checked_add_i64(transition.utc_seconds, transition.offset_before, start) &&
+           checked_add_i64(transition.utc_seconds, transition.offset_after, end) && local_seconds >= start &&
+           local_seconds < end;
+}
+
+auto gap_shift(TimezoneData const& data, TimezoneLocalTimePoint local)
+    -> jb::core::Result<std::optional<std::int64_t>, jb::core::Error>
+{
+    auto const   local_seconds = std::chrono::floor<std::chrono::seconds>(local.time_since_epoch()).count();
+    std::int64_t first_transition{};
+    std::int64_t last_transition{};
+    if (!checked_add_i64(local_seconds, -static_cast<std::int64_t>(kMaximumUtcOffset), first_transition) ||
+        !checked_add_i64(local_seconds, -static_cast<std::int64_t>(kMinimumUtcOffset), last_transition)) {
+        return jb::core::Result<std::optional<std::int64_t>, jb::core::Error>::failure(occurrence_out_of_range());
+    }
+
+    auto transition = std::lower_bound(
+        data.transitions.begin(),
+        data.transitions.end(),
+        first_transition,
+        [](TimezoneTransition const& candidate, std::int64_t value) { return candidate.unix_seconds < value; });
+    for (; transition != data.transitions.end() && transition->unix_seconds <= last_transition; ++transition) {
+        auto const index = static_cast<std::size_t>(std::distance(data.transitions.begin(), transition));
+        auto const before_type =
+            index == 0 ? data.default_local_time_type : data.transitions[index - 1].local_time_type;
+        auto const candidate = OffsetTransition{
+            .utc_seconds   = transition->unix_seconds,
+            .offset_before = data.local_time_types[before_type].utc_offset_seconds,
+            .offset_after  = data.local_time_types[transition->local_time_type].utc_offset_seconds,
+        };
+        if (gap_contains(candidate, local_seconds)) {
+            return jb::core::Result<std::optional<std::int64_t>, jb::core::Error>::success(
+                static_cast<std::int64_t>(candidate.offset_after) - candidate.offset_before);
+        }
+    }
+
+    if (!data.future_rule || !data.future_rule->daylight) {
+        return jb::core::Result<std::optional<std::int64_t>, jb::core::Error>::success(std::nullopt);
+    }
+
+    auto const candidate_year = year_containing_seconds(local_seconds);
+    if (!candidate_year || *candidate_year < static_cast<int>(std::chrono::year::min()) + 2 ||
+        *candidate_year > static_cast<int>(std::chrono::year::max()) - 2) {
+        return jb::core::Result<std::optional<std::int64_t>, jb::core::Error>::failure(occurrence_out_of_range());
+    }
+
+    std::vector<OffsetTransition> transitions;
+    transitions.reserve(10);
+    if (!append_future_transitions(*data.future_rule, *candidate_year - 2, *candidate_year + 2, transitions)) {
+        return jb::core::Result<std::optional<std::int64_t>, jb::core::Error>::failure(occurrence_out_of_range());
+    }
+
+    auto const cutoff = data.transitions.empty() ? std::optional<std::int64_t>{} : data.transitions.back().unix_seconds;
+    for (auto const& candidate : transitions) {
+        if ((!cutoff || candidate.utc_seconds > *cutoff) && gap_contains(candidate, local_seconds)) {
+            return jb::core::Result<std::optional<std::int64_t>, jb::core::Error>::success(
+                static_cast<std::int64_t>(candidate.offset_after) - candidate.offset_before);
+        }
+    }
+    return jb::core::Result<std::optional<std::int64_t>, jb::core::Error>::success(std::nullopt);
+}
+
 auto valid_timezone_name(std::string_view timezone) noexcept -> bool
 {
     if (timezone.empty() || timezone.size() > 255 || !detail::is_valid_utf8(timezone) ||
@@ -745,6 +1122,67 @@ auto load_timezone_data(std::string_view timezone, std::span<std::filesystem::pa
         return TimezoneResult::failure(invalid_timezone_data("file read"));
     }
     return parse_timezone_data(bytes);
+}
+
+auto timezone_local_time(TimezoneData const& data, jb::core::UtcTimePoint utc)
+    -> jb::core::Result<TimezoneLocalTimePoint, jb::core::Error>
+{
+    using Result = jb::core::Result<TimezoneLocalTimePoint, jb::core::Error>;
+
+    if (!valid_mapping_data(data)) {
+        return Result::failure(invalid_timezone_data("mapping data"));
+    }
+
+    auto const offset = offset_at(data, utc);
+    if (!offset) {
+        return Result::failure(std::move(offset).error());
+    }
+    auto const local = shift_time_point(utc, *offset);
+    if (!local) {
+        return Result::failure(occurrence_out_of_range());
+    }
+    return Result::success(TimezoneLocalTimePoint{local->time_since_epoch()});
+}
+
+auto timezone_utc_time(TimezoneData const& data, TimezoneLocalTimePoint local)
+    -> jb::core::Result<jb::core::UtcTimePoint, jb::core::Error>
+{
+    using Result = jb::core::Result<jb::core::UtcTimePoint, jb::core::Error>;
+
+    if (!valid_mapping_data(data)) {
+        return Result::failure(invalid_timezone_data("mapping data"));
+    }
+
+    auto mappings = exact_utc_mappings(data, local);
+    if (!mappings) {
+        return Result::failure(std::move(mappings).error());
+    }
+    if (!mappings->values.empty()) {
+        return Result::success(mappings->values.front());
+    }
+
+    auto shift = gap_shift(data, local);
+    if (!shift) {
+        return Result::failure(std::move(shift).error());
+    }
+    if (!*shift) {
+        return Result::failure(mappings->range_exhausted ? occurrence_out_of_range()
+                                                         : invalid_timezone_data("local mapping"));
+    }
+
+    auto const shifted_local = shift_time_point(local, **shift);
+    if (!shifted_local) {
+        return Result::failure(occurrence_out_of_range());
+    }
+    auto shifted_mappings = exact_utc_mappings(data, *shifted_local);
+    if (!shifted_mappings) {
+        return Result::failure(std::move(shifted_mappings).error());
+    }
+    if (shifted_mappings->values.empty()) {
+        return Result::failure(shifted_mappings->range_exhausted ? occurrence_out_of_range()
+                                                                 : invalid_timezone_data("gap mapping"));
+    }
+    return Result::success(shifted_mappings->values.front());
 }
 
 } // namespace jb::jobu
