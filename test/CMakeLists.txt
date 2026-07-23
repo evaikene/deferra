@@ -466,4 +466,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
         COMMAND $<TARGET_FILE:${TARGET}> $<TARGET_FILE:jobud> $<TARGET_FILE:jobuctl>
     )
     set_tests_properties(${TARGET} PROPERTIES TIMEOUT 60)
+
+    # Linux job management executable lifecycle, restart, and persistence integration test
+    set(TARGET "jobuctl-job-management-test")
+    add_executable(${TARGET}
+        jobuctl-job-management-test.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET} PRIVATE db-sqlite)
+    add_dependencies(${TARGET} jobud jobuctl)
+    add_test(NAME ${TARGET}
+        COMMAND $<TARGET_FILE:${TARGET}> $<TARGET_FILE:jobud> $<TARGET_FILE:jobuctl>
+    )
+    set_tests_properties(${TARGET} PROPERTIES TIMEOUT 90)
 endif()
