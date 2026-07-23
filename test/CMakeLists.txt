@@ -244,11 +244,15 @@ target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JobU executable smoke tests
-add_test(NAME jobud-version COMMAND $<TARGET_FILE:jobud> --version)
-add_test(NAME jobud-usage COMMAND $<TARGET_FILE:jobud>)
-set_tests_properties(jobud-usage PROPERTIES
-    WILL_FAIL TRUE
-)
+if(TARGET jobud)
+    add_test(NAME jobud-version COMMAND $<TARGET_FILE:jobud> --version)
+    add_test(NAME jobud-usage COMMAND $<TARGET_FILE:jobud>)
+    add_test(NAME jobud-missing-database COMMAND $<TARGET_FILE:jobud> --socket unused.sock)
+    add_test(NAME jobud-missing-socket COMMAND $<TARGET_FILE:jobud> --database unused.sqlite)
+    set_tests_properties(jobud-usage jobud-missing-database jobud-missing-socket PROPERTIES
+        WILL_FAIL TRUE
+    )
+endif()
 
 add_test(NAME jobuctl-version COMMAND $<TARGET_FILE:jobuctl> --version)
 add_test(NAME jobuctl-usage COMMAND $<TARGET_FILE:jobuctl>)
@@ -398,19 +402,21 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
     if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
         set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
     endif()
+endif()
 
-    # Platform foreground daemon and job control executable integration test
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
+    # Platform foreground daemon database bootstrap and job control executable integration test
     set(TARGET "jobuctl-system-info-test")
     add_executable(${TARGET}
         jobuctl-system-info-test.cpp
         support/temporary_directory.cpp
     )
-    target_link_libraries(${TARGET} PRIVATE core)
+    target_link_libraries(${TARGET} PRIVATE db-sqlite)
     add_dependencies(${TARGET} jobud jobuctl)
     add_test(NAME ${TARGET}
         COMMAND $<TARGET_FILE:${TARGET}> $<TARGET_FILE:jobud> $<TARGET_FILE:jobuctl> ${PROJECT_VERSION}
     )
-    set_tests_properties(${TARGET} PROPERTIES TIMEOUT 15)
+    set_tests_properties(${TARGET} PROPERTIES TIMEOUT 40)
     if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
         set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
     endif()

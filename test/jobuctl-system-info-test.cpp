@@ -1,5 +1,9 @@
 #include "support/temporary_directory.hpp"
 
+#include "database.hpp"
+#include "query.hpp"
+#include "sqlite/sqlite_driver.hpp"
+
 #include <fmt/format.h>
 
 #include <cerrno>
@@ -9,6 +13,7 @@
 #include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -106,15 +111,22 @@ auto fail(std::string_view message) -> int
     return EXIT_FAILURE;
 }
 
-auto spawn_jobud(std::filesystem::path const& executable, std::filesystem::path const& socket_path)
-    -> std::optional<ChildProcess>
+auto spawn_jobud(std::filesystem::path const& executable,
+                 std::filesystem::path const& socket_path,
+                 std::filesystem::path const& database_path) -> std::optional<ChildProcess>
 {
     auto const pid = ::fork();
     if (pid < 0) {
         return std::nullopt;
     }
     if (pid == 0) {
-        ::execl(executable.c_str(), executable.c_str(), "--socket", socket_path.c_str(), static_cast<char*>(nullptr));
+        ::execl(executable.c_str(),
+                executable.c_str(),
+                "--socket",
+                socket_path.c_str(),
+                "--database",
+                database_path.c_str(),
+                static_cast<char*>(nullptr));
         ::_exit(127);
     }
     return ChildProcess{pid};
@@ -134,6 +146,38 @@ auto wait_for_listener(ChildProcess& daemon, std::filesystem::path const& socket
         std::this_thread::sleep_for(10ms);
     }
     return false;
+}
+
+auto wait_for_exit(ChildProcess& child) -> std::optional<int>
+{
+    auto const deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (auto status = child.try_wait()) {
+            return status;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    return std::nullopt;
+}
+
+auto mark_schema_newer(std::filesystem::path const& database_path) -> bool
+{
+    auto database = jb::db::Database{
+        std::make_unique<jb::db::sqlite::Driver>(jb::db::sqlite::Options{.database_file = database_path})};
+    if (!database.open()) {
+        return false;
+    }
+
+    auto updated  = false;
+    auto finished = false;
+    {
+        jb::db::Query query{database};
+        auto          executed = query.exec("UPDATE jobu_schema SET version = 2 WHERE singleton = 1");
+        updated                = executed && query.num_rows_affected() == 1;
+        finished               = static_cast<bool>(query.finish());
+    }
+    auto const closed = database.close();
+    return updated && finished && closed;
 }
 
 void read_available(int fd, std::string& output, bool& eof)
@@ -223,13 +267,17 @@ auto main(int argc, char* argv[]) -> int
     }
 
     jb::test::TemporaryDirectory directory;
-    auto const                   socket_path = directory.path() / "jobud.sock";
-    auto                         daemon      = spawn_jobud(argv[1], socket_path);
+    auto const                   database_path = directory.path() / "jobu.sqlite";
+    auto const                   socket_path   = directory.path() / "jobud-fresh.sock";
+    auto                         daemon        = spawn_jobud(argv[1], socket_path, database_path);
     if (!daemon) {
         return fail("unable to start jobud");
     }
     if (!wait_for_listener(*daemon, socket_path)) {
         return fail("jobud did not begin listening before the deadline");
+    }
+    if (!std::filesystem::is_regular_file(database_path)) {
+        return fail("jobud did not create the database file");
     }
 
     auto const command = run_jobuctl(argv[2], socket_path);
@@ -251,6 +299,44 @@ auto main(int argc, char* argv[]) -> int
     }
 
     daemon->terminate();
+
+    auto const reopen_socket = directory.path() / "jobud-reopen.sock";
+    auto       reopened      = spawn_jobud(argv[1], reopen_socket, database_path);
+    if (!reopened) {
+        return fail("unable to restart jobud");
+    }
+    if (!wait_for_listener(*reopened, reopen_socket)) {
+        return fail("jobud did not reopen the database before the deadline");
+    }
+
+    auto const reopened_command = run_jobuctl(argv[2], reopen_socket);
+    if (!reopened_command.completed || !WIFEXITED(reopened_command.status) ||
+        WEXITSTATUS(reopened_command.status) != EXIT_SUCCESS) {
+        fmt::print(stderr, "{}", reopened_command.output);
+        return fail("jobuctl could not query the reopened daemon");
+    }
+    reopened->terminate();
+
+    if (!mark_schema_newer(database_path)) {
+        return fail("unable to mark the database schema as newer");
+    }
+
+    auto const newer_socket = directory.path() / "jobud-newer.sock";
+    auto       newer        = spawn_jobud(argv[1], newer_socket, database_path);
+    if (!newer) {
+        return fail("unable to start jobud against the newer schema");
+    }
+    auto const newer_status = wait_for_exit(*newer);
+    if (!newer_status) {
+        return fail("jobud did not reject the newer schema before the deadline");
+    }
+    if (!WIFEXITED(*newer_status) || WEXITSTATUS(*newer_status) == EXIT_SUCCESS) {
+        return fail("jobud did not exit unsuccessfully for the newer schema");
+    }
+    if (std::filesystem::exists(newer_socket)) {
+        return fail("jobud created a socket before rejecting the newer schema");
+    }
+
     auto const cleanup_error = directory.cleanup();
     if (cleanup_error) {
         return fail("temporary directory cleanup failed");
