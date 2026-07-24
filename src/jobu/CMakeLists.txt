@@ -55,6 +55,7 @@ target_sources(${TARGET}
         utc_timestamp.cpp
     PUBLIC
         attempt.hpp
+        attempt_executor.hpp
         attribute.hpp
         attribute_registry.hpp
         cron.hpp
