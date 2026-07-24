@@ -305,8 +305,8 @@ public:
      * @return Committed definition with its revision incremented once, or a validation, not-found, deleted, revision,
      * state, immutable, schedule-snapshot, cron, attribute, payload, or database Error. An unstarted occurrence keeps
      * its run identity and receives the new revision, snapshot, and schedule time atomically. A running or
-     * retry-waiting recurring occurrence keeps its old snapshot and accepts only a recurring effective schedule, so the
-     * committed definition applies to its future successor. Schedule conversion and snapshot refresh require the
+     * retry-waiting recurring occurrence keeps its old snapshot; supplied definition fields update only the durable
+     * definition and apply to its future successor. Conversion to a one-time schedule and snapshot refresh require the
      * current occurrence to be scheduled with no attempt; even a pending attempt prevents them. One-time definitions
      * remain immutable after execution starts. No attempt, callback, or external work starts.
      */
