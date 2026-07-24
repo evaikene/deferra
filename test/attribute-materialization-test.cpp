@@ -257,18 +257,41 @@ auto attribute_document(JsonValue::Object values) -> JsonValue
 
 TEST_CASE("Standard attributes expose the specified definitions and defaults", "[jobu][attribute][materialization]")
 {
-    StandardAttributeRegistry registry;
-    REQUIRE(registry.definitions().size() == 9U);
+    StandardAttributeRegistry                  registry;
+    constexpr std::array<std::string_view, 11> expected_names{
+        "job.timeout",
+        "output.capture",
+        "output.stderr_limit",
+        "output.stdout_limit",
+        "retry.initial_delay",
+        "retry.jitter",
+        "retry.max_attempts",
+        "retry.max_delay",
+        "retry.mode",
+        "retry.multiplier",
+        "retry.strategy",
+    };
+    auto const definitions = registry.definitions();
+    REQUIRE(definitions.size() == expected_names.size());
+    for (std::size_t index = 0; index < definitions.size(); ++index) {
+        CHECK(definitions[index].name == expected_names[index]);
+    }
+    REQUIRE(registry.find("retry.jitter") != nullptr);
+    REQUIRE(registry.find("retry.multiplier") != nullptr);
+    CHECK(registry.find("retry.jitter")->type == AttributeType::Number);
+    CHECK(registry.find("retry.multiplier")->type == AttributeType::Number);
 
     auto materialized = materialize_attributes(registry, {}, {}, {});
     REQUIRE(materialized);
-    REQUIRE(materialized->size() == 9U);
+    REQUIRE(materialized->size() == expected_names.size());
     CHECK(std::get<Duration>(materialized->at("job.timeout").data) == 120s);
     CHECK(std::get<std::int64_t>(materialized->at("retry.max_attempts").data) == 1);
     CHECK(std::get<std::string>(materialized->at("retry.strategy").data) == "fixed");
     CHECK(std::get<Duration>(materialized->at("retry.initial_delay").data) == 0s);
+    CHECK(std::get<double>(materialized->at("retry.jitter").data) == 0.0);
     CHECK(std::get<Duration>(materialized->at("retry.max_delay").data) == 24h);
     CHECK(std::get<std::string>(materialized->at("retry.mode").data) == "reschedule");
+    CHECK(std::get<double>(materialized->at("retry.multiplier").data) == 2.0);
     CHECK(std::get<std::string>(materialized->at("output.capture").data) == "on_error");
     CHECK(std::get<std::int64_t>(materialized->at("output.stdout_limit").data) == 1024 * 1024);
     CHECK(std::get<std::int64_t>(materialized->at("output.stderr_limit").data) == 1024 * 1024);
@@ -307,6 +330,14 @@ TEST_CASE("Standard attributes enforce every field constraint", "[jobu][attribut
     CHECK_FALSE(validate("retry.initial_delay", {.data = -1ns}));
     CHECK_FALSE(validate("retry.initial_delay", {.data = 24h + 1ns}));
 
+    CHECK(validate("retry.jitter", {.data = 0.0}));
+    CHECK(validate("retry.jitter", {.data = 1.0}));
+    CHECK_FALSE(validate("retry.jitter", {.data = -0.01}));
+    CHECK_FALSE(validate("retry.jitter", {.data = 1.01}));
+    CHECK_FALSE(validate("retry.jitter", {.data = std::numeric_limits<double>::quiet_NaN()}));
+    CHECK_FALSE(validate("retry.jitter", {.data = std::numeric_limits<double>::infinity()}));
+    CHECK_FALSE(validate("retry.jitter", {.data = std::int64_t{0}}));
+
     CHECK(validate("retry.max_delay", {.data = 0s}));
     CHECK(validate("retry.max_delay", {.data = std::chrono::days{30}}));
     CHECK_FALSE(validate("retry.max_delay", {.data = -1ns}));
@@ -315,6 +346,14 @@ TEST_CASE("Standard attributes enforce every field constraint", "[jobu][attribut
     CHECK(validate("retry.mode", {.data = std::string{"blocking"}}));
     CHECK(validate("retry.mode", {.data = std::string{"reschedule"}}));
     CHECK_FALSE(validate("retry.mode", {.data = std::string{"immediate"}}));
+
+    CHECK(validate("retry.multiplier", {.data = 1.0}));
+    CHECK(validate("retry.multiplier", {.data = 100.0}));
+    CHECK_FALSE(validate("retry.multiplier", {.data = 0.99}));
+    CHECK_FALSE(validate("retry.multiplier", {.data = 100.01}));
+    CHECK_FALSE(validate("retry.multiplier", {.data = std::numeric_limits<double>::quiet_NaN()}));
+    CHECK_FALSE(validate("retry.multiplier", {.data = std::numeric_limits<double>::infinity()}));
+    CHECK_FALSE(validate("retry.multiplier", {.data = std::int64_t{2}}));
 
     for (auto const* capture : {"none", "on_error", "always"}) {
         CHECK(validate("output.capture", {.data = std::string{capture}}));
@@ -330,6 +369,24 @@ TEST_CASE("Standard attributes enforce every field constraint", "[jobu][attribut
 
     CHECK(validate("missing.value", {.data = true}).error().code == "jobu.attribute.unknown");
     CHECK(validate("job.timeout", {.data = std::int64_t{1}}).error().code == "jobu.attribute.invalid_type");
+}
+
+TEST_CASE("Phase 4 retry number attributes round trip through public JSON", "[jobu][attribute][json]")
+{
+    StandardAttributeRegistry registry;
+    AttributeSet              values{
+        {"retry.jitter",     {.data = 0.25}},
+        {"retry.multiplier", {.data = 3.5} },
+    };
+
+    auto encoded = attribute_set_to_json(values, registry, AttributeScope::Job);
+    REQUIRE(encoded);
+    CHECK(encoded->as_object().at("retry.jitter").as_double() == 0.25);
+    CHECK(encoded->as_object().at("retry.multiplier").as_double() == 3.5);
+
+    auto decoded = attribute_set_from_json(*encoded, registry, AttributeScope::Job);
+    REQUIRE(decoded);
+    CHECK(same_set(*decoded, values));
 }
 
 TEST_CASE("Attribute materialization applies deterministic precedence and cross-field validation",
