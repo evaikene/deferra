@@ -436,6 +436,12 @@ StandardAttributeRegistry::StandardAttributeRegistry()
                   .built_in_default = {.data = jb::core::Duration::zero()},
                   .description      = "Delay before the first retry",
               }, {
+                  .name             = "retry.jitter",
+                  .type             = AttributeType::Number,
+                  .scopes           = standard_scopes(),
+                  .built_in_default = {.data = 0.0},
+                  .description      = "Symmetric retry delay jitter fraction",
+              }, {
                   .name             = "retry.max_attempts",
                   .type             = AttributeType::Integer,
                   .scopes           = standard_scopes(),
@@ -453,6 +459,12 @@ StandardAttributeRegistry::StandardAttributeRegistry()
                   .scopes           = standard_scopes(),
                   .built_in_default = {.data = std::string{"reschedule"}},
                   .description      = "Whether retry delays block or reschedule queue capacity",
+              }, {
+                  .name             = "retry.multiplier",
+                  .type             = AttributeType::Number,
+                  .scopes           = standard_scopes(),
+                  .built_in_default = {.data = 2.0},
+                  .description      = "Exponential retry delay multiplier",
               }, {
                   .name             = "retry.strategy",
                   .type             = AttributeType::String,
@@ -514,6 +526,12 @@ auto StandardAttributeRegistry::validate(std::string_view name, AttributeValue c
             return AttributeResult::failure(invalid_value());
         }
     }
+    else if (name == "retry.jitter") {
+        auto const jitter = std::get<double>(value.data);
+        if (!std::isfinite(jitter) || jitter < 0.0 || jitter > 1.0) {
+            return AttributeResult::failure(invalid_value());
+        }
+    }
     else if (name == "retry.max_delay") {
         auto const duration = std::get<jb::core::Duration>(value.data);
         if (duration < jb::core::Duration::zero() || duration > duration_cast<jb::core::Duration>(days{30})) {
@@ -522,6 +540,12 @@ auto StandardAttributeRegistry::validate(std::string_view name, AttributeValue c
     }
     else if (name == "retry.mode") {
         if (!is_one_of(std::get<std::string>(value.data), {"blocking", "reschedule"})) {
+            return AttributeResult::failure(invalid_value());
+        }
+    }
+    else if (name == "retry.multiplier") {
+        auto const multiplier = std::get<double>(value.data);
+        if (!std::isfinite(multiplier) || multiplier < 1.0 || multiplier > 100.0) {
             return AttributeResult::failure(invalid_value());
         }
     }

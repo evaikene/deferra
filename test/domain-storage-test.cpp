@@ -513,7 +513,7 @@ TEST_CASE("Attribute persistence uses explicit typed tags for every value altern
     CHECK(same_attribute_set(*decoded, values));
 }
 
-TEST_CASE("Attribute persistence keeps partial documents partial and extends materialized documents",
+TEST_CASE("Attribute persistence keeps partial documents partial and upgrades Phase 3 materialized documents",
           "[jobu][storage][attribute]")
 {
     StandardAttributeRegistry registry;
@@ -540,8 +540,11 @@ TEST_CASE("Attribute persistence keeps partial documents partial and extends mat
     auto encoded_complete =
         encode_attribute_document(registry, *complete, AttributeScope::Job, AttributeDocumentMode::Materialized);
     REQUIRE(encoded_complete);
-    auto& values = std::get<JsonValue::Object>(encoded_complete->data).at("values");
-    std::get<JsonValue::Object>(values.data).erase("retry.mode");
+    auto& values        = std::get<JsonValue::Object>(encoded_complete->data).at("values");
+    auto& legacy_values = std::get<JsonValue::Object>(values.data);
+    REQUIRE(legacy_values.erase("retry.jitter") == 1U);
+    REQUIRE(legacy_values.erase("retry.multiplier") == 1U);
+    REQUIRE(legacy_values.size() == 9U);
 
     auto decoded_older = decode_attribute_document(registry,
                                                    *encoded_complete,
@@ -549,14 +552,17 @@ TEST_CASE("Attribute persistence keeps partial documents partial and extends mat
                                                    AttributeDocumentMode::Materialized);
     REQUIRE(decoded_older);
     REQUIRE(decoded_older->size() == registry.definitions().size());
-    CHECK(std::get<std::string>(decoded_older->at("retry.mode").data) == "reschedule");
+    CHECK(std::get<double>(decoded_older->at("retry.jitter").data) == 0.0);
+    CHECK(std::get<double>(decoded_older->at("retry.multiplier").data) == 2.0);
 
     auto decoded_as_partial =
         decode_attribute_document(registry, *encoded_complete, AttributeScope::Job, AttributeDocumentMode::Partial);
     REQUIRE(decoded_as_partial);
-    CHECK_FALSE(decoded_as_partial->contains("retry.mode"));
+    REQUIRE(decoded_as_partial->size() == 9U);
+    CHECK_FALSE(decoded_as_partial->contains("retry.jitter"));
+    CHECK_FALSE(decoded_as_partial->contains("retry.multiplier"));
 
-    complete->erase("retry.mode");
+    complete->erase("retry.jitter");
     auto incomplete =
         encode_attribute_document(registry, *complete, AttributeScope::Job, AttributeDocumentMode::Materialized);
     REQUIRE_FALSE(incomplete);

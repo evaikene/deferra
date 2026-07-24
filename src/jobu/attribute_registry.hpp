@@ -2,7 +2,7 @@
  * @file attribute_registry.hpp
  * @brief Defines JobU's built-in attributes, materialization policy, and public JSON conversion.
  *
- * Use StandardAttributeRegistry for the Phase 3 JobU policy. Attribute layers remain partial until
+ * Use StandardAttributeRegistry for the current JobU policy. Attribute layers remain partial until
  * materialize_attributes() combines built-in, daemon, queue, and job values into a complete job set. The JSON helpers
  * convert one partial or complete set using the registry definition and the scope at which that set is used.
  */
@@ -23,7 +23,7 @@ namespace jb::jobu {
  */
 class StandardAttributeRegistry final : public AttributeRegistry {
 public:
-    /// Constructs the fixed Phase 3 standard definitions and built-in defaults.
+    /// Constructs the fixed standard definitions and built-in defaults.
     StandardAttributeRegistry();
 
     /** Finds a standard definition by its canonical name.
@@ -58,7 +58,7 @@ public:
         -> jb::core::Result<void, jb::core::Error>;
 
 private:
-    std::array<AttributeDefinition, 9> _definitions;
+    std::array<AttributeDefinition, 11> _definitions;
 };
 
 /** Materializes the effective attributes for one job.
@@ -82,8 +82,9 @@ private:
 /** Encodes an attribute set as the public definition-directed JSON object.
  *
  * Durations use exact signed integer milliseconds and bytes use lower-case hexadecimal. List and map values use
- * natural JSON recursively; nested durations and bytes are rejected because Phase 3 has no element schema with which
- * to decode them. Applicable standard cross-field constraints are also validated; for example, `retry.max_delay`
+ * natural JSON recursively; nested durations and bytes are rejected because the public format has no element schema
+ * with which to decode them. Applicable standard cross-field constraints are also validated; for example,
+ * `retry.max_delay`
  * must not be below `retry.initial_delay` when both attributes are supplied.
  *
  * @param values Partial or complete attribute set to encode without retaining it.
@@ -100,7 +101,7 @@ private:
  * The conversion validates every name and value at @p scope, together with applicable standard cross-field
  * constraints; for example, `retry.max_delay` must not be below `retry.initial_delay` when both attributes are
  * supplied. It does not materialize omitted definitions or retain references to @p value. List and map members decode
- * only the natural JSON alternatives because Phase 3 has no nested duration or byte element schema.
+ * only the natural JSON alternatives because the public format has no nested duration or byte element schema.
  *
  * @param value JSON object to decode without retaining it.
  * @param registry Registry defining every top-level attribute.

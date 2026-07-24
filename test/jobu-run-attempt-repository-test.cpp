@@ -1,6 +1,7 @@
 #include "attempt_repository_priv.hpp"
 #include "run_repository_priv.hpp"
 
+#include "attribute_codec_priv.hpp"
 #include "attribute_registry.hpp"
 #include "database.hpp"
 #include "domain_storage_priv.hpp"
@@ -225,6 +226,44 @@ TEST_CASE("Run repository round-trips schedule-owned snapshots and enforces uniq
     auto missing = fixture.runs.find_by_id(id(99));
     REQUIRE(missing);
     CHECK_FALSE(missing->has_value());
+}
+
+TEST_CASE("Run repository upgrades Phase 3 retry snapshots with Phase 4 defaults", "[jobu][run][sqlite]")
+{
+    RepositoryFixture fixture;
+    auto const        queue_id = id(6);
+    auto const        job_id   = id(7);
+    auto const        run_id   = id(8);
+    insert_queue(fixture.database, queue_id, "primary");
+    insert_job(fixture.database, job_id, queue_id);
+
+    auto run       = make_run(fixture.registry, run_id, job_id, queue_id);
+    run.attributes = materialized_attributes(fixture.registry, 4);
+    REQUIRE(fixture.runs.insert_schedule_owned(run));
+
+    auto legacy_attributes = run.attributes;
+    REQUIRE(legacy_attributes.erase("retry.jitter") == 1U);
+    REQUIRE(legacy_attributes.erase("retry.multiplier") == 1U);
+    REQUIRE(legacy_attributes.size() == 9U);
+    auto legacy_document = encode_and_serialize_attribute_document(fixture.registry,
+                                                                   legacy_attributes,
+                                                                   AttributeScope::Job,
+                                                                   AttributeDocumentMode::Partial);
+    REQUIRE(legacy_document);
+
+    Query query{fixture.database};
+    REQUIRE(query.prepare("UPDATE jobu_runs SET attributes_json = :attributes WHERE id = :id"));
+    REQUIRE(query.bind_value(":attributes", make_text(legacy_document->serialized())));
+    REQUIRE(query.bind_value(":id", uuid_to_storage(run_id)));
+    REQUIRE(query.exec());
+
+    auto found = fixture.runs.find_by_id(run_id);
+    REQUIRE(found);
+    REQUIRE(found->has_value());
+    REQUIRE((*found)->attributes.size() == fixture.registry.definitions().size());
+    CHECK(std::get<std::int64_t>((*found)->attributes.at("retry.max_attempts").data) == 4);
+    CHECK(std::get<double>((*found)->attributes.at("retry.jitter").data) == 0.0);
+    CHECK(std::get<double>((*found)->attributes.at("retry.multiplier").data) == 2.0);
 }
 
 TEST_CASE("Run repository enforces execution start lifecycle invariants", "[jobu][run][sqlite]")
