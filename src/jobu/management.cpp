@@ -193,13 +193,6 @@ auto schedule_refresh_conflict() -> jb::core::Error
                          "The pending schedule-owned run could not be refreshed");
 }
 
-auto cron_unavailable() -> jb::core::Error
-{
-    return service_error(jb::core::ErrorCategory::Unsupported,
-                         "jobu.schedule.cron_unavailable",
-                         "Recurring schedules are unavailable in Phase 3");
-}
-
 auto invalid_idempotency_key() -> jb::core::Error
 {
     return service_error(jb::core::ErrorCategory::InvalidArgument,
@@ -1118,20 +1111,23 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
         }
     }
     if (request.schedule && std::holds_alternative<CronSchedule>(*request.schedule)) {
-        return ServiceResult<JobDefinition>::failure(cron_unavailable());
+        auto valid = _data->cron.validate(std::get<CronSchedule>(*request.schedule));
+        if (!valid) {
+            return ServiceResult<JobDefinition>::failure(std::move(valid).error());
+        }
     }
     auto attribute_changes = validate_attributes(_data->attributes, request.attribute_changes, AttributeScope::Job);
     if (!attribute_changes) {
         return ServiceResult<JobDefinition>::failure(std::move(attribute_changes).error());
     }
-    auto const now = _data->time_source.utc_now();
 
     auto begun = jb::db::Transaction::begin(_data->database);
     if (!begun) {
         return ServiceResult<JobDefinition>::failure(std::move(begun).error());
     }
-    auto transaction = std::move(begun).value();
-    auto found       = _data->jobs.find_by_id(request.job_id, true);
+    auto       transaction = std::move(begun).value();
+    auto const now         = _data->time_source.utc_now();
+    auto       found       = _data->jobs.find_by_id(request.job_id, true);
     if (!found) {
         return ServiceResult<JobDefinition>::failure(std::move(found).error());
     }
@@ -1148,12 +1144,38 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
     if (replacement.state != JobState::Active && replacement.state != JobState::Suspended) {
         return ServiceResult<JobDefinition>::failure(job_state_conflict());
     }
-    auto started = _data->attempts.has_started_for_job(replacement.id);
-    if (!started) {
-        return ServiceResult<JobDefinition>::failure(std::move(started).error());
+
+    auto const recurring = std::holds_alternative<CronSchedule>(replacement.schedule);
+    if (!recurring) {
+        auto started = _data->attempts.has_started_for_job(replacement.id);
+        if (!started) {
+            return ServiceResult<JobDefinition>::failure(std::move(started).error());
+        }
+        if (*started) {
+            return ServiceResult<JobDefinition>::failure(job_immutable());
+        }
     }
-    if (*started) {
-        return ServiceResult<JobDefinition>::failure(job_immutable());
+    auto schedule_owned = _data->runs.find_schedule_owned(replacement.id);
+    if (!schedule_owned) {
+        return ServiceResult<JobDefinition>::failure(std::move(schedule_owned).error());
+    }
+    if (!schedule_owned->has_value()) {
+        return ServiceResult<JobDefinition>::failure(schedule_refresh_conflict());
+    }
+
+    auto refresh_snapshot = false;
+    if ((**schedule_owned).state == RunState::Scheduled) {
+        auto has_attempt = _data->attempts.has_any_for_run((**schedule_owned).id);
+        if (!has_attempt) {
+            return ServiceResult<JobDefinition>::failure(std::move(has_attempt).error());
+        }
+        if (*has_attempt) {
+            return ServiceResult<JobDefinition>::failure(schedule_refresh_conflict());
+        }
+        refresh_snapshot = true;
+    }
+    else if (!recurring || (request.schedule && std::holds_alternative<OnceSchedule>(*request.schedule))) {
+        return ServiceResult<JobDefinition>::failure(schedule_refresh_conflict());
     }
 
     if (request.name) {
@@ -1173,9 +1195,6 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
     }
     if (request.payload) {
         replacement.payload = std::move(*request.payload);
-    }
-    if (std::holds_alternative<CronSchedule>(replacement.schedule)) {
-        return ServiceResult<JobDefinition>::failure(cron_unavailable());
     }
     auto payload = validate_job_payload(replacement.type, replacement.payload);
     if (!payload) {
@@ -1216,24 +1235,36 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
         return ServiceResult<JobDefinition>::failure(job_state_conflict());
     }
 
-    auto const planned_at = std::get<OnceSchedule>(replacement.schedule).planned_at;
-    auto       refreshed =
-        _data->runs.refresh_unstarted_schedule_owned(replacement.id,
-                                                     {
-                                                         .job_revision    = replacement.revision,
-                                                         .queue_id        = replacement.queue_id,
-                                                         .planned_at      = planned_at,
-                                                         .runnable_at     = planned_at,
-                                                         .type            = replacement.type,
-                                                         .priority        = replacement.priority,
-                                                         .attributes_json = serialized_attributes->serialized(),
-                                                         .payload_json    = payload->serialized(),
-                                                     });
-    if (!refreshed) {
-        return ServiceResult<JobDefinition>::failure(std::move(refreshed).error());
-    }
-    if (!*refreshed) {
-        return ServiceResult<JobDefinition>::failure(schedule_refresh_conflict());
+    if (refresh_snapshot) {
+        auto planned_at = jb::core::UtcTimePoint{};
+        if (auto const* once = std::get_if<OnceSchedule>(&replacement.schedule)) {
+            planned_at = once->planned_at;
+        }
+        else {
+            auto next = _data->cron.next_after(std::get<CronSchedule>(replacement.schedule), now);
+            if (!next) {
+                return ServiceResult<JobDefinition>::failure(std::move(next).error());
+            }
+            planned_at = *next;
+        }
+        auto refreshed =
+            _data->runs.refresh_unstarted_schedule_owned(replacement.id,
+                                                         {
+                                                             .job_revision    = replacement.revision,
+                                                             .queue_id        = replacement.queue_id,
+                                                             .planned_at      = planned_at,
+                                                             .runnable_at     = planned_at,
+                                                             .type            = replacement.type,
+                                                             .priority        = replacement.priority,
+                                                             .attributes_json = serialized_attributes->serialized(),
+                                                             .payload_json    = payload->serialized(),
+                                                         });
+        if (!refreshed) {
+            return ServiceResult<JobDefinition>::failure(std::move(refreshed).error());
+        }
+        if (!*refreshed) {
+            return ServiceResult<JobDefinition>::failure(schedule_refresh_conflict());
+        }
     }
     auto committed = transaction.commit();
     if (!committed) {

@@ -1288,10 +1288,6 @@ TEST_CASE("Job update validates revisions state and replacement fields", "[jobu]
                   ErrorCategory::InvalidArgument,
                   "jobu.job.invalid_name");
     require_error(service.update_job(
-                      {.job_id = job_id, .expected_revision = 1, .schedule = CronSchedule{.expression = "* * * * *"}}),
-                  ErrorCategory::Unsupported,
-                  "jobu.schedule.cron_unavailable");
-    require_error(service.update_job(
                       {.job_id = job_id, .expected_revision = 1, .attribute_changes = {{"unknown", {.data = true}}}}),
                   ErrorCategory::InvalidArgument,
                   "jobu.attribute.unknown");
