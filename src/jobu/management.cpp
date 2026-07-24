@@ -3,6 +3,7 @@
 #include "attempt_repository_priv.hpp"
 #include "attribute_codec_priv.hpp"
 #include "attribute_registry.hpp"
+#include "cron.hpp"
 #include "idempotency_codec_priv.hpp"
 #include "idempotency_repository_priv.hpp"
 #include "job_repository_priv.hpp"
@@ -372,11 +373,13 @@ auto is_empty_update(UpdateJobRequest const& request) noexcept -> bool
 struct ManagementService::Private {
     Private(jb::db::Database&        database_value,
             AttributeRegistry const& attributes_value,
+            CronEngine const&        cron_value,
             jb::core::UuidGenerator& uuid_generator_value,
             jb::core::TimeSource&    time_source_value,
             AttributeSet             daemon_defaults_value)
         : database{database_value}
         , attributes{attributes_value}
+        , cron{cron_value}
         , uuid_generator{uuid_generator_value}
         , time_source{time_source_value}
         , daemon_defaults{std::move(daemon_defaults_value)}
@@ -395,6 +398,7 @@ struct ManagementService::Private {
 
     jb::db::Database&              database;
     AttributeRegistry const&       attributes;
+    CronEngine const&              cron;
     jb::core::UuidGenerator&       uuid_generator;
     jb::core::TimeSource&          time_source;
     AttributeSet                   daemon_defaults;
@@ -409,10 +413,16 @@ struct ManagementService::Private {
 
 ManagementService::ManagementService(jb::db::Database&        database,
                                      AttributeRegistry const& attributes,
+                                     CronEngine const&        cron,
                                      jb::core::UuidGenerator& uuid_generator,
                                      jb::core::TimeSource&    time_source,
                                      AttributeSet             daemon_defaults)
-    : _data{std::make_unique<Private>(database, attributes, uuid_generator, time_source, std::move(daemon_defaults))}
+    : _data{std::make_unique<Private>(database,
+                                      attributes,
+                                      cron,
+                                      uuid_generator,
+                                      time_source,
+                                      std::move(daemon_defaults))}
 {}
 
 ManagementService::~ManagementService() = default;
@@ -906,9 +916,6 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
     if (!name) {
         return ServiceResult<JobDefinition>::failure(std::move(name).error());
     }
-    if (std::holds_alternative<CronSchedule>(request.schedule)) {
-        return ServiceResult<JobDefinition>::failure(cron_unavailable());
-    }
     auto payload = validate_job_payload(request.type, request.payload);
     if (!payload) {
         return ServiceResult<JobDefinition>::failure(std::move(payload).error());
@@ -924,7 +931,6 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
 
     auto job_id            = std::optional<jb::core::Uuid>{};
     auto run_id            = std::optional<jb::core::Uuid>{};
-    auto now               = std::optional<jb::core::UtcTimePoint>{};
     auto generate_identity = [&]() -> ServiceResult<void> {
         auto generated_job_id = _data->uuid_generator.generate();
         if (!generated_job_id) {
@@ -936,7 +942,6 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
         }
         job_id = *generated_job_id;
         run_id = *generated_run_id;
-        now    = _data->time_source.utc_now();
         return ServiceResult<void>::success();
     };
     if (!request.idempotency_key) {
@@ -1002,6 +1007,24 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
         }
     }
 
+    auto const now        = _data->time_source.utc_now();
+    auto       planned_at = jb::core::UtcTimePoint{};
+    if (auto const* once = std::get_if<OnceSchedule>(&request.schedule)) {
+        planned_at = once->planned_at;
+    }
+    else {
+        auto const& cron_schedule = std::get<CronSchedule>(request.schedule);
+        auto        valid         = _data->cron.validate(cron_schedule);
+        if (!valid) {
+            return ServiceResult<JobDefinition>::failure(std::move(valid).error());
+        }
+        auto next = _data->cron.next_after(cron_schedule, now);
+        if (!next) {
+            return ServiceResult<JobDefinition>::failure(std::move(next).error());
+        }
+        planned_at = *next;
+    }
+
     auto materialized =
         materialize_attributes(_data->attributes, _data->daemon_defaults, queue.defaults, request.attributes);
     if (!materialized) {
@@ -1026,12 +1049,11 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
         .priority   = request.priority,
         .attributes = std::move(materialized).value(),
         .payload    = std::move(request.payload),
-        .created_at = *now,
-        .updated_at = *now,
+        .created_at = now,
+        .updated_at = now,
         .deleted_at = std::nullopt,
     };
-    auto const planned_at = std::get<OnceSchedule>(job.schedule).planned_at;
-    auto       run        = detail::ScheduleOwnedRunInsert{
+    auto run = detail::ScheduleOwnedRunInsert{
         .id              = *run_id,
         .job_id          = job.id,
         .job_revision    = job.revision,
@@ -1064,7 +1086,7 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
             .request_json = *canonical_request,
             .result_json  = std::move(result_json).value(),
             .resource_id  = job.id,
-            .created_at   = *now,
+            .created_at   = now,
             .expires_at   = std::nullopt,
         });
         if (!recorded) {

@@ -252,37 +252,64 @@ auto decode_job_type(std::string_view text) -> CodecResult<JobType>
     return CodecResult<JobType>::failure(invalid_record("invalid_job_type"));
 }
 
-auto encode_once_schedule(JobSchedule const& schedule) -> CodecResult<jb::rpc::JsonValue>
+auto encode_schedule(JobSchedule const& schedule) -> CodecResult<jb::rpc::JsonValue>
 {
-    auto const* once = std::get_if<OnceSchedule>(&schedule);
-    if (once == nullptr) {
-        return CodecResult<jb::rpc::JsonValue>::failure(invalid_record("non_once_schedule"));
+    if (auto const* once = std::get_if<OnceSchedule>(&schedule)) {
+        auto at = encode_time(once->planned_at);
+        if (!at) {
+            return CodecResult<jb::rpc::JsonValue>::failure(std::move(at).error());
+        }
+        return CodecResult<jb::rpc::JsonValue>::success(json_object({
+            {"at",   std::move(at).value()},
+            {"kind", json_string("once")  },
+        }));
     }
-    auto at = encode_time(once->planned_at);
-    if (!at) {
-        return CodecResult<jb::rpc::JsonValue>::failure(std::move(at).error());
+    if (auto const* cron = std::get_if<CronSchedule>(&schedule)) {
+        return CodecResult<jb::rpc::JsonValue>::success(json_object({
+            {"expression", json_string(cron->expression)},
+            {"kind",       json_string("cron")          },
+            {"timezone",   json_string(cron->timezone)  },
+        }));
     }
-    return CodecResult<jb::rpc::JsonValue>::success(json_object({
-        {"at",   std::move(at).value()},
-        {"kind", json_string("once")  },
-    }));
+    return CodecResult<jb::rpc::JsonValue>::failure(invalid_record("invalid_schedule_kind"));
 }
 
-auto decode_once_schedule(jb::rpc::JsonValue const& value) -> CodecResult<JobSchedule>
+auto decode_schedule(jb::rpc::JsonValue const& value) -> CodecResult<JobSchedule>
 {
-    auto object = object_with_members(value, {"at", "kind"});
-    if (!object) {
-        return CodecResult<JobSchedule>::failure(std::move(object).error());
+    if (!value.is_object()) {
+        return CodecResult<JobSchedule>::failure(invalid_record("invalid_schedule"));
     }
-    auto kind = text_member(**object, "kind");
-    if (!kind || *kind != "once") {
+    auto kind = text_member(value.as_object(), "kind");
+    if (!kind) {
         return CodecResult<JobSchedule>::failure(invalid_record("invalid_schedule_kind"));
     }
-    auto at = time_member(**object, "at");
-    if (!at) {
-        return CodecResult<JobSchedule>::failure(std::move(at).error());
+    if (*kind == "once") {
+        auto object = object_with_members(value, {"at", "kind"});
+        if (!object) {
+            return CodecResult<JobSchedule>::failure(std::move(object).error());
+        }
+        auto at = time_member(**object, "at");
+        if (!at) {
+            return CodecResult<JobSchedule>::failure(std::move(at).error());
+        }
+        return CodecResult<JobSchedule>::success(OnceSchedule{.planned_at = *at});
     }
-    return CodecResult<JobSchedule>::success(OnceSchedule{.planned_at = *at});
+    if (*kind == "cron") {
+        auto object = object_with_members(value, {"expression", "kind", "timezone"});
+        if (!object) {
+            return CodecResult<JobSchedule>::failure(std::move(object).error());
+        }
+        auto expression = text_member(**object, "expression");
+        auto timezone   = text_member(**object, "timezone");
+        if (!expression || !timezone) {
+            return CodecResult<JobSchedule>::failure(invalid_record("invalid_cron_schedule"));
+        }
+        return CodecResult<JobSchedule>::success(CronSchedule{
+            .expression = std::move(expression).value(),
+            .timezone   = std::move(timezone).value(),
+        });
+    }
+    return CodecResult<JobSchedule>::failure(invalid_record("invalid_schedule_kind"));
 }
 
 auto encode_attributes(AttributeSet const& values, AttributeRegistry const& attributes, AttributeScope scope)
@@ -563,7 +590,7 @@ auto encode_job_create_idempotency_request(CreateJobRequest const&  request,
                                            AttributeRegistry const& attributes)
     -> jb::core::Result<std::string, jb::core::Error>
 {
-    auto schedule           = encode_once_schedule(request.schedule);
+    auto schedule           = encode_schedule(request.schedule);
     auto encoded_attributes = encode_attributes(request.attributes, attributes, AttributeScope::Job);
     if (!schedule || !encoded_attributes || job_type_text(request.type).empty()) {
         return CodecResult<std::string>::failure(invalid_record("invalid_job_request"));
@@ -596,7 +623,7 @@ auto validate_job_create_idempotency_request(std::string_view request_json, Attr
     auto type_text = text_member(**object, "type");
     auto type =
         type_text ? decode_job_type(*type_text) : CodecResult<JobType>::failure(invalid_record("invalid_job_type"));
-    auto schedule         = decode_once_schedule((**object).at("schedule"));
+    auto schedule         = decode_schedule((**object).at("schedule"));
     auto priority         = signed_member(**object, "priority");
     auto attributes_value = decode_attributes((**object).at("attributes"), attributes, AttributeScope::Job);
     if (!queue_id || !name || !type || !schedule || !priority || *priority < std::numeric_limits<std::int32_t>::min() ||
@@ -610,7 +637,7 @@ auto validate_job_create_idempotency_request(std::string_view request_json, Attr
 auto encode_job_idempotency_result(JobDefinition const& job, AttributeRegistry const& attributes)
     -> jb::core::Result<std::string, jb::core::Error>
 {
-    auto schedule           = encode_once_schedule(job.schedule);
+    auto schedule           = encode_schedule(job.schedule);
     auto encoded_attributes = encode_attributes(job.attributes, attributes, AttributeScope::Job);
     auto created            = encode_time(job.created_at);
     auto updated            = encode_time(job.updated_at);
@@ -671,7 +698,7 @@ auto decode_job_idempotency_result(std::string_view result_json, AttributeRegist
     auto type_text = text_member(**object, "type");
     auto type =
         type_text ? decode_job_type(*type_text) : CodecResult<JobType>::failure(invalid_record("invalid_job_type"));
-    auto schedule           = decode_once_schedule((**object).at("schedule"));
+    auto schedule           = decode_schedule((**object).at("schedule"));
     auto priority           = signed_member(**object, "priority");
     auto decoded_attributes = decode_attributes((**object).at("attributes"), attributes, AttributeScope::Job);
     auto created            = time_member(**object, "created_at");

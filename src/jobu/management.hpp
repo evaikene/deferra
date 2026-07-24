@@ -26,6 +26,8 @@ class Database;
 
 namespace jb::jobu {
 
+class CronEngine;
+
 /// Selects a queue by stable UUID or exact user-facing name.
 using QueueSelector = std::variant<jb::core::Uuid, std::string>;
 
@@ -108,10 +110,11 @@ struct QueueListRequest {
     PageOptions               page;
 };
 
-/** Values used to create one active one-time job and its scheduled run.
+/** Values used to create one active job and its first scheduled run.
  *
- * Phase 3 accepts only OnceSchedule. The supplied job attribute layer is materialized over built-in, daemon, and
- * resolved queue defaults before persistence. The payload remains owning and preserves unknown additive members.
+ * Cron schedules are validated and evaluated by ManagementService. The supplied job attribute layer is materialized
+ * over built-in, daemon, and resolved queue defaults before persistence. The payload remains owning and preserves
+ * unknown additive members.
  */
 struct CreateJobRequest {
     /// Existing non-deleted queue selected by UUID or exact user-facing name.
@@ -120,7 +123,7 @@ struct CreateJobRequest {
     std::optional<std::string> name;
     /// Runner family whose structural payload rules are applied.
     JobType                    type{JobType::Cli};
-    /// One-time schedule accepted by Phase 3; CronSchedule returns `jobu.schedule.cron_unavailable`.
+    /// One-time schedule or recurring cron schedule used to plan the first occurrence.
     JobSchedule                schedule;
     /// Signed scheduling priority copied into the run snapshot.
     std::int32_t               priority{0};
@@ -191,27 +194,29 @@ struct DeleteJobRequest {
 
 /** Synchronous owner-thread service for durable JobU management operations.
  *
- * The service borrows an already-open Database, AttributeRegistry, UuidGenerator, and TimeSource; each collaborator
- * must outlive the service. All calls must run on the Database owner thread. The daemon-default attribute layer is
- * validated and copied during construction; a validation failure is returned by subsequent operations.
+ * The service borrows an already-open Database, AttributeRegistry, CronEngine, UuidGenerator, and TimeSource; each
+ * collaborator must outlive the service. All calls must run on the Database owner thread. The daemon-default attribute
+ * layer is validated and copied during construction; a validation failure is returned by subsequent operations.
  *
  * Queue/job gets and lists use bounded repository reads without an explicit transaction. Creates, updates, lifecycle
  * changes, moves, and deletions use one immediate transaction and return only after commit. Errors include stable
- * `jobu.queue.*`, `jobu.job.*`, `jobu.attribute.*`, and `jobu.idempotency.*` codes plus unchanged database errors when
- * no domain mapping applies. Methods invoke no callbacks, start no threads, and perform no event-loop processing or
- * external I/O.
+ * `jobu.queue.*`, `jobu.job.*`, `jobu.schedule.*`, `jobu.attribute.*`, and `jobu.idempotency.*` codes plus unchanged
+ * database errors when no domain mapping applies. Methods invoke no callbacks, start no threads, and perform no
+ * event-loop processing. A fresh recurring create may synchronously load timezone data through CronEngine.
  */
 class ManagementService final {
 public:
     /** Constructs a management service by borrowing its collaborators.
      * @param database Already-open sole JobU database connection.
      * @param attributes Registry used to validate and decode durable attributes.
+     * @param cron Owner-thread cron validator and occurrence calculator used synchronously by recurring operations.
      * @param uuid_generator Generator used for new durable identities.
      * @param time_source Source used for durable UTC timestamps.
      * @param daemon_defaults Partial daemon-default attribute layer to validate and copy.
      */
     ManagementService(jb::db::Database&        database,
                       AttributeRegistry const& attributes,
+                      CronEngine const&        cron,
                       jb::core::UuidGenerator& uuid_generator,
                       jb::core::TimeSource&    time_source,
                       AttributeSet             daemon_defaults = {});
@@ -281,12 +286,13 @@ public:
      */
     [[nodiscard]] auto delete_queue(QueueSelector const& selector) -> jb::core::Result<void, jb::core::Error>;
 
-    /** Creates one active one-time job and its scheduled run in one immediate transaction.
+    /** Creates one active job and its first schedule-owned run in one immediate transaction.
      * @param request Queue selector, definition fields, partial attributes, owning payload, and optional idempotency
      * key consumed after validation. A matching key in the resolved queue scope replays the original successful
-     * result.
+     * result and its unchanged first occurrence. A fresh cron request is validated and evaluated strictly after the
+     * transaction's sampled current time.
      * @return Committed or replayed revision-1 definition, or a queue, schedule, validation, idempotency, generator,
-     * attribute, run, or database Error. No attempt is created and no external work starts.
+     * attribute, run, or database Error. No attempt is created and no runner execution starts.
      */
     [[nodiscard]] auto create_job(CreateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
 

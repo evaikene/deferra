@@ -4,6 +4,12 @@
 
 static_assert(!std::is_copy_constructible_v<jb::jobu::ManagementService>);
 static_assert(!std::is_move_constructible_v<jb::jobu::ManagementService>);
+static_assert(std::is_constructible_v<jb::jobu::ManagementService,
+                                      jb::db::Database&,
+                                      jb::jobu::AttributeRegistry const&,
+                                      jb::jobu::CronEngine const&,
+                                      jb::core::UuidGenerator&,
+                                      jb::core::TimeSource&>);
 static_assert(std::is_same_v<jb::jobu::QueueSelector, std::variant<jb::core::Uuid, std::string>>);
 static_assert(std::is_same_v<decltype(jb::jobu::JobPage::items), std::vector<jb::jobu::JobDefinition>>);
 static_assert(std::is_same_v<decltype(jb::jobu::MoveJobRequest::job_id), jb::core::Uuid>);
