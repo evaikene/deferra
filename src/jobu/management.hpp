@@ -135,11 +135,12 @@ struct CreateJobRequest {
     std::optional<std::string> idempotency_key;
 };
 
-/** Changes selected fields of one pending one-time job using optimistic concurrency.
+/** Changes selected fields of one durable job definition using optimistic concurrency.
  *
  * The name's outer optional distinguishes unchanged from changed, while its inner optional distinguishes clearing the
  * name from replacing it. Attribute changes patch the stored complete materialized set; omitted attributes remain
- * unchanged and no daemon or queue defaults are reapplied.
+ * unchanged and no daemon or queue defaults are reapplied. Recurring changes refresh an unstarted scheduled occurrence
+ * or apply only to the definition while its current occurrence is running or waiting to retry.
  */
 struct UpdateJobRequest {
     /// Stable job-definition UUID to update.
@@ -150,7 +151,7 @@ struct UpdateJobRequest {
     std::optional<std::optional<std::string>> name;
     /// Replacement runner family, validated together with the resulting payload.
     std::optional<JobType>                    type;
-    /// Replacement one-time schedule; CronSchedule remains unavailable in Phase 3.
+    /// Replacement one-time or recurring schedule; conversion requires a scheduled current occurrence with no attempt.
     std::optional<JobSchedule>                schedule;
     /// Replacement scheduling priority.
     std::optional<std::int32_t>               priority;
@@ -202,7 +203,8 @@ struct DeleteJobRequest {
  * changes, moves, and deletions use one immediate transaction and return only after commit. Errors include stable
  * `jobu.queue.*`, `jobu.job.*`, `jobu.schedule.*`, `jobu.attribute.*`, and `jobu.idempotency.*` codes plus unchanged
  * database errors when no domain mapping applies. Methods invoke no callbacks, start no threads, and perform no
- * event-loop processing. A fresh recurring create may synchronously load timezone data through CronEngine.
+ * event-loop processing. A fresh recurring create or an update that validates or evaluates a recurring schedule may
+ * synchronously load timezone data through CronEngine.
  */
 class ManagementService final {
 public:
@@ -296,11 +298,17 @@ public:
      */
     [[nodiscard]] auto create_job(CreateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
 
-    /** Updates one pending one-time job and its scheduled-run snapshot in one immediate transaction.
+    /** Updates one job definition and, when unstarted, its scheduled-run snapshot in one immediate transaction.
      * @param request Non-empty patch consumed after validation. expected_revision must match the durable positive
-     * revision. Updates preserve stored attributes not named in attribute_changes and never reapply defaults.
+     * revision. Updates preserve stored attributes not named in attribute_changes and never reapply defaults. A
+     * replacement cron schedule is validated synchronously without retaining its strings.
      * @return Committed definition with its revision incremented once, or a validation, not-found, deleted, revision,
-     * state, immutable, schedule-snapshot, attribute, payload, or database Error. No attempt or external work starts.
+     * state, immutable, schedule-snapshot, cron, attribute, payload, or database Error. An unstarted occurrence keeps
+     * its run identity and receives the new revision, snapshot, and schedule time atomically. A running or
+     * retry-waiting recurring occurrence keeps its old snapshot and accepts only a recurring effective schedule, so the
+     * committed definition applies to its future successor. Schedule conversion and snapshot refresh require the
+     * current occurrence to be scheduled with no attempt; even a pending attempt prevents them. One-time definitions
+     * remain immutable after execution starts. No attempt, callback, or external work starts.
      */
     [[nodiscard]] auto update_job(UpdateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
 
