@@ -20,6 +20,12 @@ add_executable(${TARGET} attribute-materialization-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU retry policy calculation test
+set(TARGET "retry-policy-test")
+add_executable(${TARGET} retry-policy-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # JobU UTC timestamp test
 set(TARGET "utc-timestamp-test")
 add_executable(${TARGET} utc-timestamp-test.cpp)

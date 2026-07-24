@@ -40,6 +40,8 @@ target_sources(${TARGET}
         queue_repository_priv.hpp
         queue_validation_priv.cpp
         queue_validation_priv.hpp
+        retry_policy_priv.cpp
+        retry_policy_priv.hpp
         retention_repository_priv.cpp
         retention_repository_priv.hpp
         run_repository_priv.cpp
