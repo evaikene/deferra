@@ -38,15 +38,14 @@ struct OnceSchedule {
     jb::core::UtcTimePoint planned_at;
 };
 
-/** Reserved recurring schedule representation.
+/** Recurring schedule evaluated in one IANA timezone.
  *
- * Phase 3 preserves this public form for compatibility but create and update operations reject it with
- * `jobu.schedule.cron_unavailable`. Phase 4 adds validation and persistence behavior.
+ * Management creation validates both fields through its borrowed CronEngine before persisting the definition.
  */
 struct CronSchedule {
-    /// Five-field cron expression reserved for Phase 4.
+    /// Five-field cron expression interpreted using JobU's documented calendar rules.
     std::string expression;
-    /// IANA timezone name, defaulting to UTC, reserved for Phase 4.
+    /// IANA timezone name, defaulting to UTC.
     std::string timezone{"UTC"};
 };
 
@@ -71,7 +70,7 @@ struct JobDefinition {
     JobState                              state{JobState::Active};
     /// Runner family copied into run snapshots.
     JobType                               type{JobType::Cli};
-    /// One-time schedule accepted in Phase 3 or reserved cron schedule form.
+    /// One-time or recurring schedule owned by this definition.
     JobSchedule                           schedule;
     /// Signed scheduling priority.
     std::int32_t                          priority{0};

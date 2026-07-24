@@ -8,6 +8,7 @@
 #include "run_repository_priv.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
+#include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
@@ -70,6 +71,7 @@ struct ServiceFixture {
     std::filesystem::path     database_file{directory.path() / "jobu.sqlite"};
     Database                  database{make_database(database_file)};
     StandardAttributeRegistry registry;
+    FakeCronEngine            cron;
     SequenceUuidGenerator     generator;
     FakeTimeSource            time;
 };
@@ -187,7 +189,7 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
     ServiceFixture fixture{
         {first_id, second_id, third_id, spare_id}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
 
     auto create_request = CreateQueueRequest{
         .name                  = "alpha",
@@ -300,7 +302,7 @@ TEST_CASE("Queue create idempotency replays canonical results and rolls back rec
     ServiceFixture fixture{
         {sequence_id(1), sequence_id(2), sequence_id(3), sequence_id(4), sequence_id(5)}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
 
     auto original_request = CreateQueueRequest{
         .name            = "replay",
@@ -350,7 +352,7 @@ TEST_CASE("Queue create idempotency replays canonical results and rolls back rec
 TEST_CASE("Queue create idempotency replay does not require a fresh UUID", "[jobu][queue][idempotency]")
 {
     ServiceFixture    fixture{{sequence_id(1)}};
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     auto const        request = CreateQueueRequest{
         .name            = "replay",
         .idempotency_key = "queue-key",
@@ -378,7 +380,7 @@ TEST_CASE("Queue lifecycle persists draining suspension resume and idempotent no
     ServiceFixture fixture{
         {immediate_queue, busy_queue, job_id, run_id}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "immediate"}));
     REQUIRE(service.create_queue({.name = "busy"}));
     REQUIRE(service.create_job({.queue    = busy_queue,
@@ -502,7 +504,7 @@ TEST_CASE("Queue deletion atomically deletes contained work and releases its nam
          terminal_run, other_job,
          other_run, replacement}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "delete-me"}));
     REQUIRE(service.create_queue({.name = "other"}));
     REQUIRE(service.create_job({.queue    = deleted_queue,
@@ -624,7 +626,7 @@ TEST_CASE("Queue deletion rejects running work and rolls back bulk conflicts", "
          guarded_queue, guarded_job,
          guarded_run}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "active"}));
     require_error(service.delete_queue(active_queue), ErrorCategory::Conflict, "jobu.queue.not_suspended");
     require_error(service.delete_queue(uuid("00000000-0000-7000-8000-000000000399")),
@@ -724,7 +726,7 @@ TEST_CASE("Queue management rejects invalid input before durable mutation", "[jo
 {
     auto const        generated_id = uuid("00000000-0000-7000-8000-000000000010");
     ServiceFixture    fixture{{generated_id}};
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
 
     require_error(service.create_queue({.name = ""}), ErrorCategory::InvalidArgument, "jobu.queue.invalid_name");
     require_error(service.create_queue({
@@ -750,7 +752,7 @@ TEST_CASE("Queue management rejects invalid input before durable mutation", "[jo
                   "jobu.attribute.unknown");
 
     MapAttributeRegistry map_registry;
-    ManagementService    map_service{fixture.database, map_registry, fixture.generator, fixture.time};
+    ManagementService    map_service{fixture.database, map_registry, fixture.cron, fixture.generator, fixture.time};
     auto                 oversized_defaults = AttributeSet{
         {"test.map", {.data = AttributeValue::Map{{"value", {.data = std::string(256U * 1024U, 'x')}}}}}
     };
@@ -799,6 +801,7 @@ TEST_CASE("Queue management reports invalid daemon defaults from every operation
     ServiceFixture    fixture{{uuid("00000000-0000-7000-8000-000000000020")}};
     ManagementService service{fixture.database,
                               fixture.registry,
+                              fixture.cron,
                               fixture.generator,
                               fixture.time,
                               {{"unknown", {.data = true}}}};
@@ -819,7 +822,7 @@ TEST_CASE("Queue management reports invalid daemon defaults from every operation
 TEST_CASE("Queue lookup exposes original deleted names and detects historical ambiguity", "[jobu][queue][sqlite]")
 {
     ServiceFixture    fixture{{uuid("00000000-0000-7000-8000-000000000030")}};
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
 
     execute(fixture.database, R"sql(
 INSERT INTO jobu_queues(
@@ -864,7 +867,7 @@ TEST_CASE("Queue management rejects malformed persisted attribute documents", "[
 {
     auto const        id = uuid("00000000-0000-7000-8000-000000000040");
     ServiceFixture    fixture{{id}};
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "queue"}));
     execute(fixture.database, "UPDATE jobu_queues SET defaults_json = '{}' WHERE name = 'queue'");
 

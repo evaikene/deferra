@@ -180,6 +180,15 @@ if(TARGET jobu-sqlite)
     target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+    # JobU SQLite-backed recurring create management test
+    set(TARGET "jobu-cron-management-test")
+    add_executable(${TARGET}
+        jobu-cron-management-test.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
     # JobU SQLite application schema integration test
     set(TARGET "jobu-sqlite-schema-test")
     add_executable(${TARGET}

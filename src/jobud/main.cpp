@@ -3,6 +3,7 @@
 #include "application.hpp"
 #include "attribute_registry.hpp"
 #include "command_line_parser.hpp"
+#include "cron.hpp"
 #include "database.hpp"
 #include "local_server.hpp"
 #include "logging.hpp"
@@ -120,7 +121,8 @@ auto main(int argc, char* argv[]) -> int
 
     UuidV7Generator           uuid_generator{time_source};
     StandardAttributeRegistry attribute_registry;
-    ManagementService         management_service{database, attribute_registry, uuid_generator, time_source};
+    SystemCronEngine          cron;
+    ManagementService         management_service{database, attribute_registry, cron, uuid_generator, time_source};
     LocalServer               local_server;
     Server                    rpc_server;
 

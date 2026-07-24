@@ -7,9 +7,11 @@
 #include "management.hpp"
 #include "management_json.hpp"
 #include "protocol_priv.hpp"
+#include "run_repository_priv.hpp"
 #include "server.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
+#include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/memory_io_device.hpp"
 #include "support/sequence_uuid_generator.hpp"
@@ -78,6 +80,7 @@ struct ServiceFixture {
     std::filesystem::path     database_file{directory.path() / "jobu.sqlite"};
     Database                  database{make_database(database_file)};
     StandardAttributeRegistry registry;
+    FakeCronEngine            cron;
     SequenceUuidGenerator     generator;
     FakeTimeSource            time;
 };
@@ -147,7 +150,7 @@ void require_application_error(ResponseEnvelope const& response, std::string_vie
 class RpcEndpoint {
 public:
     explicit RpcEndpoint(ServiceFixture& fixture)
-        : _service{fixture.database, fixture.registry, fixture.generator, fixture.time}
+        : _service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time}
     {
         REQUIRE(register_management_methods(_server, _service, fixture.registry));
 
@@ -237,7 +240,7 @@ TEST_CASE("Management RPC registration is exact and reports duplicate failure", 
 {
     Application       app{0, nullptr};
     ServiceFixture    fixture{{sequence_id(1)}};
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     Server            server;
 
     constexpr std::array<std::string_view, 15> expected_methods{
@@ -396,6 +399,57 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
     }
 }
 
+TEST_CASE("Management RPC creates and replays a recurring job with its first occurrence",
+          "[jobu][management-rpc][cron][sqlite]")
+{
+    Application    app{0, nullptr};
+    auto const     queue_id = sequence_id(1);
+    auto const     job_id   = sequence_id(2);
+    auto const     run_id   = sequence_id(3);
+    ServiceFixture fixture{
+        {queue_id, job_id, run_id}
+    };
+    auto const schedule = CronSchedule{.expression = "0 * * * *", .timezone = "UTC"};
+    fixture.cron.set_occurrences(schedule, {UtcTimePoint{3600s}});
+    RpcEndpoint endpoint{fixture};
+
+    auto queue = decode_queue(
+        endpoint.call("queue.create", encode_create(CreateQueueRequest{.name = "recurring"}, fixture.registry)),
+        fixture.registry);
+    CHECK(queue.id == queue_id);
+
+    auto const request = CreateJobRequest{
+        .queue           = queue_id,
+        .name            = "hourly",
+        .schedule        = schedule,
+        .payload         = cli_payload("/usr/bin/true"),
+        .idempotency_key = "rpc-cron",
+    };
+    auto const params  = encode_create(request, fixture.registry);
+    auto       created = decode_job(endpoint.call("job.create", params), fixture.registry);
+    CHECK(created.id == job_id);
+    CHECK(std::get<CronSchedule>(created.schedule).expression == schedule.expression);
+    CHECK(std::get<CronSchedule>(created.schedule).timezone == schedule.timezone);
+
+    auto replayed = decode_job(endpoint.call("job.create", params), fixture.registry);
+    CHECK(replayed.id == job_id);
+    CHECK(replayed.created_at == created.created_at);
+    CHECK(fixture.cron.validation_calls().size() == 1);
+    CHECK(fixture.cron.next_calls().size() == 1);
+    CHECK(fixture.cron.next_calls().front().exclusive_lower_bound == UtcTimePoint{1s});
+
+    auto fetched = decode_job(endpoint.call("job.get", encode_job_id(job_id)), fixture.registry);
+    CHECK(std::get<CronSchedule>(fetched.schedule).expression == schedule.expression);
+
+    jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                            stored = runs.find_schedule_owned(job_id);
+    REQUIRE(stored);
+    REQUIRE(stored->has_value());
+    CHECK((**stored).id == run_id);
+    CHECK((**stored).planned_at == UtcTimePoint{3600s});
+    CHECK((**stored).runnable_at == UtcTimePoint{3600s});
+}
+
 TEST_CASE("Job management RPC completes revisions idempotency and a durable lifecycle",
           "[jobu][management-rpc][sqlite]")
 {
@@ -552,8 +606,10 @@ TEST_CASE("Management RPC separates invalid params from safe application errors"
 {
     Application    app{0, nullptr};
     auto const     queue_id = sequence_id(1);
-    ServiceFixture fixture{{queue_id}};
-    RpcEndpoint    endpoint{fixture};
+    ServiceFixture fixture{
+        {queue_id, sequence_id(2), sequence_id(3)}
+    };
+    RpcEndpoint endpoint{fixture};
 
     for (auto const method : management_rpc_method_names()) {
         CAPTURE(method);
@@ -596,6 +652,11 @@ TEST_CASE("Management RPC separates invalid params from safe application errors"
     })),
                            ErrorCode::InvalidParams);
 
+    fixture.cron.set_validation_error(Error{
+        .category = ErrorCategory::InvalidArgument,
+        .code     = "jobu.schedule.invalid_expression",
+        .message  = "Injected invalid cron expression",
+    });
     require_application_error(
         endpoint.call("job.create",
                       encode_create(
@@ -605,8 +666,8 @@ TEST_CASE("Management RPC separates invalid params from safe application errors"
                               .payload  = cli_payload("/usr/bin/true"),
     },
                           fixture.registry)),
-        "unsupported",
-        "jobu.schedule.cron_unavailable");
+        "invalid_argument",
+        "jobu.schedule.invalid_expression");
 
     require_application_error(endpoint.call("job.get", encode_job_id(missing_id)), "not_found", "jobu.job.not_found");
 

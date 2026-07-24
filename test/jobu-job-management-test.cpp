@@ -9,6 +9,7 @@
 #include "run_repository_priv.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
+#include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
@@ -73,6 +74,7 @@ struct ServiceFixture {
     std::filesystem::path     database_file{directory.path() / "jobu.sqlite"};
     Database                  database{make_database(database_file)};
     StandardAttributeRegistry registry;
+    FakeCronEngine            cron;
     SequenceUuidGenerator     generator;
     FakeTimeSource            time;
 };
@@ -269,7 +271,12 @@ TEST_CASE("Job management creates durable one-time definitions and immutable run
     ServiceFixture fixture{
         {queue_id, cli_id, cli_run, http_id, http_run}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time, max_attempts(2)};
+    ManagementService service{fixture.database,
+                              fixture.registry,
+                              fixture.cron,
+                              fixture.generator,
+                              fixture.time,
+                              max_attempts(2)};
 
     auto queue = service.create_queue({.name = "jobs", .defaults = max_attempts(3)});
     REQUIRE(queue);
@@ -384,7 +391,7 @@ TEST_CASE("Job create idempotency is queue-scoped and replays the original defin
         ids.push_back(sequence_id(suffix));
     }
     ServiceFixture    fixture{std::move(ids)};
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
 
     auto first_queue = service.create_queue({.name = "first"});
     REQUIRE(first_queue);
@@ -447,7 +454,7 @@ TEST_CASE("Job create idempotency replay does not require fresh UUIDs", "[jobu][
     ServiceFixture fixture{
         {sequence_id(1), sequence_id(2), sequence_id(3)}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
 
     auto queue = service.create_queue({.name = "queue"});
     REQUIRE(queue);
@@ -486,7 +493,7 @@ TEST_CASE("Job management lists filtered keyset pages and controls deleted visib
     ServiceFixture fixture{
         {first_queue, second_queue, first_job, first_run, second_job, second_run, third_job, third_run}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "first"}));
     REQUIRE(service.create_queue({.name = "second"}));
 
@@ -569,7 +576,7 @@ TEST_CASE("Job management rejects invalid requests before durable creation", "[j
          uuid("00000000-0000-7000-8000-000000000025"),
          uuid("00000000-0000-7000-8000-000000000026")}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "jobs"}));
     auto const schedule = once_at(UtcTimePoint{1s});
 
@@ -594,11 +601,6 @@ TEST_CASE("Job management rejects invalid requests before durable creation", "[j
     }),
                   ErrorCategory::InvalidArgument,
                   "jobu.job.invalid_name");
-    require_error(
-        service.create_job(
-            {.queue = queue_id, .schedule = CronSchedule{.expression = "* * * * *"}, .payload = cli_payload("true")}),
-        ErrorCategory::Unsupported,
-        "jobu.schedule.cron_unavailable");
     require_error(service.create_job({.queue = queue_id, .schedule = schedule, .payload = jb::rpc::JsonValue{}}),
                   ErrorCategory::InvalidArgument,
                   "jobu.job.invalid_payload");
@@ -700,7 +702,7 @@ TEST_CASE("Job creation rolls back the definition when schedule-run insertion fa
     ServiceFixture fixture{
         {queue_id, first_job, shared_run, rolled_back_job, shared_run}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "jobs"}));
     REQUIRE(service.create_job(
         {.queue = queue_id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("first")}));
@@ -721,7 +723,7 @@ TEST_CASE("Job creation rejects oversized materialized attribute snapshots", "[j
         {queue_id, uuid("00000000-0000-7000-8000-000000000061"), uuid("00000000-0000-7000-8000-000000000062")}
     };
     LargeAttributeRegistry registry;
-    ManagementService      service{fixture.database, registry, fixture.generator, fixture.time};
+    ManagementService      service{fixture.database, registry, fixture.cron, fixture.generator, fixture.time};
 
     auto queue_defaults = AttributeSet{
         {"test.queue_large", {.data = std::string(140U * 1024U, 'q')}}
@@ -750,7 +752,12 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
     ServiceFixture fixture{
         {queue_id, job_id, run_id}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time, max_attempts(2)};
+    ManagementService service{fixture.database,
+                              fixture.registry,
+                              fixture.cron,
+                              fixture.generator,
+                              fixture.time,
+                              max_attempts(2)};
     REQUIRE(service.create_queue({.name = "jobs", .defaults = max_attempts(3)}));
     auto created = service.create_job({
         .queue      = queue_id,
@@ -842,7 +849,7 @@ TEST_CASE("Job lifecycle persists revisions draining suspension and idempotent n
     ServiceFixture fixture{
         {queue_id, immediate_job, immediate_run, busy_job, busy_run}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "jobs"}));
     REQUIRE(service.create_job({.queue    = queue_id,
                                 .name     = "immediate",
@@ -963,7 +970,7 @@ TEST_CASE("Job lifecycle rolls back revision exhaustion and rejects deleted defi
     ServiceFixture fixture{
         {queue_id, job_id, run_id}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "jobs"}));
     REQUIRE(
         service.create_job({.queue = queue_id, .schedule = once_at(UtcTimePoint{20s}), .payload = cli_payload("job")}));
@@ -1014,7 +1021,7 @@ TEST_CASE("Job move preserves definitions and terminal history across guarded ta
          moving_run, history_job,
          history_run}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "source", .defaults = max_attempts(2)}));
     REQUIRE(service.create_queue({.name = "active-target", .defaults = max_attempts(99)}));
     REQUIRE(service.create_queue({.name = "suspended-target", .defaults = max_attempts(88)}));
@@ -1153,7 +1160,7 @@ TEST_CASE("Job deletion cancels pending work cleans references and enforces prer
     ServiceFixture fixture{
         {queue_id, deleted_job, deleted_run, running_job, running_run, exhausted_job, exhausted_run}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "jobs"}));
     REQUIRE(service.create_job({.queue    = queue_id,
                                 .name     = "delete",
@@ -1262,7 +1269,7 @@ TEST_CASE("Job update validates revisions state and replacement fields", "[jobu]
     ServiceFixture fixture{
         {queue_id, job_id, uuid("00000000-0000-7000-8000-000000000082")}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "jobs"}));
     REQUIRE(
         service.create_job({.queue = queue_id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("true")}));
@@ -1325,7 +1332,7 @@ TEST_CASE("Job update rolls back when attempts prevent snapshot refresh", "[jobu
     ServiceFixture fixture{
         {queue_id, pending_job, pending_run, started_job, started_run}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "jobs"}));
     REQUIRE(service.create_job({.queue    = queue_id,
                                 .name     = "pending",
@@ -1375,7 +1382,7 @@ TEST_CASE("Job management rejects malformed persisted definitions", "[jobu][job]
     ServiceFixture fixture{
         {queue_id, job_id, uuid("00000000-0000-7000-8000-000000000042")}
     };
-    ManagementService service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "jobs"}));
     REQUIRE(
         service.create_job({.queue = queue_id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("true")}));
@@ -1395,12 +1402,13 @@ TEST_CASE("Job methods report invalid daemon defaults consistently", "[jobu][job
          uuid("00000000-0000-7000-8000-000000000051"),
          uuid("00000000-0000-7000-8000-000000000052")}
     };
-    ManagementService queue_service{fixture.database, fixture.registry, fixture.generator, fixture.time};
+    ManagementService queue_service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     auto              queue = queue_service.create_queue({.name = "jobs"});
     REQUIRE(queue);
 
     ManagementService invalid_service{fixture.database,
                                       fixture.registry,
+                                      fixture.cron,
                                       fixture.generator,
                                       fixture.time,
                                       {{"unknown", {.data = true}}}};
