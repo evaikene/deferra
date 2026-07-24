@@ -174,10 +174,16 @@ auto FakeAttemptExecutor::start(jobu::AttemptStartRequest request, jobu::Attempt
 {
     using Result = core::Result<void, core::Error>;
 
-    auto const key = request.key;
+    auto const key  = request.key;
+    auto const type = request.type;
     _start_requests.push_back(std::move(request));
     if (_start_error) {
         return Result::failure(*_start_error);
+    }
+    if (!is_available(type)) {
+        return Result::failure(test_error(core::ErrorCategory::Unavailable,
+                                          "test.executor.type_unavailable",
+                                          "The fake executor is unavailable for the requested job type"));
     }
     if (!completion) {
         return Result::failure(test_error(core::ErrorCategory::InvalidArgument,

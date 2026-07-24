@@ -228,6 +228,7 @@ TEST_CASE("FakeAttemptExecutor retains no callback after failed or rejected star
     CHECK(callback_count == 0);
 
     executor.set_start_error(std::nullopt);
+    executor.set_available(jb::jobu::JobType::Cli, true);
     auto empty_handler = executor.start(start_request(key), {});
     REQUIRE_FALSE(empty_handler);
     CHECK(empty_handler.error().code == "test.executor.empty_completion_handler");
@@ -250,6 +251,32 @@ TEST_CASE("FakeAttemptExecutor retains no callback after failed or rejected star
     CHECK(callback_count == 0);
 }
 
+TEST_CASE("FakeAttemptExecutor rejects unavailable types after recording their starts", "[test][attempt-executor]")
+{
+    auto const cli_key  = attempt_key("00000000-0000-0000-0000-000000000009");
+    auto const http_key = attempt_key("00000000-0000-0000-0000-00000000000a");
+
+    jb::test::FakeAttemptExecutor executor;
+    auto                          callback_count = std::size_t{0};
+
+    auto unavailable_cli = executor.start(start_request(cli_key), [&](auto) { ++callback_count; });
+    REQUIRE_FALSE(unavailable_cli);
+    CHECK(unavailable_cli.error().category == ErrorCategory::Unavailable);
+    CHECK(unavailable_cli.error().code == "test.executor.type_unavailable");
+
+    auto unavailable_http =
+        executor.start(start_request(http_key, jb::jobu::JobType::Http), [&](auto) { ++callback_count; });
+    REQUIRE_FALSE(unavailable_http);
+    CHECK(unavailable_http.error().category == ErrorCategory::Unavailable);
+    CHECK(unavailable_http.error().code == "test.executor.type_unavailable");
+
+    REQUIRE(executor.start_requests().size() == 2);
+    CHECK(executor.start_requests()[0].key == cli_key);
+    CHECK(executor.start_requests()[1].key == http_key);
+    CHECK(executor.pending_keys().empty());
+    CHECK(callback_count == 0);
+}
+
 TEST_CASE("FakeAttemptExecutor rejects mismatched unknown and duplicate completions", "[test][attempt-executor]")
 {
     auto const pending_key = attempt_key("00000000-0000-0000-0000-000000000004");
@@ -257,6 +284,7 @@ TEST_CASE("FakeAttemptExecutor rejects mismatched unknown and duplicate completi
 
     jb::test::FakeAttemptExecutor executor;
     auto                          callback_count = std::size_t{0};
+    executor.set_available(jb::jobu::JobType::Cli, true);
     REQUIRE(executor.start(start_request(pending_key), [&](auto) { ++callback_count; }));
 
     auto mismatched = executor.complete(pending_key, attempt_completion(other_key));
@@ -306,6 +334,7 @@ TEST_CASE("FakeAttemptExecutor accepts every valid completion shape", "[test][at
     for (auto& completion : completions) {
         jb::test::FakeAttemptExecutor executor;
         auto                          callback_count = std::size_t{0};
+        executor.set_available(jb::jobu::JobType::Cli, true);
         REQUIRE(executor.start(start_request(key), [&](auto) { ++callback_count; }));
         REQUIRE(executor.complete(key, std::move(completion)));
         CHECK(callback_count == 1);
@@ -361,6 +390,7 @@ TEST_CASE("FakeAttemptExecutor rejects inconsistent or unsafe completion shapes"
     for (auto& [reason, completion] : completions) {
         jb::test::FakeAttemptExecutor executor;
         auto                          callback_count = std::size_t{0};
+        executor.set_available(jb::jobu::JobType::Cli, true);
         REQUIRE(executor.start(start_request(key), [&](auto) { ++callback_count; }));
 
         auto result = executor.complete(key, std::move(completion));
@@ -383,6 +413,7 @@ TEST_CASE("FakeAttemptExecutor cancellation records calls without completing att
 
     jb::test::FakeAttemptExecutor executor;
     auto                          callback_count = std::size_t{0};
+    executor.set_available(jb::jobu::JobType::Cli, true);
     REQUIRE(executor.start(start_request(key), [&](auto) { ++callback_count; }));
 
     executor.set_cancel_error(cancel_error);

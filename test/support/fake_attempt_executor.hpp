@@ -12,12 +12,13 @@ namespace jb::test {
 
 /** Test-only AttemptExecutor with explicit completion and call recording.
  *
- * CLI and HTTP availability are configured independently. Starts and cancellations run only on the calling test
+ * CLI and HTTP availability are configured independently. A start for a disabled type is recorded and returns
+ * `test.executor.type_unavailable` without retaining its handler. Starts and cancellations run only on the calling test
  * thread, no thread or external operation is created, and successful starts remain pending until complete() is called.
  */
 class FakeAttemptExecutor final : public jobu::AttemptExecutor {
 public:
-    /// Enables or disables one runner family; both families are unavailable initially.
+    /// Enables or disables starts for one runner family; both families are unavailable initially.
     void set_available(jobu::JobType type, bool available) noexcept;
 
     /// Injects or clears the error returned by start().
