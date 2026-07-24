@@ -30,6 +30,8 @@ public:
     /// Replaces the strictly increasing occurrence sequence for one exact schedule.
     void set_occurrences(jobu::CronSchedule schedule, std::vector<core::UtcTimePoint> occurrences)
     {
+        std::sort(occurrences.begin(), occurrences.end());
+        occurrences.erase(std::unique(occurrences.begin(), occurrences.end()), occurrences.end());
         _occurrences.insert_or_assign(key(schedule), std::move(occurrences));
     }
 

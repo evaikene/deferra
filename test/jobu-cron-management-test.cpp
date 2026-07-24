@@ -134,6 +134,21 @@ void check_schedule(JobSchedule const& value, CronSchedule const& expected)
 
 } // anonymous namespace
 
+TEST_CASE("Fake cron normalizes configured occurrences", "[jobu][cron][support]")
+{
+    FakeCronEngine cron;
+    auto const     schedule = cron_schedule();
+    cron.set_occurrences(schedule, {UtcTimePoint{120s}, UtcTimePoint{60s}, UtcTimePoint{60s}, UtcTimePoint{5s}});
+
+    auto first = cron.next_after(schedule, UtcTimePoint{10s});
+    REQUIRE(first);
+    CHECK(*first == UtcTimePoint{60s});
+
+    auto second = cron.next_after(schedule, *first);
+    REQUIRE(second);
+    CHECK(*second == UtcTimePoint{120s});
+}
+
 TEST_CASE("Recurring create persists one future schedule-owned snapshot", "[jobu][cron][management][sqlite]")
 {
     auto const     queue_id = sequence_id(1);
