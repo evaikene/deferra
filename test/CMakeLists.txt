@@ -84,9 +84,10 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 set(TARGET "test-support-test")
 add_executable(${TARGET}
     test-support-test.cpp
+    support/fake_attempt_executor.cpp
     support/temporary_directory.cpp
 )
-target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # Generic database API test
@@ -215,6 +216,7 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 # JobU domain public headers must each compile as the first include.
 foreach(JOBU_DOMAIN_HEADER IN ITEMS
         attempt
+        attempt-executor
         attribute-registry
         cron
         job
