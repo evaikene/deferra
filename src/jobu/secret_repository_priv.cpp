@@ -7,7 +7,6 @@
 #include "value.hpp"
 
 #include <cstdint>
-#include <limits>
 #include <set>
 #include <utility>
 

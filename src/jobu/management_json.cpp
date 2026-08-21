@@ -323,7 +323,7 @@ auto schedule_from_json(jb::rpc::JsonValue const& value, bool request) -> Conver
     }
     if (kind->as_string() == "once") {
         auto const* at = find_member(object, "at");
-        if (!at || (request && !has_only_members(object, {"kind", "at"}))) {
+        if (at == nullptr || (request && !has_only_members(object, {"kind", "at"}))) {
             return invalid<JobSchedule>(request);
         }
         auto planned_at = jb::core::UtcTimePoint{};
@@ -335,7 +335,7 @@ auto schedule_from_json(jb::rpc::JsonValue const& value, bool request) -> Conver
     if (kind->as_string() == "cron") {
         auto const* expression = find_member(object, "expression");
         auto const* timezone   = find_member(object, "timezone");
-        if (!expression || !expression->is_string() || !timezone || !timezone->is_string() ||
+        if (expression == nullptr || !expression->is_string() || timezone == nullptr || !timezone->is_string() ||
             (request && !has_only_members(object, {"kind", "expression", "timezone"}))) {
             return invalid<JobSchedule>(request);
         }
@@ -767,7 +767,7 @@ auto queue_list_request_from_json(jb::rpc::JsonValue const& value)
         }
         result.page.after_id = id;
     }
-    return ConversionResult<QueueListRequest>::success(std::move(result));
+    return ConversionResult<QueueListRequest>::success(result);
 }
 
 auto update_queue_request_to_json(UpdateQueueRequest const& request, AttributeRegistry const& registry)

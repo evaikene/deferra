@@ -21,9 +21,9 @@ namespace jb::rpc {
  */
 struct FramingLimits {
     /// Maximum permitted header size in bytes, including the terminating `\r\n\r\n`.
-    std::size_t max_header_bytes{16U * 1024U};
+    std::size_t max_header_bytes{std::size_t{16} * 1024U};
     /// Maximum permitted body size in bytes; zero-length bodies remain valid when this limit is zero.
-    std::size_t max_body_bytes{1024U * 1024U};
+    std::size_t max_body_bytes{std::size_t{1024} * 1024U};
 };
 
 /** Incrementally extracts owned bodies from an LSP-style byte stream.

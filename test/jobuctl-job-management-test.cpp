@@ -507,10 +507,11 @@ auto inspect_job(jb::db::Database& database,
     auto const* schedule_owned   = field<std::int64_t>(query, "schedule_owned");
     auto const* job_payload      = field<std::string>(query, "job_payload");
     auto const* run_payload      = field<std::string>(query, "run_payload");
-    if (!stored_queue || *stored_queue != expected_blob(*queue_id) || !stored_revision ||
-        *stored_revision != revision || !stored_job_state || *stored_job_state != job_state || !stored_run_state ||
-        *stored_run_state != run_state || !schedule_owned || *schedule_owned != 1 || !job_payload || !run_payload ||
-        *job_payload != expected_payload || *run_payload != expected_payload) {
+    if (stored_queue == nullptr || *stored_queue != expected_blob(*queue_id) || stored_revision == nullptr ||
+        *stored_revision != revision || stored_job_state == nullptr || *stored_job_state != job_state ||
+        stored_run_state == nullptr || *stored_run_state != run_state || schedule_owned == nullptr ||
+        *schedule_owned != 1 || job_payload == nullptr || run_payload == nullptr || *job_payload != expected_payload ||
+        *run_payload != expected_payload) {
         return false;
     }
 
@@ -554,9 +555,8 @@ auto inspect_database(std::filesystem::path const& database_path,
         return false;
     }
 
-    auto const cli_payload =
-        fmt::format("{{\"arguments\":[\"-c\",\"{}\"],\"command\":\"/bin/sh\"}}", cli_payload_marker);
-    auto const http_payload = fmt::format("{{\"method\":\"GET\",\"url\":\"{}\"}}", http_url);
+    auto const cli_payload  = fmt::format(R"({{"arguments":["-c","{}"],"command":"/bin/sh"}})", cli_payload_marker);
+    auto const http_payload = fmt::format(R"({{"method":"GET","url":"{}"}})", http_url);
     auto valid = inspect_job(database, cli_job_id, cli_queue_id, cli_revision, "deleted", "cancelled", cli_payload) &&
                  inspect_job(database, http_job_id, http_queue_id, 1, "active", "scheduled", http_payload);
     auto const run_count     = scalar_count(database, "jobu_runs");

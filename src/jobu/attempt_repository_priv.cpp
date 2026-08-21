@@ -17,7 +17,7 @@ namespace {
 template <typename T>
 using RepositoryResult = jb::core::Result<T, jb::core::Error>;
 
-constexpr std::size_t kMaximumJsonDocumentBytes = 256U * 1024U;
+constexpr std::size_t kMaximumJsonDocumentBytes = std::size_t{256} * 1024U;
 constexpr std::size_t kMaximumAttemptList       = 1000U;
 
 constexpr auto kAttemptSelection =
@@ -220,15 +220,6 @@ auto decode_output(jb::db::Record const& record) -> RepositoryResult<AttemptOutp
         .stderr_truncated = *stderr_truncated,
         .capture_lost     = *capture_lost,
     });
-}
-
-auto affected_rows(jb::db::Query const& query) -> RepositoryResult<std::size_t>
-{
-    auto const count = query.num_rows_affected();
-    if (count < 0 || !std::in_range<std::size_t>(count)) {
-        return RepositoryResult<std::size_t>::failure(invalid_attempt("invalid_affected_row_count"));
-    }
-    return RepositoryResult<std::size_t>::success(static_cast<std::size_t>(count));
 }
 
 auto bind_output(jb::db::Query&        query,

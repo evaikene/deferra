@@ -38,6 +38,30 @@ For code changes, Codex must use a staged workflow.
 The project requires CMake 3.20+, a C++20 compiler, `fmt`, `sqlite3`, `nlohmann_json`, and Catch2
 discoverable via CMake package config.
 
+## Clangd Diagnostics
+
+When `.bld/compile_commands.json` is available, use the clangd MCP/LSP tools for C++ semantic
+exploration and diagnostics.
+
+- The repository has an established diagnostics-clean baseline. For normal work, query diagnostics
+  only for changed C++ source files and changed standalone C++ headers; do not repeat a project-wide
+  scan unless the user explicitly requests one or there is evidence that the baseline is no longer
+  valid.
+- Diagnose a changed intentionally non-standalone or platform-specific header through an owning
+  translation unit with the matching target configuration. Report unavailable target coverage
+  instead of treating fallback-context parser errors as code defects.
+- Treat every enabled compiler, include-cleaner, and clang-tidy diagnostic reported for those files
+  as a completion blocker. Fix all diagnostics within the approved scope; do not silently accept or
+  suppress them.
+- If a fix would expand the approved stage, or a diagnostic conflicts with the intended design or
+  project style, stop and report the exact location, check name, message, and rationale to the user.
+- Preserve intentional indirect includes with `// IWYU pragma: keep <justification>`. Use
+  `// IWYU pragma: export` when a public header deliberately re-exports another header, and remove
+  genuinely unused includes. Do not add filename-based `.clangd` exceptions for include intent.
+- Do not modify `.clangd` or add other local diagnostic suppressions without explicit approval.
+- Re-run diagnostics for the changed files after fixes and report the stage complete only when those
+  files are clean.
+
 ## Coding Style & Naming Conventions
 
 Use the checked-in `.clang-format`. Important defaults are 4-space indentation, 120-column limit, left-aligned pointers, and custom brace wrapping with function braces on their own line. Keep public API headers in `src/core` and implementation details in `.cpp` or `*_priv.hpp` files.

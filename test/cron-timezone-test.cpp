@@ -330,7 +330,7 @@ TEST_CASE("TZif POSIX footer accepts IANA rule forms and checked signed offsets"
 TEST_CASE("TZif POSIX footer rejects unsupported or malformed grammar", "[jobu][cron][timezone]")
 {
     auto const section = minimal_section();
-    for (auto const footer : {
+    for (auto const* const footer : {
              "AB0",
              "<+3>-3",
              "<ABC0",
@@ -407,7 +407,7 @@ TEST_CASE("TZif rejects malformed headers, counts, and every truncation", "[jobu
     v1_with_trailing.push_back('\0');
     check_invalid_data(v1_with_trailing);
 
-    check_invalid_data(std::string(16U * 1024U * 1024U + 1U, '\0'));
+    check_invalid_data(std::string((16U * 1024U * 1024U) + 1U, '\0'));
 }
 
 TEST_CASE("TZif validates transitions, types, abbreviations, leaps, and indicators", "[jobu][cron][timezone]")
@@ -500,13 +500,13 @@ TEST_CASE("TZif validates compatibility and preferred sections independently", "
     auto fixture = make_tzif('4', first, second);
 
     auto       malformed_first   = fixture.bytes;
-    auto const first_type_offset = 44U + first.transitions.size() * 4U + first.transition_types.size();
+    auto const first_type_offset = 44U + (first.transitions.size() * 4U) + first.transition_types.size();
     replace_u32(malformed_first, first_type_offset, std::bit_cast<std::uint32_t>(std::int32_t{-90000}));
     check_invalid_data(malformed_first);
 
     auto       malformed_second = fixture.bytes;
     auto const second_type_offset =
-        fixture.second_section_offset + second.transitions.size() * 8U + second.transition_types.size();
+        fixture.second_section_offset + (second.transitions.size() * 8U) + second.transition_types.size();
     replace_u32(malformed_second, second_type_offset, std::bit_cast<std::uint32_t>(std::int32_t{93600}));
     check_invalid_data(malformed_second);
 
@@ -615,7 +615,7 @@ TEST_CASE("Timezone lookup uses the first valid root and bounds files before rea
     CHECK(malformed.error().category == ErrorCategory::Internal);
     CHECK(malformed.error().code == "jobu.schedule.invalid_timezone_data");
 
-    write_file(first_root / "TooLarge", std::string(16U * 1024U * 1024U + 1U, '\0'));
+    write_file(first_root / "TooLarge", std::string((16U * 1024U * 1024U) + 1U, '\0'));
     auto const oversized = load_timezone_data("TooLarge", roots);
     REQUIRE_FALSE(oversized);
     CHECK(oversized.error().code == "jobu.schedule.invalid_timezone_data");

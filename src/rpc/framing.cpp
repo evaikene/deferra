@@ -13,7 +13,7 @@ using AppendResult = jb::core::Result<std::vector<std::string>, jb::core::Error>
 using FrameResult  = jb::core::Result<std::string, jb::core::Error>;
 using LengthResult = jb::core::Result<std::size_t, jb::core::Error>;
 
-enum class FramingFailure {
+enum class FramingFailure : unsigned char {
     HeaderTooLarge,
     InvalidHeader,
     MissingContentLength,
@@ -169,7 +169,7 @@ auto parse_content_length(std::string_view value) -> LengthResult
         if (length > (std::numeric_limits<std::size_t>::max() - digit) / 10U) {
             return LengthResult::failure(make_framing_error(FramingFailure::InvalidContentLength));
         }
-        length = length * 10U + digit;
+        length = (length * 10U) + digit;
     }
 
     return LengthResult::success(length);
@@ -181,7 +181,7 @@ public:
         : _value{trim_ows(value)}
     {}
 
-    enum class Status {
+    enum class Status : unsigned char {
         Supported,
         Invalid,
         Unsupported,
@@ -323,10 +323,10 @@ auto parse_header(std::string_view header, FramingLimits const& limits) -> Lengt
 
         auto const name  = line.substr(0, colon);
         auto const value = line.substr(colon + 1U);
-        if (!std::all_of(name.begin(),
-                         name.end(),
-                         [](char character) { return is_token_character(static_cast<unsigned char>(character)); }) ||
-            !std::all_of(value.begin(), value.end(), [](char character) {
+        if (!std::ranges::all_of(
+                name,
+                [](char character) { return is_token_character(static_cast<unsigned char>(character)); }) ||
+            !std::ranges::all_of(value, [](char character) {
                 return is_field_value_character(static_cast<unsigned char>(character));
             })) {
             return LengthResult::failure(make_framing_error(FramingFailure::InvalidHeader));
@@ -382,7 +382,7 @@ auto has_header_terminator(std::string const& header) noexcept -> bool
 } // anonymous namespace
 
 struct StreamFramer::Private {
-    enum class State {
+    enum class State : unsigned char {
         Header,
         Body,
     };
@@ -434,7 +434,7 @@ struct StreamFramer::Private {
 
             auto const remaining = expected_body_bytes - body.size();
             auto const count     = std::min(remaining, bytes.size());
-            body.append(bytes.data(), count);
+            body.append(bytes.substr(0, count));
             bytes.remove_prefix(count);
             if (body.size() != expected_body_bytes) {
                 continue;

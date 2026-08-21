@@ -6,7 +6,6 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
-#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -18,6 +17,8 @@ using namespace jb::core;
 using namespace std::chrono_literals;
 
 namespace {
+
+constexpr std::size_t kMaximumResultBytes = std::size_t{256} * 1024U;
 
 template <typename T>
 auto make_json(T value) -> jb::rpc::JsonValue
@@ -220,7 +221,8 @@ TEST_CASE("FakeAttemptExecutor retains no callback after failed or rejected star
     jb::test::FakeAttemptExecutor executor;
     executor.set_start_error(start_error);
     auto callback_count = std::size_t{0};
-    auto failed         = executor.start(start_request(key), [&](auto) { ++callback_count; });
+    auto count_callback = [&](auto const&) { ++callback_count; };
+    auto failed         = executor.start(start_request(key), count_callback);
     REQUIRE_FALSE(failed);
     CHECK(failed.error() == start_error);
     CHECK(executor.start_requests().size() == 1);
@@ -237,14 +239,14 @@ TEST_CASE("FakeAttemptExecutor retains no callback after failed or rejected star
 
     auto invalid_key           = key;
     invalid_key.attempt_number = 0;
-    auto invalid_start         = executor.start(start_request(invalid_key), [&](auto) { ++callback_count; });
+    auto invalid_start         = executor.start(start_request(invalid_key), count_callback);
     REQUIRE_FALSE(invalid_start);
     CHECK(invalid_start.error().code == "test.executor.invalid_key");
     CHECK(executor.start_requests().size() == 3);
     CHECK(executor.pending_keys().empty());
 
-    REQUIRE(executor.start(start_request(key), [&](auto) { ++callback_count; }));
-    auto duplicate = executor.start(start_request(key), [&](auto) { ++callback_count; });
+    REQUIRE(executor.start(start_request(key), count_callback));
+    auto duplicate = executor.start(start_request(key), count_callback);
     REQUIRE_FALSE(duplicate);
     CHECK(duplicate.error().code == "test.executor.duplicate_start");
     CHECK(executor.pending_keys() == std::vector<jb::jobu::AttemptKey>{key});
@@ -258,14 +260,14 @@ TEST_CASE("FakeAttemptExecutor rejects unavailable types after recording their s
 
     jb::test::FakeAttemptExecutor executor;
     auto                          callback_count = std::size_t{0};
+    auto                          count_callback = [&](auto const&) { ++callback_count; };
 
-    auto unavailable_cli = executor.start(start_request(cli_key), [&](auto) { ++callback_count; });
+    auto unavailable_cli = executor.start(start_request(cli_key), count_callback);
     REQUIRE_FALSE(unavailable_cli);
     CHECK(unavailable_cli.error().category == ErrorCategory::Unavailable);
     CHECK(unavailable_cli.error().code == "test.executor.type_unavailable");
 
-    auto unavailable_http =
-        executor.start(start_request(http_key, jb::jobu::JobType::Http), [&](auto) { ++callback_count; });
+    auto unavailable_http = executor.start(start_request(http_key, jb::jobu::JobType::Http), count_callback);
     REQUIRE_FALSE(unavailable_http);
     CHECK(unavailable_http.error().category == ErrorCategory::Unavailable);
     CHECK(unavailable_http.error().code == "test.executor.type_unavailable");
@@ -284,8 +286,9 @@ TEST_CASE("FakeAttemptExecutor rejects mismatched unknown and duplicate completi
 
     jb::test::FakeAttemptExecutor executor;
     auto                          callback_count = std::size_t{0};
+    auto                          count_callback = [&](auto const&) { ++callback_count; };
     executor.set_available(jb::jobu::JobType::Cli, true);
-    REQUIRE(executor.start(start_request(pending_key), [&](auto) { ++callback_count; }));
+    REQUIRE(executor.start(start_request(pending_key), count_callback));
 
     auto mismatched = executor.complete(pending_key, attempt_completion(other_key));
     REQUIRE_FALSE(mismatched);
@@ -326,16 +329,17 @@ TEST_CASE("FakeAttemptExecutor accepts every valid completion shape", "[test][at
 
     auto empty_serialized = jb::rpc::serialize_json(object_with_text(""));
     REQUIRE(empty_serialized);
-    REQUIRE(empty_serialized->size() < 256 * 1024);
+    REQUIRE(empty_serialized->size() < kMaximumResultBytes);
     auto maximum_result   = attempt_completion(key);
-    maximum_result.result = object_with_text(std::string(256 * 1024 - empty_serialized->size(), 'x'));
+    maximum_result.result = object_with_text(std::string(kMaximumResultBytes - empty_serialized->size(), 'x'));
     completions.push_back(std::move(maximum_result));
 
     for (auto& completion : completions) {
         jb::test::FakeAttemptExecutor executor;
         auto                          callback_count = std::size_t{0};
+        auto                          count_callback = [&](auto const&) { ++callback_count; };
         executor.set_available(jb::jobu::JobType::Cli, true);
-        REQUIRE(executor.start(start_request(key), [&](auto) { ++callback_count; }));
+        REQUIRE(executor.start(start_request(key), count_callback));
         REQUIRE(executor.complete(key, std::move(completion)));
         CHECK(callback_count == 1);
         CHECK(executor.pending_keys().empty());
@@ -384,14 +388,15 @@ TEST_CASE("FakeAttemptExecutor rejects inconsistent or unsafe completion shapes"
     completions.emplace_back("result_not_serializable", std::move(invalid_json));
 
     auto oversized_result   = attempt_completion(key);
-    oversized_result.result = object_with_text(std::string(256 * 1024, 'x'));
+    oversized_result.result = object_with_text(std::string(kMaximumResultBytes, 'x'));
     completions.emplace_back("result_too_large", std::move(oversized_result));
 
     for (auto& [reason, completion] : completions) {
         jb::test::FakeAttemptExecutor executor;
         auto                          callback_count = std::size_t{0};
+        auto                          count_callback = [&](auto const&) { ++callback_count; };
         executor.set_available(jb::jobu::JobType::Cli, true);
-        REQUIRE(executor.start(start_request(key), [&](auto) { ++callback_count; }));
+        REQUIRE(executor.start(start_request(key), count_callback));
 
         auto result = executor.complete(key, std::move(completion));
         REQUIRE_FALSE(result);
@@ -413,8 +418,9 @@ TEST_CASE("FakeAttemptExecutor cancellation records calls without completing att
 
     jb::test::FakeAttemptExecutor executor;
     auto                          callback_count = std::size_t{0};
+    auto                          count_callback = [&](auto const&) { ++callback_count; };
     executor.set_available(jb::jobu::JobType::Cli, true);
-    REQUIRE(executor.start(start_request(key), [&](auto) { ++callback_count; }));
+    REQUIRE(executor.start(start_request(key), count_callback));
 
     executor.set_cancel_error(cancel_error);
     auto failed = executor.cancel(key);

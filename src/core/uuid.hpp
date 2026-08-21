@@ -8,7 +8,7 @@
 #include "time_source.hpp"
 
 #include <array>
-#include <compare>
+#include <compare> // IWYU pragma: keep for defaulted three-way comparison
 #include <cstddef>
 #include <cstdint>
 #include <functional>

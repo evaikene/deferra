@@ -650,11 +650,11 @@ TEST_CASE("Job management rejects invalid requests before durable creation", "[j
             {.queue = queue_id, .type = static_cast<JobType>(99), .schedule = schedule, .payload = cli_payload("x")}),
         ErrorCategory::InvalidArgument,
         "jobu.job.invalid_payload");
-    require_error(
-        service.create_job(
-            {.queue = queue_id, .schedule = schedule, .payload = cli_payload(std::string(256U * 1024U, 'x'))}),
-        ErrorCategory::ResourceExhausted,
-        "jobu.protocol.value_too_large");
+    require_error(service.create_job({.queue    = queue_id,
+                                      .schedule = schedule,
+                                      .payload  = cli_payload(std::string(std::string::size_type{256} * 1024U, 'x'))}),
+                  ErrorCategory::ResourceExhausted,
+                  "jobu.protocol.value_too_large");
     require_error(service.create_job(
                       {.queue = queue_id, .schedule = schedule, .payload = cli_payload("x"), .idempotency_key = ""}),
                   ErrorCategory::InvalidArgument,
@@ -726,12 +726,12 @@ TEST_CASE("Job creation rejects oversized materialized attribute snapshots", "[j
     ManagementService      service{fixture.database, registry, fixture.cron, fixture.generator, fixture.time};
 
     auto queue_defaults = AttributeSet{
-        {"test.queue_large", {.data = std::string(140U * 1024U, 'q')}}
+        {"test.queue_large", {.data = std::string(std::string::size_type{140} * 1024U, 'q')}}
     };
     REQUIRE(service.create_queue({.name = "large", .defaults = std::move(queue_defaults)}));
 
     auto job_attributes = AttributeSet{
-        {"test.job_large", {.data = std::string(140U * 1024U, 'j')}}
+        {"test.job_large", {.data = std::string(std::string::size_type{140} * 1024U, 'j')}}
     };
     auto oversized_error = require_error(service.create_job({.queue      = queue_id,
                                                              .schedule   = once_at(UtcTimePoint{1s}),
@@ -1387,7 +1387,7 @@ TEST_CASE("Job management rejects malformed persisted definitions", "[jobu][job]
     require_error(service.get_job(job_id), ErrorCategory::Internal, "jobu.storage.invariant");
     require_error(service.list_jobs({}), ErrorCategory::Internal, "jobu.storage.invariant");
 
-    execute(fixture.database, "UPDATE jobu_jobs SET payload_json = '{\"command\":\"true\"}', name = char(1)");
+    execute(fixture.database, R"(UPDATE jobu_jobs SET payload_json = '{"command":"true"}', name = char(1))");
     require_error(service.get_job(job_id), ErrorCategory::Internal, "jobu.storage.invariant");
 }
 

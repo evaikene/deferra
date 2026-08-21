@@ -495,11 +495,11 @@ TEST_CASE("Scheduler runnable reads preserve strict priority and time ordering",
     };
 
     for (auto const spec : std::vector<OrderedRun>{
-             {60, 5, 90, 100},
-             {61, 6, 90, 100},
-             {62, 6, 80, 110},
-             {63, 6, 80, 90 },
-             {64, 6, 80, 90 },
+             {.id_suffix = 60, .priority = 5, .runnable = 90, .planned = 100},
+             {.id_suffix = 61, .priority = 6, .runnable = 90, .planned = 100},
+             {.id_suffix = 62, .priority = 6, .runnable = 80, .planned = 110},
+             {.id_suffix = 63, .priority = 6, .runnable = 80, .planned = 90 },
+             {.id_suffix = 64, .priority = 6, .runnable = 80, .planned = 90 },
     }) {
         auto const job_id = id(static_cast<std::uint8_t>(spec.id_suffix + 70));
         insert_job(fixture.database, job_id, queue_id);
@@ -649,10 +649,12 @@ TEST_CASE("Atomic scheduler dispatch persists the running attempt before executo
     SECTION("accepted start")
     {
         auto callback_called = false;
-        auto dispatched =
-            dispatch_selected(fixture.database, fixture.registry, executor, run_id, at(120), [&](AttemptCompletion) {
-                callback_called = true;
-            });
+        auto dispatched      = dispatch_selected(fixture.database,
+                                                 fixture.registry,
+                                                 executor,
+                                                 run_id,
+                                                 at(120),
+                                                 [&](AttemptCompletion const&) { callback_called = true; });
         REQUIRE(dispatched);
         REQUIRE(dispatched->has_value());
         CHECK(dispatched->value().key == AttemptKey{.run_id = run_id, .attempt_number = 1});
@@ -670,8 +672,12 @@ TEST_CASE("Atomic scheduler dispatch persists the running attempt before executo
             .message  = "Injected executor start failure",
             .detail   = "private detail",
         });
-        auto dispatched =
-            dispatch_selected(fixture.database, fixture.registry, executor, run_id, at(120), [](AttemptCompletion) {});
+        auto dispatched = dispatch_selected(fixture.database,
+                                            fixture.registry,
+                                            executor,
+                                            run_id,
+                                            at(120),
+                                            [](AttemptCompletion const&) {});
         REQUIRE(dispatched);
         REQUIRE(dispatched->has_value());
         REQUIRE(dispatched->value().immediate_completion);
@@ -715,7 +721,8 @@ TEST_CASE("Retry dispatch preserves first start and allocates the next attempt m
     FakeAttemptExecutor executor;
     executor.set_available(JobType::Cli, true);
     auto dispatched =
-        dispatch_selected(fixture.database, fixture.registry, executor, run_id, at(120), [](AttemptCompletion) {});
+        dispatch_selected(fixture.database, fixture.registry, executor, run_id, at(120), [](AttemptCompletion const&) {
+        });
     REQUIRE(dispatched);
     REQUIRE(dispatched->has_value());
     CHECK(dispatched->value().key == AttemptKey{.run_id = run_id, .attempt_number = 2});
@@ -763,7 +770,7 @@ TEST_CASE("Dispatch revalidation enforces queue capacity and checked attempt exh
                                             executor,
                                             candidate_run,
                                             at(120),
-                                            [](AttemptCompletion) {});
+                                            [](AttemptCompletion const&) {});
         REQUIRE(dispatched);
         CHECK_FALSE(dispatched->has_value());
         CHECK(executor.start_requests().empty());
@@ -784,8 +791,12 @@ TEST_CASE("Dispatch revalidation enforces queue capacity and checked attempt exh
                        static_cast<AttemptNumber>(std::numeric_limits<std::int64_t>::max()),
                        AttemptState::Completed);
 
-        auto dispatched =
-            dispatch_selected(fixture.database, fixture.registry, executor, run_id, at(120), [](AttemptCompletion) {});
+        auto dispatched = dispatch_selected(fixture.database,
+                                            fixture.registry,
+                                            executor,
+                                            run_id,
+                                            at(120),
+                                            [](AttemptCompletion const&) {});
         require_error(dispatched, ErrorCategory::ResourceExhausted, "jobu.attempt.number_exhausted");
         CHECK(executor.start_requests().empty());
 
@@ -808,8 +819,12 @@ TEST_CASE("Dispatch revalidation enforces queue capacity and checked attempt exh
         CHECK(selected->front().run.id == run_id);
 
         execute(fixture.database, "UPDATE jobu_jobs SET state = 'suspended' WHERE id IS NOT NULL");
-        auto dispatched =
-            dispatch_selected(fixture.database, fixture.registry, executor, run_id, at(120), [](AttemptCompletion) {});
+        auto dispatched = dispatch_selected(fixture.database,
+                                            fixture.registry,
+                                            executor,
+                                            run_id,
+                                            at(120),
+                                            [](AttemptCompletion const&) {});
         REQUIRE(dispatched);
         CHECK_FALSE(dispatched->has_value());
         CHECK(executor.start_requests().empty());

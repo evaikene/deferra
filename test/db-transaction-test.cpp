@@ -43,7 +43,7 @@ auto call_count(FakeDatabaseDriverState const& state, std::string const& call) -
 
 auto call_position(FakeDatabaseDriverState const& state, std::string const& call) -> std::size_t
 {
-    auto const position = std::find(state.calls.begin(), state.calls.end(), call);
+    auto const position = std::ranges::find(state.calls, call);
     REQUIRE(position != state.calls.end());
     return static_cast<std::size_t>(std::distance(state.calls.begin(), position));
 }

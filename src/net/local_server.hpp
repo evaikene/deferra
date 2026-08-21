@@ -29,7 +29,7 @@ struct LocalServerOptions {
     std::size_t max_pending_connections{64};
 
     /// Per-connection input-buffer limit in bytes; zero means unlimited.
-    std::size_t accepted_read_buffer_limit{2U * 1024U * 1024U};
+    std::size_t accepted_read_buffer_limit{std::size_t{2} * 1024U * 1024U};
 };
 
 /// Event-loop-driven listener for local filesystem IPC connections.

@@ -79,7 +79,7 @@ public:
         REQUIRE(server.add_connection(std::move(device)));
     }
 
-    [[nodiscard]] auto call(std::optional<JsonValue> params = std::nullopt) -> ResponseEnvelope
+    [[nodiscard]] auto call(std::optional<JsonValue> const& params = std::nullopt) -> ResponseEnvelope
     {
         _device->inject_input(request_frame(_next_id++, params));
         return take_response(*_device);

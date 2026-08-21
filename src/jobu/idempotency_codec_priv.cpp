@@ -21,7 +21,7 @@ namespace {
 template <typename T>
 using CodecResult = jb::core::Result<T, jb::core::Error>;
 
-constexpr std::size_t kMaximumIdempotencyDocumentBytes = 1024U * 1024U;
+constexpr std::size_t kMaximumIdempotencyDocumentBytes = std::size_t{1024} * 1024U;
 
 auto invalid_record(std::string_view reason, std::string_view cause = {}) -> jb::core::Error
 {

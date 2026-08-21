@@ -10,7 +10,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -46,12 +45,13 @@ auto encode_frame(JsonValue const& value, FramingLimits limits = {}) -> std::str
     return std::move(framed).value();
 }
 
-auto success_frame(RequestId id, JsonValue result = make_json(JsonNull{}), FramingLimits limits = {}) -> std::string
+auto success_frame(RequestId const& id, JsonValue const& result = make_json(JsonNull{}), FramingLimits limits = {})
+    -> std::string
 {
     return encode_frame(encode_success_response(id, result), limits);
 }
 
-auto error_frame(RequestId id, RpcError error, FramingLimits limits = {}) -> std::string
+auto error_frame(RequestId const& id, RpcError const& error, FramingLimits limits = {}) -> std::string
 {
     return encode_frame(encode_error_response(id, error), limits);
 }
@@ -103,12 +103,12 @@ TEST_CASE("Client public defaults and object contract are stable", "[rpc][client
     static_assert(!std::is_move_constructible_v<Client>);
 
     auto const options = ClientOptions{};
-    CHECK(options.framing.max_header_bytes == 16U * 1024U);
-    CHECK(options.framing.max_body_bytes == 1024U * 1024U);
+    CHECK(options.framing.max_header_bytes == std::size_t{16} * 1024U);
+    CHECK(options.framing.max_body_bytes == std::size_t{1024} * 1024U);
     CHECK(options.json.max_depth == 64U);
     CHECK(options.max_batch_entries == 64U);
     CHECK(options.max_pending_requests == 128U);
-    CHECK(options.max_queued_output_bytes == 2U * 1024U * 1024U);
+    CHECK(options.max_queued_output_bytes == std::size_t{2} * 1024U * 1024U);
 
     Application    app{0, nullptr};
     Object         parent;
@@ -668,7 +668,7 @@ TEST_CASE("Queued output accounting observes inclusive boundaries and acknowledg
         MemoryIODevice device;
         device.open();
         device.set_auto_acknowledge_writes(false);
-        Client client{device, {.max_queued_output_bytes = 2U * frame_size - 1U}};
+        Client client{device, {.max_queued_output_bytes = (std::size_t{2} * frame_size) - 1U}};
         auto   events = std::vector<std::string>{};
         client.protocol_error.connect([&](Error const& error) { events.push_back("protocol:" + error.code); });
         client.request_failed.connect([&](RequestId const& id, Error const& error) {

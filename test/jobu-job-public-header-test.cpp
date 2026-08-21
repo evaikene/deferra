@@ -1,4 +1,4 @@
-#include "job.hpp"
+#include "job.hpp" // IWYU pragma: keep for public header self-containment coverage
 
 auto main() -> int
 {

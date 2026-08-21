@@ -1,4 +1,4 @@
-#include "attribute_registry.hpp"
+#include "attribute_registry.hpp" // IWYU pragma: keep for public header self-containment coverage
 
 auto main() -> int
 {

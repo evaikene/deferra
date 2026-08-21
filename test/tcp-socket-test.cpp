@@ -137,7 +137,7 @@ public:
     {
         REQUIRE(_accepted_fd >= 0);
 
-        linger reset{1, 0};
+        linger reset{.l_onoff = 1, .l_linger = 0};
         REQUIRE(::setsockopt(_accepted_fd, SOL_SOCKET, SO_LINGER, &reset, sizeof(reset)) == 0);
         ::close(_accepted_fd);
         _accepted_fd = -1;

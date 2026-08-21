@@ -3,7 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
-#include <chrono>
+#include <chrono> // IWYU pragma: keep for std::chrono_literals
 #include <string_view>
 #include <variant>
 

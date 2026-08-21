@@ -12,7 +12,7 @@ namespace jb::test {
 
 namespace {
 
-constexpr std::size_t kMaximumResultBytes = 256 * 1024;
+constexpr std::size_t kMaximumResultBytes = std::size_t{256} * 1024U;
 
 auto test_error(core::ErrorCategory category, std::string code, std::string message, std::string detail = {})
     -> core::Error
@@ -128,10 +128,9 @@ auto FakeAttemptExecutor::complete(jobu::AttemptKey const& key, jobu::AttemptCom
 {
     using Result = core::Result<void, core::Error>;
 
-    auto const pending =
-        std::find_if(_pending.begin(), _pending.end(), [&](PendingAttempt const& entry) { return entry.key == key; });
+    auto const pending = std::ranges::find_if(_pending, [&](PendingAttempt const& entry) { return entry.key == key; });
     if (pending == _pending.end()) {
-        auto const completed = std::find(_completed_keys.begin(), _completed_keys.end(), key);
+        auto const completed = std::ranges::find(_completed_keys, key);
         if (completed != _completed_keys.end()) {
             return Result::failure(test_error(core::ErrorCategory::Conflict,
                                               "test.executor.duplicate_completion",
@@ -196,8 +195,8 @@ auto FakeAttemptExecutor::start(jobu::AttemptStartRequest request, jobu::Attempt
                                           "The fake executor requires a positive attempt number"));
     }
     auto const is_pending =
-        std::any_of(_pending.begin(), _pending.end(), [&](PendingAttempt const& entry) { return entry.key == key; });
-    auto const was_completed = std::find(_completed_keys.begin(), _completed_keys.end(), key) != _completed_keys.end();
+        std::ranges::any_of(_pending, [&](PendingAttempt const& entry) { return entry.key == key; });
+    auto const was_completed = std::ranges::find(_completed_keys, key) != _completed_keys.end();
     if (is_pending || was_completed) {
         return Result::failure(test_error(core::ErrorCategory::Conflict,
                                           "test.executor.duplicate_start",

@@ -573,7 +573,7 @@ TEST_CASE("Attribute persistence rejects malformed typed documents with a stable
           "[jobu][storage][attribute]")
 {
     CodecAttributeRegistry registry;
-    auto                   decode = [&registry](JsonValue document) {
+    auto                   decode = [&registry](JsonValue const& document) {
         return decode_attribute_document(registry, document, AttributeScope::Job, AttributeDocumentMode::Partial);
     };
 
@@ -585,7 +585,7 @@ TEST_CASE("Attribute persistence rejects malformed typed documents with a stable
     CHECK(unknown_type.error().code == "jobu.attribute.invalid_document");
     CHECK(unknown_type.error().detail == "reason=unknown_type_tag");
 
-    for (auto document : {
+    for (auto const& document : {
              attribute_document(
                  {{"test.integer",
                    typed_json("integer", json(std::uint64_t{std::numeric_limits<std::uint64_t>::max()}))}    }
@@ -601,7 +601,7 @@ TEST_CASE("Attribute persistence rejects malformed typed documents with a stable
              attribute_document({                                                                                                            },
                  2),
     }) {
-        auto result = decode(std::move(document));
+        auto result = decode(document);
         REQUIRE_FALSE(result);
         CHECK(result.error().category == ErrorCategory::Internal);
         CHECK(result.error().code == "jobu.attribute.invalid_document");

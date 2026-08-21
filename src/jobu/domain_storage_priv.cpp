@@ -19,7 +19,7 @@ namespace {
 template <typename T>
 using StorageResult = jb::core::Result<T, jb::core::Error>;
 
-constexpr std::size_t kMaximumJsonDocumentBytes = 256U * 1024U;
+constexpr std::size_t kMaximumJsonDocumentBytes = std::size_t{256} * 1024U;
 
 constexpr auto kJobRunColumns =
     "jobu_runs.id AS run_id, jobu_runs.job_id AS run_job_id, "

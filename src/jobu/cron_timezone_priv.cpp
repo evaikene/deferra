@@ -25,7 +25,7 @@ namespace {
 
 using TimezoneResult = jb::core::Result<TimezoneData, jb::core::Error>;
 
-constexpr std::size_t   kMaximumTimezoneFileSize = 16U * 1024U * 1024U;
+constexpr std::size_t   kMaximumTimezoneFileSize = std::size_t{16} * 1024U * 1024U;
 constexpr std::uint32_t kMaximumTransitionCount  = 1000000U;
 constexpr std::uint32_t kMaximumTypeCount        = 256U;
 constexpr std::uint32_t kMaximumAbbreviationSize = 64U * 1024U;
@@ -422,10 +422,10 @@ public:
             return std::nullopt;
         }
 
-        unsigned   value{};
-        auto const first  = _text.data() + begin;
-        auto const last   = _text.data() + _position;
-        auto const parsed = std::from_chars(first, last, value);
+        unsigned          value{};
+        auto const* const first  = _text.data() + begin;
+        auto const* const last   = _text.data() + _position;
+        auto const        parsed = std::from_chars(first, last, value);
         if (parsed.ec != std::errc{} || parsed.ptr != last || value < minimum || value > maximum) {
             return std::nullopt;
         }
@@ -464,7 +464,7 @@ public:
             }
         }
 
-        auto const magnitude = static_cast<std::int32_t>(*hours * 3600U + minutes * 60U + seconds);
+        auto const magnitude = static_cast<std::int32_t>((*hours * 3600U) + (minutes * 60U) + seconds);
         return sign * magnitude;
     }
 
@@ -641,7 +641,7 @@ auto shift_time_point(TimePoint value, std::int64_t seconds) -> std::optional<Ti
 
 auto valid_date_rule(PosixDateRule const& rule) noexcept -> bool
 {
-    constexpr auto maximum_transition_time = kMaximumPosixHour * 3600 + 59 * 60 + 59;
+    constexpr auto maximum_transition_time = (kMaximumPosixHour * 3600) + (59 * 60) + 59;
     if (rule.transition_time_seconds < -maximum_transition_time ||
         rule.transition_time_seconds > maximum_transition_time) {
         return false;
@@ -711,7 +711,7 @@ auto transition_local_date(int year_value, PosixDateRule const& rule) -> std::op
         auto const current_month = month{rule.month};
         auto const first         = sys_days{current_year / current_month / day{1}};
         auto const first_weekday = weekday{first}.c_encoding();
-        auto       day_value     = 1U + (rule.weekday + 7U - first_weekday) % 7U + 7U * (rule.week - 1U);
+        auto       day_value     = 1U + ((rule.weekday + 7U - first_weekday) % 7U) + (7U * (rule.week - 1U));
         auto const last_day =
             static_cast<unsigned>(year_month_day_last{current_year, month_day_last{current_month}}.day());
         if (day_value > last_day) {
@@ -776,9 +776,7 @@ auto append_future_transitions(PosixFutureRule const&         rule,
             .offset_after  = rule.standard_utc_offset_seconds,
         });
     }
-    std::stable_sort(output.begin(), output.end(), [](auto const& left, auto const& right) {
-        return left.utc_seconds < right.utc_seconds;
-    });
+    std::ranges::stable_sort(output, {}, &OffsetTransition::utc_seconds);
     return true;
 }
 
@@ -842,11 +840,8 @@ auto offset_at(TimezoneData const& data, jb::core::UtcTimePoint utc) -> OffsetRe
         return future_offset_at(data, utc_seconds);
     }
 
-    auto const transition = std::upper_bound(
-        data.transitions.begin(),
-        data.transitions.end(),
-        utc_seconds,
-        [](std::int64_t value, TimezoneTransition const& candidate) { return value < candidate.unix_seconds; });
+    auto const transition =
+        std::ranges::upper_bound(data.transitions, utc_seconds, {}, &TimezoneTransition::unix_seconds);
     auto const type =
         transition == data.transitions.begin() ? data.default_local_time_type : std::prev(transition)->local_time_type;
     return OffsetResult::success(data.local_time_types[type].utc_offset_seconds);
@@ -865,8 +860,9 @@ auto candidate_offsets(TimezoneData const& data) -> std::vector<std::int32_t>
             offsets.push_back(data.future_rule->daylight->utc_offset_seconds);
         }
     }
-    std::sort(offsets.begin(), offsets.end());
-    offsets.erase(std::unique(offsets.begin(), offsets.end()), offsets.end());
+    std::ranges::sort(offsets);
+    auto const duplicates = std::ranges::unique(offsets);
+    offsets.erase(duplicates.begin(), duplicates.end());
     return offsets;
 }
 
@@ -890,8 +886,9 @@ auto exact_utc_mappings(TimezoneData const& data, TimezoneLocalTimePoint local) 
         }
     }
 
-    std::sort(mappings.values.begin(), mappings.values.end());
-    mappings.values.erase(std::unique(mappings.values.begin(), mappings.values.end()), mappings.values.end());
+    std::ranges::sort(mappings.values);
+    auto const duplicates = std::ranges::unique(mappings.values);
+    mappings.values.erase(duplicates.begin(), duplicates.end());
     return MappingCandidatesResult::success(std::move(mappings));
 }
 
@@ -919,11 +916,8 @@ auto gap_shift(TimezoneData const& data, TimezoneLocalTimePoint local)
         return jb::core::Result<std::optional<std::int64_t>, jb::core::Error>::failure(occurrence_out_of_range());
     }
 
-    auto transition = std::lower_bound(
-        data.transitions.begin(),
-        data.transitions.end(),
-        first_transition,
-        [](TimezoneTransition const& candidate, std::int64_t value) { return candidate.unix_seconds < value; });
+    auto transition =
+        std::ranges::lower_bound(data.transitions, first_transition, {}, &TimezoneTransition::unix_seconds);
     for (; transition != data.transitions.end() && transition->unix_seconds <= last_transition; ++transition) {
         auto const index = static_cast<std::size_t>(std::distance(data.transitions.begin(), transition));
         auto const before_type =
@@ -1062,7 +1056,7 @@ auto parse_timezone_data(std::string_view bytes) -> jb::core::Result<TimezoneDat
         .transitions             = std::move(second_section->transitions),
         .local_time_types        = std::move(second_section->local_time_types),
         .default_local_time_type = second_section->default_local_time_type,
-        .future_rule             = std::move(*future_rule),
+        .future_rule             = *future_rule,
     });
 }
 

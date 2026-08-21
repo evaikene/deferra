@@ -84,6 +84,8 @@ void log_handler_failure(std::string_view reason) noexcept
         jb::core::log_error("RPC method handler failed: {}", reason);
     }
     catch (...) {
+        // Logging must not allow a secondary failure to escape this noexcept recovery path.
+        return;
     }
 }
 
@@ -96,7 +98,7 @@ auto internal_error_response(RequestId const& id) -> JsonValue
 
 Server::Private::ConnectionState::ConnectionState(ConnectionId         connection_id,
                                                   jb::core::IODevice*  connection_device,
-                                                  OperationContext     connection_operation,
+                                                  OperationContext&&   connection_operation,
                                                   FramingLimits const& framing_limits)
     : id(connection_id)
     , device(connection_device)
@@ -106,7 +108,7 @@ Server::Private::ConnectionState::ConnectionState(ConnectionId         connectio
 
 Server::Private::Private(Server& server, ServerOptions server_options)
     : owner(server)
-    , options(std::move(server_options))
+    , options(server_options)
 {}
 
 auto Server::Private::allocate_connection_id() -> jb::core::Result<ConnectionId, jb::core::Error>
@@ -158,7 +160,7 @@ void Server::Private::process_readable(ConnectionId id)
             auto bodies = iterator->second.framer.append(bytes);
             if (!bodies) {
                 auto error = std::move(bodies).error();
-                fail_connection(id, std::move(error));
+                fail_connection(id, error);
                 return;
             }
 
@@ -307,14 +309,14 @@ auto Server::Private::write_response(ConnectionId id, JsonValue const& response)
     auto serialized = serialize_json(response);
     if (!serialized) {
         auto error = std::move(serialized).error();
-        fail_connection(id, std::move(error));
+        fail_connection(id, error);
         return false;
     }
 
     auto framed = frame_message(serialized.value(), options.framing);
     if (!framed) {
         auto error = std::move(framed).error();
-        fail_connection(id, std::move(error));
+        fail_connection(id, error);
         return false;
     }
 
@@ -365,7 +367,7 @@ void Server::Private::handle_device_error(ConnectionId id, jb::core::IOError err
     fail_connection(id, device_error(error));
 }
 
-void Server::Private::fail_connection(ConnectionId id, jb::core::Error error)
+void Server::Private::fail_connection(ConnectionId id, jb::core::Error const& error)
 {
     auto iterator = connections.find(id);
     if (iterator == connections.end() || iterator->second.closing || iterator->second.error_reported) {
@@ -412,7 +414,7 @@ void Server::Private::retire_connection(ConnectionId id)
 
 Server::Server(ServerOptions options, jb::core::Object* parent)
     : Object(parent)
-    , _data(std::make_unique<Private>(*this, std::move(options)))
+    , _data(std::make_unique<Private>(*this, options))
 {}
 
 Server::~Server()
@@ -462,8 +464,9 @@ auto Server::add_connection(std::unique_ptr<jb::core::IODevice> device, Operatio
     auto const id  = allocated.value();
     auto*      raw = device.get();
 
+    auto connection_operation = std::move(operation);
     auto [iterator, inserted] =
-        _data->connections.try_emplace(id, id, raw, std::move(operation), _data->options.framing);
+        _data->connections.try_emplace(id, id, raw, std::move(connection_operation), _data->options.framing);
     if (!inserted) {
         return Result::failure(connection_limit_error());
     }
@@ -490,7 +493,7 @@ auto Server::add_connection(std::unique_ptr<jb::core::IODevice> device, Operatio
         _data->connections.erase(iterator);
         return Result::failure(invalid_connection_error());
     }
-    static_cast<void>(device.release());
+    [[maybe_unused]] auto* released_device = device.release();
 
     emit(connection_opened, id);
     auto const current = _data->connections.find(id);

@@ -35,9 +35,13 @@ auto is_valid_utf8(std::string_view text) noexcept -> bool
                 return false;
             }
             auto const second       = bytes[index + 1];
-            auto const valid_second = first == 0xe0U ? second >= 0xa0U && second <= 0xbfU
-                                    : first == 0xedU ? second >= 0x80U && second <= 0x9fU
-                                                     : is_continuation(second);
+            auto       valid_second = is_continuation(second);
+            if (first == 0xe0U) {
+                valid_second = second >= 0xa0U && second <= 0xbfU;
+            }
+            else if (first == 0xedU) {
+                valid_second = second >= 0x80U && second <= 0x9fU;
+            }
             if (!valid_second) {
                 return false;
             }
@@ -49,9 +53,13 @@ auto is_valid_utf8(std::string_view text) noexcept -> bool
                 return false;
             }
             auto const second       = bytes[index + 1];
-            auto const valid_second = first == 0xf0U ? second >= 0x90U && second <= 0xbfU
-                                    : first == 0xf4U ? second >= 0x80U && second <= 0x8fU
-                                                     : is_continuation(second);
+            auto       valid_second = is_continuation(second);
+            if (first == 0xf0U) {
+                valid_second = second >= 0x90U && second <= 0xbfU;
+            }
+            else if (first == 0xf4U) {
+                valid_second = second >= 0x80U && second <= 0x8fU;
+            }
             if (!valid_second) {
                 return false;
             }

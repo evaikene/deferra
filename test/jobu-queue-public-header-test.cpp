@@ -1,4 +1,4 @@
-#include "queue.hpp"
+#include "queue.hpp" // IWYU pragma: keep for public header self-containment coverage
 
 auto main() -> int
 {

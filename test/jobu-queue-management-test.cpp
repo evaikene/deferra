@@ -224,7 +224,7 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
     REQUIRE(by_name);
     CHECK(by_name->id == first_id);
 
-    auto const noncanonical_defaults =
+    auto const* const noncanonical_defaults =
         R"({ "values": { "retry.max_attempts": { "type": "integer", "value": 4 } }, "version": 1 })";
     execute(fixture.database,
             "UPDATE jobu_queues SET defaults_json = '" + std::string{noncanonical_defaults} + "' WHERE name = 'alpha'");
@@ -754,7 +754,8 @@ TEST_CASE("Queue management rejects invalid input before durable mutation", "[jo
     MapAttributeRegistry map_registry;
     ManagementService    map_service{fixture.database, map_registry, fixture.cron, fixture.generator, fixture.time};
     auto                 oversized_defaults = AttributeSet{
-        {"test.map", {.data = AttributeValue::Map{{"value", {.data = std::string(256U * 1024U, 'x')}}}}}
+        {"test.map",
+         {.data = AttributeValue::Map{{"value", {.data = std::string(std::string::size_type{256} * 1024U, 'x')}}}}}
     };
     auto oversized_error = require_error(
         map_service.create_queue({.name = "oversized-default", .defaults = std::move(oversized_defaults)}),

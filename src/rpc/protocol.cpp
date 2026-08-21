@@ -218,9 +218,8 @@ auto encode_request_id(RequestId const& id) -> JsonValue
         id);
 }
 
-auto encode_request_object(std::optional<RequestId> const& id,
-                           std::string_view                method,
-                           std::optional<JsonValue> const& params) -> JsonValue
+auto encode_request_object(std::optional<RequestId> const& id, std::string_view method, std::optional<JsonValue> params)
+    -> JsonValue
 {
     auto object = JsonValue::Object{
         {"jsonrpc", make_json(std::string{"2.0"}) },
@@ -230,7 +229,7 @@ auto encode_request_object(std::optional<RequestId> const& id,
         object.emplace("id", encode_request_id(*id));
     }
     if (params) {
-        object.emplace("params", *params);
+        object.emplace("params", std::move(*params));
     }
     return make_json(std::move(object));
 }
@@ -328,14 +327,14 @@ auto decode_response_document(JsonValue const& value, std::size_t max_batch_entr
     });
 }
 
-auto encode_request(RequestId const& id, std::string_view method, std::optional<JsonValue> const& params) -> JsonValue
+auto encode_request(RequestId const& id, std::string_view method, std::optional<JsonValue> params) -> JsonValue
 {
-    return encode_request_object(id, method, params);
+    return encode_request_object(id, method, std::move(params));
 }
 
-auto encode_notification(std::string_view method, std::optional<JsonValue> const& params) -> JsonValue
+auto encode_notification(std::string_view method, std::optional<JsonValue> params) -> JsonValue
 {
-    return encode_request_object(std::nullopt, method, params);
+    return encode_request_object(std::nullopt, method, std::move(params));
 }
 
 auto encode_success_response(RequestId const& id, JsonValue const& result) -> JsonValue

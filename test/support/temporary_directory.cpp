@@ -39,7 +39,7 @@ TemporaryDirectory::TemporaryDirectory()
 
 TemporaryDirectory::~TemporaryDirectory()
 {
-    static_cast<void>(cleanup());
+    static_cast<void>(cleanup()); // NOLINT(bugprone-unused-return-value) Noexcept cleanup is best-effort.
 }
 
 TemporaryDirectory::TemporaryDirectory(TemporaryDirectory&& other) noexcept
@@ -49,7 +49,7 @@ TemporaryDirectory::TemporaryDirectory(TemporaryDirectory&& other) noexcept
 auto TemporaryDirectory::operator=(TemporaryDirectory&& other) noexcept -> TemporaryDirectory&
 {
     if (this != &other) {
-        static_cast<void>(cleanup());
+        static_cast<void>(cleanup()); // NOLINT(bugprone-unused-return-value) Noexcept cleanup is best-effort.
         _path = std::exchange(other._path, std::filesystem::path{});
     }
     return *this;

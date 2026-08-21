@@ -35,7 +35,7 @@ struct NullRequestId {
 using RequestId = std::variant<NullRequestId, std::int64_t, std::uint64_t, std::string>;
 
 /// Standard JSON-RPC error codes plus the JobU application-error code.
-enum class ErrorCode : std::int64_t {
+enum class ErrorCode : std::int64_t { // NOLINT(performance-enum-size) Codes are used as std::int64_t values.
     /// The received JSON text could not be parsed.
     ParseError       = -32700,
     /// The decoded JSON value is not a valid JSON-RPC request.

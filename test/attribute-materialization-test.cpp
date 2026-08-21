@@ -5,7 +5,6 @@
 
 #include <array>
 #include <chrono>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -293,8 +292,8 @@ TEST_CASE("Standard attributes expose the specified definitions and defaults", "
     CHECK(std::get<std::string>(materialized->at("retry.mode").data) == "reschedule");
     CHECK(std::get<double>(materialized->at("retry.multiplier").data) == 2.0);
     CHECK(std::get<std::string>(materialized->at("output.capture").data) == "on_error");
-    CHECK(std::get<std::int64_t>(materialized->at("output.stdout_limit").data) == 1024 * 1024);
-    CHECK(std::get<std::int64_t>(materialized->at("output.stderr_limit").data) == 1024 * 1024);
+    CHECK(std::get<std::int64_t>(materialized->at("output.stdout_limit").data) == std::int64_t{1024} * 1024);
+    CHECK(std::get<std::int64_t>(materialized->at("output.stderr_limit").data) == std::int64_t{1024} * 1024);
     CHECK(registry.validate_materialized(*materialized));
 
     for (auto const& definition : registry.definitions()) {
@@ -307,7 +306,7 @@ TEST_CASE("Standard attributes expose the specified definitions and defaults", "
 TEST_CASE("Standard attributes enforce every field constraint", "[jobu][attribute][materialization]")
 {
     StandardAttributeRegistry registry;
-    auto                      validate = [&registry](std::string_view name, AttributeValue value) {
+    auto                      validate = [&registry](std::string_view name, AttributeValue const& value) {
         return registry.validate(name, value, AttributeScope::Job);
     };
 
@@ -362,9 +361,9 @@ TEST_CASE("Standard attributes enforce every field constraint", "[jobu][attribut
 
     for (auto const* name : {"output.stdout_limit", "output.stderr_limit"}) {
         CHECK(validate(name, {.data = std::int64_t{0}}));
-        CHECK(validate(name, {.data = std::int64_t{64 * 1024 * 1024}}));
+        CHECK(validate(name, {.data = std::int64_t{64} * 1024 * 1024}));
         CHECK_FALSE(validate(name, {.data = std::int64_t{-1}}));
-        CHECK_FALSE(validate(name, {.data = std::int64_t{64 * 1024 * 1024 + 1}}));
+        CHECK_FALSE(validate(name, {.data = (std::int64_t{64} * 1024 * 1024) + 1}));
     }
 
     CHECK(validate("missing.value", {.data = true}).error().code == "jobu.attribute.unknown");
@@ -563,7 +562,7 @@ TEST_CASE("Attribute persistence validates UTF-8 while traversing typed values",
         CHECK(encoded.error().message == "JobU attribute text is not valid UTF-8");
     }
 
-    auto decode = [&registry](JsonValue document) {
+    auto decode = [&registry](JsonValue const& document) {
         return decode_attribute_document(registry, document, AttributeScope::Job, AttributeDocumentMode::Partial);
     };
 

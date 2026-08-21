@@ -29,7 +29,7 @@ namespace {
 template <typename T>
 using ServiceResult = jb::core::Result<T, jb::core::Error>;
 
-constexpr std::size_t kMaximumAttributeDocumentBytes = 256U * 1024U;
+constexpr std::size_t kMaximumAttributeDocumentBytes = std::size_t{256} * 1024U;
 constexpr std::size_t kMaximumPageSize               = 200;
 // JobRevision is unsigned publicly, but schema version 1 stores revisions in a positive signed 64-bit INTEGER.
 constexpr JobRevision kMaximumPersistedJobRevision = static_cast<JobRevision>(std::numeric_limits<std::int64_t>::max());
@@ -1191,7 +1191,7 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
         replacement.priority = *request.priority;
     }
     for (auto& [name, value] : request.attribute_changes) {
-        replacement.attributes.insert_or_assign(std::move(name), std::move(value));
+        replacement.attributes.insert_or_assign(name, std::move(value));
     }
     if (request.payload) {
         replacement.payload = std::move(*request.payload);

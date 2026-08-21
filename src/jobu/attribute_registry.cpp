@@ -18,7 +18,9 @@ using AttributeResult = jb::core::Result<void, jb::core::Error>;
 template <typename T>
 using Result = jb::core::Result<T, jb::core::Error>;
 
-constexpr std::size_t kMaxAttributeDepth{64};
+constexpr std::size_t  kMaxAttributeDepth{64};
+constexpr std::int64_t kDefaultOutputLimitBytes = std::int64_t{1024} * 1024;
+constexpr std::int64_t kMaximumOutputLimitBytes = std::int64_t{64} * 1024 * 1024;
 
 auto attribute_error(std::string code, std::string message) -> jb::core::Error
 {
@@ -421,13 +423,13 @@ StandardAttributeRegistry::StandardAttributeRegistry()
                   .name             = "output.stderr_limit",
                   .type             = AttributeType::Integer,
                   .scopes           = standard_scopes(),
-                  .built_in_default = {.data = std::int64_t{1024 * 1024}},
+                  .built_in_default = {.data = kDefaultOutputLimitBytes},
                   .description      = "Maximum captured standard error bytes",
               }, {
                   .name             = "output.stdout_limit",
                   .type             = AttributeType::Integer,
                   .scopes           = standard_scopes(),
-                  .built_in_default = {.data = std::int64_t{1024 * 1024}},
+                  .built_in_default = {.data = kDefaultOutputLimitBytes},
                   .description      = "Maximum captured standard output bytes",
               }, {
                   .name             = "retry.initial_delay",
@@ -556,7 +558,7 @@ auto StandardAttributeRegistry::validate(std::string_view name, AttributeValue c
     }
     else if (name == "output.stdout_limit" || name == "output.stderr_limit") {
         auto const limit = std::get<std::int64_t>(value.data);
-        if (limit < 0 || limit > std::int64_t{64 * 1024 * 1024}) {
+        if (limit < 0 || limit > kMaximumOutputLimitBytes) {
             return AttributeResult::failure(invalid_value());
         }
     }

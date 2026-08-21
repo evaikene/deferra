@@ -1,4 +1,4 @@
-#include "sqlite/sqlite_schema.hpp"
+#include "sqlite/sqlite_schema.hpp" // IWYU pragma: keep for public header self-containment coverage
 
 auto main() -> int
 {

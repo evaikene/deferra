@@ -30,28 +30,28 @@ struct WeekdayValue {
 };
 
 constexpr auto kMonthNames = std::array{
-    FieldName{"JAN", 1 },
-    FieldName{"FEB", 2 },
-    FieldName{"MAR", 3 },
-    FieldName{"APR", 4 },
-    FieldName{"MAY", 5 },
-    FieldName{"JUN", 6 },
-    FieldName{"JUL", 7 },
-    FieldName{"AUG", 8 },
-    FieldName{"SEP", 9 },
-    FieldName{"OCT", 10},
-    FieldName{"NOV", 11},
-    FieldName{"DEC", 12},
+    FieldName{.text = "JAN", .value = 1 },
+    FieldName{.text = "FEB", .value = 2 },
+    FieldName{.text = "MAR", .value = 3 },
+    FieldName{.text = "APR", .value = 4 },
+    FieldName{.text = "MAY", .value = 5 },
+    FieldName{.text = "JUN", .value = 6 },
+    FieldName{.text = "JUL", .value = 7 },
+    FieldName{.text = "AUG", .value = 8 },
+    FieldName{.text = "SEP", .value = 9 },
+    FieldName{.text = "OCT", .value = 10},
+    FieldName{.text = "NOV", .value = 11},
+    FieldName{.text = "DEC", .value = 12},
 };
 
 constexpr auto kWeekdayNames = std::array{
-    FieldName{"SUN", 0},
-    FieldName{"MON", 1},
-    FieldName{"TUE", 2},
-    FieldName{"WED", 3},
-    FieldName{"THU", 4},
-    FieldName{"FRI", 5},
-    FieldName{"SAT", 6},
+    FieldName{.text = "SUN", .value = 0},
+    FieldName{.text = "MON", .value = 1},
+    FieldName{.text = "TUE", .value = 2},
+    FieldName{.text = "WED", .value = 3},
+    FieldName{.text = "THU", .value = 4},
+    FieldName{.text = "FRI", .value = 5},
+    FieldName{.text = "SAT", .value = 6},
 };
 
 auto schedule_error(jb::core::ErrorCategory category, std::string code, std::string message) -> jb::core::Error
@@ -400,7 +400,7 @@ auto parse_cron_expression(std::string_view expression) -> jb::core::Result<Cron
         !parse_weekday_field((*fields)[4], parsed.days_of_week)) {
         return CronResult::failure(invalid_expression());
     }
-    return CronResult::success(std::move(parsed));
+    return CronResult::success(parsed);
 }
 
 auto next_local_occurrence(CronExpression const& expression, LocalTimePoint exclusive_lower_bound)

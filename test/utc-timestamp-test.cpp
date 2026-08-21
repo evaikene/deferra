@@ -74,8 +74,8 @@ TEST_CASE("UTC timestamps honor the platform clock range", "[jobu][time]")
     };
 
     constexpr auto boundaries = std::array{
-        Boundary{"0000-01-01T00:00:00Z",        -62167219200000000},
-        Boundary{"9999-12-31T23:59:59.999999Z", 253402300799999999},
+        Boundary{.text = "0000-01-01T00:00:00Z",        .microseconds = -62167219200000000},
+        Boundary{.text = "9999-12-31T23:59:59.999999Z", .microseconds = 253402300799999999},
     };
     auto const minimum = std::chrono::ceil<Microseconds>(UtcTimePoint::min().time_since_epoch()).count();
     auto const maximum = std::chrono::floor<Microseconds>(UtcTimePoint::max().time_since_epoch()).count();

@@ -103,7 +103,7 @@ TEST_CASE("Cron aliases, names, and ASCII field whitespace normalize determinist
 
 TEST_CASE("Cron weekday ranges are cyclic and retain an explicit step anchor", "[jobu][cron]")
 {
-    for (auto const expression : {
+    for (auto const* const expression : {
              "* * * * SUN-SAT",
              "* * * * MON-SUN",
              "* * * * 0-6",
