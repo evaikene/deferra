@@ -2,6 +2,7 @@
 
 #include "domain_storage_priv.hpp"
 #include "query.hpp"
+#include "queue_repository_priv.hpp"
 #include "retry_policy_priv.hpp"
 #include "value.hpp"
 
@@ -36,6 +37,13 @@ auto invalid_limit() -> jb::core::Error
     return repository_error(jb::core::ErrorCategory::InvalidArgument,
                             "jobu.storage.invalid_limit",
                             "Repository limit is outside its supported range");
+}
+
+auto attempt_number_exhausted() -> jb::core::Error
+{
+    return repository_error(jb::core::ErrorCategory::ResourceExhausted,
+                            "jobu.attempt.number_exhausted",
+                            "The run cannot allocate another attempt number");
 }
 
 auto invariant(std::string_view reason, jb::core::Error const* cause = nullptr) -> jb::core::Error
@@ -261,6 +269,9 @@ auto validate_candidate(SchedulerRun const&           row,
     if (row.active_attempts != 0 || row.running_attempts != 0) {
         return RepositoryResult<void>::failure(invariant("candidate_active_attempt"));
     }
+    if (row.run.state != RunState::Scheduled && row.run.state != RunState::RetryWait) {
+        return RepositoryResult<void>::failure(invariant("candidate_state"));
+    }
     if (row.run.state == RunState::Scheduled && row.total_attempts != 0) {
         return RepositoryResult<void>::failure(invariant("scheduled_candidate_has_attempt"));
     }
@@ -270,6 +281,157 @@ auto validate_candidate(SchedulerRun const&           row,
         return RepositoryResult<void>::failure(invariant("retry_candidate_attempt_history"));
     }
     return RepositoryResult<void>::success();
+}
+
+auto capacity_usage(SchedulerRun const& row) -> RepositoryResult<CapacityUsage>
+{
+    auto usage = CapacityUsage{};
+    if (row.run.state == RunState::Running) {
+        if (row.active_attempts != 1 || row.running_attempts != 1 || row.completed_attempts + 1 != row.total_attempts) {
+            return RepositoryResult<CapacityUsage>::failure(invariant("running_attempt_relationship"));
+        }
+        if (row.run.type == JobType::Cli) {
+            usage.cli_running = 1;
+        }
+        else {
+            usage.http_running = 1;
+        }
+        usage.queue_slots = 1;
+        return RepositoryResult<CapacityUsage>::success(usage);
+    }
+
+    if (row.run.state != RunState::RetryWait || row.active_attempts != 0 || row.completed_attempts == 0 ||
+        row.completed_attempts != row.total_attempts || row.failed_attempts != row.completed_attempts) {
+        return RepositoryResult<CapacityUsage>::failure(invariant("retry_attempt_relationship"));
+    }
+    auto policy = retry_policy_from_attributes(row.run.attributes);
+    if (!policy) {
+        return RepositoryResult<CapacityUsage>::failure(invariant("invalid_retry_policy", &policy.error()));
+    }
+    auto const job_permits_execution = row.job_state == JobState::Active || row.run.origin == RunOrigin::Manual;
+    if (policy->mode == RetryMode::Blocking && job_permits_execution && row.queue_state == QueueState::Active) {
+        usage.queue_slots = 1;
+    }
+    return RepositoryResult<CapacityUsage>::success(usage);
+}
+
+auto next_attempt_number(jb::db::Database& database, jb::core::Uuid const& run_id) -> RepositoryResult<AttemptNumber>
+{
+    jb::db::Query query{database};
+    auto          prepared =
+        query.prepare("SELECT MAX(attempt_number) AS maximum_attempt_number FROM jobu_attempts WHERE run_id = :run_id");
+    if (!prepared) {
+        return RepositoryResult<AttemptNumber>::failure(std::move(prepared).error());
+    }
+    auto bound = query.bind_value(":run_id", uuid_to_storage(run_id));
+    if (!bound) {
+        return RepositoryResult<AttemptNumber>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<AttemptNumber>::failure(std::move(executed).error());
+    }
+    auto next = query.next();
+    if (!next) {
+        return RepositoryResult<AttemptNumber>::failure(std::move(next).error());
+    }
+    if (!*next) {
+        return RepositoryResult<AttemptNumber>::failure(invariant("missing_attempt_maximum_row"));
+    }
+    auto const* value = query.record().value("maximum_attempt_number");
+    if (value == nullptr) {
+        return RepositoryResult<AttemptNumber>::failure(invariant("missing_attempt_maximum"));
+    }
+    if (std::holds_alternative<jb::db::Null>(*value)) {
+        return RepositoryResult<AttemptNumber>::success(1);
+    }
+    auto const* maximum = std::get_if<std::int64_t>(value);
+    if (maximum == nullptr || *maximum <= 0) {
+        return RepositoryResult<AttemptNumber>::failure(invariant("invalid_attempt_maximum"));
+    }
+    if (*maximum == std::numeric_limits<std::int64_t>::max()) {
+        return RepositoryResult<AttemptNumber>::failure(attempt_number_exhausted());
+    }
+    return RepositoryResult<AttemptNumber>::success(static_cast<AttemptNumber>(*maximum) + 1U);
+}
+
+auto queue_has_dispatch_capacity(jb::db::Database&        database,
+                                 AttributeRegistry const& attributes,
+                                 SchedulerRun const&      candidate,
+                                 Queue const&             queue) -> RepositoryResult<bool>
+{
+    auto selected_already_occupies = false;
+    if (candidate.run.state == RunState::RetryWait) {
+        auto selected_usage = capacity_usage(candidate);
+        if (!selected_usage) {
+            return RepositoryResult<bool>::failure(std::move(selected_usage).error());
+        }
+        selected_already_occupies = selected_usage->queue_slots == 1;
+    }
+
+    auto                  after_id  = std::optional<jb::core::Uuid>{};
+    constexpr std::size_t page_size = kMaximumSchedulerPageRows;
+    std::uint64_t         occupied  = 0;
+    while (true) {
+        auto sql = "SELECT " + scheduler_run_columns() + std::string{scheduler_run_joins()} +
+                   "WHERE jobu_runs.state IN ('running', 'retry_wait') AND jobu_runs.queue_id = :queue_id";
+        add_after_clause(sql, after_id);
+        sql += " ORDER BY jobu_runs.id ASC LIMIT :limit";
+
+        jb::db::Query query{database};
+        auto          prepared = query.prepare(sql);
+        if (!prepared) {
+            return RepositoryResult<bool>::failure(std::move(prepared).error());
+        }
+        auto bound = query.bind_value(":queue_id", uuid_to_storage(queue.id));
+        if (!bound) {
+            return RepositoryResult<bool>::failure(std::move(bound).error());
+        }
+        auto after_bound = bind_after(query, after_id);
+        if (!after_bound) {
+            return RepositoryResult<bool>::failure(std::move(after_bound).error());
+        }
+        auto limit_bound = query.bind_value(":limit", static_cast<std::int64_t>(page_size));
+        if (!limit_bound) {
+            return RepositoryResult<bool>::failure(std::move(limit_bound).error());
+        }
+        auto executed = query.exec();
+        if (!executed) {
+            return RepositoryResult<bool>::failure(std::move(executed).error());
+        }
+
+        auto rows = std::size_t{0};
+        while (true) {
+            auto next = query.next();
+            if (!next) {
+                return RepositoryResult<bool>::failure(std::move(next).error());
+            }
+            if (!*next) {
+                break;
+            }
+            ++rows;
+            auto decoded = decode_scheduler_run(query.record(), attributes);
+            if (!decoded) {
+                return RepositoryResult<bool>::failure(std::move(decoded).error());
+            }
+            if (decoded->run.queue_id != queue.id) {
+                return RepositoryResult<bool>::failure(invariant("capacity_queue_mismatch"));
+            }
+            auto usage = capacity_usage(*decoded);
+            if (!usage) {
+                return RepositoryResult<bool>::failure(std::move(usage).error());
+            }
+            occupied += usage->queue_slots;
+            after_id  = decoded->run.id;
+            if (!selected_already_occupies && occupied >= queue.concurrency_limit) {
+                return RepositoryResult<bool>::success(false);
+            }
+        }
+        if (rows < page_size) {
+            break;
+        }
+    }
+    return RepositoryResult<bool>::success(true);
 }
 
 } // anonymous namespace
@@ -386,39 +548,11 @@ auto SchedulerRepository::list_capacity_rows(std::size_t limit, std::optional<jb
             return RepositoryResult<std::vector<CapacityRow>>::failure(std::move(decoded).error());
         }
 
-        auto usage = CapacityUsage{};
-        if (decoded->run.state == RunState::Running) {
-            if (decoded->active_attempts != 1 || decoded->running_attempts != 1 ||
-                decoded->completed_attempts + 1 != decoded->total_attempts) {
-                return RepositoryResult<std::vector<CapacityRow>>::failure(invariant("running_attempt_relationship"));
-            }
-            if (decoded->run.type == JobType::Cli) {
-                usage.cli_running = 1;
-            }
-            else {
-                usage.http_running = 1;
-            }
-            usage.queue_slots = 1;
+        auto usage = capacity_usage(*decoded);
+        if (!usage) {
+            return RepositoryResult<std::vector<CapacityRow>>::failure(std::move(usage).error());
         }
-        else {
-            if (decoded->run.state != RunState::RetryWait || decoded->active_attempts != 0 ||
-                decoded->completed_attempts == 0 || decoded->completed_attempts != decoded->total_attempts ||
-                decoded->failed_attempts != decoded->completed_attempts) {
-                return RepositoryResult<std::vector<CapacityRow>>::failure(invariant("retry_attempt_relationship"));
-            }
-            auto policy = retry_policy_from_attributes(decoded->run.attributes);
-            if (!policy) {
-                return RepositoryResult<std::vector<CapacityRow>>::failure(
-                    invariant("invalid_retry_policy", &policy.error()));
-            }
-            auto const job_permits_execution =
-                decoded->job_state == JobState::Active || decoded->run.origin == RunOrigin::Manual;
-            if (policy->mode == RetryMode::Blocking && job_permits_execution &&
-                decoded->queue_state == QueueState::Active) {
-                usage.queue_slots = 1;
-            }
-        }
-        rows.push_back({.run_id = decoded->run.id, .queue_id = decoded->run.queue_id, .usage = usage});
+        rows.push_back({.run_id = decoded->run.id, .queue_id = decoded->run.queue_id, .usage = *usage});
     }
     return RepositoryResult<std::vector<CapacityRow>>::success(std::move(rows));
 }
@@ -598,6 +732,155 @@ auto SchedulerRepository::earliest_future_runnable(JobType type, jb::core::UtcTi
         return RepositoryResult<std::optional<jb::core::UtcTimePoint>>::failure(std::move(valid).error());
     }
     return RepositoryResult<std::optional<jb::core::UtcTimePoint>>::success(decoded->run.runnable_at);
+}
+
+auto SchedulerRepository::find_dispatch_context(jb::core::Uuid const& run_id, jb::core::UtcTimePoint now)
+    -> jb::core::Result<std::optional<DispatchContext>, jb::core::Error>
+{
+    auto sql = "SELECT " + scheduler_run_columns() +
+               ", (SELECT COUNT(*) FROM jobu_runs AS manual_siblings "
+               "WHERE manual_siblings.job_id = jobu_runs.job_id AND manual_siblings.origin = 'manual' "
+               "AND manual_siblings.schedule_owned = 0 "
+               "AND manual_siblings.state IN ('scheduled', 'running', 'retry_wait')) AS manual_sibling_count, "
+               "(SELECT COUNT(*) FROM jobu_runs AS schedule_siblings "
+               "WHERE schedule_siblings.job_id = jobu_runs.job_id AND schedule_siblings.origin = 'scheduled' "
+               "AND schedule_siblings.schedule_owned = 1 "
+               "AND schedule_siblings.state IN ('scheduled', 'running', 'retry_wait')) AS schedule_sibling_count" +
+               std::string{scheduler_run_joins()} +
+               "WHERE jobu_runs.id = :run_id AND jobu_runs.state IN ('scheduled', 'retry_wait')";
+
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(sql);
+    if (!prepared) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(std::move(prepared).error());
+    }
+    auto bound = query.bind_value(":run_id", uuid_to_storage(run_id));
+    if (!bound) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(std::move(executed).error());
+    }
+    auto next = query.next();
+    if (!next) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(std::move(next).error());
+    }
+    if (!*next) {
+        return RepositoryResult<std::optional<DispatchContext>>::success(std::nullopt);
+    }
+    auto decoded = decode_scheduler_run(query.record(), _attributes);
+    if (!decoded) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(std::move(decoded).error());
+    }
+    auto manual_count   = read_count(query.record(), "manual_sibling_count");
+    auto schedule_count = read_count(query.record(), "schedule_sibling_count");
+    if (!manual_count || !schedule_count) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(
+            !manual_count ? std::move(manual_count).error() : std::move(schedule_count).error());
+    }
+
+    if (decoded->run.origin == RunOrigin::Manual) {
+        if (decoded->run.schedule_owned || *manual_count != 1 || *schedule_count != 1) {
+            return RepositoryResult<std::optional<DispatchContext>>::failure(invariant("manual_barrier_relationship"));
+        }
+    }
+    else if (decoded->run.origin == RunOrigin::Scheduled) {
+        if (!decoded->run.schedule_owned || *schedule_count != 1 || *manual_count > 1) {
+            return RepositoryResult<std::optional<DispatchContext>>::failure(
+                invariant("scheduled_candidate_relationship"));
+        }
+        if (*manual_count == 1) {
+            return RepositoryResult<std::optional<DispatchContext>>::success(std::nullopt);
+        }
+    }
+    else {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(invariant("unsupported_candidate_origin"));
+    }
+
+    if (decoded->run.runnable_at > now || decoded->queue_state != QueueState::Active ||
+        (decoded->run.origin == RunOrigin::Scheduled && decoded->job_state != JobState::Active)) {
+        return RepositoryResult<std::optional<DispatchContext>>::success(std::nullopt);
+    }
+    auto valid = validate_candidate(*decoded, decoded->run.type, now, false, decoded->run.queue_id);
+    if (!valid) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(std::move(valid).error());
+    }
+    auto finished = query.finish();
+    if (!finished) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(std::move(finished).error());
+    }
+
+    QueueRepository queues{_database, _attributes};
+    auto            queue = queues.find_by_id(decoded->run.queue_id, true);
+    if (!queue) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(
+            invariant("invalid_dispatch_queue", &queue.error()));
+    }
+    if (!queue->has_value()) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(invariant("missing_dispatch_queue"));
+    }
+    auto dispatch_queue = std::move(queue).value().value();
+    if (dispatch_queue.state != decoded->queue_state) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(invariant("dispatch_queue_state_mismatch"));
+    }
+    auto has_capacity = queue_has_dispatch_capacity(_database, _attributes, *decoded, dispatch_queue);
+    if (!has_capacity) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(std::move(has_capacity).error());
+    }
+    if (!*has_capacity) {
+        return RepositoryResult<std::optional<DispatchContext>>::success(std::nullopt);
+    }
+    auto attempt = next_attempt_number(_database, run_id);
+    if (!attempt) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(std::move(attempt).error());
+    }
+
+    return RepositoryResult<std::optional<DispatchContext>>::success(DispatchContext{
+        .run          = std::move(decoded->run),
+        .job_state    = decoded->job_state,
+        .queue        = std::move(dispatch_queue),
+        .next_attempt = *attempt,
+    });
+}
+
+auto SchedulerRepository::mark_dispatch_running(jb::core::Uuid const&  run_id,
+                                                RunState               expected_state,
+                                                jb::core::UtcTimePoint started_at)
+    -> jb::core::Result<bool, jb::core::Error>
+{
+    if (expected_state != RunState::Scheduled && expected_state != RunState::RetryWait) {
+        return RepositoryResult<bool>::failure(invariant("invalid_dispatch_expected_state"));
+    }
+    auto started = timestamp_to_storage(started_at);
+    if (!started) {
+        return RepositoryResult<bool>::failure(std::move(started).error());
+    }
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(
+        "UPDATE jobu_runs SET state = 'running', started_at_us = COALESCE(started_at_us, :started_at_us) "
+        "WHERE id = :run_id AND state = :expected_state AND completed_at_us IS NULL AND result_json IS NULL");
+    if (!prepared) {
+        return RepositoryResult<bool>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":started_at_us",  std::move(started).value()                     },
+                              {":run_id",         uuid_to_storage(run_id)                        },
+                              {":expected_state", jb::db::make_text(storage_text(expected_state))},
+    });
+    if (!bound) {
+        return RepositoryResult<bool>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<bool>::failure(std::move(executed).error());
+    }
+    auto const affected = query.num_rows_affected();
+    if (affected < 0 || affected > 1) {
+        return RepositoryResult<bool>::failure(invariant("invalid_dispatch_affected_rows"));
+    }
+    return RepositoryResult<bool>::success(affected == 1);
 }
 
 auto SchedulerRepository::has_any_running_state() -> jb::core::Result<bool, jb::core::Error>
