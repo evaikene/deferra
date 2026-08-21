@@ -2,9 +2,11 @@
 
 #include "error.hpp"
 #include "result.hpp"
+#include "uuid.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 
 namespace jb::core {
 class TimeSource;
@@ -38,11 +40,15 @@ public:
     [[nodiscard]] auto process_cycle() -> jb::core::Result<void, jb::core::Error>;
 
 private:
-    jb::db::Database&        _database;
-    AttributeRegistry const& _attributes;
-    jb::core::TimeSource&    _time_source;
-    AttemptExecutor&         _executor;
-    SchedulerCoreOptions     _options;
+    jb::db::Database&                       _database;
+    AttributeRegistry const&                _attributes;
+    jb::core::TimeSource&                   _time_source;
+    AttemptExecutor&                        _executor;
+    SchedulerCoreOptions                    _options;
+    std::map<jb::core::Uuid, std::uint32_t> _queue_weights;
+    std::map<jb::core::Uuid, std::int64_t>  _cli_credits;
+    std::map<jb::core::Uuid, std::int64_t>  _http_credits;
+    bool                                    _cli_first{true};
 };
 
 } // namespace detail

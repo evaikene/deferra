@@ -14,6 +14,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -81,32 +82,38 @@ struct CoreFixture {
     AttemptRepository         attempts;
 };
 
-void insert_queue(Database& database, Uuid const& queue_id, std::uint32_t concurrency_limit)
+void insert_queue(Database& database, Uuid const& queue_id, std::uint32_t concurrency_limit, std::uint32_t weight = 1)
 {
     Query query{database};
     REQUIRE(query.prepare(
         "INSERT INTO jobu_queues(id, name, deleted_name, state, weight, concurrency_limit, recovery_policy, "
         "defaults_json, retention_seconds, runnable_wait_warning_ms, created_at_us, updated_at_us, deleted_at_us) "
-        "VALUES(:id, :name, NULL, 'active', 1, :concurrency_limit, 'fail_interrupted', "
+        "VALUES(:id, :name, NULL, 'active', :weight, :concurrency_limit, 'fail_interrupted', "
         "'{\"version\":1,\"values\":{}}', NULL, 10000, 0, 0, NULL)"));
     REQUIRE(query.bind_value(":id", uuid_to_storage(queue_id)));
     REQUIRE(
         query.bind_value(":name",
                          make_text("queue-" + std::to_string(std::to_integer<unsigned int>(queue_id.bytes().back())))));
+    REQUIRE(query.bind_value(":weight", static_cast<std::int64_t>(weight)));
     REQUIRE(query.bind_value(":concurrency_limit", static_cast<std::int64_t>(concurrency_limit)));
     REQUIRE(query.exec());
 }
 
-void insert_job(Database& database, Uuid const& job_id, Uuid const& queue_id, JobType type)
+void insert_job(Database&   database,
+                Uuid const& job_id,
+                Uuid const& queue_id,
+                JobType     type,
+                JobState    state = JobState::Active)
 {
     Query query{database};
     REQUIRE(query.prepare(
         "INSERT INTO jobu_jobs(id, queue_id, revision, name, state, type, schedule_kind, scheduled_at_us, "
         "cron_expression, cron_timezone, priority, attributes_json, payload_json, created_at_us, updated_at_us, "
-        "deleted_at_us) VALUES(:id, :queue_id, 1, NULL, 'active', :type, 'once', 0, NULL, NULL, 0, "
+        "deleted_at_us) VALUES(:id, :queue_id, 1, NULL, :state, :type, 'once', 0, NULL, NULL, 0, "
         "'{\"version\":1,\"values\":{}}', '{}', 0, 0, NULL)"));
     REQUIRE(query.bind_value(":id", uuid_to_storage(job_id)));
     REQUIRE(query.bind_value(":queue_id", uuid_to_storage(queue_id)));
+    REQUIRE(query.bind_value(":state", make_text(storage_text(state))));
     REQUIRE(query.bind_value(":type", make_text(storage_text(type))));
     REQUIRE(query.exec());
 }
@@ -221,10 +228,13 @@ void insert_running(CoreFixture& fixture, Uuid const& queue_id, std::uint8_t run
     }));
 }
 
-void insert_blocking_retry(CoreFixture& fixture, Uuid const& queue_id, std::uint8_t run_suffix)
+void insert_blocking_retry(CoreFixture& fixture,
+                           Uuid const&  queue_id,
+                           std::uint8_t run_suffix,
+                           JobState     job_state = JobState::Active)
 {
     auto const job_id = id(static_cast<std::uint8_t>(run_suffix + 100));
-    insert_job(fixture.database, job_id, queue_id, JobType::Cli);
+    insert_job(fixture.database, job_id, queue_id, JobType::Cli, job_state);
     auto run            = default_run(fixture, id(run_suffix), job_id, queue_id, JobType::Cli);
     run.state           = RunState::RetryWait;
     run.started_at      = at(70);
@@ -244,6 +254,69 @@ void insert_blocking_retry(CoreFixture& fixture, Uuid const& queue_id, std::uint
         .result         = std::move(result),
     };
     REQUIRE(fixture.attempts.insert_attempt(attempt));
+}
+
+void insert_scheduled_range(CoreFixture& fixture,
+                            Uuid const&  queue_id,
+                            std::uint8_t first_suffix,
+                            std::size_t  count,
+                            JobType      type)
+{
+    for (auto index = std::size_t{0}; index < count; ++index) {
+        insert_scheduled(fixture, queue_id, static_cast<std::uint8_t>(first_suffix + index), type);
+    }
+}
+
+auto starts_for(FakeAttemptExecutor const& executor, Uuid const& queue_id, JobType type) -> std::size_t
+{
+    return static_cast<std::size_t>(std::count_if(
+        executor.start_requests().begin(),
+        executor.start_requests().end(),
+        [&](AttemptStartRequest const& request) { return request.queue_id == queue_id && request.type == type; }));
+}
+
+void update_queue_state(Database& database, Uuid const& queue_id, QueueState state)
+{
+    Query query{database};
+    REQUIRE(query.prepare("UPDATE jobu_queues SET state = :state WHERE id = :id"));
+    REQUIRE(query.bind_value(":state", make_text(storage_text(state))));
+    REQUIRE(query.bind_value(":id", uuid_to_storage(queue_id)));
+    REQUIRE(query.exec());
+}
+
+void update_queue_scheduling(Database&     database,
+                             Uuid const&   queue_id,
+                             std::uint32_t weight,
+                             std::uint32_t concurrency_limit)
+{
+    Query query{database};
+    REQUIRE(query.prepare(
+        "UPDATE jobu_queues SET weight = :weight, concurrency_limit = :concurrency_limit WHERE id = :id"));
+    REQUIRE(query.bind_value(":weight", static_cast<std::int64_t>(weight)));
+    REQUIRE(query.bind_value(":concurrency_limit", static_cast<std::int64_t>(concurrency_limit)));
+    REQUIRE(query.bind_value(":id", uuid_to_storage(queue_id)));
+    REQUIRE(query.exec());
+}
+
+void check_cli_ratio(std::uint32_t first_weight,
+                     std::uint32_t second_weight,
+                     std::uint32_t dispatches,
+                     std::size_t   expected_first,
+                     std::size_t   expected_second)
+{
+    CoreFixture fixture;
+    auto const  first_queue  = id(1);
+    auto const  second_queue = id(2);
+    insert_queue(fixture.database, first_queue, 40, first_weight);
+    insert_queue(fixture.database, second_queue, 40, second_weight);
+    insert_scheduled_range(fixture, first_queue, 10, 40, JobType::Cli);
+    insert_scheduled_range(fixture, second_queue, 60, 40, JobType::Cli);
+    fixture.executor.set_available(JobType::Cli, true);
+
+    REQUIRE(fixture.process({.cli_concurrency = dispatches, .http_concurrency = 1, .candidate_batch_size = 7}));
+    REQUIRE(fixture.executor.start_requests().size() == dispatches);
+    CHECK(starts_for(fixture.executor, first_queue, JobType::Cli) == expected_first);
+    CHECK(starts_for(fixture.executor, second_queue, JobType::Cli) == expected_second);
 }
 
 class AdvancingTimeSource final : public TimeSource {
@@ -344,6 +417,201 @@ TEST_CASE("Single-queue scheduler core preserves strict order across bounded bat
     }
 }
 
+TEST_CASE("Scheduler core follows smooth weighted queue ratios", "[jobu][scheduler][core][fairness][sqlite]")
+{
+    SECTION("1:1")
+    {
+        check_cli_ratio(1, 1, 30, 15, 15);
+    }
+    SECTION("1:2")
+    {
+        check_cli_ratio(1, 2, 30, 10, 20);
+    }
+    SECTION("2:5")
+    {
+        check_cli_ratio(2, 5, 35, 10, 25);
+    }
+}
+
+TEST_CASE("Scheduler core breaks equal-credit ties by queue UUID", "[jobu][scheduler][core][fairness][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  first_queue  = id(1);
+    auto const  second_queue = id(2);
+    insert_queue(fixture.database, first_queue, 2);
+    insert_queue(fixture.database, second_queue, 2);
+    insert_scheduled(fixture, first_queue, 10, JobType::Cli);
+    insert_scheduled(fixture, second_queue, 20, JobType::Cli);
+    fixture.executor.set_available(JobType::Cli, true);
+
+    REQUIRE(fixture.process({.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}));
+    REQUIRE(fixture.executor.start_requests().size() == 1U);
+    CHECK(fixture.executor.start_requests().front().queue_id == first_queue);
+}
+
+TEST_CASE("Scheduler core resets idle credit and applies dynamic weights", "[jobu][scheduler][core][fairness][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  first_queue  = id(1);
+    auto const  second_queue = id(2);
+    insert_queue(fixture.database, first_queue, 8);
+    insert_queue(fixture.database, second_queue, 8);
+    insert_scheduled(fixture, first_queue, 10, JobType::Cli);
+    fixture.executor.set_available(JobType::Cli, true);
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.time,
+        fixture.executor,
+        {.cli_concurrency = 7, .http_concurrency = 1, .candidate_batch_size = 3}
+    };
+
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.start_requests().size() == 1U);
+
+    update_queue_scheduling(fixture.database, second_queue, 2, 8);
+    insert_scheduled_range(fixture, first_queue, 11, 5, JobType::Cli);
+    insert_scheduled_range(fixture, second_queue, 60, 5, JobType::Cli);
+    REQUIRE(core.process_cycle());
+
+    REQUIRE(fixture.executor.start_requests().size() == 7U);
+    CHECK(starts_for(fixture.executor, first_queue, JobType::Cli) == 3U);
+    CHECK(starts_for(fixture.executor, second_queue, JobType::Cli) == 4U);
+}
+
+TEST_CASE("Scheduler core keeps CLI and HTTP fairness credits independent", "[jobu][scheduler][core][fairness][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  first_queue  = id(1);
+    auto const  second_queue = id(2);
+    insert_queue(fixture.database, first_queue, 20, 1);
+    insert_queue(fixture.database, second_queue, 20, 2);
+    insert_scheduled_range(fixture, first_queue, 10, 8, JobType::Cli);
+    insert_scheduled_range(fixture, second_queue, 30, 8, JobType::Cli);
+    insert_scheduled_range(fixture, first_queue, 50, 8, JobType::Http);
+    insert_scheduled_range(fixture, second_queue, 70, 8, JobType::Http);
+    fixture.executor.set_available(JobType::Cli, true);
+    fixture.executor.set_available(JobType::Http, true);
+
+    REQUIRE(fixture.process({.cli_concurrency = 6, .http_concurrency = 6, .candidate_batch_size = 3}));
+    REQUIRE(fixture.executor.start_requests().size() == 12U);
+    CHECK(starts_for(fixture.executor, first_queue, JobType::Cli) == 2U);
+    CHECK(starts_for(fixture.executor, second_queue, JobType::Cli) == 4U);
+    CHECK(starts_for(fixture.executor, first_queue, JobType::Http) == 2U);
+    CHECK(starts_for(fixture.executor, second_queue, JobType::Http) == 4U);
+}
+
+TEST_CASE("Scheduler core alternates the first type across mixed-capacity rounds",
+          "[jobu][scheduler][core][fairness][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  first_queue  = id(1);
+    auto const  second_queue = id(2);
+    insert_queue(fixture.database, first_queue, 1);
+    insert_queue(fixture.database, second_queue, 1);
+    insert_scheduled(fixture, first_queue, 10, JobType::Cli);
+    insert_scheduled(fixture, first_queue, 11, JobType::Http);
+    insert_scheduled(fixture, second_queue, 20, JobType::Cli);
+    insert_scheduled(fixture, second_queue, 21, JobType::Http);
+    fixture.executor.set_available(JobType::Cli, true);
+    fixture.executor.set_available(JobType::Http, true);
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.time,
+        fixture.executor,
+        {.cli_concurrency = 2, .http_concurrency = 2, .candidate_batch_size = 2}
+    };
+
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.start_requests().size() == 2U);
+    CHECK(fixture.executor.start_requests()[0].type == JobType::Cli);
+    CHECK(fixture.executor.start_requests()[0].queue_id == first_queue);
+    CHECK(fixture.executor.start_requests()[1].type == JobType::Http);
+    CHECK(fixture.executor.start_requests()[1].queue_id == second_queue);
+
+    auto const third_queue  = id(3);
+    auto const fourth_queue = id(4);
+    insert_queue(fixture.database, third_queue, 1);
+    insert_queue(fixture.database, fourth_queue, 1);
+    insert_scheduled(fixture, third_queue, 30, JobType::Cli);
+    insert_scheduled(fixture, third_queue, 31, JobType::Http);
+    insert_scheduled(fixture, fourth_queue, 40, JobType::Cli);
+    insert_scheduled(fixture, fourth_queue, 41, JobType::Http);
+
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.start_requests().size() == 4U);
+    CHECK(fixture.executor.start_requests()[2].type == JobType::Http);
+    CHECK(fixture.executor.start_requests()[2].queue_id == third_queue);
+    CHECK(fixture.executor.start_requests()[3].type == JobType::Cli);
+    CHECK(fixture.executor.start_requests()[3].queue_id == fourth_queue);
+}
+
+TEST_CASE("Scheduler core reconciles suspension and resume by queue UUID", "[jobu][scheduler][core][fairness][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  first_queue  = id(1);
+    auto const  second_queue = id(2);
+    insert_queue(fixture.database, first_queue, 3, 5);
+    insert_queue(fixture.database, second_queue, 3, 1);
+    insert_scheduled(fixture, first_queue, 10, JobType::Cli);
+    fixture.executor.set_available(JobType::Cli, true);
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.time,
+        fixture.executor,
+        {.cli_concurrency = 3, .http_concurrency = 1, .candidate_batch_size = 2}
+    };
+
+    REQUIRE(core.process_cycle());
+    update_queue_state(fixture.database, first_queue, QueueState::Suspended);
+    insert_scheduled(fixture, first_queue, 11, JobType::Cli);
+    insert_scheduled(fixture, second_queue, 20, JobType::Cli);
+    REQUIRE(core.process_cycle());
+    update_queue_state(fixture.database, first_queue, QueueState::Active);
+    insert_scheduled(fixture, second_queue, 21, JobType::Cli);
+    REQUIRE(core.process_cycle());
+
+    REQUIRE(fixture.executor.start_requests().size() == 3U);
+    CHECK(fixture.executor.start_requests()[0].queue_id == first_queue);
+    CHECK(fixture.executor.start_requests()[1].queue_id == second_queue);
+    CHECK(fixture.executor.start_requests()[2].queue_id == first_queue);
+}
+
+TEST_CASE("Scheduler core observes dynamic queue concurrency", "[jobu][scheduler][core][capacity][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  first_queue  = id(1);
+    auto const  second_queue = id(2);
+    insert_queue(fixture.database, first_queue, 3);
+    insert_queue(fixture.database, second_queue, 3);
+    insert_scheduled(fixture, first_queue, 10, JobType::Cli);
+    fixture.executor.set_available(JobType::Cli, true);
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.time,
+        fixture.executor,
+        {.cli_concurrency = 4, .http_concurrency = 1, .candidate_batch_size = 2}
+    };
+
+    REQUIRE(core.process_cycle());
+    update_queue_scheduling(fixture.database, first_queue, 1, 1);
+    insert_scheduled(fixture, first_queue, 11, JobType::Cli);
+    insert_scheduled(fixture, second_queue, 20, JobType::Cli);
+    REQUIRE(core.process_cycle());
+    update_queue_scheduling(fixture.database, first_queue, 1, 2);
+    insert_scheduled(fixture, second_queue, 21, JobType::Cli);
+    REQUIRE(core.process_cycle());
+
+    REQUIRE(fixture.executor.start_requests().size() == 4U);
+    CHECK(fixture.executor.start_requests()[0].queue_id == first_queue);
+    CHECK(fixture.executor.start_requests()[1].queue_id == second_queue);
+    CHECK(fixture.executor.start_requests()[2].queue_id == first_queue);
+    CHECK(fixture.executor.start_requests()[3].queue_id == second_queue);
+}
+
 TEST_CASE("Single-queue scheduler core enforces global and combined queue limits", "[jobu][scheduler][core][sqlite]")
 {
     SECTION("CLI global limit")
@@ -419,6 +687,20 @@ TEST_CASE("Single-queue scheduler core reconstructs durable occupancy", "[jobu][
 
         REQUIRE(fixture.process({.cli_concurrency = 2, .http_concurrency = 2, .candidate_batch_size = 1}));
         CHECK(fixture.executor.start_requests().empty());
+    }
+
+    SECTION("suspended blocking retries release the combined queue slot")
+    {
+        CoreFixture fixture;
+        auto const  queue_id = id(75);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_blocking_retry(fixture, queue_id, 76, JobState::Suspended);
+        insert_scheduled(fixture, queue_id, 77, JobType::Cli);
+        fixture.executor.set_available(JobType::Cli, true);
+
+        REQUIRE(fixture.process({.cli_concurrency = 2, .http_concurrency = 2, .candidate_batch_size = 1}));
+        REQUIRE(fixture.executor.start_requests().size() == 1U);
+        CHECK(fixture.executor.start_requests().front().key.run_id == id(77));
     }
 }
 
