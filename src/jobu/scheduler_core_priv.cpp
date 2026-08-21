@@ -6,6 +6,7 @@
 #include "time_source.hpp"
 
 #include <algorithm>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <utility>
