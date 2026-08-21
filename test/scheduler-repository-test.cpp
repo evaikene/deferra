@@ -226,6 +226,20 @@ void insert_attempt(AttemptRepository& attempts, Uuid const& run_id, AttemptNumb
     REQUIRE(attempts.insert_attempt(attempt));
 }
 
+void set_attempt_outcome(Database& database, Uuid const& run_id, std::optional<AttemptOutcome> outcome)
+{
+    Query query{database};
+    REQUIRE(query.prepare("UPDATE jobu_attempts SET outcome = :outcome WHERE run_id = :run_id"));
+    REQUIRE(query.bind_value(":run_id", uuid_to_storage(run_id)));
+    if (outcome) {
+        REQUIRE(query.bind_value(":outcome", make_text(storage_text(*outcome))));
+    }
+    else {
+        REQUIRE(query.bind_value(":outcome", Null{}));
+    }
+    REQUIRE(query.exec());
+}
+
 auto default_run(RepositoryFixture const& fixture, Uuid run_id, Uuid job_id, Uuid queue_id) -> RunSpec
 {
     return {
@@ -266,6 +280,35 @@ TEST_CASE("Scheduler repository pages active runtime queues by binary UUID", "[j
     require_error(fixture.repository.list_runtime_queues(10, std::nullopt),
                   ErrorCategory::Internal,
                   "jobu.storage.invariant");
+}
+
+TEST_CASE("Scheduler repository bounds every paged read", "[jobu][scheduler][repository][sqlite]")
+{
+    RepositoryFixture fixture;
+    constexpr auto    maximum_page_rows = std::size_t{1000};
+
+    auto queues = fixture.repository.list_runtime_queues(maximum_page_rows, std::nullopt);
+    REQUIRE(queues);
+    auto capacity = fixture.repository.list_capacity_rows(maximum_page_rows, std::nullopt);
+    REQUIRE(capacity);
+    auto barriers = fixture.repository.list_manual_barriers(maximum_page_rows, std::nullopt);
+    REQUIRE(barriers);
+    auto runnable = fixture.repository.list_runnable(id(1), JobType::Cli, at(100), maximum_page_rows);
+    REQUIRE(runnable);
+
+    constexpr auto oversized_page = maximum_page_rows + 1U;
+    require_error(fixture.repository.list_runtime_queues(oversized_page, std::nullopt),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.storage.invalid_limit");
+    require_error(fixture.repository.list_capacity_rows(oversized_page, std::nullopt),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.storage.invalid_limit");
+    require_error(fixture.repository.list_manual_barriers(oversized_page, std::nullopt),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.storage.invalid_limit");
+    require_error(fixture.repository.list_runnable(id(1), JobType::Cli, at(100), oversized_page),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.storage.invalid_limit");
 }
 
 TEST_CASE("Scheduler repository reconstructs global and combined queue capacity",
@@ -333,6 +376,48 @@ TEST_CASE("Scheduler repository reconstructs global and combined queue capacity"
     CHECK(rows[6].usage == CapacityUsage{.cli_running = 0, .http_running = 0, .queue_slots = 1});
 }
 
+TEST_CASE("Manual blocking retries retain capacity while bypassing job suspension",
+          "[jobu][scheduler][repository][sqlite]")
+{
+    RepositoryFixture fixture;
+    auto const        active_queue    = id(120);
+    auto const        suspended_queue = id(121);
+    insert_queue(fixture.database, active_queue);
+    insert_queue(fixture.database, suspended_queue, QueueState::Suspended);
+
+    auto add_retry = [&](std::uint8_t run_suffix,
+                         std::uint8_t schedule_suffix,
+                         std::uint8_t job_suffix,
+                         Uuid const&  queue_id,
+                         JobState     job_state) {
+        auto const job_id = id(job_suffix);
+        insert_job(fixture.database, job_id, queue_id, job_state);
+        insert_run(fixture.database, default_run(fixture, id(schedule_suffix), job_id, queue_id));
+        auto run            = default_run(fixture, id(run_suffix), job_id, queue_id);
+        run.origin          = RunOrigin::Manual;
+        run.schedule_owned  = false;
+        run.state           = RunState::RetryWait;
+        run.started_at      = at(80);
+        run.runnable_at     = at(200);
+        run.attributes_json = attribute_document(fixture.registry, "blocking");
+        insert_run(fixture.database, run);
+        insert_attempt(fixture.attempts, run.id, 1, AttemptState::Completed);
+    };
+
+    add_retry(130, 140, 150, active_queue, JobState::Active);
+    add_retry(131, 141, 151, active_queue, JobState::Suspending);
+    add_retry(132, 142, 152, active_queue, JobState::Suspended);
+    add_retry(133, 143, 153, suspended_queue, JobState::Active);
+
+    auto rows = fixture.repository.list_capacity_rows(10, std::nullopt);
+    REQUIRE(rows);
+    REQUIRE(rows->size() == 4U);
+    CHECK((*rows)[0].usage.queue_slots == 1U);
+    CHECK((*rows)[1].usage.queue_slots == 1U);
+    CHECK((*rows)[2].usage.queue_slots == 1U);
+    CHECK((*rows)[3].usage.queue_slots == 0U);
+}
+
 TEST_CASE("Scheduler repository reconstructs and validates manual barriers", "[jobu][scheduler][repository][sqlite]")
 {
     RepositoryFixture fixture;
@@ -376,6 +461,16 @@ TEST_CASE("Scheduler repository reconstructs and validates manual barriers", "[j
         execute(fixture.database,
                 "UPDATE jobu_runs SET state = 'cancelled', completed_at_us = 200, "
                 "result_json = '{}' WHERE id = X'00000000000070008000000000000028'");
+        require_error(fixture.repository.list_manual_barriers(10, std::nullopt),
+                      ErrorCategory::Internal,
+                      "jobu.storage.invariant");
+    }
+
+    SECTION("a submitted schedule-owned sibling is an invariant failure")
+    {
+        execute(fixture.database,
+                "UPDATE jobu_runs SET origin = 'submitted' WHERE id = "
+                "X'00000000000070008000000000000028'");
         require_error(fixture.repository.list_manual_barriers(10, std::nullopt),
                       ErrorCategory::Internal,
                       "jobu.storage.invariant");
@@ -605,6 +700,43 @@ TEST_CASE("Scheduler repository rejects malformed snapshots and contradictory at
         insert_run(fixture.database, run);
         insert_attempt(fixture.attempts, run_id, 1, AttemptState::Running);
         insert_attempt(fixture.attempts, run_id, 2, AttemptState::Running);
+        require_error(fixture.repository.list_capacity_rows(10, std::nullopt),
+                      ErrorCategory::Internal,
+                      "jobu.storage.invariant");
+    }
+
+    SECTION("retry-wait run with a non-failed completed attempt")
+    {
+        auto const job_id = id(122);
+        auto const run_id = id(123);
+        insert_job(fixture.database, job_id, first_queue);
+        auto run        = default_run(fixture, run_id, job_id, first_queue);
+        run.state       = RunState::RetryWait;
+        run.started_at  = at(80);
+        run.runnable_at = at(100);
+        insert_run(fixture.database, run);
+        insert_attempt(fixture.attempts, run_id, 1, AttemptState::Completed);
+
+        SECTION("succeeded")
+        {
+            set_attempt_outcome(fixture.database, run_id, AttemptOutcome::Succeeded);
+        }
+        SECTION("interrupted")
+        {
+            set_attempt_outcome(fixture.database, run_id, AttemptOutcome::Interrupted);
+        }
+        SECTION("cancelled")
+        {
+            set_attempt_outcome(fixture.database, run_id, AttemptOutcome::Cancelled);
+        }
+        SECTION("missing")
+        {
+            set_attempt_outcome(fixture.database, run_id, std::nullopt);
+        }
+
+        require_error(fixture.repository.list_runnable(first_queue, JobType::Cli, at(200), 10),
+                      ErrorCategory::Internal,
+                      "jobu.storage.invariant");
         require_error(fixture.repository.list_capacity_rows(10, std::nullopt),
                       ErrorCategory::Internal,
                       "jobu.storage.invariant");
