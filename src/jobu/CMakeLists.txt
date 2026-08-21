@@ -46,6 +46,8 @@ target_sources(${TARGET}
         retention_repository_priv.hpp
         run_repository_priv.cpp
         run_repository_priv.hpp
+        scheduler_repository_priv.cpp
+        scheduler_repository_priv.hpp
         secret_repository_priv.cpp
         secret_repository_priv.hpp
         system_info.cpp

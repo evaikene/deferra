@@ -1,5 +1,6 @@
 #include "domain_storage_priv.hpp"
 
+#include "attribute_codec_priv.hpp"
 #include "json.hpp"
 
 #include <algorithm>
@@ -17,6 +18,18 @@ namespace {
 
 template <typename T>
 using StorageResult = jb::core::Result<T, jb::core::Error>;
+
+constexpr std::size_t kMaximumJsonDocumentBytes = 256U * 1024U;
+
+constexpr auto kJobRunColumns =
+    "jobu_runs.id AS run_id, jobu_runs.job_id AS run_job_id, "
+    "jobu_runs.job_revision AS run_job_revision, jobu_runs.queue_id AS run_queue_id, "
+    "jobu_runs.origin AS run_origin, jobu_runs.schedule_owned AS run_schedule_owned, "
+    "jobu_runs.planned_at_us AS run_planned_at_us, jobu_runs.runnable_at_us AS run_runnable_at_us, "
+    "jobu_runs.started_at_us AS run_started_at_us, jobu_runs.completed_at_us AS run_completed_at_us, "
+    "jobu_runs.type AS run_type, jobu_runs.priority AS run_priority, "
+    "jobu_runs.attributes_json AS run_attributes_json, jobu_runs.payload_json AS run_payload_json, "
+    "jobu_runs.state AS run_state, jobu_runs.result_json AS run_result_json";
 
 auto storage_error(std::string_view code, std::string_view message, std::string_view field, std::string_view reason)
     -> jb::core::Error
@@ -112,6 +125,34 @@ auto nonnegative_duration_count_to_storage(Rep count) -> StorageResult<jb::db::V
 auto json_error(std::string_view field, std::string_view reason) -> jb::core::Error
 {
     return storage_error("jobu.storage.invalid_json", "Persisted JSON document is invalid", field, reason);
+}
+
+auto invalid_run(std::string_view reason) -> jb::core::Error
+{
+    return storage_error("jobu.storage.invariant", "Persisted run data violates a JobU invariant", {}, reason);
+}
+
+auto is_terminal(RunState state) noexcept -> bool
+{
+    return state == RunState::Succeeded || state == RunState::Failed || state == RunState::Interrupted ||
+           state == RunState::Cancelled;
+}
+
+auto valid_started_at(RunState state, bool has_started_at) noexcept -> bool
+{
+    switch (state) {
+        case RunState::Scheduled:
+            return !has_started_at;
+        case RunState::Running:
+        case RunState::RetryWait:
+        case RunState::Succeeded:
+        case RunState::Failed:
+        case RunState::Interrupted:
+            return has_started_at;
+        case RunState::Cancelled:
+            return true;
+    }
+    return false;
 }
 
 auto decode_json(jb::db::Value const& value, std::string_view field, bool require_object, std::size_t max_size)
@@ -439,6 +480,118 @@ auto read_optional_json(jb::db::Record const& record, std::string_view field, bo
         return StorageResult<std::optional<jb::rpc::JsonValue>>::failure(std::move(decoded).error());
     }
     return StorageResult<std::optional<jb::rpc::JsonValue>>::success(std::move(decoded).value());
+}
+
+auto job_run_columns() noexcept -> std::string_view
+{
+    return kJobRunColumns;
+}
+
+auto read_job_run(jb::db::Record const& record, AttributeRegistry const& attributes) -> StorageResult<JobRun>
+{
+    auto id = read_uuid(record, "run_id");
+    if (!id) {
+        return StorageResult<JobRun>::failure(std::move(id).error());
+    }
+    auto job_id = read_uuid(record, "run_job_id");
+    if (!job_id) {
+        return StorageResult<JobRun>::failure(std::move(job_id).error());
+    }
+    auto revision = read_revision(record, "run_job_revision");
+    if (!revision) {
+        return StorageResult<JobRun>::failure(std::move(revision).error());
+    }
+    auto queue_id = read_uuid(record, "run_queue_id");
+    if (!queue_id) {
+        return StorageResult<JobRun>::failure(std::move(queue_id).error());
+    }
+    auto origin = read_run_origin(record, "run_origin");
+    if (!origin) {
+        return StorageResult<JobRun>::failure(std::move(origin).error());
+    }
+    auto schedule_owned = read_boolean(record, "run_schedule_owned");
+    if (!schedule_owned) {
+        return StorageResult<JobRun>::failure(std::move(schedule_owned).error());
+    }
+    auto planned = read_timestamp(record, "run_planned_at_us");
+    if (!planned) {
+        return StorageResult<JobRun>::failure(std::move(planned).error());
+    }
+    auto runnable = read_timestamp(record, "run_runnable_at_us");
+    if (!runnable) {
+        return StorageResult<JobRun>::failure(std::move(runnable).error());
+    }
+    auto started = read_optional_timestamp(record, "run_started_at_us");
+    if (!started) {
+        return StorageResult<JobRun>::failure(std::move(started).error());
+    }
+    auto completed = read_optional_timestamp(record, "run_completed_at_us");
+    if (!completed) {
+        return StorageResult<JobRun>::failure(std::move(completed).error());
+    }
+    auto type = read_job_type(record, "run_type");
+    if (!type) {
+        return StorageResult<JobRun>::failure(std::move(type).error());
+    }
+    auto priority = read_int32(record, "run_priority");
+    if (!priority) {
+        return StorageResult<JobRun>::failure(std::move(priority).error());
+    }
+    auto attributes_json = read_json(record, "run_attributes_json", true, kMaximumJsonDocumentBytes);
+    if (!attributes_json) {
+        return StorageResult<JobRun>::failure(std::move(attributes_json).error());
+    }
+    auto decoded_attributes = decode_attribute_document(attributes,
+                                                        *attributes_json,
+                                                        AttributeScope::Job,
+                                                        AttributeDocumentMode::Materialized);
+    if (!decoded_attributes) {
+        return StorageResult<JobRun>::failure(std::move(decoded_attributes).error());
+    }
+    auto payload = read_json(record, "run_payload_json", true, kMaximumJsonDocumentBytes);
+    if (!payload) {
+        return StorageResult<JobRun>::failure(std::move(payload).error());
+    }
+    auto state = read_run_state(record, "run_state");
+    if (!state) {
+        return StorageResult<JobRun>::failure(std::move(state).error());
+    }
+    auto result = read_optional_json(record, "run_result_json", true, kMaximumJsonDocumentBytes);
+    if (!result) {
+        return StorageResult<JobRun>::failure(std::move(result).error());
+    }
+
+    if (*schedule_owned && *origin != RunOrigin::Scheduled) {
+        return StorageResult<JobRun>::failure(invalid_run("schedule_owned_origin"));
+    }
+    if (is_terminal(*state) != completed->has_value()) {
+        return StorageResult<JobRun>::failure(invalid_run("completion_state_mismatch"));
+    }
+    if (!is_terminal(*state) && result->has_value()) {
+        return StorageResult<JobRun>::failure(invalid_run("non_terminal_result"));
+    }
+    if (!valid_started_at(*state, started->has_value())) {
+        return StorageResult<JobRun>::failure(invalid_run("started_state_mismatch"));
+    }
+
+    return StorageResult<JobRun>::success(JobRun{
+        .id             = *id,
+        .job_id         = *job_id,
+        .job_revision   = *revision,
+        .queue_id       = *queue_id,
+        .origin         = *origin,
+        .schedule_owned = *schedule_owned,
+        .planned_at     = *planned,
+        .runnable_at    = *runnable,
+        .started_at     = *started,
+        .completed_at   = *completed,
+        .type           = *type,
+        .priority       = *priority,
+        .attributes     = std::move(decoded_attributes).value(),
+        .payload        = std::move(payload).value(),
+        .state          = *state,
+        .result         = std::move(result).value(),
+    });
 }
 
 auto storage_text(QueueState value) noexcept -> std::string_view

@@ -163,6 +163,15 @@ if(TARGET jobu-sqlite)
     target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+    # JobU SQLite-backed scheduler read repository test
+    set(TARGET "scheduler-repository-test")
+    add_executable(${TARGET}
+        scheduler-repository-test.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
     # JobU SQLite-backed queue management service test
     set(TARGET "jobu-queue-management-test")
     add_executable(${TARGET}

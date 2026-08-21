@@ -24,14 +24,6 @@ constexpr std::size_t kMaximumRetentionBatch    = 1000U;
 // Keep each statement below conservative database parameter ceilings; the retention transaction makes chunks atomic.
 constexpr std::size_t kMaximumRunIdsPerDelete   = 500U;
 
-constexpr auto kRunSelection =
-    "SELECT id AS run_id, job_id AS run_job_id, job_revision AS run_job_revision, queue_id AS run_queue_id, "
-    "origin AS run_origin, schedule_owned AS run_schedule_owned, planned_at_us AS run_planned_at_us, "
-    "runnable_at_us AS run_runnable_at_us, started_at_us AS run_started_at_us, "
-    "completed_at_us AS run_completed_at_us, type AS run_type, priority AS run_priority, "
-    "attributes_json AS run_attributes_json, payload_json AS run_payload_json, state AS run_state, "
-    "result_json AS run_result_json FROM jobu_runs ";
-
 auto repository_error(jb::core::ErrorCategory category, std::string_view code, std::string_view message)
     -> jb::core::Error
 {
@@ -136,113 +128,6 @@ auto optional_json_to_storage(std::optional<jb::rpc::JsonValue> const& value) ->
         return RepositoryResult<jb::db::Value>::success(jb::db::Null{});
     }
     return json_to_storage(*value, true, kMaximumJsonDocumentBytes);
-}
-
-auto decode_run(jb::db::Record const& record, AttributeRegistry const& attributes) -> RepositoryResult<JobRun>
-{
-    auto id = read_uuid(record, "run_id");
-    if (!id) {
-        return RepositoryResult<JobRun>::failure(std::move(id).error());
-    }
-    auto job_id = read_uuid(record, "run_job_id");
-    if (!job_id) {
-        return RepositoryResult<JobRun>::failure(std::move(job_id).error());
-    }
-    auto revision = read_revision(record, "run_job_revision");
-    if (!revision) {
-        return RepositoryResult<JobRun>::failure(std::move(revision).error());
-    }
-    auto queue_id = read_uuid(record, "run_queue_id");
-    if (!queue_id) {
-        return RepositoryResult<JobRun>::failure(std::move(queue_id).error());
-    }
-    auto origin = read_run_origin(record, "run_origin");
-    if (!origin) {
-        return RepositoryResult<JobRun>::failure(std::move(origin).error());
-    }
-    auto schedule_owned = read_boolean(record, "run_schedule_owned");
-    if (!schedule_owned) {
-        return RepositoryResult<JobRun>::failure(std::move(schedule_owned).error());
-    }
-    auto planned = read_timestamp(record, "run_planned_at_us");
-    if (!planned) {
-        return RepositoryResult<JobRun>::failure(std::move(planned).error());
-    }
-    auto runnable = read_timestamp(record, "run_runnable_at_us");
-    if (!runnable) {
-        return RepositoryResult<JobRun>::failure(std::move(runnable).error());
-    }
-    auto started = read_optional_timestamp(record, "run_started_at_us");
-    if (!started) {
-        return RepositoryResult<JobRun>::failure(std::move(started).error());
-    }
-    auto completed = read_optional_timestamp(record, "run_completed_at_us");
-    if (!completed) {
-        return RepositoryResult<JobRun>::failure(std::move(completed).error());
-    }
-    auto type = read_job_type(record, "run_type");
-    if (!type) {
-        return RepositoryResult<JobRun>::failure(std::move(type).error());
-    }
-    auto priority = read_int32(record, "run_priority");
-    if (!priority) {
-        return RepositoryResult<JobRun>::failure(std::move(priority).error());
-    }
-    auto attributes_json = read_json(record, "run_attributes_json", true, kMaximumJsonDocumentBytes);
-    if (!attributes_json) {
-        return RepositoryResult<JobRun>::failure(std::move(attributes_json).error());
-    }
-    auto decoded_attributes = decode_attribute_document(attributes,
-                                                        *attributes_json,
-                                                        AttributeScope::Job,
-                                                        AttributeDocumentMode::Materialized);
-    if (!decoded_attributes) {
-        return RepositoryResult<JobRun>::failure(std::move(decoded_attributes).error());
-    }
-    auto payload = read_json(record, "run_payload_json", true, kMaximumJsonDocumentBytes);
-    if (!payload) {
-        return RepositoryResult<JobRun>::failure(std::move(payload).error());
-    }
-    auto state = read_run_state(record, "run_state");
-    if (!state) {
-        return RepositoryResult<JobRun>::failure(std::move(state).error());
-    }
-    auto result = read_optional_json(record, "run_result_json", true, kMaximumJsonDocumentBytes);
-    if (!result) {
-        return RepositoryResult<JobRun>::failure(std::move(result).error());
-    }
-
-    if (*schedule_owned && *origin != RunOrigin::Scheduled) {
-        return RepositoryResult<JobRun>::failure(invalid_run("schedule_owned_origin"));
-    }
-    if (is_terminal(*state) != completed->has_value()) {
-        return RepositoryResult<JobRun>::failure(invalid_run("completion_state_mismatch"));
-    }
-    if (!is_terminal(*state) && result->has_value()) {
-        return RepositoryResult<JobRun>::failure(invalid_run("non_terminal_result"));
-    }
-    if (!valid_started_at(*state, started->has_value())) {
-        return RepositoryResult<JobRun>::failure(invalid_run("started_state_mismatch"));
-    }
-
-    return RepositoryResult<JobRun>::success(JobRun{
-        .id             = *id,
-        .job_id         = *job_id,
-        .job_revision   = *revision,
-        .queue_id       = *queue_id,
-        .origin         = *origin,
-        .schedule_owned = *schedule_owned,
-        .planned_at     = *planned,
-        .runnable_at    = *runnable,
-        .started_at     = *started,
-        .completed_at   = *completed,
-        .type           = *type,
-        .priority       = *priority,
-        .attributes     = std::move(decoded_attributes).value(),
-        .payload        = std::move(payload).value(),
-        .state          = *state,
-        .result         = std::move(result).value(),
-    });
 }
 
 auto affected_rows(jb::db::Query const& query) -> RepositoryResult<std::size_t>
@@ -569,9 +454,10 @@ auto RunRepository::find_schedule_owned(jb::core::Uuid const& job_id)
     -> jb::core::Result<std::optional<JobRun>, jb::core::Error>
 {
     jb::db::Query query{_database};
-    auto          prepared =
-        query.prepare(std::string{kRunSelection} + "WHERE job_id = :job_id AND schedule_owned = 1 "
-                                                   "AND state IN ('scheduled', 'running', 'retry_wait') LIMIT 2");
+    auto          prepared = query.prepare("SELECT " + std::string{job_run_columns()} +
+                                           " FROM jobu_runs "
+                                           "WHERE job_id = :job_id AND schedule_owned = 1 "
+                                           "AND state IN ('scheduled', 'running', 'retry_wait') LIMIT 2");
     if (!prepared) {
         return RepositoryResult<std::optional<JobRun>>::failure(std::move(prepared).error());
     }
@@ -590,7 +476,7 @@ auto RunRepository::find_schedule_owned(jb::core::Uuid const& job_id)
     if (!*next) {
         return RepositoryResult<std::optional<JobRun>>::success(std::nullopt);
     }
-    auto decoded = decode_run(query.record(), _attributes);
+    auto decoded = read_job_run(query.record(), _attributes);
     if (!decoded) {
         return RepositoryResult<std::optional<JobRun>>::failure(std::move(decoded).error());
     }
@@ -607,7 +493,7 @@ auto RunRepository::find_schedule_owned(jb::core::Uuid const& job_id)
 auto RunRepository::find_by_id(jb::core::Uuid const& run_id) -> jb::core::Result<std::optional<JobRun>, jb::core::Error>
 {
     jb::db::Query query{_database};
-    auto          prepared = query.prepare(std::string{kRunSelection} + "WHERE id = :run_id");
+    auto prepared = query.prepare("SELECT " + std::string{job_run_columns()} + " FROM jobu_runs WHERE id = :run_id");
     if (!prepared) {
         return RepositoryResult<std::optional<JobRun>>::failure(std::move(prepared).error());
     }
@@ -626,7 +512,7 @@ auto RunRepository::find_by_id(jb::core::Uuid const& run_id) -> jb::core::Result
     if (!*next) {
         return RepositoryResult<std::optional<JobRun>>::success(std::nullopt);
     }
-    auto decoded = decode_run(query.record(), _attributes);
+    auto decoded = read_job_run(query.record(), _attributes);
     if (!decoded) {
         return RepositoryResult<std::optional<JobRun>>::failure(std::move(decoded).error());
     }
