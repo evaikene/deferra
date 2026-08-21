@@ -12,6 +12,8 @@ Diagnostics:
     Remove: [
       readability-function-cognitive-complexity,
       readability-convert-member-functions-to-static,
+      readability-use-anyofallof,
+      readability-magic-numbers,
       modernize-use-nodiscard,
       modernize-avoid-c-arrays,
       readability-identifier-length,

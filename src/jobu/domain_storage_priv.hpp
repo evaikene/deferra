@@ -75,6 +75,10 @@ read_json(jb::db::Record const& record, std::string_view field, bool require_obj
 read_optional_json(jb::db::Record const& record, std::string_view field, bool require_object, std::size_t max_size)
     -> jb::core::Result<std::optional<jb::rpc::JsonValue>, jb::core::Error>;
 
+[[nodiscard]] auto job_run_columns() noexcept -> std::string_view;
+[[nodiscard]] auto read_job_run(jb::db::Record const& record, AttributeRegistry const& attributes)
+    -> jb::core::Result<JobRun, jb::core::Error>;
+
 [[nodiscard]] auto storage_text(QueueState value) noexcept -> std::string_view;
 [[nodiscard]] auto storage_text(RecoveryPolicy value) noexcept -> std::string_view;
 [[nodiscard]] auto storage_text(JobState value) noexcept -> std::string_view;

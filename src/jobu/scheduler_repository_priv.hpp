@@ -1,0 +1,79 @@
+#pragma once
+
+#include "attribute.hpp"
+#include "job.hpp"
+#include "queue.hpp"
+#include "result.hpp"
+#include "run.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <vector>
+
+namespace jb::db {
+class Database;
+}
+
+namespace jb::jobu::detail {
+
+struct QueueRuntime {
+    jb::core::Uuid id;
+    std::uint32_t  weight{1};
+    std::uint32_t  concurrency_limit{1};
+
+    auto operator==(QueueRuntime const&) const -> bool = default;
+};
+
+struct CapacityUsage {
+    std::uint32_t cli_running{0};
+    std::uint32_t http_running{0};
+    std::uint32_t queue_slots{0};
+
+    auto operator==(CapacityUsage const&) const -> bool = default;
+};
+
+struct CapacityRow {
+    jb::core::Uuid run_id;
+    jb::core::Uuid queue_id;
+    CapacityUsage  usage;
+
+    auto operator==(CapacityRow const&) const -> bool = default;
+};
+
+struct ManualBarrier {
+    jb::core::Uuid run_id;
+    jb::core::Uuid job_id;
+
+    auto operator==(ManualBarrier const&) const -> bool = default;
+};
+
+struct DispatchCandidate {
+    JobRun     run;
+    JobState   job_state{JobState::Active};
+    QueueState queue_state{QueueState::Active};
+};
+
+class SchedulerRepository final {
+public:
+    SchedulerRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept;
+
+    [[nodiscard]] auto list_runtime_queues(std::size_t limit, std::optional<jb::core::Uuid> after_id)
+        -> jb::core::Result<std::vector<QueueRuntime>, jb::core::Error>;
+    [[nodiscard]] auto list_capacity_rows(std::size_t limit, std::optional<jb::core::Uuid> after_run_id)
+        -> jb::core::Result<std::vector<CapacityRow>, jb::core::Error>;
+    [[nodiscard]] auto list_manual_barriers(std::size_t limit, std::optional<jb::core::Uuid> after_run_id)
+        -> jb::core::Result<std::vector<ManualBarrier>, jb::core::Error>;
+    [[nodiscard]] auto
+    list_runnable(jb::core::Uuid const& queue_id, JobType type, jb::core::UtcTimePoint now, std::size_t limit)
+        -> jb::core::Result<std::vector<DispatchCandidate>, jb::core::Error>;
+    [[nodiscard]] auto earliest_future_runnable(JobType type, jb::core::UtcTimePoint now)
+        -> jb::core::Result<std::optional<jb::core::UtcTimePoint>, jb::core::Error>;
+    [[nodiscard]] auto has_any_running_state() -> jb::core::Result<bool, jb::core::Error>;
+
+private:
+    jb::db::Database&        _database;
+    AttributeRegistry const& _attributes;
+};
+
+} // namespace jb::jobu::detail
