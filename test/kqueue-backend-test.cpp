@@ -18,7 +18,7 @@ struct FilterChange {
 struct ScriptedFilterChanges {
     auto operator()(FdEvent event, bool enable) -> bool
     {
-        calls.push_back({event, enable});
+        calls.push_back({.event = event, .enable = enable});
         if (results.empty()) {
             return true;
         }
@@ -70,7 +70,7 @@ TEST_CASE("Kqueue filter transition does nothing for an unchanged mask", "[core]
 TEST_CASE("Kqueue filter transition rolls back a partial addition", "[core][kqueue]")
 {
     ScriptedFilterChanges changes{
-        {true, false, true}
+        .results = {true, false, true}
     };
 
     auto const result =
@@ -87,7 +87,7 @@ TEST_CASE("Kqueue filter transition rolls back a partial addition", "[core][kque
 TEST_CASE("Kqueue filter transition rolls back a failed replacement", "[core][kqueue]")
 {
     ScriptedFilterChanges changes{
-        {true, false, true}
+        .results = {true, false, true}
     };
 
     auto const result = jb::core::priv::transition_kqueue_filters(FdEvent::Read, FdEvent::Write, std::ref(changes));
@@ -103,7 +103,7 @@ TEST_CASE("Kqueue filter transition rolls back a failed replacement", "[core][kq
 TEST_CASE("Kqueue filter transition rolls back a partial removal", "[core][kqueue]")
 {
     ScriptedFilterChanges changes{
-        {true, false, true}
+        .results = {true, false, true}
     };
 
     auto const result =
@@ -121,7 +121,7 @@ TEST_CASE("Kqueue filter transition rolls back a partial removal", "[core][kqueu
 TEST_CASE("Kqueue filter transition reports rollback failure", "[core][kqueue]")
 {
     ScriptedFilterChanges changes{
-        {true, false, false}
+        .results = {true, false, false}
     };
 
     auto const result =

@@ -414,8 +414,18 @@ auto next_local_occurrence(CronExpression const& expression, LocalTimePoint excl
     }
     auto const first_candidate = lower_minute + minutes{1};
 
-    auto const lower_date = year_month_day{floor<days>(exclusive_lower_bound)};
-    auto const first_date = year_month_day{floor<days>(first_candidate)};
+    static constexpr auto kMinimumCalendarDay = local_days{year::min() / January / day{1}};
+    static constexpr auto kMaximumCalendarDay = local_days{year::max() / December / last};
+
+    auto const lower_day = floor<days>(exclusive_lower_bound);
+    auto const first_day = floor<days>(first_candidate);
+    if (lower_day < kMinimumCalendarDay || lower_day > kMaximumCalendarDay || first_day < kMinimumCalendarDay ||
+        first_day > kMaximumCalendarDay) {
+        return LocalResult::failure(occurrence_out_of_range());
+    }
+
+    auto const lower_date = year_month_day{lower_day};
+    auto const first_date = year_month_day{first_day};
     auto const first_year = static_cast<int>(first_date.year());
     auto const last_year  = static_cast<int>(lower_date.year()) + 399;
     if (!year{last_year}.ok()) {

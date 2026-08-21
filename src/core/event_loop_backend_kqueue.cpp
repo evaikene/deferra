@@ -192,7 +192,7 @@ private:
         }
     }
 
-    auto apply_filter_change(int fd, std::int16_t filter, std::uint16_t flags) -> bool
+    auto apply_filter_change(int fd, std::int16_t filter, std::uint16_t flags) const -> bool
     {
         struct kevent change;
         EV_SET(&change, fd, filter, flags, 0, 0, nullptr);
@@ -233,7 +233,7 @@ private:
         }
 
         auto const result = transition_kqueue_filters(original, requested, [this, fd](FdEvent event, bool enable) {
-            auto const filter = event == FdEvent::Read ? EVFILT_READ : EVFILT_WRITE;
+            auto const filter = static_cast<std::int16_t>(event == FdEvent::Read ? EVFILT_READ : EVFILT_WRITE);
             auto const flags  = static_cast<std::uint16_t>(enable ? EV_ADD | EV_CLEAR : EV_DELETE);
             return apply_filter_change(fd, filter, flags);
         });

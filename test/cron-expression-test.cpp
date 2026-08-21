@@ -228,3 +228,22 @@ TEST_CASE("Cron local search reports bounded horizon exhaustion", "[jobu][cron]"
     CHECK(next.error().category == ErrorCategory::InvalidArgument);
     CHECK(next.error().code == "jobu.schedule.no_future_occurrence");
 }
+
+TEST_CASE("Cron local search rejects clock values beyond the calendar range", "[jobu][cron]")
+{
+    using namespace std::chrono;
+
+    auto const maximum_calendar_day = local_days{year::max() / December / last};
+    if (floor<days>(LocalTimePoint::max()) <= maximum_calendar_day) {
+        SUCCEED("The platform clock does not extend beyond the calendar range");
+        return;
+    }
+
+    auto const out_of_range_day = maximum_calendar_day + days{1};
+    auto const lower_bound = LocalTimePoint{duration_cast<UtcClock::duration>(out_of_range_day.time_since_epoch())};
+    auto const next        = next_local_occurrence(parsed_expression("* * * * *"), lower_bound);
+
+    REQUIRE_FALSE(next);
+    CHECK(next.error().category == ErrorCategory::ResourceExhausted);
+    CHECK(next.error().code == "jobu.schedule.out_of_range");
+}
