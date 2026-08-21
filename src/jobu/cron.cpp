@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -53,9 +54,18 @@ auto fixed_utc_data() -> TimezoneData
     };
 }
 
-auto local_year(TimezoneLocalTimePoint value) -> std::chrono::year
+auto local_year(TimezoneLocalTimePoint value) -> std::optional<std::chrono::year>
 {
-    return std::chrono::year_month_day{std::chrono::floor<std::chrono::days>(value)}.year();
+    using namespace std::chrono;
+
+    static constexpr auto kMinimumCalendarDay = local_days{year::min() / January / day{1}};
+    static constexpr auto kMaximumCalendarDay = local_days{year::max() / December / last};
+
+    auto const local_day = floor<days>(value);
+    if (local_day < kMinimumCalendarDay || local_day > kMaximumCalendarDay) {
+        return std::nullopt;
+    }
+    return year_month_day{local_day}.year();
 }
 
 auto timezone_local_candidate(LocalMinute value) -> jb::core::Result<TimezoneLocalTimePoint, jb::core::Error>
@@ -143,10 +153,10 @@ auto SystemCronEngine::next_after(CronSchedule const& schedule, jb::core::UtcTim
     auto local_cursor = *local_lower;
 
     auto const first_year = local_year(local_cursor);
-    if (!first_year.ok() || static_cast<int>(first_year) > static_cast<int>(std::chrono::year::max()) - 399) {
+    if (!first_year || static_cast<int>(*first_year) > static_cast<int>(std::chrono::year::max()) - 399) {
         return OccurrenceResult::failure(occurrence_out_of_range());
     }
-    auto const last_year = static_cast<int>(first_year) + 399;
+    auto const last_year = static_cast<int>(*first_year) + 399;
 
     while (true) {
         auto local_candidate = next_local_occurrence(*expression, local_cursor);
@@ -158,7 +168,11 @@ auto SystemCronEngine::next_after(CronSchedule const& schedule, jb::core::UtcTim
         if (!candidate) {
             return OccurrenceResult::failure(std::move(candidate).error());
         }
-        if (static_cast<int>(local_year(*candidate)) > last_year) {
+        auto const candidate_year = local_year(*candidate);
+        if (!candidate_year) {
+            return OccurrenceResult::failure(occurrence_out_of_range());
+        }
+        if (static_cast<int>(*candidate_year) > last_year) {
             return OccurrenceResult::failure(no_future_occurrence());
         }
 

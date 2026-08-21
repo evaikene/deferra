@@ -388,7 +388,7 @@ auto LocalSocket::Private::release_socket(LocalSocket& socket) -> bool
 
     auto*      loop          = socket.event_loop();
     auto const active_watch  = watch;
-    auto const retry_unwatch = loop && active_watch && !loop->unwatch_fd(active_watch);
+    auto const retry_unwatch = loop != nullptr && active_watch && !loop->unwatch_fd(active_watch);
 
     auto const released_fd = std::exchange(fd, kInvalidFd);
     state                  = LocalSocketState::Unconnected;
