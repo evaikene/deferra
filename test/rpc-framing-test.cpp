@@ -52,8 +52,8 @@ TEST_CASE("framing limits and framer ownership have stable public semantics", "[
     static_assert(std::is_nothrow_move_assignable_v<StreamFramer>);
 
     StreamFramer framer;
-    CHECK(framer.limits().max_header_bytes == 16U * 1024U);
-    CHECK(framer.limits().max_body_bytes == 1024U * 1024U);
+    CHECK(framer.limits().max_header_bytes == std::size_t{16} * 1024U);
+    CHECK(framer.limits().max_body_bytes == std::size_t{1024} * 1024U);
     CHECK(framer.buffered_bytes() == 0U);
 }
 
@@ -281,16 +281,17 @@ TEST_CASE("StreamFramer rejects malformed CRLF and header fields", "[rpc][framin
     };
 
     auto const failures = std::array{
-        Failure{"Content-Length: 0\n\n",                             "rpc.framing.invalid_header"        },
-        Failure{"Content-Length: 0\rX",                              "rpc.framing.invalid_header"        },
-        Failure{": value\r\nContent-Length: 0\r\n\r\n",              "rpc.framing.invalid_header"        },
-        Failure{"Content-Length 0\r\n\r\n",                          "rpc.framing.invalid_header"        },
-        Failure{"Content-Length : 0\r\n\r\n",                        "rpc.framing.invalid_header"        },
-        Failure{"Content@Length: 0\r\n\r\n",                         "rpc.framing.invalid_header"        },
-        Failure{std::string{"X: \x01\r\nContent-Length: 0\r\n\r\n"}, "rpc.framing.invalid_header"        },
-        Failure{"Future: SECRET-MARKER\r\n\r\n",                     "rpc.framing.missing_content_length"},
-        Failure{"Content-Type: application/json; charset=utf-8\r\nContent-Type: application/json; charset=utf-8\r\n"
-                "Content-Length: 0\r\n\r\n",         "rpc.framing.invalid_header"        },
+        Failure{.input = "Content-Length: 0\n\n",                             .code = "rpc.framing.invalid_header"        },
+        Failure{.input = "Content-Length: 0\rX",                              .code = "rpc.framing.invalid_header"        },
+        Failure{.input = ": value\r\nContent-Length: 0\r\n\r\n",              .code = "rpc.framing.invalid_header"        },
+        Failure{.input = "Content-Length 0\r\n\r\n",                          .code = "rpc.framing.invalid_header"        },
+        Failure{.input = "Content-Length : 0\r\n\r\n",                        .code = "rpc.framing.invalid_header"        },
+        Failure{.input = "Content@Length: 0\r\n\r\n",                         .code = "rpc.framing.invalid_header"        },
+        Failure{.input = std::string{"X: \x01\r\nContent-Length: 0\r\n\r\n"}, .code = "rpc.framing.invalid_header"        },
+        Failure{.input = "Future: SECRET-MARKER\r\n\r\n",                     .code = "rpc.framing.missing_content_length"},
+        Failure{.input =
+                    "Content-Type: application/json; charset=utf-8\r\nContent-Type: application/json; charset=utf-8\r\n"
+                    "Content-Length: 0\r\n\r\n",              .code = "rpc.framing.invalid_header"        },
     };
 
     for (auto const& failure : failures) {

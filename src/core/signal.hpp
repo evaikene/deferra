@@ -1,7 +1,6 @@
 #pragma once
 
 #include "connection.hpp"
-#include "thread_context.hpp"
 
 #include <cassert>
 #include <functional>

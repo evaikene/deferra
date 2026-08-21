@@ -18,7 +18,6 @@
 #include <string_view>
 #include <system_error>
 #include <type_traits>
-#include <utility>
 #include <vector>
 
 #include <fcntl.h>
@@ -505,14 +504,15 @@ TEST_CASE("LocalServer queues multiple clients in FIFO order", "[net][local-serv
     CHECK(server.pending_connection_count() == 0);
     CHECK_FALSE(server.take_next_connection());
 
-    REQUIRE(wait_for(app, [&]() -> bool {
+    auto const all_payloads_available = [&]() -> bool {
         for (std::size_t index = 0; index < accepted.size(); ++index) {
             if (accepted[index]->bytes_available() != markers[index].size()) {
                 return false;
             }
         }
         return true;
-    }));
+    };
+    REQUIRE(wait_for(app, all_payloads_available));
     for (std::size_t index = 0; index < accepted.size(); ++index) {
         CHECK(accepted[index]->read_all() == markers[index]);
     }

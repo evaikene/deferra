@@ -75,6 +75,6 @@ auto main() -> int
     auto const default_permissions = std::filesystem::perms::owner_read | std::filesystem::perms::owner_write;
     auto const defaults_are_valid  = options.permissions == default_permissions && options.backlog == 128 &&
                                      options.max_pending_connections == 64 &&
-                                     options.accepted_read_buffer_limit == 2U * 1024U * 1024U;
+                                     options.accepted_read_buffer_limit == std::size_t{2} * 1024U * 1024U;
     return credentials.process_id || credentials.user_id || credentials.group_id || !defaults_are_valid ? 1 : 0;
 }

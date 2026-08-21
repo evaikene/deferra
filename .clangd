@@ -16,6 +16,7 @@ Diagnostics:
       readability-magic-numbers,
       modernize-use-nodiscard,
       modernize-avoid-c-arrays,
+      modernize-use-trailing-return-type,
       readability-identifier-length,
       bugprone-easily-swappable-parameters
     ]

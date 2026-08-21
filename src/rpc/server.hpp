@@ -33,7 +33,7 @@ struct ServerOptions {
     /// Maximum simultaneously live connections; defaults to 128, while zero rejects every connection.
     std::size_t   max_connections{128};
     /// Maximum unacknowledged framed-output bytes per connection; defaults to 2 MiB, while zero permits no reply.
-    std::size_t   max_queued_output_bytes{2U * 1024U * 1024U};
+    std::size_t   max_queued_output_bytes{std::size_t{2} * 1024U * 1024U};
 };
 
 /** Owns generic byte-stream connections and dispatches JSON-RPC requests.

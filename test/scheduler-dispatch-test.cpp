@@ -156,7 +156,7 @@ auto test_error(std::string code) -> Error
 
 auto call_position(FakeDatabaseDriverState const& state, std::string const& call) -> std::size_t
 {
-    auto const found = std::find(state.calls.begin(), state.calls.end(), call);
+    auto const found = std::ranges::find(state.calls, call);
     REQUIRE(found != state.calls.end());
     return static_cast<std::size_t>(found - state.calls.begin());
 }
@@ -200,7 +200,7 @@ struct DispatchFixture {
 
 auto dispatch(DispatchFixture& fixture) -> Result<std::optional<DispatchStart>, Error>
 {
-    return dispatch_selected(fixture.database, fixture.registry, fixture.executor, id(1), at(120), [](auto) {});
+    return dispatch_selected(fixture.database, fixture.registry, fixture.executor, id(1), at(120), [](auto const&) {});
 }
 
 void require_no_start(DispatchFixture& fixture)

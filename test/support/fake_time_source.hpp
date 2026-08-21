@@ -33,8 +33,8 @@ public:
     }
 
 private:
-    core::UtcTimePoint _utc{};
-    core::TimePoint    _monotonic{};
+    core::UtcTimePoint _utc;
+    core::TimePoint    _monotonic;
 };
 
 } // namespace jb::test

@@ -53,7 +53,12 @@ auto EventLoop::post_event(Object* receiver, std::weak_ptr<priv::ObjectLifetime>
     if (!_backend || !_backend->wakeup()) {
         return false;
     }
-    _event_queue.push({receiver, std::move(lifetime), std::move(event), {}});
+    _event_queue.push({
+        .receiver = receiver,
+        .lifetime = std::move(lifetime),
+        .event    = std::move(event),
+        .delivery = {},
+    });
     return true;
 }
 
@@ -66,7 +71,12 @@ auto EventLoop::post_event_delivery(Object* receiver, std::weak_ptr<priv::Object
     if (!_backend || !_backend->wakeup()) {
         return false;
     }
-    _event_queue.push({receiver, std::move(lifetime), {}, std::move(delivery)});
+    _event_queue.push({
+        .receiver = receiver,
+        .lifetime = std::move(lifetime),
+        .event    = {},
+        .delivery = std::move(delivery),
+    });
     return true;
 }
 
@@ -78,7 +88,10 @@ auto EventLoop::defer_delete(Object* object, std::weak_ptr<priv::ObjectLifetime>
     if (!_backend || !_backend->wakeup()) {
         return false;
     }
-    _deferred_delete_queue.push({object, std::move(lifetime)});
+    _deferred_delete_queue.push({
+        .object   = object,
+        .lifetime = std::move(lifetime),
+    });
     return true;
 }
 

@@ -125,12 +125,12 @@ public:
 
 private:
     /// Constructs a result whose variant is initialized with a value.
-    explicit Result(std::in_place_index_t<1>, T value)
+    explicit Result(std::in_place_index_t<1> /*tag*/, T value)
         : _data{std::in_place_index<1>, std::move(value)}
     {}
 
     /// Constructs a result whose variant is initialized with an error.
-    explicit Result(std::in_place_index_t<2>, E error)
+    explicit Result(std::in_place_index_t<2> /*tag*/, E error)
         : _data{std::in_place_index<2>, std::move(error)}
     {}
 
@@ -215,12 +215,12 @@ public:
 
 private:
     /// Constructs a successful completion variant.
-    explicit Result(std::in_place_index_t<1>)
+    explicit Result(std::in_place_index_t<1> /*tag*/)
         : _data{std::in_place_index<1>}
     {}
 
     /// Constructs a failed completion variant.
-    explicit Result(std::in_place_index_t<2>, E error)
+    explicit Result(std::in_place_index_t<2> /*tag*/, E error)
         : _data{std::in_place_index<2>, std::move(error)}
     {}
 

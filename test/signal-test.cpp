@@ -73,13 +73,11 @@ public:
 
     explicit CopyCountingValue(int value)
         : value{value}
-        , instance{++instances}
         , lifetime{std::make_shared<int>(0)}
     {}
 
     CopyCountingValue(CopyCountingValue const& other)
         : value{other.value}
-        , instance{++instances}
         , lifetime{other.lifetime}
     {
         ++copies;
@@ -96,7 +94,7 @@ public:
     }
 
     int                  value;
-    std::size_t          instance;
+    std::size_t          instance{++instances};
     std::shared_ptr<int> lifetime;
 
     static inline std::size_t copies{0};
@@ -237,7 +235,10 @@ TEST_CASE("Direct signal slots may copy owning arguments intentionally", "[core]
     std::size_t        copied_instance{0};
 
     sender.value_changed.connect([&](CopyCountingValue const& value) { borrowed_instance = value.instance; });
-    sender.value_changed.connect([&](CopyCountingValue value) { copied_instance = value.instance; });
+    auto copying_slot = [&](CopyCountingValue value) { // NOLINT(performance-unnecessary-value-param) Intentional copy.
+        copied_instance = value.instance;
+    };
+    sender.value_changed.connect(copying_slot);
 
     CopyCountingValue::reset();
     CopyCountingValue value{42};

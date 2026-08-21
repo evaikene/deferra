@@ -18,7 +18,6 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -769,7 +768,7 @@ auto parse_job_update(std::filesystem::path                socket_path,
             if (!parsed) {
                 return parse_failure("--revision must be a positive 64-bit integer");
             }
-            revision      = *parsed;
+            revision      = parsed;
             revision_seen = true;
             continue;
         }
@@ -783,7 +782,7 @@ auto parse_job_update(std::filesystem::path                socket_path,
             if (!parsed) {
                 return parse_failure("--priority must be an integer from -2147483648 through 2147483647");
             }
-            priority      = *parsed;
+            priority      = parsed;
             priority_seen = true;
             continue;
         }
@@ -858,7 +857,7 @@ auto parse_job_move(std::filesystem::path socket_path, std::span<CommandLineArgu
         if (!parsed) {
             return parse_failure("--revision must be a positive 64-bit integer");
         }
-        revision      = *parsed;
+        revision      = parsed;
         revision_seen = true;
     }
     if (!revision) {
@@ -1336,7 +1335,7 @@ auto main(int argc, char* argv[]) -> int
         finish(EXIT_FAILURE);
     };
 
-    socket.set_read_buffer_limit(2U * 1024U * 1024U);
+    socket.set_read_buffer_limit(std::size_t{2} * 1024U * 1024U);
     socket.error_occurred.connect(
         [&finish_operator_error](IOError, std::string const& message) -> void { finish_operator_error(message); });
     socket.connected.connect([&]() -> void {

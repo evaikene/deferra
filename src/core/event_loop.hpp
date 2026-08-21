@@ -14,7 +14,7 @@ namespace jb::core {
 class Application;
 class Event;
 class Object;
-struct ThreadCtx;
+class ThreadCtx;
 
 namespace priv {
 struct EventLoopTestAccess;

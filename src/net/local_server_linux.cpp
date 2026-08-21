@@ -165,7 +165,7 @@ auto permissions_are_valid(std::filesystem::perms permissions) -> bool
 
     auto const bits = static_cast<PermissionBits>(permissions);
     auto const mask = static_cast<PermissionBits>(std::filesystem::perms::mask);
-    return (bits & static_cast<PermissionBits>(~mask)) == 0;
+    return (bits & ~mask) == 0;
 }
 
 auto metadata_matches(auto const& data, struct stat const& metadata) -> bool
@@ -478,7 +478,7 @@ void LocalServer::close()
     ++d->generation;
     auto*      loop          = event_loop();
     auto const watch         = d->watch;
-    auto const retry_unwatch = loop && watch && !loop->unwatch_fd(watch);
+    auto const retry_unwatch = loop != nullptr && watch && !loop->unwatch_fd(watch);
     d->listening             = false;
     d->accept_callback       = {};
     d->pending_connections.clear();

@@ -143,7 +143,7 @@ auto device_error(jb::core::IOError error) -> Error
 Client::Private::Private(Client& client, jb::core::IODevice& client_device, ClientOptions client_options)
     : owner(client)
     , device(&client_device)
-    , options(std::move(client_options))
+    , options(client_options)
     , framer(options.framing)
 {
     assert(device->is_open());
@@ -325,7 +325,7 @@ void Client::Private::process_body(std::string const& body)
     reserved_response_ids.clear();
 }
 
-auto Client::Private::preflight_responses(detail::ResponseDocument const& document)
+auto Client::Private::preflight_responses(detail::ResponseDocument const& document) const
     -> jb::core::Result<std::vector<std::uint64_t>, Error>
 {
     using Result = jb::core::Result<std::vector<std::uint64_t>, Error>;
@@ -348,10 +348,10 @@ void Client::Private::deliver_response(detail::ResponseEnvelope const& response,
 {
     auto request_id = RequestId{id};
     if (std::holds_alternative<JsonValue>(response.payload)) {
-        owner.emit(owner.result_received, std::move(request_id), std::get<JsonValue>(response.payload));
+        owner.emit(owner.result_received, request_id, std::get<JsonValue>(response.payload));
         return;
     }
-    owner.emit(owner.error_received, std::move(request_id), std::get<RpcError>(response.payload));
+    owner.emit(owner.error_received, request_id, std::get<RpcError>(response.payload));
 }
 
 void Client::Private::acknowledge_output(std::size_t bytes) noexcept
@@ -377,7 +377,7 @@ void Client::Private::terminate(Error error, bool emit_protocol_error)
     }
 
     closed         = true;
-    terminal_error = error;
+    terminal_error = std::move(error);
     disconnect_device();
     framer.reset();
     read_pending        = false;
@@ -387,11 +387,12 @@ void Client::Private::terminate(Error error, bool emit_protocol_error)
     auto failed_ids = std::vector<std::uint64_t>{pending_ids.begin(), pending_ids.end()};
     pending_ids.clear();
 
+    auto const& terminal = *terminal_error;
     if (emit_protocol_error) {
-        owner.emit(owner.protocol_error, error);
+        owner.emit(owner.protocol_error, terminal);
     }
     for (auto const id : failed_ids) {
-        owner.emit(owner.request_failed, RequestId{id}, error);
+        owner.emit(owner.request_failed, RequestId{id}, terminal);
     }
 }
 
@@ -405,7 +406,7 @@ void Client::Private::disconnect_device() noexcept
 
 Client::Client(jb::core::IODevice& device, ClientOptions options, jb::core::Object* parent)
     : Object(parent)
-    , _data(std::make_unique<Private>(*this, device, std::move(options)))
+    , _data(std::make_unique<Private>(*this, device, options))
 {}
 
 Client::~Client()
@@ -434,7 +435,7 @@ auto Client::call(std::string_view method, std::optional<JsonValue> params)
     }
     auto const id = allocated.value();
 
-    auto serialized = serialize_json(detail::encode_request(RequestId{id}, method, params));
+    auto serialized = serialize_json(detail::encode_request(RequestId{id}, method, std::move(params)));
     if (!serialized) {
         return Result::failure(std::move(serialized).error());
     }
@@ -467,7 +468,7 @@ auto Client::notify(std::string_view method, std::optional<JsonValue> params) ->
         return Result::failure(std::move(*error));
     }
 
-    auto serialized = serialize_json(detail::encode_notification(method, params));
+    auto serialized = serialize_json(detail::encode_notification(method, std::move(params)));
     if (!serialized) {
         return Result::failure(std::move(serialized).error());
     }

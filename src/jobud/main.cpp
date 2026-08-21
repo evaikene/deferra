@@ -21,7 +21,7 @@
 #include <fmt/format.h>
 
 #include <array>
-#include <cstdio>
+#include <cstdio> // IWYU pragma: keep for stderr and stdout
 #include <cstdlib>
 #include <filesystem>
 #include <memory>

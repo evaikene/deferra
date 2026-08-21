@@ -25,7 +25,7 @@ struct Client::Private {
 
     void               process_readable();
     void               process_body(std::string const& body);
-    [[nodiscard]] auto preflight_responses(detail::ResponseDocument const& document)
+    [[nodiscard]] auto preflight_responses(detail::ResponseDocument const& document) const
         -> jb::core::Result<std::vector<std::uint64_t>, jb::core::Error>;
     void deliver_response(detail::ResponseEnvelope const& response, std::uint64_t id);
 

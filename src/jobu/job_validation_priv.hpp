@@ -4,14 +4,15 @@
 #include "result.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
 namespace jb::jobu::detail {
 
-inline constexpr std::size_t maximum_job_document_bytes = 256U * 1024U;
+inline constexpr std::size_t maximum_job_document_bytes = std::size_t{256} * 1024U;
 
-enum class JobPayloadIssue {
+enum class JobPayloadIssue : std::uint8_t {
     None,
     UnknownType,
     NotObject,

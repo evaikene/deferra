@@ -82,7 +82,7 @@ TEST_CASE("Records support indexed and ASCII case-insensitive named access", "[d
 TEST_CASE("Record is an ordinary owning copyable value", "[db][record]")
 {
     Record original{{Field{"value", make_text("owned")}}};
-    auto   copy = original;
+    auto   copy = original; // NOLINT(performance-unnecessary-copy-initialization) Copy construction is under test.
 
     CHECK(std::get<std::string>(copy.value(0)) == "owned");
 }

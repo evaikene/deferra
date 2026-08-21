@@ -3,7 +3,7 @@
 #include "framing.hpp"
 #include "json.hpp"
 #include "protocol.hpp"
-#include "rpc.hpp"
+#include "rpc.hpp" // IWYU pragma: keep for public header self-containment coverage
 #include "server.hpp"
 
 #include <cstdint>

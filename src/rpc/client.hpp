@@ -33,7 +33,7 @@ struct ClientOptions {
     /// Maximum simultaneously pending calls; defaults to 128, while zero rejects every call.
     std::size_t   max_pending_requests{128};
     /// Maximum unacknowledged framed-output bytes; defaults to 2 MiB, while zero permits no request or notification.
-    std::size_t   max_queued_output_bytes{2U * 1024U * 1024U};
+    std::size_t   max_queued_output_bytes{std::size_t{2} * 1024U * 1024U};
 };
 
 /** Sends and correlates JSON-RPC calls over one borrowed byte-stream device.

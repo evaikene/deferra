@@ -5,7 +5,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <chrono>
+#include <chrono> // IWYU pragma: keep for std::chrono_literals
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -14,7 +14,6 @@
 #include <string>
 #include <string_view>
 #include <utility>
-#include <variant>
 
 using namespace jb::core;
 using namespace jb::jobu;

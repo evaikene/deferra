@@ -3,6 +3,7 @@
 #include "protocol.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -27,7 +28,7 @@ struct InvalidRequest {
 
 using RequestEntry = std::variant<RequestEnvelope, InvalidRequest>;
 
-enum class RequestDocumentKind {
+enum class RequestDocumentKind : std::uint8_t {
     Single,
     Batch,
     RejectedBatch,
@@ -49,7 +50,7 @@ struct ResponseEnvelope {
     auto operator==(ResponseEnvelope const&) const -> bool = default;
 };
 
-enum class ResponseDocumentKind {
+enum class ResponseDocumentKind : unsigned char {
     Single,
     Batch,
 };
@@ -69,10 +70,9 @@ struct ResponseDocument {
                                             std::size_t      max_batch_entries = default_max_batch_entries)
     -> jb::core::Result<ResponseDocument, jb::core::Error>;
 
-[[nodiscard]] auto
-encode_request(RequestId const& id, std::string_view method, std::optional<JsonValue> const& params = {}) -> JsonValue;
-[[nodiscard]] auto encode_notification(std::string_view method, std::optional<JsonValue> const& params = {})
+[[nodiscard]] auto encode_request(RequestId const& id, std::string_view method, std::optional<JsonValue> params = {})
     -> JsonValue;
+[[nodiscard]] auto encode_notification(std::string_view method, std::optional<JsonValue> params = {}) -> JsonValue;
 [[nodiscard]] auto encode_success_response(RequestId const& id, JsonValue const& result) -> JsonValue;
 [[nodiscard]] auto encode_error_response(RequestId const& id, RpcError const& error) -> JsonValue;
 [[nodiscard]] auto encode_batch(std::vector<JsonValue> entries) -> std::optional<JsonValue>;

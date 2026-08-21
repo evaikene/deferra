@@ -8,7 +8,6 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -48,7 +47,7 @@ auto encode_frame(JsonValue const& value, FramingLimits limits = {}) -> std::str
     return std::move(framed).value();
 }
 
-auto request_frame(RequestId                       id,
+auto request_frame(RequestId const&                id,
                    std::string_view                method,
                    std::optional<JsonValue> const& params = std::nullopt,
                    FramingLimits                   limits = {}) -> std::string
@@ -193,12 +192,12 @@ TEST_CASE("Server public defaults and object contract are stable", "[rpc][server
     static_assert(!std::is_move_constructible_v<Server>);
 
     auto const options = ServerOptions{};
-    CHECK(options.framing.max_header_bytes == 16U * 1024U);
-    CHECK(options.framing.max_body_bytes == 1024U * 1024U);
+    CHECK(options.framing.max_header_bytes == std::size_t{16} * 1024U);
+    CHECK(options.framing.max_body_bytes == std::size_t{1024} * 1024U);
     CHECK(options.json.max_depth == 64U);
     CHECK(options.max_batch_entries == 64U);
     CHECK(options.max_connections == 128U);
-    CHECK(options.max_queued_output_bytes == 2U * 1024U * 1024U);
+    CHECK(options.max_queued_output_bytes == std::size_t{2} * 1024U * 1024U);
 
     Application app{0, nullptr};
     Object      parent;
@@ -236,12 +235,13 @@ TEST_CASE("A handler may unregister itself during dispatch", "[rpc][server][regi
 {
     Application app{0, nullptr};
     Server      server;
-    auto        calls = 0;
-    REQUIRE(server.register_method("once", [&server, &calls](auto const&, auto const&) {
+    auto        calls        = 0;
+    auto        once_handler = [&server, &calls](auto const&, auto const&) {
         ++calls;
         CHECK(server.unregister_method("once"));
         return MethodResult::success(make_json(std::string{"done"}));
-    }));
+    };
+    REQUIRE(server.register_method("once", once_handler));
     auto connection = attach(server);
 
     connection.device->inject_input(request_frame(std::uint64_t{1}, "once"));
@@ -366,11 +366,12 @@ TEST_CASE("Connection opening installs ownership before signals and buffered dis
 {
     Application app{0, nullptr};
     Server      server;
-    auto        calls = 0;
-    REQUIRE(server.register_method("buffered", [&calls](auto const&, auto const&) {
+    auto        calls            = 0;
+    auto        buffered_handler = [&calls](auto const&, auto const&) {
         ++calls;
         return MethodResult::success(make_json(std::string{"processed"}));
-    }));
+    };
+    REQUIRE(server.register_method("buffered", buffered_handler));
 
     auto  device = std::make_unique<MemoryIODevice>();
     auto* raw    = device.get();
@@ -398,12 +399,13 @@ TEST_CASE("An opened listener may close the connection immediately", "[rpc][serv
 {
     Application app{0, nullptr};
     Server      server;
-    auto        calls  = 0;
-    auto        closed = 0;
-    REQUIRE(server.register_method("unused", [&calls](auto const&, auto const&) {
+    auto        calls          = 0;
+    auto        closed         = 0;
+    auto        unused_handler = [&calls](auto const&, auto const&) {
         ++calls;
         return MethodResult::success(make_json(JsonNull{}));
-    }));
+    };
+    REQUIRE(server.register_method("unused", unused_handler));
 
     auto device = std::make_unique<MemoryIODevice>();
     device->open();
@@ -486,23 +488,27 @@ TEST_CASE("Notifications never receive responses and keep the connection usable"
 {
     Application app{0, nullptr};
     Server      server;
-    auto        calls = 0;
-    REQUIRE(server.register_method("ok", [&calls](auto const&, auto const&) {
+    auto        calls      = 0;
+    auto        ok_handler = [&calls](auto const&, auto const&) {
         ++calls;
         return MethodResult::success(make_json(JsonNull{}));
-    }));
-    REQUIRE(server.register_method("failed", [&calls](auto const&, auto const&) {
+    };
+    auto failed_handler = [&calls](auto const&, auto const&) {
         ++calls;
         return MethodResult::failure(RpcError{.code = 99, .message = "represented"});
-    }));
-    REQUIRE(server.register_method("throws", [&calls](auto const&, auto const&) -> MethodResult {
+    };
+    auto throws_handler = [&calls](auto const&, auto const&) -> MethodResult {
         ++calls;
         throw std::runtime_error{"private exception detail"};
-    }));
-    REQUIRE(server.register_method("invalid", [&calls](auto const&, auto const&) {
+    };
+    auto invalid_handler = [&calls](auto const&, auto const&) {
         ++calls;
         return MethodResult::success(make_json(std::numeric_limits<double>::infinity()));
-    }));
+    };
+    REQUIRE(server.register_method("ok", ok_handler));
+    REQUIRE(server.register_method("failed", failed_handler));
+    REQUIRE(server.register_method("throws", throws_handler));
+    REQUIRE(server.register_method("invalid", invalid_handler));
     auto connection = attach(server);
 
     auto input = notification_frame("ok") + notification_frame("failed") + notification_frame("throws") +
@@ -581,16 +587,17 @@ TEST_CASE("Framing supports fragmentation, coalescing, and non-recursive input",
 {
     Application app{0, nullptr};
     Server      server;
-    auto        depth         = 0;
-    auto        maximum_depth = 0;
-    auto        calls         = 0;
-    REQUIRE(server.register_method("ordered", [&](auto const&, auto const&) {
+    auto        depth           = 0;
+    auto        maximum_depth   = 0;
+    auto        calls           = 0;
+    auto        ordered_handler = [&](auto const&, auto const&) {
         ++depth;
         maximum_depth = std::max(maximum_depth, depth);
         ++calls;
         --depth;
-        return MethodResult::success(make_json(std::uint64_t{static_cast<std::uint64_t>(calls)}));
-    }));
+        return MethodResult::success(make_json(static_cast<std::uint64_t>(calls)));
+    };
+    REQUIRE(server.register_method("ordered", ordered_handler));
 
     auto  device = std::make_unique<MemoryIODevice>();
     auto* raw    = device.get();
@@ -706,11 +713,12 @@ TEST_CASE("Server applies inclusive configured and default batch limits", "[rpc]
     {
         Application app{0, nullptr};
         Server      server{{.max_batch_entries = 0U}};
-        auto        calls = 0;
-        REQUIRE(server.register_method("call", [&calls](auto const&, auto const&) {
+        auto        calls        = 0;
+        auto        call_handler = [&calls](auto const&, auto const&) {
             ++calls;
             return MethodResult::success(make_json(JsonNull{}));
-        }));
+        };
+        REQUIRE(server.register_method("call", call_handler));
         auto connection = attach(server);
         connection.device->inject_input(
             encode_frame(make_json(JsonValue::Array{encode_request(std::uint64_t{1}, "call")})));
@@ -724,11 +732,12 @@ TEST_CASE("Server applies inclusive configured and default batch limits", "[rpc]
     {
         Application app{0, nullptr};
         Server      server{{.max_batch_entries = 2U}};
-        auto        calls = 0;
-        REQUIRE(server.register_method("call", [&calls](auto const&, auto const&) {
+        auto        calls        = 0;
+        auto        call_handler = [&calls](auto const&, auto const&) {
             ++calls;
             return MethodResult::success(make_json(JsonNull{}));
-        }));
+        };
+        REQUIRE(server.register_method("call", call_handler));
         auto connection = attach(server);
         auto exact      = JsonValue::Array{
             encode_request(std::uint64_t{1}, "call"),
@@ -752,11 +761,12 @@ TEST_CASE("Server applies inclusive configured and default batch limits", "[rpc]
     {
         Application app{0, nullptr};
         Server      server;
-        auto        calls = 0;
-        REQUIRE(server.register_method("call", [&calls](auto const&, auto const&) {
+        auto        calls        = 0;
+        auto        call_handler = [&calls](auto const&, auto const&) {
             ++calls;
             return MethodResult::success(make_json(JsonNull{}));
-        }));
+        };
+        REQUIRE(server.register_method("call", call_handler));
         auto connection = attach(server);
         auto batch      = JsonValue::Array{};
         batch.reserve(65U);
@@ -809,7 +819,7 @@ TEST_CASE("Every framing failure is terminal only for its connection", "[rpc][se
     server.connection_closed.connect([&events](ConnectionId) { events.emplace_back("closed"); });
 
     auto const failures = std::vector<std::pair<std::string, std::string>>{
-        {std::string(16U * 1024U + 1U, 'x'), "rpc.framing.header_too_large"},
+        {std::string((16U * 1024U) + 1U, 'x'), "rpc.framing.header_too_large"},
         {"Broken\r\n\r\n", "rpc.framing.invalid_header"},
         {"X-Test: value\r\n\r\n", "rpc.framing.missing_content_length"},
         {"Content-Length: 0\r\nContent-Length: 0\r\n\r\n", "rpc.framing.duplicate_content_length"},
@@ -947,11 +957,12 @@ TEST_CASE("Queued output accounting enforces exact and one-over boundaries", "[r
     {
         Application app{0, nullptr};
         Server      server{{.max_queued_output_bytes = 0U}};
-        auto        calls = 0;
-        REQUIRE(server.register_method("notify", [&calls](auto const&, auto const&) {
+        auto        calls          = 0;
+        auto        notify_handler = [&calls](auto const&, auto const&) {
             ++calls;
             return MethodResult::success(make_json(JsonNull{}));
-        }));
+        };
+        REQUIRE(server.register_method("notify", notify_handler));
         auto connection = attach(server);
         connection.device->inject_input(notification_frame("notify"));
         CHECK(calls == 1);
@@ -967,7 +978,7 @@ TEST_CASE("Acknowledgements drain only tracked queued bytes", "[rpc][server][out
     SECTION("a partial delayed acknowledgement frees exactly that capacity")
     {
         Application app{0, nullptr};
-        Server      server{{.max_queued_output_bytes = 2U * frame_size - 1U}};
+        Server      server{{.max_queued_output_bytes = (std::size_t{2} * frame_size) - 1U}};
         REQUIRE(server.register_method("reply", null_success_handler()));
         auto device = std::make_unique<MemoryIODevice>();
         device->open();
@@ -979,7 +990,7 @@ TEST_CASE("Acknowledgements drain only tracked queued bytes", "[rpc][server][out
         connection.device->acknowledge_writes(1U);
         connection.device->inject_input(request_frame(std::uint64_t{2}, "reply"));
         CHECK(server.connection_count() == 1U);
-        CHECK(connection.device->unacknowledged_bytes() == 2U * frame_size - 1U);
+        CHECK(connection.device->unacknowledged_bytes() == (std::size_t{2} * frame_size) - 1U);
 
         connection.device->inject_input(request_frame(std::uint64_t{3}, "reply"));
         CHECK(server.connection_count() == 0U);
@@ -1108,10 +1119,11 @@ TEST_CASE("Closing from a handler aborts later batch dispatch safely", "[rpc][se
         server.close_connection(context.connection_id);
         return MethodResult::success(make_json(JsonNull{}));
     }));
-    REQUIRE(server.register_method("later", [&later_calls](auto const&, auto const&) {
+    auto later_handler = [&later_calls](auto const&, auto const&) {
         ++later_calls;
         return MethodResult::success(make_json(JsonNull{}));
-    }));
+    };
+    REQUIRE(server.register_method("later", later_handler));
     auto connection = attach(server);
     auto batch      = make_json(JsonValue::Array{
         encode_request(std::uint64_t{1}, "close"),

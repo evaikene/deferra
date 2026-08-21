@@ -5,7 +5,6 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -297,7 +296,7 @@ public:
         }
     }
 
-    void shutdown_writes()
+    void shutdown_writes() const
     {
         REQUIRE(_client_fd >= 0);
         for (;;) {
@@ -730,7 +729,7 @@ TEST_CASE("LocalSocket writes ordered binary data and extends a graceful flush",
     socket.bytes_written.connect([&](std::size_t bytes) -> void { bytes_written += bytes; });
     REQUIRE(connect_socket(app, listener, socket));
 
-    auto payload = std::string(4U * 1024U * 1024U, 'x');
+    auto payload = std::string(std::string::size_type{4} * 1024U * 1024U, 'x');
     payload[17]  = '\0';
     CHECK(socket.write(payload) == payload.size());
     socket.disconnect_from_server();

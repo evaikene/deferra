@@ -110,7 +110,7 @@ auto Uuid::parse(std::string_view text) -> Result<Uuid, Error>
 
     Storage     bytes{};
     std::size_t input_index{0};
-    for (std::size_t byte_index = 0; byte_index < bytes.size(); ++byte_index) {
+    for (auto& byte : bytes) {
         if (input_index == 8 || input_index == 13 || input_index == 18 || input_index == 23) {
             ++input_index;
         }
@@ -119,7 +119,7 @@ auto Uuid::parse(std::string_view text) -> Result<Uuid, Error>
         if (high < 0 || low < 0) {
             return Result<Uuid, Error>::failure(invalid_uuid_error());
         }
-        bytes[byte_index] = static_cast<std::byte>((high << 4) | low);
+        byte = static_cast<std::byte>((high << 4) | low);
     }
     return Result<Uuid, Error>::success(Uuid{bytes});
 }

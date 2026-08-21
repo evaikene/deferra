@@ -6,12 +6,10 @@
 #include "sqlite/sqlite_schema_priv.hpp"
 #include "support/fake_database_driver.hpp"
 #include "support/temporary_directory.hpp"
-#include "transaction.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -125,7 +123,7 @@ INSERT INTO jobu_runs(
 ))sql");
 }
 
-auto fail_after_first_creation(std::size_t completed_statements, std::string_view) -> Result<void, Error>
+auto fail_after_first_creation(std::size_t completed_statements, std::string_view /*statement*/) -> Result<void, Error>
 {
     if (completed_statements == 1) {
         return Result<void, Error>::failure({

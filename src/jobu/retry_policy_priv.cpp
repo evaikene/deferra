@@ -270,7 +270,7 @@ auto retry_decision(AttributeSet const& attributes, RetryCompletion const& compl
         .due_at = *due_at,
         .mode   = policy->mode,
     };
-    return RetryResult<RetryDecision>::success({.retry = std::move(schedule)});
+    return RetryResult<RetryDecision>::success({.retry = schedule});
 }
 
 } // namespace jb::jobu::detail

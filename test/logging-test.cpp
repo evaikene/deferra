@@ -26,10 +26,12 @@ public:
     void log(LogMessage const& msg) override
     {
         std::lock_guard lock{_mx};
-        _records.push_back({msg.level,
-                            std::string{msg.message},
-                            msg.location.file_name(),
-                            msg.location.line()});
+        _records.push_back({
+            .level   = msg.level,
+            .message = std::string{msg.message},
+            .file    = msg.location.file_name(),
+            .line    = msg.location.line(),
+        });
     }
 
     auto records() const -> std::vector<Record>
@@ -45,7 +47,7 @@ public:
     }
 
 private:
-    mutable std::mutex _mx;
+    mutable std::mutex  _mx;
     std::vector<Record> _records;
 };
 
@@ -69,6 +71,7 @@ struct LoggerGuard {
 
 TEST_CASE("log_level_name returns correct strings", "[core][logging]")
 {
+    // clang-format off
     CHECK(log_level_name(LogLevel::Fatal)   == "FATAL");
     CHECK(log_level_name(LogLevel::Error)   == "ERROR");
     CHECK(log_level_name(LogLevel::Warning) == "WARN");
@@ -76,6 +79,7 @@ TEST_CASE("log_level_name returns correct strings", "[core][logging]")
     CHECK(log_level_name(LogLevel::Debug1)  == "DBG1");
     CHECK(log_level_name(LogLevel::Debug2)  == "DBG2");
     CHECK(log_level_name(LogLevel::Debug3)  == "DBG3");
+    // clang-format on
 }
 
 // ---------------------------------------------------------------------------
@@ -217,8 +221,10 @@ TEST_CASE("Log message timestamp is set", "[core][logging]")
 
     struct TsLogger : Logger {
         system_clock::time_point ts;
+
         void log(LogMessage const& msg) override { ts = msg.timestamp; }
     };
+
     auto tsl = std::make_shared<TsLogger>();
     tsl->set_level(LogLevel::Debug3);
     set_logger(tsl);

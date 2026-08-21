@@ -6,7 +6,6 @@
 
 #include <map>
 #include <optional>
-#include <vector>
 
 namespace jb::rpc {
 
@@ -14,7 +13,7 @@ struct Server::Private {
     struct ConnectionState {
         ConnectionState(ConnectionId         connection_id,
                         jb::core::IODevice*  connection_device,
-                        OperationContext     connection_operation,
+                        OperationContext&&   connection_operation,
                         FramingLimits const& framing_limits);
 
         ConnectionId        id;
@@ -45,7 +44,7 @@ struct Server::Private {
     [[nodiscard]] auto write_response(ConnectionId id, JsonValue const& response) -> bool;
     void               acknowledge_output(ConnectionId id, std::size_t bytes);
     void               handle_device_error(ConnectionId id, jb::core::IOError error);
-    void               fail_connection(ConnectionId id, jb::core::Error error);
+    void               fail_connection(ConnectionId id, jb::core::Error const& error);
     void               close_connection(ConnectionId id);
     void               retire_connection(ConnectionId id);
 

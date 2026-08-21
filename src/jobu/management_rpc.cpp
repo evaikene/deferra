@@ -129,7 +129,7 @@ auto register_management_methods(jb::rpc::Server&         server,
                    return handle_value(
                        params,
                        [](jb::rpc::JsonValue const& value) { return queue_selector_from_json(value); },
-                       [&service](QueueSelector selector) { return service.get_queue(selector); },
+                       [&service](QueueSelector const& selector) { return service.get_queue(selector); },
                        [attribute_registry](Queue const& queue) { return queue_to_json(queue, *attribute_registry); });
                }) &&
            server.register_method(
@@ -166,7 +166,7 @@ auto register_management_methods(jb::rpc::Server&         server,
                    return handle_value(
                        params,
                        [](jb::rpc::JsonValue const& value) { return queue_selector_from_json(value); },
-                       [&service](QueueSelector selector) { return service.suspend_queue(selector); },
+                       [&service](QueueSelector const& selector) { return service.suspend_queue(selector); },
                        [attribute_registry](Queue const& queue) { return queue_to_json(queue, *attribute_registry); });
                }) &&
            server.register_method(
@@ -177,7 +177,7 @@ auto register_management_methods(jb::rpc::Server&         server,
                    return handle_value(
                        params,
                        [](jb::rpc::JsonValue const& value) { return queue_selector_from_json(value); },
-                       [&service](QueueSelector selector) { return service.resume_queue(selector); },
+                       [&service](QueueSelector const& selector) { return service.resume_queue(selector); },
                        [attribute_registry](Queue const& queue) { return queue_to_json(queue, *attribute_registry); });
                }) &&
            server.register_method(
@@ -187,7 +187,7 @@ auto register_management_methods(jb::rpc::Server&         server,
                    return handle_void(
                        params,
                        [](jb::rpc::JsonValue const& value) { return queue_selector_from_json(value); },
-                       [&service](QueueSelector selector) { return service.delete_queue(selector); });
+                       [&service](QueueSelector const& selector) { return service.delete_queue(selector); });
                }) &&
            server.register_method(
                std::string{management_methods[7]},

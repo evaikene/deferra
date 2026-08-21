@@ -12,7 +12,6 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <variant>
 
 using namespace jb::core;
 using namespace jb::db;

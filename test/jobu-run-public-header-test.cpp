@@ -1,4 +1,4 @@
-#include "run.hpp"
+#include "run.hpp" // IWYU pragma: keep for public header self-containment coverage
 
 auto main() -> int
 {

@@ -335,7 +335,7 @@ auto TcpSocket::release_socket() -> bool
 
     auto*      loop          = event_loop();
     auto const watch         = d->watch;
-    auto const retry_unwatch = loop && watch && !loop->unwatch_fd(watch);
+    auto const retry_unwatch = loop != nullptr && watch && !loop->unwatch_fd(watch);
 
     auto const released_fd = std::exchange(d->fd, kInvalidFd);
     if (released_fd != kInvalidFd) {

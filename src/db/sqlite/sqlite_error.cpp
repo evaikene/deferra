@@ -1,7 +1,6 @@
 #include "sqlite_error.hpp"
 
 #include <string>
-#include <utility>
 
 namespace jb::db::sqlite::detail {
 
@@ -20,45 +19,47 @@ auto error_identity(int                     primary,
     switch (extended) {
         case SQLITE_CONSTRAINT_UNIQUE:
         case SQLITE_CONSTRAINT_PRIMARYKEY:
-            return {jb::core::ErrorCategory::Conflict, "db.constraint.unique"};
+            return {.category = jb::core::ErrorCategory::Conflict, .code = "db.constraint.unique"};
         case SQLITE_CONSTRAINT_FOREIGNKEY:
-            return {jb::core::ErrorCategory::Conflict, "db.constraint.foreign_key"};
+            return {.category = jb::core::ErrorCategory::Conflict, .code = "db.constraint.foreign_key"};
         default:
             break;
     }
 
     switch (primary) {
         case SQLITE_BUSY:
-            return {jb::core::ErrorCategory::Unavailable, "db.busy"};
+            return {.category = jb::core::ErrorCategory::Unavailable, .code = "db.busy"};
         case SQLITE_LOCKED:
-            return {jb::core::ErrorCategory::Unavailable, "db.locked"};
+            return {.category = jb::core::ErrorCategory::Unavailable, .code = "db.locked"};
         case SQLITE_CONSTRAINT:
-            return {jb::core::ErrorCategory::Conflict, "db.constraint"};
+            return {.category = jb::core::ErrorCategory::Conflict, .code = "db.constraint"};
         case SQLITE_CORRUPT:
         case SQLITE_NOTADB:
-            return {jb::core::ErrorCategory::Internal, "db.corrupt"};
+            return {.category = jb::core::ErrorCategory::Internal, .code = "db.corrupt"};
         case SQLITE_IOERR:
         case SQLITE_CANTOPEN:
-            return {jb::core::ErrorCategory::Io,
-                    fallback_code == "db.sqlite.open_failed" ? fallback_code : std::string_view{"db.io"}};
+            return {
+                .category = jb::core::ErrorCategory::Io,
+                .code     = fallback_code == "db.sqlite.open_failed" ? fallback_code : std::string_view{"db.io"},
+            };
         case SQLITE_PERM:
         case SQLITE_AUTH:
         case SQLITE_READONLY:
-            return {jb::core::ErrorCategory::PermissionDenied, "db.permission_denied"};
+            return {.category = jb::core::ErrorCategory::PermissionDenied, .code = "db.permission_denied"};
         case SQLITE_NOMEM:
-            return {jb::core::ErrorCategory::ResourceExhausted, "db.out_of_memory"};
+            return {.category = jb::core::ErrorCategory::ResourceExhausted, .code = "db.out_of_memory"};
         case SQLITE_TOOBIG:
         case SQLITE_FULL:
-            return {jb::core::ErrorCategory::ResourceExhausted, fallback_code};
+            return {.category = jb::core::ErrorCategory::ResourceExhausted, .code = fallback_code};
         case SQLITE_INTERRUPT:
-            return {jb::core::ErrorCategory::Cancelled, fallback_code};
+            return {.category = jb::core::ErrorCategory::Cancelled, .code = fallback_code};
         case SQLITE_ERROR:
         case SQLITE_MISMATCH:
         case SQLITE_MISUSE:
         case SQLITE_RANGE:
-            return {jb::core::ErrorCategory::InvalidArgument, fallback_code};
+            return {.category = jb::core::ErrorCategory::InvalidArgument, .code = fallback_code};
         default:
-            return {fallback_category, fallback_code};
+            return {.category = fallback_category, .code = fallback_code};
     }
 }
 

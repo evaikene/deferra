@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -19,7 +18,7 @@ namespace {
 template <typename T>
 using RepositoryResult = jb::core::Result<T, jb::core::Error>;
 
-constexpr std::size_t kMaximumJsonDocumentBytes = 256U * 1024U;
+constexpr std::size_t kMaximumJsonDocumentBytes = std::size_t{256} * 1024U;
 constexpr std::size_t kMaximumRetentionBatch    = 1000U;
 // Keep each statement below conservative database parameter ceilings; the retention transaction makes chunks atomic.
 constexpr std::size_t kMaximumRunIdsPerDelete   = 500U;

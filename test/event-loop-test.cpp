@@ -74,7 +74,8 @@ TEST_CASE("EventLoop does not queue a task when wakeup fails", "[core][event_loo
     int  counter = 0;
 
     fake.backend->wakeup_result = false;
-    CHECK_FALSE(fake.loop->post([&counter]() -> void { ++counter; }));
+    auto increment_counter      = [&counter]() -> void { ++counter; };
+    CHECK_FALSE(fake.loop->post(std::move(increment_counter)));
 
     fake.backend->wakeup_result = true;
     CHECK(fake.loop->process_events(EventFlag::Tasks) == ProcessEventsResult::Stopped);
@@ -143,7 +144,8 @@ TEST_CASE("EventLoop reports backend poll failures", "[core][event_loop]")
 {
     auto fake = make_fake_loop();
     int  task_calls{0};
-    REQUIRE(fake.loop->post([&task_calls]() -> void { ++task_calls; }));
+    auto increment_task_calls = [&task_calls]() -> void { ++task_calls; };
+    REQUIRE(fake.loop->post(std::move(increment_task_calls)));
     fake.backend->poll_result = -1;
 
     CHECK(fake.loop->process_events(EventFlag::All, 0) == ProcessEventsResult::Failed);
@@ -158,8 +160,9 @@ TEST_CASE("EventLoop reports backend poll failures", "[core][event_loop]")
 TEST_CASE("EventLoop process_events executes a posted task", "[core][event_loop]")
 {
     EventLoop loop;
-    int       counter = 0;
-    REQUIRE(loop.post([&counter]() -> void { ++counter; }));
+    int       counter           = 0;
+    auto      increment_counter = [&counter]() -> void { ++counter; };
+    REQUIRE(loop.post(std::move(increment_counter)));
     CHECK(loop.process_events(EventFlag::Tasks) == ProcessEventsResult::Stopped);
     CHECK(counter == 1);
 }
@@ -306,8 +309,9 @@ TEST_CASE("EventLoop cancel_timer on already-expired timer is a no-op", "[core][
 TEST_CASE("EventLoop post_repeating fires on each interval", "[core][event_loop]")
 {
     EventLoop loop;
-    int       count = 0;
-    REQUIRE(loop.post_repeating(10ms, [&count]() -> void { ++count; }));
+    int       count           = 0;
+    auto      increment_count = [&count]() -> void { ++count; };
+    REQUIRE(loop.post_repeating(10ms, std::move(increment_count)));
 
     std::this_thread::sleep_for(15ms);
     CHECK(loop.process_events(EventFlag::Timers) == ProcessEventsResult::Stopped);

@@ -17,7 +17,7 @@ namespace {
 template <typename T>
 using RepositoryResult = jb::core::Result<T, jb::core::Error>;
 
-constexpr std::size_t kMaximumAttributeDocumentBytes = 256U * 1024U;
+constexpr std::size_t kMaximumAttributeDocumentBytes = std::size_t{256} * 1024U;
 
 constexpr auto kQueueSelection =
     "SELECT id AS queue_id, CASE WHEN state = 'deleted' THEN deleted_name ELSE name END AS queue_name, "
@@ -397,19 +397,19 @@ auto QueueRepository::replace_mutable_fields(Queue const& queue, SerializedAttri
         return RepositoryResult<bool>::failure(std::move(updated).error());
     }
 
-    auto const    sql = defaults == nullptr
-                          ? "UPDATE jobu_queues SET name = :name, weight = :weight, "
-                            "concurrency_limit = :concurrency_limit, recovery_policy = :recovery_policy, "
-                            "retention_seconds = :retention_seconds, "
-                            "runnable_wait_warning_ms = :runnable_wait_warning_ms, updated_at_us = :updated_at_us "
-                            "WHERE id = :id AND state <> 'deleted'"
-                          : "UPDATE jobu_queues SET name = :name, weight = :weight, "
-                            "concurrency_limit = :concurrency_limit, recovery_policy = :recovery_policy, "
-                            "defaults_json = :defaults_json, retention_seconds = :retention_seconds, "
-                            "runnable_wait_warning_ms = :runnable_wait_warning_ms, updated_at_us = :updated_at_us "
-                            "WHERE id = :id AND state <> 'deleted'";
-    jb::db::Query query{_database};
-    auto          prepared = query.prepare(sql);
+    auto const* const sql = defaults == nullptr
+                              ? "UPDATE jobu_queues SET name = :name, weight = :weight, "
+                                "concurrency_limit = :concurrency_limit, recovery_policy = :recovery_policy, "
+                                "retention_seconds = :retention_seconds, "
+                                "runnable_wait_warning_ms = :runnable_wait_warning_ms, updated_at_us = :updated_at_us "
+                                "WHERE id = :id AND state <> 'deleted'"
+                              : "UPDATE jobu_queues SET name = :name, weight = :weight, "
+                                "concurrency_limit = :concurrency_limit, recovery_policy = :recovery_policy, "
+                                "defaults_json = :defaults_json, retention_seconds = :retention_seconds, "
+                                "runnable_wait_warning_ms = :runnable_wait_warning_ms, updated_at_us = :updated_at_us "
+                                "WHERE id = :id AND state <> 'deleted'";
+    jb::db::Query     query{_database};
+    auto              prepared = query.prepare(sql);
     if (!prepared) {
         return RepositoryResult<bool>::failure(std::move(prepared).error());
     }
