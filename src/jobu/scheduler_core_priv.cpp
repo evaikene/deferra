@@ -6,8 +6,10 @@
 #include "time_source.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -22,10 +24,24 @@ using CoreResult = jb::core::Result<T, jb::core::Error>;
 constexpr std::size_t kMaximumRepositoryPageRows = 1000U;
 
 struct CapacityState {
-    std::uint64_t cli_running{0};
-    std::uint64_t http_running{0};
-    std::uint64_t queue_slots{0};
+    std::uint64_t                           cli_running{0};
+    std::uint64_t                           http_running{0};
+    std::map<jb::core::Uuid, std::uint64_t> queue_slots;
 };
+
+struct CandidateBatch {
+    std::vector<DispatchCandidate> candidates;
+    std::size_t                    next{0};
+    bool                           queried{false};
+    bool                           may_have_more{false};
+};
+
+struct EligibleQueue {
+    QueueRuntime const* runtime{nullptr};
+    CandidateBatch*     batch{nullptr};
+};
+
+using CandidateCache = std::map<jb::core::Uuid, CandidateBatch>;
 
 auto core_error(jb::core::ErrorCategory category, std::string code, std::string message) -> jb::core::Error
 {
@@ -48,6 +64,13 @@ auto capacity_overflow() -> jb::core::Error
     return core_error(jb::core::ErrorCategory::Internal,
                       "jobu.storage.invariant",
                       "Persisted scheduler capacity exceeds its supported range");
+}
+
+auto fairness_overflow() -> jb::core::Error
+{
+    return core_error(jb::core::ErrorCategory::Internal,
+                      "jobu.storage.invariant",
+                      "Scheduler fairness arithmetic exceeds its supported range");
 }
 
 auto checked_add(std::uint64_t& value, std::uint32_t increment) -> CoreResult<void>
@@ -85,8 +108,7 @@ auto load_runtime_queues(SchedulerRepository& repository, std::size_t limit) -> 
     return CoreResult<std::vector<QueueRuntime>>::success(std::move(queues));
 }
 
-auto load_capacity(SchedulerRepository& repository, jb::core::Uuid const& selected_queue, std::size_t limit)
-    -> CoreResult<CapacityState>
+auto load_capacity(SchedulerRepository& repository, std::size_t limit) -> CoreResult<CapacityState>
 {
     auto state    = CapacityState{};
     auto after_id = std::optional<jb::core::Uuid>{};
@@ -107,11 +129,10 @@ auto load_capacity(SchedulerRepository& repository, jb::core::Uuid const& select
             if (!http) {
                 return CoreResult<CapacityState>::failure(std::move(http).error());
             }
-            if (row.queue_id == selected_queue) {
-                auto queue = checked_add(state.queue_slots, row.usage.queue_slots);
-                if (!queue) {
-                    return CoreResult<CapacityState>::failure(std::move(queue).error());
-                }
+            auto& queue_slots = state.queue_slots[row.queue_id];
+            auto  queue       = checked_add(queue_slots, row.usage.queue_slots);
+            if (!queue) {
+                return CoreResult<CapacityState>::failure(std::move(queue).error());
             }
         }
         after_id = page->back().run_id;
@@ -132,65 +153,214 @@ auto global_limit_for(SchedulerCoreOptions const& options, JobType type) noexcep
     return type == JobType::Cli ? options.cli_concurrency : options.http_concurrency;
 }
 
-void record_start(CapacityState& state, JobType type)
+auto queue_slots_for(CapacityState const& state, jb::core::Uuid const& queue_id) noexcept -> std::uint64_t
 {
-    if (type == JobType::Cli) {
-        ++state.cli_running;
-    }
-    else {
-        ++state.http_running;
-    }
-    ++state.queue_slots;
+    auto const found = state.queue_slots.find(queue_id);
+    return found == state.queue_slots.end() ? 0 : found->second;
 }
 
-auto dispatch_type(jb::db::Database&           database,
-                   AttributeRegistry const&    attributes,
-                   AttemptExecutor&            executor,
-                   SchedulerRepository&        repository,
-                   QueueRuntime const&         queue,
-                   JobType                     type,
-                   jb::core::UtcTimePoint      now,
-                   SchedulerCoreOptions const& options,
-                   CapacityState&              capacity) -> CoreResult<void>
+auto record_start(CapacityState& state, JobType type, jb::core::Uuid const& queue_id) -> CoreResult<void>
 {
-    auto const global_limit = global_limit_for(options, type);
-    auto const limit        = page_size(options);
+    auto* running = &state.http_running;
+    if (type == JobType::Cli) {
+        running = &state.cli_running;
+    }
+    auto& queue_slots = state.queue_slots[queue_id];
+    if (*running == std::numeric_limits<std::uint64_t>::max() ||
+        queue_slots == std::numeric_limits<std::uint64_t>::max()) {
+        return CoreResult<void>::failure(capacity_overflow());
+    }
+    ++*running;
+    ++queue_slots;
+    return CoreResult<void>::success();
+}
 
-    while (running_for(capacity, type) < global_limit && capacity.queue_slots < queue.concurrency_limit) {
-        if (!executor.is_available(type)) {
-            break;
+void reset_credits(std::map<jb::core::Uuid, std::int64_t>& credits, std::vector<QueueRuntime> const& queues)
+{
+    for (auto const& queue : queues) {
+        auto const found = credits.find(queue.id);
+        if (found != credits.end()) {
+            found->second = 0;
         }
-        auto candidates = repository.list_runnable(queue.id, type, now, limit);
-        if (!candidates) {
-            return CoreResult<void>::failure(std::move(candidates).error());
-        }
-        if (candidates->empty()) {
-            break;
-        }
+    }
+}
 
-        auto started = std::size_t{0};
-        for (auto const& candidate : *candidates) {
-            if (running_for(capacity, type) >= global_limit || capacity.queue_slots >= queue.concurrency_limit) {
-                break;
+void reconcile_fairness(std::vector<QueueRuntime> const&         queues,
+                        std::map<jb::core::Uuid, std::uint32_t>& queue_weights,
+                        std::map<jb::core::Uuid, std::int64_t>&  cli_credits,
+                        std::map<jb::core::Uuid, std::int64_t>&  http_credits)
+{
+    auto current_weights = std::map<jb::core::Uuid, std::uint32_t>{};
+    for (auto const& queue : queues) {
+        current_weights.emplace(queue.id, queue.weight);
+        auto const previous = queue_weights.find(queue.id);
+        // A new or reweighted queue begins a new fairness history for both independent resources.
+        if (previous == queue_weights.end() || previous->second != queue.weight) {
+            cli_credits[queue.id]  = 0;
+            http_credits[queue.id] = 0;
+        }
+    }
+
+    for (auto iterator = cli_credits.begin(); iterator != cli_credits.end();) {
+        if (!current_weights.contains(iterator->first)) {
+            iterator = cli_credits.erase(iterator);
+        }
+        else {
+            ++iterator;
+        }
+    }
+    for (auto iterator = http_credits.begin(); iterator != http_credits.end();) {
+        if (!current_weights.contains(iterator->first)) {
+            iterator = http_credits.erase(iterator);
+        }
+        else {
+            ++iterator;
+        }
+    }
+    queue_weights = std::move(current_weights);
+}
+
+auto add_weight(std::int64_t& value, std::uint32_t weight) -> CoreResult<void>
+{
+    if (value > std::numeric_limits<std::int64_t>::max() - static_cast<std::int64_t>(weight)) {
+        return CoreResult<void>::failure(fairness_overflow());
+    }
+    value += static_cast<std::int64_t>(weight);
+    return CoreResult<void>::success();
+}
+
+auto subtract_total(std::int64_t& value, std::int64_t total) -> CoreResult<void>
+{
+    if (value < std::numeric_limits<std::int64_t>::min() + total) {
+        return CoreResult<void>::failure(fairness_overflow());
+    }
+    value -= total;
+    return CoreResult<void>::success();
+}
+
+auto load_candidate_batch(SchedulerRepository&   repository,
+                          jb::core::Uuid const&  queue_id,
+                          JobType                type,
+                          jb::core::UtcTimePoint now,
+                          std::size_t            limit,
+                          CandidateBatch&        batch) -> CoreResult<void>
+{
+    if (batch.next < batch.candidates.size() || (batch.queried && !batch.may_have_more)) {
+        return CoreResult<void>::success();
+    }
+
+    auto candidates = repository.list_runnable(queue_id, type, now, limit);
+    if (!candidates) {
+        return CoreResult<void>::failure(std::move(candidates).error());
+    }
+    batch.candidates    = std::move(candidates).value();
+    batch.next          = 0;
+    batch.queried       = true;
+    batch.may_have_more = batch.candidates.size() == limit;
+    return CoreResult<void>::success();
+}
+
+auto dispatch_visit(jb::db::Database&                       database,
+                    AttributeRegistry const&                attributes,
+                    AttemptExecutor&                        executor,
+                    SchedulerRepository&                    repository,
+                    std::vector<QueueRuntime> const&        queues,
+                    JobType                                 type,
+                    jb::core::UtcTimePoint                  now,
+                    SchedulerCoreOptions const&             options,
+                    CapacityState&                          capacity,
+                    std::map<jb::core::Uuid, std::int64_t>& credits,
+                    CandidateCache&                         candidate_cache) -> CoreResult<bool>
+{
+    if (running_for(capacity, type) >= global_limit_for(options, type)) {
+        return CoreResult<bool>::success(false);
+    }
+    if (!executor.is_available(type)) {
+        reset_credits(credits, queues);
+        return CoreResult<bool>::success(false);
+    }
+
+    auto const limit    = page_size(options);
+    auto       eligible = std::vector<EligibleQueue>{};
+    eligible.reserve(queues.size());
+    for (auto const& queue : queues) {
+        if (queue_slots_for(capacity, queue.id) >= queue.concurrency_limit) {
+            credits[queue.id] = 0;
+            continue;
+        }
+        auto& batch  = candidate_cache[queue.id];
+        auto  loaded = load_candidate_batch(repository, queue.id, type, now, limit, batch);
+        if (!loaded) {
+            return CoreResult<bool>::failure(std::move(loaded).error());
+        }
+        if (batch.next == batch.candidates.size()) {
+            credits[queue.id] = 0;
+            continue;
+        }
+        eligible.push_back({.runtime = &queue, .batch = &batch});
+    }
+    if (eligible.empty()) {
+        return CoreResult<bool>::success(false);
+    }
+
+    // Smooth weighted round-robin adds every eligible weight before selecting the highest current credit.
+    auto total = std::int64_t{0};
+    for (auto const& queue : eligible) {
+        auto total_added = add_weight(total, queue.runtime->weight);
+        if (!total_added) {
+            return CoreResult<bool>::failure(std::move(total_added).error());
+        }
+        auto const credit = credits[queue.runtime->id];
+        if (credit > std::numeric_limits<std::int64_t>::max() - static_cast<std::int64_t>(queue.runtime->weight)) {
+            return CoreResult<bool>::failure(fairness_overflow());
+        }
+    }
+    for (auto const& queue : eligible) {
+        credits[queue.runtime->id] += static_cast<std::int64_t>(queue.runtime->weight);
+    }
+
+    while (!eligible.empty()) {
+        auto selected_index = std::size_t{0};
+        for (auto index = std::size_t{1}; index < eligible.size(); ++index) {
+            auto const queue_credit    = credits[eligible[index].runtime->id];
+            auto const selected_credit = credits[eligible[selected_index].runtime->id];
+            if (queue_credit > selected_credit ||
+                (queue_credit == selected_credit &&
+                 eligible[index].runtime->id < eligible[selected_index].runtime->id)) {
+                selected_index = index;
             }
+        }
+        auto& selected   = eligible[selected_index];
+        auto  subtracted = subtract_total(credits[selected.runtime->id], total);
+        if (!subtracted) {
+            return CoreResult<bool>::failure(std::move(subtracted).error());
+        }
+
+        while (selected.batch->next < selected.batch->candidates.size()) {
+            auto const& candidate = selected.batch->candidates[selected.batch->next];
+            ++selected.batch->next;
             auto dispatched =
                 dispatch_selected(database, attributes, executor, candidate.run.id, now, [](AttemptCompletion const&) {
                 });
             if (!dispatched) {
-                return CoreResult<void>::failure(std::move(dispatched).error());
+                return CoreResult<bool>::failure(std::move(dispatched).error());
             }
             if (!dispatched->has_value()) {
                 continue;
             }
-            record_start(capacity, type);
-            ++started;
+            auto recorded = record_start(capacity, type, selected.runtime->id);
+            if (!recorded) {
+                return CoreResult<bool>::failure(std::move(recorded).error());
+            }
+            return CoreResult<bool>::success(true);
         }
 
-        if (candidates->size() < limit || started == 0) {
-            break;
-        }
+        // The selected snapshot went stale. It no longer participates in this opportunity, but another queue may.
+        credits[selected.runtime->id]  = 0;
+        total                         -= static_cast<std::int64_t>(selected.runtime->weight);
+        eligible.erase(eligible.begin() + static_cast<std::ptrdiff_t>(selected_index));
     }
-    return CoreResult<void>::success();
+    return CoreResult<bool>::success(false);
 }
 
 } // anonymous namespace
@@ -220,23 +390,57 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
     if (!queues) {
         return CoreResult<void>::failure(std::move(queues).error());
     }
-    if (queues->empty()) {
-        return CoreResult<void>::success();
-    }
-
-    // Stage 4.11 intentionally drives one queue. Stage 4.12 replaces this selection with weighted arbitration.
-    auto const& queue    = queues->front();
-    auto        capacity = load_capacity(repository, queue.id, limit);
+    reconcile_fairness(*queues, _queue_weights, _cli_credits, _http_credits);
+    auto capacity = load_capacity(repository, limit);
     if (!capacity) {
         return CoreResult<void>::failure(std::move(capacity).error());
     }
+    auto cli_candidates  = CandidateCache{};
+    auto http_candidates = CandidateCache{};
 
-    auto cli =
-        dispatch_type(_database, _attributes, _executor, repository, queue, JobType::Cli, now, _options, *capacity);
-    if (!cli) {
-        return CoreResult<void>::failure(std::move(cli).error());
+    while (true) {
+        auto const first_type        = _cli_first ? JobType::Cli : JobType::Http;
+        auto const second_type       = _cli_first ? JobType::Http : JobType::Cli;
+        auto&      first_credits     = _cli_first ? _cli_credits : _http_credits;
+        auto&      second_credits    = _cli_first ? _http_credits : _cli_credits;
+        auto&      first_candidates  = _cli_first ? cli_candidates : http_candidates;
+        auto&      second_candidates = _cli_first ? http_candidates : cli_candidates;
+
+        auto first = dispatch_visit(_database,
+                                    _attributes,
+                                    _executor,
+                                    repository,
+                                    *queues,
+                                    first_type,
+                                    now,
+                                    _options,
+                                    *capacity,
+                                    first_credits,
+                                    first_candidates);
+        if (!first) {
+            return CoreResult<void>::failure(std::move(first).error());
+        }
+        auto second = dispatch_visit(_database,
+                                     _attributes,
+                                     _executor,
+                                     repository,
+                                     *queues,
+                                     second_type,
+                                     now,
+                                     _options,
+                                     *capacity,
+                                     second_credits,
+                                     second_candidates);
+        if (!second) {
+            return CoreResult<void>::failure(std::move(second).error());
+        }
+        if (!*first && !*second) {
+            break;
+        }
+        // Empty cycles do not consume the token; the next productive round starts with the other type.
+        _cli_first = !_cli_first;
     }
-    return dispatch_type(_database, _attributes, _executor, repository, queue, JobType::Http, now, _options, *capacity);
+    return CoreResult<void>::success();
 }
 
 } // namespace jb::jobu::detail

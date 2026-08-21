@@ -183,7 +183,7 @@ if(TARGET jobu-sqlite)
     target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
-    # JobU SQLite-backed deterministic single-queue scheduler core test
+    # JobU SQLite-backed deterministic scheduler core test
     set(TARGET "scheduler-core-test")
     add_executable(${TARGET}
         scheduler-core-test.cpp
