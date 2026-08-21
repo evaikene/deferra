@@ -15,6 +15,19 @@
 
 namespace jb::test {
 
+/// Per-query configuration consumed in creation order by FakeDatabaseDriver.
+struct FakeDatabaseQueryPlan {
+    std::optional<jb::core::Error> prepare_error;
+    std::optional<jb::core::Error> bind_error;
+    std::optional<jb::core::Error> exec_error;
+    std::optional<jb::core::Error> next_error;
+    std::optional<jb::core::Error> finish_error;
+
+    std::vector<std::string>    parameter_names;
+    jb::db::ExecutionInfo       execution_info;
+    std::vector<jb::db::Record> records;
+};
+
 /// Shared configuration and observations for a FakeDatabaseDriver and its queries.
 struct FakeDatabaseDriverState {
     bool open{false};
@@ -31,14 +44,16 @@ struct FakeDatabaseDriverState {
     std::optional<jb::core::Error> commit_error;
     std::optional<jb::core::Error> rollback_error;
 
-    std::vector<std::string>    parameter_names;
-    jb::db::ExecutionInfo       execution_info;
-    std::vector<jb::db::Record> records;
+    std::vector<std::string>           parameter_names;
+    jb::db::ExecutionInfo              execution_info;
+    std::vector<jb::db::Record>        records;
+    std::vector<FakeDatabaseQueryPlan> query_plans;
 
     std::vector<std::string>                           calls;
     std::string                                        prepared_sql;
     std::vector<std::pair<std::size_t, jb::db::Value>> bindings;
     std::size_t                                        next_record_index{0};
+    std::size_t                                        next_query_plan_index{0};
     std::size_t                                        clear_count{0};
     std::optional<jb::db::TransactionMode>             last_transaction_mode;
 };

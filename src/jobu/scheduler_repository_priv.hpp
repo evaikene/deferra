@@ -1,5 +1,6 @@
 #pragma once
 
+#include "attempt.hpp"
 #include "attribute.hpp"
 #include "job.hpp"
 #include "queue.hpp"
@@ -54,6 +55,13 @@ struct DispatchCandidate {
     QueueState queue_state{QueueState::Active};
 };
 
+struct DispatchContext {
+    JobRun        run;
+    JobState      job_state{JobState::Active};
+    Queue         queue;
+    AttemptNumber next_attempt{1};
+};
+
 class SchedulerRepository final {
 public:
     SchedulerRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept;
@@ -69,6 +77,11 @@ public:
         -> jb::core::Result<std::vector<DispatchCandidate>, jb::core::Error>;
     [[nodiscard]] auto earliest_future_runnable(JobType type, jb::core::UtcTimePoint now)
         -> jb::core::Result<std::optional<jb::core::UtcTimePoint>, jb::core::Error>;
+    [[nodiscard]] auto find_dispatch_context(jb::core::Uuid const& run_id, jb::core::UtcTimePoint now)
+        -> jb::core::Result<std::optional<DispatchContext>, jb::core::Error>;
+    [[nodiscard]] auto
+    mark_dispatch_running(jb::core::Uuid const& run_id, RunState expected_state, jb::core::UtcTimePoint started_at)
+        -> jb::core::Result<bool, jb::core::Error>;
     [[nodiscard]] auto has_any_running_state() -> jb::core::Result<bool, jb::core::Error>;
 
 private:

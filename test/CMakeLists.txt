@@ -90,6 +90,16 @@ add_executable(${TARGET}
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU backend-independent atomic scheduler dispatch test
+set(TARGET "scheduler-dispatch-test")
+add_executable(${TARGET}
+    scheduler-dispatch-test.cpp
+    support/fake_attempt_executor.cpp
+    support/fake_database_driver.cpp
+)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Generic database API test
 set(TARGET "db-api-test")
 add_executable(${TARGET}
@@ -167,6 +177,7 @@ if(TARGET jobu-sqlite)
     set(TARGET "scheduler-repository-test")
     add_executable(${TARGET}
         scheduler-repository-test.cpp
+        support/fake_attempt_executor.cpp
         support/temporary_directory.cpp
     )
     target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)

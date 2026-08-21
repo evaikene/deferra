@@ -6,8 +6,11 @@
 #include "database.hpp"
 #include "domain_storage_priv.hpp"
 #include "query.hpp"
+#include "run_repository_priv.hpp"
+#include "scheduler_dispatch_priv.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
+#include "support/fake_attempt_executor.hpp"
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -628,6 +631,190 @@ TEST_CASE("Scheduler repository detects running state in either durable table", 
     running = fixture.repository.has_any_running_state();
     REQUIRE(running);
     CHECK(*running);
+}
+
+TEST_CASE("Atomic scheduler dispatch persists the running attempt before executor handoff",
+          "[jobu][scheduler][dispatch][sqlite]")
+{
+    RepositoryFixture fixture;
+    auto const        queue_id = id(100);
+    auto const        job_id   = id(101);
+    auto const        run_id   = id(102);
+    insert_queue(fixture.database, queue_id, QueueState::Active, 1, 2);
+    insert_job(fixture.database, job_id, queue_id);
+    insert_run(fixture.database, default_run(fixture, run_id, job_id, queue_id));
+
+    FakeAttemptExecutor executor;
+    executor.set_available(JobType::Cli, true);
+    SECTION("accepted start")
+    {
+        auto callback_called = false;
+        auto dispatched =
+            dispatch_selected(fixture.database, fixture.registry, executor, run_id, at(120), [&](AttemptCompletion) {
+                callback_called = true;
+            });
+        REQUIRE(dispatched);
+        REQUIRE(dispatched->has_value());
+        CHECK(dispatched->value().key == AttemptKey{.run_id = run_id, .attempt_number = 1});
+        CHECK_FALSE(dispatched->value().immediate_completion);
+        CHECK_FALSE(callback_called);
+        CHECK(executor.pending_keys() == std::vector<AttemptKey>{
+                                             {.run_id = run_id, .attempt_number = 1}
+        });
+    }
+    SECTION("start failure scaffold")
+    {
+        executor.set_start_error(Error{
+            .category = ErrorCategory::Unavailable,
+            .code     = "test.executor.start_failed",
+            .message  = "Injected executor start failure",
+            .detail   = "private detail",
+        });
+        auto dispatched =
+            dispatch_selected(fixture.database, fixture.registry, executor, run_id, at(120), [](AttemptCompletion) {});
+        REQUIRE(dispatched);
+        REQUIRE(dispatched->has_value());
+        REQUIRE(dispatched->value().immediate_completion);
+        CHECK(dispatched->value().immediate_completion->outcome == AttemptOutcome::Failed);
+        CHECK(dispatched->value().immediate_completion->failure_disposition == FailureDisposition::Terminal);
+        CHECK(executor.pending_keys().empty());
+    }
+
+    auto attempt = fixture.attempts.find(run_id, 1);
+    REQUIRE(attempt);
+    REQUIRE(attempt->has_value());
+    CHECK((*attempt)->due_at == at(100));
+    CHECK((*attempt)->started_at == at(120));
+    CHECK((*attempt)->state == AttemptState::Running);
+
+    RunRepository runs{fixture.database, fixture.registry};
+    auto          run = runs.find_by_id(run_id);
+    REQUIRE(run);
+    REQUIRE(run->has_value());
+    CHECK((*run)->state == RunState::Running);
+    CHECK((*run)->started_at == at(120));
+    CHECK((*run)->runnable_at == at(100));
+}
+
+TEST_CASE("Retry dispatch preserves first start and allocates the next attempt monotonically",
+          "[jobu][scheduler][dispatch][sqlite]")
+{
+    RepositoryFixture fixture;
+    auto const        queue_id = id(103);
+    auto const        job_id   = id(104);
+    auto const        run_id   = id(105);
+    insert_queue(fixture.database, queue_id, QueueState::Active, 1, 1);
+    insert_job(fixture.database, job_id, queue_id);
+    auto run            = default_run(fixture, run_id, job_id, queue_id);
+    run.state           = RunState::RetryWait;
+    run.started_at      = at(70);
+    run.attributes_json = attribute_document(fixture.registry, "blocking");
+    insert_run(fixture.database, run);
+    insert_attempt(fixture.attempts, run_id, 1, AttemptState::Completed);
+
+    FakeAttemptExecutor executor;
+    executor.set_available(JobType::Cli, true);
+    auto dispatched =
+        dispatch_selected(fixture.database, fixture.registry, executor, run_id, at(120), [](AttemptCompletion) {});
+    REQUIRE(dispatched);
+    REQUIRE(dispatched->has_value());
+    CHECK(dispatched->value().key == AttemptKey{.run_id = run_id, .attempt_number = 2});
+
+    auto attempt = fixture.attempts.find(run_id, 2);
+    REQUIRE(attempt);
+    REQUIRE(attempt->has_value());
+    CHECK((*attempt)->due_at == at(100));
+    CHECK((*attempt)->started_at == at(120));
+
+    RunRepository runs{fixture.database, fixture.registry};
+    auto          persisted = runs.find_by_id(run_id);
+    REQUIRE(persisted);
+    REQUIRE(persisted->has_value());
+    CHECK((*persisted)->state == RunState::Running);
+    CHECK((*persisted)->started_at == at(70));
+}
+
+TEST_CASE("Dispatch revalidation enforces queue capacity and checked attempt exhaustion",
+          "[jobu][scheduler][dispatch][sqlite]")
+{
+    RepositoryFixture fixture;
+    auto const        queue_id = id(106);
+    insert_queue(fixture.database, queue_id, QueueState::Active, 1, 1);
+    FakeAttemptExecutor executor;
+    executor.set_available(JobType::Cli, true);
+
+    SECTION("a running sibling fills the combined queue limit")
+    {
+        auto const running_job = id(107);
+        auto const running_run = id(108);
+        insert_job(fixture.database, running_job, queue_id);
+        auto running       = default_run(fixture, running_run, running_job, queue_id);
+        running.state      = RunState::Running;
+        running.started_at = at(80);
+        insert_run(fixture.database, running);
+        insert_attempt(fixture.attempts, running_run, 1, AttemptState::Running);
+
+        auto const candidate_job = id(109);
+        auto const candidate_run = id(110);
+        insert_job(fixture.database, candidate_job, queue_id);
+        insert_run(fixture.database, default_run(fixture, candidate_run, candidate_job, queue_id));
+        auto dispatched = dispatch_selected(fixture.database,
+                                            fixture.registry,
+                                            executor,
+                                            candidate_run,
+                                            at(120),
+                                            [](AttemptCompletion) {});
+        REQUIRE(dispatched);
+        CHECK_FALSE(dispatched->has_value());
+        CHECK(executor.start_requests().empty());
+        CHECK_FALSE(*fixture.attempts.has_any_for_run(candidate_run));
+    }
+
+    SECTION("the signed SQLite attempt boundary is exhausted")
+    {
+        auto const job_id = id(111);
+        auto const run_id = id(112);
+        insert_job(fixture.database, job_id, queue_id);
+        auto retry       = default_run(fixture, run_id, job_id, queue_id);
+        retry.state      = RunState::RetryWait;
+        retry.started_at = at(70);
+        insert_run(fixture.database, retry);
+        insert_attempt(fixture.attempts,
+                       run_id,
+                       static_cast<AttemptNumber>(std::numeric_limits<std::int64_t>::max()),
+                       AttemptState::Completed);
+
+        auto dispatched =
+            dispatch_selected(fixture.database, fixture.registry, executor, run_id, at(120), [](AttemptCompletion) {});
+        require_error(dispatched, ErrorCategory::ResourceExhausted, "jobu.attempt.number_exhausted");
+        CHECK(executor.start_requests().empty());
+
+        RunRepository runs{fixture.database, fixture.registry};
+        auto          persisted = runs.find_by_id(run_id);
+        REQUIRE(persisted);
+        REQUIRE(persisted->has_value());
+        CHECK((*persisted)->state == RunState::RetryWait);
+    }
+
+    SECTION("a job suspension after candidate selection is a normal skip")
+    {
+        auto const job_id = id(113);
+        auto const run_id = id(114);
+        insert_job(fixture.database, job_id, queue_id);
+        insert_run(fixture.database, default_run(fixture, run_id, job_id, queue_id));
+        auto selected = fixture.repository.list_runnable(queue_id, JobType::Cli, at(120), 10);
+        REQUIRE(selected);
+        REQUIRE(selected->size() == 1U);
+        CHECK(selected->front().run.id == run_id);
+
+        execute(fixture.database, "UPDATE jobu_jobs SET state = 'suspended' WHERE id IS NOT NULL");
+        auto dispatched =
+            dispatch_selected(fixture.database, fixture.registry, executor, run_id, at(120), [](AttemptCompletion) {});
+        REQUIRE(dispatched);
+        CHECK_FALSE(dispatched->has_value());
+        CHECK(executor.start_requests().empty());
+        CHECK_FALSE(*fixture.attempts.has_any_for_run(run_id));
+    }
 }
 
 TEST_CASE("Scheduler repository rejects malformed snapshots and contradictory attempt relationships",
