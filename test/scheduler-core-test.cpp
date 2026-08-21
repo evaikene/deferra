@@ -740,6 +740,34 @@ TEST_CASE("Single-queue scheduler core treats dispatch revalidation loss as a no
     CHECK(executor.fake.start_requests().empty());
 }
 
+TEST_CASE("Scheduler core falls through when the selected queue loses eligibility",
+          "[jobu][scheduler][core][fairness][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  first_queue  = id(90);
+    auto const  second_queue = id(95);
+    insert_queue(fixture.database, first_queue, 2);
+    insert_queue(fixture.database, second_queue, 1);
+    insert_running(fixture, first_queue, 91, JobType::Cli);
+    insert_scheduled(fixture, first_queue, 92, JobType::Cli);
+    insert_scheduled(fixture, second_queue, 93, JobType::Cli);
+
+    LoweringExecutor executor{fixture.database, first_queue};
+    SchedulerCore    core{
+        fixture.database,
+        fixture.registry,
+        fixture.time,
+        executor,
+        {.cli_concurrency = 2, .http_concurrency = 2, .candidate_batch_size = 2}
+    };
+    REQUIRE(core.process_cycle());
+
+    CHECK(executor.mutation_ok());
+    REQUIRE(executor.fake.start_requests().size() == 1U);
+    CHECK(executor.fake.start_requests().front().queue_id == second_queue);
+    CHECK(executor.fake.start_requests().front().key.run_id == id(93));
+}
+
 TEST_CASE("Single-queue scheduler core rejects zero limits and batch size", "[jobu][scheduler][core][sqlite]")
 {
     CoreFixture fixture;

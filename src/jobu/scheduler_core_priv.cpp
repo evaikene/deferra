@@ -29,10 +29,19 @@ struct CapacityState {
     std::map<jb::core::Uuid, std::uint64_t> queue_slots;
 };
 
-struct EligibleQueue {
-    QueueRuntime const*            runtime{nullptr};
+struct CandidateBatch {
     std::vector<DispatchCandidate> candidates;
+    std::size_t                    next{0};
+    bool                           queried{false};
+    bool                           may_have_more{false};
 };
+
+struct EligibleQueue {
+    QueueRuntime const* runtime{nullptr};
+    CandidateBatch*     batch{nullptr};
+};
+
+using CandidateCache = std::map<jb::core::Uuid, CandidateBatch>;
 
 auto core_error(jb::core::ErrorCategory category, std::string code, std::string message) -> jb::core::Error
 {
@@ -229,6 +238,28 @@ auto subtract_total(std::int64_t& value, std::int64_t total) -> CoreResult<void>
     return CoreResult<void>::success();
 }
 
+auto load_candidate_batch(SchedulerRepository&   repository,
+                          jb::core::Uuid const&  queue_id,
+                          JobType                type,
+                          jb::core::UtcTimePoint now,
+                          std::size_t            limit,
+                          CandidateBatch&        batch) -> CoreResult<void>
+{
+    if (batch.next < batch.candidates.size() || (batch.queried && !batch.may_have_more)) {
+        return CoreResult<void>::success();
+    }
+
+    auto candidates = repository.list_runnable(queue_id, type, now, limit);
+    if (!candidates) {
+        return CoreResult<void>::failure(std::move(candidates).error());
+    }
+    batch.candidates    = std::move(candidates).value();
+    batch.next          = 0;
+    batch.queried       = true;
+    batch.may_have_more = batch.candidates.size() == limit;
+    return CoreResult<void>::success();
+}
+
 auto dispatch_visit(jb::db::Database&                       database,
                     AttributeRegistry const&                attributes,
                     AttemptExecutor&                        executor,
@@ -238,7 +269,8 @@ auto dispatch_visit(jb::db::Database&                       database,
                     jb::core::UtcTimePoint                  now,
                     SchedulerCoreOptions const&             options,
                     CapacityState&                          capacity,
-                    std::map<jb::core::Uuid, std::int64_t>& credits) -> CoreResult<bool>
+                    std::map<jb::core::Uuid, std::int64_t>& credits,
+                    CandidateCache&                         candidate_cache) -> CoreResult<bool>
 {
     if (running_for(capacity, type) >= global_limit_for(options, type)) {
         return CoreResult<bool>::success(false);
@@ -256,15 +288,16 @@ auto dispatch_visit(jb::db::Database&                       database,
             credits[queue.id] = 0;
             continue;
         }
-        auto candidates = repository.list_runnable(queue.id, type, now, limit);
-        if (!candidates) {
-            return CoreResult<bool>::failure(std::move(candidates).error());
+        auto& batch  = candidate_cache[queue.id];
+        auto  loaded = load_candidate_batch(repository, queue.id, type, now, limit, batch);
+        if (!loaded) {
+            return CoreResult<bool>::failure(std::move(loaded).error());
         }
-        if (candidates->empty()) {
+        if (batch.next == batch.candidates.size()) {
             credits[queue.id] = 0;
             continue;
         }
-        eligible.push_back({.runtime = &queue, .candidates = std::move(candidates).value()});
+        eligible.push_back({.runtime = &queue, .batch = &batch});
     }
     if (eligible.empty()) {
         return CoreResult<bool>::success(false);
@@ -286,34 +319,46 @@ auto dispatch_visit(jb::db::Database&                       database,
         credits[queue.runtime->id] += static_cast<std::int64_t>(queue.runtime->weight);
     }
 
-    auto* selected = &eligible.front();
-    for (auto& queue : eligible) {
-        auto const queue_credit    = credits[queue.runtime->id];
-        auto const selected_credit = credits[selected->runtime->id];
-        if (queue_credit > selected_credit ||
-            (queue_credit == selected_credit && queue.runtime->id < selected->runtime->id)) {
-            selected = &queue;
+    while (!eligible.empty()) {
+        auto selected_index = std::size_t{0};
+        for (auto index = std::size_t{1}; index < eligible.size(); ++index) {
+            auto const queue_credit    = credits[eligible[index].runtime->id];
+            auto const selected_credit = credits[eligible[selected_index].runtime->id];
+            if (queue_credit > selected_credit ||
+                (queue_credit == selected_credit &&
+                 eligible[index].runtime->id < eligible[selected_index].runtime->id)) {
+                selected_index = index;
+            }
         }
-    }
-    auto subtracted = subtract_total(credits[selected->runtime->id], total);
-    if (!subtracted) {
-        return CoreResult<bool>::failure(std::move(subtracted).error());
-    }
+        auto& selected   = eligible[selected_index];
+        auto  subtracted = subtract_total(credits[selected.runtime->id], total);
+        if (!subtracted) {
+            return CoreResult<bool>::failure(std::move(subtracted).error());
+        }
 
-    for (auto const& candidate : selected->candidates) {
-        auto dispatched =
-            dispatch_selected(database, attributes, executor, candidate.run.id, now, [](AttemptCompletion const&) {});
-        if (!dispatched) {
-            return CoreResult<bool>::failure(std::move(dispatched).error());
+        while (selected.batch->next < selected.batch->candidates.size()) {
+            auto const& candidate = selected.batch->candidates[selected.batch->next];
+            ++selected.batch->next;
+            auto dispatched =
+                dispatch_selected(database, attributes, executor, candidate.run.id, now, [](AttemptCompletion const&) {
+                });
+            if (!dispatched) {
+                return CoreResult<bool>::failure(std::move(dispatched).error());
+            }
+            if (!dispatched->has_value()) {
+                continue;
+            }
+            auto recorded = record_start(capacity, type, selected.runtime->id);
+            if (!recorded) {
+                return CoreResult<bool>::failure(std::move(recorded).error());
+            }
+            return CoreResult<bool>::success(true);
         }
-        if (!dispatched->has_value()) {
-            continue;
-        }
-        auto recorded = record_start(capacity, type, selected->runtime->id);
-        if (!recorded) {
-            return CoreResult<bool>::failure(std::move(recorded).error());
-        }
-        return CoreResult<bool>::success(true);
+
+        // The selected snapshot went stale. It no longer participates in this opportunity, but another queue may.
+        credits[selected.runtime->id]  = 0;
+        total                         -= static_cast<std::int64_t>(selected.runtime->weight);
+        eligible.erase(eligible.begin() + static_cast<std::ptrdiff_t>(selected_index));
     }
     return CoreResult<bool>::success(false);
 }
@@ -350,12 +395,16 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
     if (!capacity) {
         return CoreResult<void>::failure(std::move(capacity).error());
     }
+    auto cli_candidates  = CandidateCache{};
+    auto http_candidates = CandidateCache{};
 
     while (true) {
-        auto const first_type     = _cli_first ? JobType::Cli : JobType::Http;
-        auto const second_type    = _cli_first ? JobType::Http : JobType::Cli;
-        auto&      first_credits  = _cli_first ? _cli_credits : _http_credits;
-        auto&      second_credits = _cli_first ? _http_credits : _cli_credits;
+        auto const first_type        = _cli_first ? JobType::Cli : JobType::Http;
+        auto const second_type       = _cli_first ? JobType::Http : JobType::Cli;
+        auto&      first_credits     = _cli_first ? _cli_credits : _http_credits;
+        auto&      second_credits    = _cli_first ? _http_credits : _cli_credits;
+        auto&      first_candidates  = _cli_first ? cli_candidates : http_candidates;
+        auto&      second_candidates = _cli_first ? http_candidates : cli_candidates;
 
         auto first = dispatch_visit(_database,
                                     _attributes,
@@ -366,7 +415,8 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
                                     now,
                                     _options,
                                     *capacity,
-                                    first_credits);
+                                    first_credits,
+                                    first_candidates);
         if (!first) {
             return CoreResult<void>::failure(std::move(first).error());
         }
@@ -379,7 +429,8 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
                                      now,
                                      _options,
                                      *capacity,
-                                     second_credits);
+                                     second_credits,
+                                     second_candidates);
         if (!second) {
             return CoreResult<void>::failure(std::move(second).error());
         }
