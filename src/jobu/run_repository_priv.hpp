@@ -65,10 +65,15 @@ public:
     [[nodiscard]] auto insert_schedule_owned(JobRun const& run) -> jb::core::Result<void, jb::core::Error>;
     [[nodiscard]] auto insert_schedule_owned(ScheduleOwnedRunInsert const& run)
         -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto insert_manual(JobRun const& run) -> jb::core::Result<void, jb::core::Error>;
     [[nodiscard]] auto find_schedule_owned(jb::core::Uuid const& job_id)
         -> jb::core::Result<std::optional<JobRun>, jb::core::Error>;
     [[nodiscard]] auto find_by_id(jb::core::Uuid const& run_id)
         -> jb::core::Result<std::optional<JobRun>, jb::core::Error>;
+    [[nodiscard]] auto has_non_terminal_manual_run(jb::core::Uuid const& job_id)
+        -> jb::core::Result<bool, jb::core::Error>;
+    [[nodiscard]] auto has_running_or_retrying_run(jb::core::Uuid const& job_id)
+        -> jb::core::Result<bool, jb::core::Error>;
     [[nodiscard]] auto refresh_unstarted_schedule_owned(jb::core::Uuid const& job_id, RunSnapshot const& snapshot)
         -> jb::core::Result<bool, jb::core::Error>;
     [[nodiscard]] auto refresh_unstarted_schedule_owned(jb::core::Uuid const&         job_id,

@@ -8,6 +8,7 @@
 #include "job.hpp"
 #include "queue.hpp"
 #include "result.hpp"
+#include "run.hpp"
 #include "time_source.hpp"
 #include "uuid.hpp"
 
@@ -193,6 +194,18 @@ struct DeleteJobRequest {
     JobRevision    expected_revision{0};
 };
 
+/** Values used to create one immediate manual occurrence of a job definition.
+ *
+ * Run Now preserves the definition's existing schedule-owned occurrence. The optional idempotency key is scoped to
+ * the selected job and durably replays the original manual run.
+ */
+struct RunNowRequest {
+    /// Existing non-deleted job definition whose current execution values are snapshotted.
+    jb::core::Uuid             job_id;
+    /// Optional 1-through-128-byte UTF-8 key reserved for durable Run Now replay.
+    std::optional<std::string> idempotency_key;
+};
+
 /** Synchronous owner-thread service for durable JobU management operations.
  *
  * The service borrows an already-open Database, AttributeRegistry, CronEngine, UuidGenerator, and TimeSource; each
@@ -201,10 +214,10 @@ struct DeleteJobRequest {
  *
  * Queue/job gets and lists use bounded repository reads without an explicit transaction. Creates, updates, lifecycle
  * changes, moves, and deletions use one immediate transaction and return only after commit. Errors include stable
- * `jobu.queue.*`, `jobu.job.*`, `jobu.schedule.*`, `jobu.attribute.*`, and `jobu.idempotency.*` codes plus unchanged
- * database errors when no domain mapping applies. Methods invoke no callbacks, start no threads, and perform no
- * event-loop processing. A fresh recurring create or an update that validates or evaluates a recurring schedule may
- * synchronously load timezone data through CronEngine.
+ * `jobu.queue.*`, `jobu.job.*`, `jobu.run.*`, `jobu.schedule.*`, `jobu.attribute.*`, and `jobu.idempotency.*` codes
+ * plus unchanged database errors when no domain mapping applies. Methods invoke no callbacks, start no threads, and
+ * perform no event-loop processing. A fresh recurring create or an update that validates or evaluates a recurring
+ * schedule may synchronously load timezone data through CronEngine.
  */
 class ManagementService final {
 public:
@@ -311,6 +324,17 @@ public:
      * remain immutable after execution starts. No attempt, callback, or external work starts.
      */
     [[nodiscard]] auto update_job(UpdateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
+
+    /** Creates one manual scheduled run while preserving the job's schedule-owned occurrence.
+     * @param request Job ID and optional job-scoped idempotency key consumed after validation. A matching key replays
+     * the original committed manual run without allocating another UUID.
+     * @return Committed or replayed manual run, or a job, queue, manual-precondition, idempotency, generator, storage,
+     * or database Error. A fresh operation requires one future scheduled schedule-owned occurrence, no running or
+     * retry-waiting run, and no other non-terminal manual run. Job suspension is permitted; queue suspension prevents
+     * later scheduler dispatch but not creation. The returned run snapshots the current definition and sets both
+     * planned_at and runnable_at to the transaction's single sampled current time. No callback or execution starts.
+     */
+    [[nodiscard]] auto run_now(RunNowRequest request) -> jb::core::Result<JobRun, jb::core::Error>;
 
     /** Suspends one job without changing its schedule-owned run or execution snapshot.
      * @param id Stable job-definition UUID, borrowed only for this call.

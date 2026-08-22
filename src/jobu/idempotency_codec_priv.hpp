@@ -30,4 +30,13 @@ namespace jb::jobu::detail {
 [[nodiscard]] auto decode_job_idempotency_result(std::string_view result_json, AttributeRegistry const& attributes)
     -> jb::core::Result<JobDefinition, jb::core::Error>;
 
+[[nodiscard]] auto encode_run_now_idempotency_request(RunNowRequest const& request)
+    -> jb::core::Result<std::string, jb::core::Error>;
+[[nodiscard]] auto validate_run_now_idempotency_request(std::string_view request_json)
+    -> jb::core::Result<void, jb::core::Error>;
+[[nodiscard]] auto encode_run_now_idempotency_result(JobRun const& run, AttributeRegistry const& attributes)
+    -> jb::core::Result<std::string, jb::core::Error>;
+[[nodiscard]] auto decode_run_now_idempotency_result(std::string_view result_json, AttributeRegistry const& attributes)
+    -> jb::core::Result<JobRun, jb::core::Error>;
+
 } // namespace jb::jobu::detail

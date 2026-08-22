@@ -228,6 +228,57 @@ TEST_CASE("Run repository round-trips schedule-owned snapshots and enforces uniq
     CHECK_FALSE(missing->has_value());
 }
 
+TEST_CASE("Run repository inserts one manual snapshot and exposes Run Now precondition probes",
+          "[jobu][run][manual][sqlite]")
+{
+    RepositoryFixture fixture;
+    auto const        queue_id     = id(9);
+    auto const        job_id       = id(10);
+    auto const        scheduled_id = id(11);
+    auto const        manual_id    = id(12);
+    auto const        duplicate_id = id(13);
+    insert_queue(fixture.database, queue_id, "manual");
+    insert_job(fixture.database, job_id, queue_id);
+    REQUIRE(fixture.runs.insert_schedule_owned(make_run(fixture.registry, scheduled_id, job_id, queue_id)));
+
+    auto manual           = make_run(fixture.registry, manual_id, job_id, queue_id);
+    manual.origin         = RunOrigin::Manual;
+    manual.schedule_owned = false;
+    manual.job_revision   = 3;
+    manual.priority       = 7;
+    manual.planned_at     = UtcTimePoint{5s};
+    manual.runnable_at    = manual.planned_at;
+    REQUIRE(fixture.runs.insert_manual(manual));
+
+    auto found = fixture.runs.find_by_id(manual_id);
+    REQUIRE(found);
+    REQUIRE(found->has_value());
+    CHECK((*found)->origin == RunOrigin::Manual);
+    CHECK_FALSE((*found)->schedule_owned);
+    CHECK((*found)->job_revision == 3);
+    CHECK((*found)->planned_at == UtcTimePoint{5s});
+    CHECK((*found)->runnable_at == UtcTimePoint{5s});
+    CHECK((*found)->state == RunState::Scheduled);
+    CHECK(fixture.runs.has_non_terminal_manual_run(job_id).value());
+    CHECK_FALSE(fixture.runs.has_running_or_retrying_run(job_id).value());
+
+    auto duplicate = manual;
+    duplicate.id   = duplicate_id;
+    require_error(fixture.runs.insert_manual(duplicate), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+
+    execute(fixture.database,
+            "UPDATE jobu_runs SET state = 'running', started_at_us = 6 WHERE id = "
+            "X'0000000000007000800000000000000C'");
+    CHECK(fixture.runs.has_running_or_retrying_run(job_id).value());
+    execute(fixture.database,
+            "INSERT INTO jobu_runs SELECT X'0000000000007000800000000000000D', job_id, job_revision, queue_id, "
+            "origin, schedule_owned, planned_at_us, runnable_at_us, NULL, NULL, type, priority, attributes_json, "
+            "payload_json, 'scheduled', NULL FROM jobu_runs WHERE id = X'0000000000007000800000000000000C'");
+    auto duplicate_probe = fixture.runs.has_non_terminal_manual_run(job_id);
+    auto error           = require_error(duplicate_probe, ErrorCategory::Internal, "jobu.storage.invariant");
+    CHECK(error.detail == "reason=manual_run_relationship");
+}
+
 TEST_CASE("Run repository upgrades Phase 3 retry snapshots with Phase 4 defaults", "[jobu][run][sqlite]")
 {
     RepositoryFixture fixture;

@@ -42,6 +42,13 @@ auto json_null() -> jb::rpc::JsonValue
     return {};
 }
 
+auto json_bool(bool value) -> jb::rpc::JsonValue
+{
+    auto result = jb::rpc::JsonValue{};
+    result.data = value;
+    return result;
+}
+
 auto json_string(std::string value) -> jb::rpc::JsonValue
 {
     auto result = jb::rpc::JsonValue{};
@@ -728,6 +735,142 @@ auto decode_job_idempotency_result(std::string_view result_json, AttributeRegist
         .created_at = *created,
         .updated_at = *updated,
         .deleted_at = std::nullopt,
+    });
+}
+
+auto encode_run_now_idempotency_request(RunNowRequest const& request) -> jb::core::Result<std::string, jb::core::Error>
+{
+    return serialize_document(json_object({
+        {"job_id", json_string(request.job_id.to_string())},
+    }));
+}
+
+auto validate_run_now_idempotency_request(std::string_view request_json) -> jb::core::Result<void, jb::core::Error>
+{
+    auto parsed = parse_document(request_json);
+    if (!parsed) {
+        return CodecResult<void>::failure(std::move(parsed).error());
+    }
+    auto object = object_with_members(*parsed, {"job_id"});
+    if (!object) {
+        return CodecResult<void>::failure(std::move(object).error());
+    }
+    auto job_id = uuid_member(**object, "job_id");
+    if (!job_id) {
+        return CodecResult<void>::failure(std::move(job_id).error());
+    }
+    return CodecResult<void>::success();
+}
+
+auto encode_run_now_idempotency_result(JobRun const& run, AttributeRegistry const& attributes)
+    -> jb::core::Result<std::string, jb::core::Error>
+{
+    auto encoded_attributes = encode_attributes(run.attributes, attributes, AttributeScope::Job);
+    auto planned            = encode_time(run.planned_at);
+    auto runnable           = encode_time(run.runnable_at);
+    if (!encoded_attributes || !planned || !runnable || run.job_revision == 0 ||
+        run.job_revision > static_cast<JobRevision>(std::numeric_limits<std::int64_t>::max()) ||
+        run.origin != RunOrigin::Manual || run.schedule_owned || run.planned_at != run.runnable_at || run.started_at ||
+        run.completed_at || run.state != RunState::Scheduled || run.result || job_type_text(run.type).empty() ||
+        !valid_payload(run.type, run.payload)) {
+        return CodecResult<std::string>::failure(invalid_record("invalid_run_now_result"));
+    }
+    auto complete = require_materialized(run.attributes, attributes);
+    if (!complete) {
+        return CodecResult<std::string>::failure(std::move(complete).error());
+    }
+    return serialize_document(json_object({
+        {"attributes",     std::move(encoded_attributes).value()            },
+        {"completed_at",   json_null()                                      },
+        {"id",             json_string(run.id.to_string())                  },
+        {"job_id",         json_string(run.job_id.to_string())              },
+        {"job_revision",   json_uint(run.job_revision)                      },
+        {"origin",         json_string("manual")                            },
+        {"payload",        run.payload                                      },
+        {"planned_at",     std::move(planned).value()                       },
+        {"priority",       json_int(run.priority)                           },
+        {"queue_id",       json_string(run.queue_id.to_string())            },
+        {"result",         json_null()                                      },
+        {"runnable_at",    std::move(runnable).value()                      },
+        {"schedule_owned", json_bool(false)                                 },
+        {"started_at",     json_null()                                      },
+        {"state",          json_string("scheduled")                         },
+        {"type",           json_string(std::string{job_type_text(run.type)})},
+    }));
+}
+
+auto decode_run_now_idempotency_result(std::string_view result_json, AttributeRegistry const& attributes)
+    -> jb::core::Result<JobRun, jb::core::Error>
+{
+    auto parsed = parse_document(result_json);
+    if (!parsed) {
+        return CodecResult<JobRun>::failure(std::move(parsed).error());
+    }
+    auto object = object_with_members(*parsed,
+                                      {"attributes",
+                                       "completed_at",
+                                       "id",
+                                       "job_id",
+                                       "job_revision",
+                                       "origin",
+                                       "payload",
+                                       "planned_at",
+                                       "priority",
+                                       "queue_id",
+                                       "result",
+                                       "runnable_at",
+                                       "schedule_owned",
+                                       "started_at",
+                                       "state",
+                                       "type"});
+    if (!object) {
+        return CodecResult<JobRun>::failure(std::move(object).error());
+    }
+    auto id        = uuid_member(**object, "id");
+    auto job_id    = uuid_member(**object, "job_id");
+    auto revision  = unsigned_member(**object, "job_revision");
+    auto queue_id  = uuid_member(**object, "queue_id");
+    auto origin    = text_member(**object, "origin");
+    auto planned   = time_member(**object, "planned_at");
+    auto runnable  = time_member(**object, "runnable_at");
+    auto type_text = text_member(**object, "type");
+    auto type =
+        type_text ? decode_job_type(*type_text) : CodecResult<JobType>::failure(invalid_record("invalid_job_type"));
+    auto        priority           = signed_member(**object, "priority");
+    auto        decoded_attributes = decode_attributes((**object).at("attributes"), attributes, AttributeScope::Job);
+    auto        state              = text_member(**object, "state");
+    auto const& schedule_owned     = (**object).at("schedule_owned");
+    if (!id || !job_id || !revision || *revision == 0 ||
+        *revision > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || !queue_id || !origin ||
+        *origin != "manual" || !planned || !runnable || *planned != *runnable || !type || !priority ||
+        *priority < std::numeric_limits<std::int32_t>::min() || *priority > std::numeric_limits<std::int32_t>::max() ||
+        !decoded_attributes || !state || *state != "scheduled" || !schedule_owned.is_bool() ||
+        schedule_owned.as_bool() || !(**object).at("started_at").is_null() ||
+        !(**object).at("completed_at").is_null() || !(**object).at("result").is_null() ||
+        !valid_payload(*type, (**object).at("payload"))) {
+        return CodecResult<JobRun>::failure(invalid_record("invalid_run_now_result"));
+    }
+    auto complete = require_materialized(*decoded_attributes, attributes);
+    if (!complete) {
+        return CodecResult<JobRun>::failure(std::move(complete).error());
+    }
+    return CodecResult<JobRun>::success({
+        .id             = *id,
+        .job_id         = *job_id,
+        .job_revision   = *revision,
+        .queue_id       = *queue_id,
+        .origin         = RunOrigin::Manual,
+        .schedule_owned = false,
+        .planned_at     = *planned,
+        .runnable_at    = *runnable,
+        .started_at     = std::nullopt,
+        .completed_at   = std::nullopt,
+        .type           = *type,
+        .priority       = static_cast<std::int32_t>(*priority),
+        .attributes     = std::move(decoded_attributes).value(),
+        .payload        = (**object).at("payload"),
+        .state          = RunState::Scheduled,
+        .result         = std::nullopt,
     });
 }
 

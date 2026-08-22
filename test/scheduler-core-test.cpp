@@ -442,6 +442,17 @@ auto result_object(std::string value = "completed") -> JsonValue
     return result;
 }
 
+auto cli_payload(std::string command) -> JsonValue
+{
+    auto value   = JsonValue{};
+    value.data   = std::move(command);
+    auto payload = JsonValue{};
+    payload.data = JsonValue::Object{
+        {"command", std::move(value)},
+    };
+    return payload;
+}
+
 auto success(AttemptKey key, std::string value = "completed") -> AttemptCompletion
 {
     return {
@@ -1989,6 +2000,194 @@ TEST_CASE("Scheduler core rolls suspension-drain failures back and fails closed"
     {
         verify_failure(FailureKind::RevisionExhaustion);
     }
+}
+
+TEST_CASE("Scheduler core runs a service-created manual retry before releasing its scheduled barrier",
+          "[jobu][scheduler][core][run-now][retry][suspension][management][sqlite]")
+{
+    auto const  queue_id     = id(1);
+    auto const  job_id       = id(2);
+    auto const  scheduled_id = id(3);
+    auto const  manual_id    = id(4);
+    auto const  schedule     = CronSchedule{.expression = "*/5 * * * *", .timezone = "UTC"};
+    CoreFixture fixture{
+        {queue_id, job_id, scheduled_id, manual_id}
+    };
+    fixture.cron.set_occurrences(schedule, {at(200), at(300)});
+    fixture.executor.set_available(JobType::Cli, true);
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "manual", .concurrency_limit = 1}));
+    REQUIRE(service.create_job({
+        .queue    = queue_id,
+        .schedule = schedule,
+        .attributes =
+            {
+                         {"retry.initial_delay", {.data = std::chrono::duration_cast<Duration>(10us)}},
+                         {"retry.max_attempts", {.data = std::int64_t{2}}},
+                         },
+        .payload = cli_payload("manual"),
+    }));
+    auto suspended = service.suspend_job(job_id);
+    REQUIRE(suspended);
+    CHECK(suspended->state == JobState::Suspended);
+    auto manual = service.run_now({.job_id = job_id});
+    REQUIRE(manual);
+    CHECK(manual->id == manual_id);
+
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        fixture.time,
+        fixture.executor,
+        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+    };
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const first_key = fixture.executor.pending_keys().front();
+    CHECK(first_key.run_id == manual_id);
+
+    fixture.time.set_utc(at(130));
+    REQUIRE(fixture.executor.complete(first_key, failure(first_key, FailureDisposition::Retryable)));
+    auto waiting = fixture.runs.find_by_id(manual_id);
+    REQUIRE(waiting);
+    REQUIRE(waiting->has_value());
+    CHECK(waiting->value().state == RunState::RetryWait);
+    CHECK(waiting->value().runnable_at == at(140));
+
+    fixture.time.set_utc(at(139));
+    REQUIRE(core.process_cycle());
+    CHECK(fixture.executor.pending_keys().empty());
+    fixture.time.set_utc(at(200));
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const retry_key = fixture.executor.pending_keys().front();
+    CHECK(retry_key.run_id == manual_id);
+    CHECK(retry_key.attempt_number == 2U);
+    fixture.time.set_utc(at(201));
+    REQUIRE(fixture.executor.complete(retry_key, success(retry_key)));
+
+    auto completed = fixture.runs.find_by_id(manual_id);
+    REQUIRE(completed);
+    REQUIRE(completed->has_value());
+    CHECK(completed->value().state == RunState::Succeeded);
+    auto scheduled = fixture.runs.find_schedule_owned(job_id);
+    REQUIRE(scheduled);
+    REQUIRE(scheduled->has_value());
+    CHECK(scheduled->value().id == scheduled_id);
+    CHECK(scheduled->value().planned_at == at(200));
+    CHECK(scheduled->value().runnable_at == at(200));
+    auto resumed = service.resume_job(job_id);
+    REQUIRE(resumed);
+    CHECK(resumed->state == JobState::Active);
+
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    CHECK(fixture.executor.pending_keys().front().run_id == scheduled_id);
+}
+
+TEST_CASE("Scheduler core delays a service-created manual run until its queue resumes",
+          "[jobu][scheduler][core][run-now][suspension][management][sqlite]")
+{
+    auto const  queue_id     = id(1);
+    auto const  job_id       = id(2);
+    auto const  scheduled_id = id(3);
+    auto const  manual_id    = id(4);
+    auto const  schedule     = CronSchedule{.expression = "*/5 * * * *", .timezone = "UTC"};
+    CoreFixture fixture{
+        {queue_id, job_id, scheduled_id, manual_id}
+    };
+    fixture.cron.set_occurrences(schedule, {at(300)});
+    fixture.executor.set_available(JobType::Cli, true);
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "suspended"}));
+    REQUIRE(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("manual")}));
+    auto suspended = service.suspend_queue(queue_id);
+    REQUIRE(suspended);
+    CHECK(suspended->state == QueueState::Suspended);
+    auto manual = service.run_now({.job_id = job_id});
+    REQUIRE(manual);
+    CHECK(manual->id == manual_id);
+
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        fixture.time,
+        fixture.executor,
+        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+    };
+    REQUIRE(core.process_cycle());
+    CHECK(fixture.executor.start_requests().empty());
+    auto resumed = service.resume_queue(queue_id);
+    REQUIRE(resumed);
+    CHECK(resumed->state == QueueState::Active);
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.start_requests().size() == 1U);
+    CHECK(fixture.executor.start_requests().front().key.run_id == manual_id);
+}
+
+TEST_CASE("Scheduler core admits manual work through weighted fairness and queue capacity",
+          "[jobu][scheduler][core][run-now][fairness][capacity][management][sqlite]")
+{
+    auto const  manual_queue = id(1);
+    auto const  job_id       = id(2);
+    auto const  scheduled_id = id(3);
+    auto const  manual_id    = id(4);
+    auto const  other_queue  = id(5);
+    auto const  schedule     = CronSchedule{.expression = "*/5 * * * *", .timezone = "UTC"};
+    CoreFixture fixture{
+        {manual_queue, job_id, scheduled_id, manual_id}
+    };
+    fixture.cron.set_occurrences(schedule, {at(300)});
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "manual", .weight = 1, .concurrency_limit = 1}));
+    REQUIRE(service.create_job({.queue = manual_queue, .schedule = schedule, .payload = cli_payload("manual")}));
+    REQUIRE(service.run_now({.job_id = job_id}));
+    insert_queue(fixture.database, other_queue, 2, 2);
+    insert_scheduled(fixture, other_queue, 10, JobType::Cli);
+    insert_scheduled(fixture, other_queue, 11, JobType::Cli);
+    fixture.executor.set_available(JobType::Cli, true);
+
+    REQUIRE(fixture.process({.cli_concurrency = 3, .http_concurrency = 1, .candidate_batch_size = 2}));
+    REQUIRE(fixture.executor.start_requests().size() == 3U);
+    CHECK(starts_for(fixture.executor, manual_queue, JobType::Cli) == 1U);
+    CHECK(starts_for(fixture.executor, other_queue, JobType::Cli) == 2U);
+    CHECK(fixture.executor.start_requests()[1].key.run_id == manual_id);
+}
+
+TEST_CASE("Scheduler core reconstructs manual barriers before dispatch",
+          "[jobu][scheduler][core][run-now][invariant][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  queue_id = id(1);
+    auto const  job_id   = id(2);
+    insert_queue(fixture.database, queue_id, 3);
+    insert_job(fixture.database,
+               job_id,
+               queue_id,
+               JobType::Cli,
+               JobState::Active,
+               CronSchedule{.expression = "*/5 * * * *", .timezone = "UTC"});
+    auto scheduled        = default_run(fixture, id(3), job_id, queue_id, JobType::Cli);
+    scheduled.planned_at  = at(300);
+    scheduled.runnable_at = at(300);
+    insert_run(fixture.database, scheduled);
+    auto manual           = default_run(fixture, id(4), job_id, queue_id, JobType::Cli);
+    manual.origin         = RunOrigin::Manual;
+    manual.schedule_owned = false;
+    insert_run(fixture.database, manual);
+    manual.id = id(5);
+    insert_run(fixture.database, manual);
+    fixture.executor.set_available(JobType::Cli, true);
+
+    auto result = fixture.process({.cli_concurrency = 3, .http_concurrency = 1, .candidate_batch_size = 1});
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == "jobu.storage.invariant");
+    CHECK(result.error().detail == "reason=manual_barrier_relationship");
+    CHECK(fixture.executor.start_requests().empty());
 }
 
 TEST_CASE("Single-queue scheduler core rejects zero limits and batch size", "[jobu][scheduler][core][sqlite]")
