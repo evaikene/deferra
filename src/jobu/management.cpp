@@ -1140,7 +1140,7 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
                 return ServiceResult<JobRun>::failure(std::move(valid).error());
             }
             if (stored.request_json != *canonical_request) {
-                return ServiceResult<JobRun>::failure(idempotency_conflict());
+                return ServiceResult<JobRun>::failure(invalid_idempotency_record("run_now_request_scope_mismatch"));
             }
             auto replay = detail::decode_run_now_idempotency_result(stored.result_json, _data->attributes);
             if (!replay) {

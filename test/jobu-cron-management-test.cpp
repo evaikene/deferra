@@ -892,11 +892,26 @@ TEST_CASE("Run Now rolls back idempotency failures and rejects corrupted replay 
     execute(fixture.database, "DROP TRIGGER fail_run_now_idempotency");
     auto manual = service.run_now({.job_id = job_id, .idempotency_key = "stored"});
     REQUIRE(manual);
-    execute(fixture.database,
-            "UPDATE jobu_idempotency SET result_json = '{}' WHERE method = 'job.run_now' AND key = 'stored'");
-    require_error(service.run_now({.job_id = job_id, .idempotency_key = "stored"}),
-                  ErrorCategory::Internal,
-                  "jobu.idempotency.invalid_record");
+    SECTION("result document")
+    {
+        execute(fixture.database,
+                "UPDATE jobu_idempotency SET result_json = '{}' "
+                "WHERE method = 'job.run_now' AND key = 'stored'");
+        require_error(service.run_now({.job_id = job_id, .idempotency_key = "stored"}),
+                      ErrorCategory::Internal,
+                      "jobu.idempotency.invalid_record");
+    }
+    SECTION("request identity")
+    {
+        execute(fixture.database,
+                "UPDATE jobu_idempotency "
+                "SET request_json = '{\"job_id\":\"00000000-0000-7000-8000-000000000063\"}' "
+                "WHERE method = 'job.run_now' AND key = 'stored'");
+        auto error = require_error(service.run_now({.job_id = job_id, .idempotency_key = "stored"}),
+                                   ErrorCategory::Internal,
+                                   "jobu.idempotency.invalid_record");
+        CHECK(error.detail == "reason=run_now_request_scope_mismatch");
+    }
 }
 
 TEST_CASE("Run Now accepts future one-time jobs and scopes idempotency by job",
