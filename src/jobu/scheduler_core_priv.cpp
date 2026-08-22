@@ -277,6 +277,25 @@ auto load_capacity(SchedulerRepository& repository, std::size_t limit) -> CoreRe
     return CoreResult<CapacityState>::success(std::move(state));
 }
 
+auto validate_manual_barriers(SchedulerRepository& repository, std::size_t limit) -> CoreResult<void>
+{
+    auto after_id = std::optional<jb::core::Uuid>{};
+    while (true) {
+        auto page = repository.list_manual_barriers(limit, after_id);
+        if (!page) {
+            return CoreResult<void>::failure(std::move(page).error());
+        }
+        if (page->empty()) {
+            break;
+        }
+        after_id = page->back().run_id;
+        if (page->size() < limit) {
+            break;
+        }
+    }
+    return CoreResult<void>::success();
+}
+
 auto running_for(CapacityState const& state, JobType type) noexcept -> std::uint64_t
 {
     return type == JobType::Cli ? state.cli_running : state.http_running;
@@ -774,6 +793,10 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
         return CoreResult<void>::failure(std::move(queues).error());
     }
     reconcile_fairness(*queues, _queue_weights, _cli_credits, _http_credits);
+    auto barriers = validate_manual_barriers(repository, limit);
+    if (!barriers) {
+        return CoreResult<void>::failure(std::move(barriers).error());
+    }
     auto capacity = load_capacity(repository, limit);
     if (!capacity) {
         return CoreResult<void>::failure(std::move(capacity).error());

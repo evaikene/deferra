@@ -17,6 +17,8 @@ static_assert(std::is_same_v<decltype(jb::jobu::MoveJobRequest::expected_revisio
 static_assert(std::is_same_v<decltype(jb::jobu::MoveJobRequest::target_queue), jb::jobu::QueueSelector>);
 static_assert(std::is_same_v<decltype(jb::jobu::DeleteJobRequest::job_id), jb::core::Uuid>);
 static_assert(std::is_same_v<decltype(jb::jobu::DeleteJobRequest::expected_revision), jb::jobu::JobRevision>);
+static_assert(std::is_same_v<decltype(jb::jobu::RunNowRequest::job_id), jb::core::Uuid>);
+static_assert(std::is_same_v<decltype(jb::jobu::RunNowRequest::idempotency_key), std::optional<std::string>>);
 static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::create_queue),
                              jb::core::Result<jb::jobu::Queue, jb::core::Error> (jb::jobu::ManagementService::*)(
                                  jb::jobu::CreateQueueRequest)>);
@@ -38,6 +40,9 @@ static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::create_job),
 static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::update_job),
                              jb::core::Result<jb::jobu::JobDefinition, jb::core::Error> (
                                  jb::jobu::ManagementService::*)(jb::jobu::UpdateJobRequest)>);
+static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::run_now),
+                             jb::core::Result<jb::jobu::JobRun, jb::core::Error> (jb::jobu::ManagementService::*)(
+                                 jb::jobu::RunNowRequest)>);
 static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::suspend_job),
                              jb::core::Result<jb::jobu::JobDefinition, jb::core::Error> (
                                  jb::jobu::ManagementService::*)(jb::core::Uuid const&)>);
@@ -58,9 +63,10 @@ int main()
     jb::jobu::UpdateJobRequest const update_request;
     jb::jobu::MoveJobRequest const   move_request;
     jb::jobu::DeleteJobRequest const delete_request;
+    jb::jobu::RunNowRequest const    run_now_request;
     return page.limit == 100 && create_request.type == jb::jobu::JobType::Cli &&
                    update_request.expected_revision == 0 && move_request.expected_revision == 0 &&
-                   delete_request.expected_revision == 0
+                   delete_request.expected_revision == 0 && !run_now_request.idempotency_key
              ? 0
              : 1;
 }

@@ -78,6 +78,25 @@ auto schedule_conflict(jb::core::Error const& cause) -> jb::core::Error
     return error;
 }
 
+auto manual_conflict() -> jb::core::Error
+{
+    return {
+        .category = jb::core::ErrorCategory::Conflict,
+        .code     = "jobu.run.manual_conflict",
+        .message  = "The job already has a non-terminal manual run",
+    };
+}
+
+auto read_count(jb::db::Record const& record, std::string_view field) -> RepositoryResult<std::uint64_t>
+{
+    auto const* value = record.value(field);
+    auto const* count = value == nullptr ? nullptr : std::get_if<std::int64_t>(value);
+    if (count == nullptr || *count < 0) {
+        return RepositoryResult<std::uint64_t>::failure(invalid_run("invalid_count"));
+    }
+    return RepositoryResult<std::uint64_t>::success(static_cast<std::uint64_t>(*count));
+}
+
 auto is_terminal(RunState state) noexcept -> bool
 {
     return state == RunState::Succeeded || state == RunState::Failed || state == RunState::Interrupted ||
@@ -449,6 +468,75 @@ auto RunRepository::insert_schedule_owned(ScheduleOwnedRunInsert const& run) -> 
     return executed;
 }
 
+auto RunRepository::insert_manual(JobRun const& run) -> jb::core::Result<void, jb::core::Error>
+{
+    if (run.origin != RunOrigin::Manual || run.schedule_owned) {
+        return RepositoryResult<void>::failure(invalid_run("insert_not_manual"));
+    }
+    if (run.state != RunState::Scheduled || run.planned_at != run.runnable_at || run.started_at || run.completed_at ||
+        run.result) {
+        return RepositoryResult<void>::failure(invalid_run("insert_state_mismatch"));
+    }
+    if (storage_text(run.type).empty()) {
+        return RepositoryResult<void>::failure(invalid_run("invalid_type"));
+    }
+    auto attributes = encode_and_serialize_attribute_document(_attributes,
+                                                              run.attributes,
+                                                              AttributeScope::Job,
+                                                              AttributeDocumentMode::Materialized);
+    if (!attributes) {
+        return RepositoryResult<void>::failure(std::move(attributes).error());
+    }
+    if (attributes->serialized().size() > kMaximumJsonDocumentBytes) {
+        return RepositoryResult<void>::failure(invalid_json("too_large"));
+    }
+    auto payload = json_to_storage(run.payload, true, kMaximumJsonDocumentBytes);
+    if (!payload) {
+        return RepositoryResult<void>::failure(std::move(payload).error());
+    }
+    auto existing = has_non_terminal_manual_run(run.job_id);
+    if (!existing) {
+        return RepositoryResult<void>::failure(std::move(existing).error());
+    }
+    if (*existing) {
+        return RepositoryResult<void>::failure(manual_conflict());
+    }
+    auto revision = revision_to_storage(run.job_revision);
+    if (!revision) {
+        return RepositoryResult<void>::failure(std::move(revision).error());
+    }
+    auto planned = timestamp_to_storage(run.planned_at);
+    if (!planned) {
+        return RepositoryResult<void>::failure(std::move(planned).error());
+    }
+
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(
+        "INSERT INTO jobu_runs(id, job_id, job_revision, queue_id, origin, schedule_owned, planned_at_us, "
+        "runnable_at_us, started_at_us, completed_at_us, type, priority, attributes_json, payload_json, state, "
+        "result_json) VALUES(:id, :job_id, :job_revision, :queue_id, 'manual', 0, :planned_at_us, "
+        ":planned_at_us, NULL, NULL, :type, :priority, :attributes_json, :payload_json, 'scheduled', NULL)");
+    if (!prepared) {
+        return RepositoryResult<void>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":id",              uuid_to_storage(run.id)                    },
+                              {":job_id",          uuid_to_storage(run.job_id)                },
+                              {":job_revision",    std::move(revision).value()                },
+                              {":queue_id",        uuid_to_storage(run.queue_id)              },
+                              {":planned_at_us",   std::move(planned).value()                 },
+                              {":type",            jb::db::make_text(storage_text(run.type))  },
+                              {":priority",        int32_to_storage(run.priority)             },
+                              {":attributes_json", jb::db::make_text(attributes->serialized())},
+                              {":payload_json",    std::move(payload).value()                 },
+    });
+    if (!bound) {
+        return bound;
+    }
+    return query.exec();
+}
+
 auto RunRepository::find_schedule_owned(jb::core::Uuid const& job_id)
     -> jb::core::Result<std::optional<JobRun>, jb::core::Error>
 {
@@ -516,6 +604,73 @@ auto RunRepository::find_by_id(jb::core::Uuid const& run_id) -> jb::core::Result
         return RepositoryResult<std::optional<JobRun>>::failure(std::move(decoded).error());
     }
     return RepositoryResult<std::optional<JobRun>>::success(std::move(decoded).value());
+}
+
+auto RunRepository::has_non_terminal_manual_run(jb::core::Uuid const& job_id) -> jb::core::Result<bool, jb::core::Error>
+{
+    jb::db::Query query{_database};
+    auto          prepared =
+        query.prepare("SELECT COUNT(*) AS manual_count, COALESCE(SUM(schedule_owned), 0) AS schedule_owned_count "
+                      "FROM jobu_runs WHERE job_id = :job_id AND origin = 'manual' "
+                      "AND state IN ('scheduled', 'running', 'retry_wait')");
+    if (!prepared) {
+        return RepositoryResult<bool>::failure(std::move(prepared).error());
+    }
+    auto bound = query.bind_value(":job_id", uuid_to_storage(job_id));
+    if (!bound) {
+        return RepositoryResult<bool>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<bool>::failure(std::move(executed).error());
+    }
+    auto next = query.next();
+    if (!next) {
+        return RepositoryResult<bool>::failure(std::move(next).error());
+    }
+    if (!*next) {
+        return RepositoryResult<bool>::failure(invalid_run("missing_count_row"));
+    }
+    auto manual_count = read_count(query.record(), "manual_count");
+    auto owned_count  = read_count(query.record(), "schedule_owned_count");
+    if (!manual_count || !owned_count) {
+        return RepositoryResult<bool>::failure(!manual_count ? std::move(manual_count).error()
+                                                             : std::move(owned_count).error());
+    }
+    if (*manual_count > 1 || *owned_count != 0) {
+        return RepositoryResult<bool>::failure(invalid_run("manual_run_relationship"));
+    }
+    return RepositoryResult<bool>::success(*manual_count == 1);
+}
+
+auto RunRepository::has_running_or_retrying_run(jb::core::Uuid const& job_id) -> jb::core::Result<bool, jb::core::Error>
+{
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare("SELECT COUNT(*) AS run_count FROM jobu_runs WHERE job_id = :job_id "
+                                           "AND state IN ('running', 'retry_wait')");
+    if (!prepared) {
+        return RepositoryResult<bool>::failure(std::move(prepared).error());
+    }
+    auto bound = query.bind_value(":job_id", uuid_to_storage(job_id));
+    if (!bound) {
+        return RepositoryResult<bool>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<bool>::failure(std::move(executed).error());
+    }
+    auto next = query.next();
+    if (!next) {
+        return RepositoryResult<bool>::failure(std::move(next).error());
+    }
+    if (!*next) {
+        return RepositoryResult<bool>::failure(invalid_run("missing_count_row"));
+    }
+    auto count = read_count(query.record(), "run_count");
+    if (!count) {
+        return RepositoryResult<bool>::failure(std::move(count).error());
+    }
+    return RepositoryResult<bool>::success(*count != 0);
 }
 
 auto RunRepository::refresh_unstarted_schedule_owned(jb::core::Uuid const& job_id, RunSnapshot const& snapshot)

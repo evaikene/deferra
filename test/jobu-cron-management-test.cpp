@@ -720,3 +720,217 @@ TEST_CASE("Unstarted schedule conversions preserve the run identity and reject p
         CHECK(std::holds_alternative<CronSchedule>(unchanged->schedule));
     }
 }
+
+TEST_CASE("Run Now snapshots a suspended definition and replays without consuming a UUID",
+          "[jobu][management][run-now][idempotency][sqlite]")
+{
+    auto const     queue_id     = sequence_id(1);
+    auto const     job_id       = sequence_id(2);
+    auto const     scheduled_id = sequence_id(3);
+    auto const     manual_id    = sequence_id(4);
+    auto const     schedule     = cron_schedule();
+    ServiceFixture fixture{
+        {queue_id, job_id, scheduled_id, manual_id}
+    };
+    fixture.cron.set_occurrences(schedule, {UtcTimePoint{60s}});
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "manual"}));
+    auto created = service.create_job({
+        .queue      = queue_id,
+        .name       = "snapshot",
+        .type       = JobType::Cli,
+        .schedule   = schedule,
+        .priority   = 17,
+        .attributes = max_attempts(4),
+        .payload    = cli_payload("snapshot-command"),
+    });
+    REQUIRE(created);
+    auto suspended_job = service.suspend_job(job_id);
+    REQUIRE(suspended_job);
+    CHECK(suspended_job->state == JobState::Suspended);
+    auto suspended_queue = service.suspend_queue(queue_id);
+    REQUIRE(suspended_queue);
+    CHECK(suspended_queue->state == QueueState::Suspended);
+
+    auto const request = RunNowRequest{.job_id = job_id, .idempotency_key = "manual-key"};
+    auto       manual  = service.run_now(request);
+    REQUIRE(manual);
+    CHECK(manual->id == manual_id);
+    CHECK(manual->job_id == job_id);
+    CHECK(manual->job_revision == suspended_job->revision);
+    CHECK(manual->queue_id == queue_id);
+    CHECK(manual->origin == RunOrigin::Manual);
+    CHECK_FALSE(manual->schedule_owned);
+    CHECK(manual->planned_at == UtcTimePoint{10s});
+    CHECK(manual->runnable_at == UtcTimePoint{10s});
+    CHECK(manual->type == JobType::Cli);
+    CHECK(manual->priority == 17);
+    CHECK(std::get<std::int64_t>(manual->attributes.at("retry.max_attempts").data) == 4);
+    CHECK(manual->payload.as_object().at("command").as_string() == "snapshot-command");
+    CHECK(manual->state == RunState::Scheduled);
+    CHECK_FALSE(manual->started_at);
+    CHECK_FALSE(manual->completed_at);
+    CHECK_FALSE(manual->result);
+
+    detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                  scheduled = runs.find_schedule_owned(job_id);
+    REQUIRE(scheduled);
+    REQUIRE(scheduled->has_value());
+    CHECK((**scheduled).id == scheduled_id);
+    CHECK((**scheduled).job_revision == 1);
+    CHECK((**scheduled).planned_at == UtcTimePoint{60s});
+    CHECK((**scheduled).runnable_at == UtcTimePoint{60s});
+
+    auto replay = service.run_now(request);
+    REQUIRE(replay);
+    CHECK(replay->id == manual->id);
+    CHECK(replay->job_id == manual->job_id);
+    CHECK(replay->job_revision == manual->job_revision);
+    CHECK(replay->planned_at == manual->planned_at);
+    CHECK(replay->attributes.size() == manual->attributes.size());
+    CHECK(std::get<std::int64_t>(replay->attributes.at("retry.max_attempts").data) == 4);
+    CHECK(replay->payload == manual->payload);
+    CHECK(count_rows(fixture.database, "jobu_runs") == 2);
+    CHECK(count_rows(fixture.database, "jobu_idempotency") == 1);
+    require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+}
+
+TEST_CASE("Run Now enforces every state-dependent manual-run precondition",
+          "[jobu][management][run-now][validation][sqlite]")
+{
+    auto const     queue_id     = sequence_id(1);
+    auto const     job_id       = sequence_id(2);
+    auto const     scheduled_id = sequence_id(3);
+    auto const     manual_id    = sequence_id(4);
+    auto const     schedule     = cron_schedule();
+    ServiceFixture fixture{
+        {queue_id, job_id, scheduled_id, manual_id}
+    };
+    fixture.cron.set_occurrences(schedule, {UtcTimePoint{60s}});
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "preconditions"}));
+    REQUIRE(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("true")}));
+
+    SECTION("unknown job")
+    {
+        require_error(service.run_now({.job_id = sequence_id(99)}), ErrorCategory::NotFound, "jobu.job.not_found");
+    }
+    SECTION("deleted job")
+    {
+        execute(fixture.database,
+                "UPDATE jobu_jobs SET state = 'deleted', revision = 2, updated_at_us = 11, deleted_at_us = 11 "
+                "WHERE id = X'00000000000070008000000000000002'");
+        require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.job.deleted");
+    }
+    SECTION("deleted queue")
+    {
+        execute(fixture.database,
+                "UPDATE jobu_queues SET name = 'preconditions-deleted#00000000-0000-7000-8000-000000000001', "
+                "deleted_name = 'preconditions', state = 'deleted', deleted_at_us = 11 "
+                "WHERE id = X'00000000000070008000000000000001'");
+        require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+    }
+    SECTION("overdue schedule")
+    {
+        fixture.time.set_utc(UtcTimePoint{60s});
+        require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+    }
+    SECTION("running schedule")
+    {
+        execute(fixture.database,
+                "UPDATE jobu_runs SET state = 'running', started_at_us = 11 "
+                "WHERE id = X'00000000000070008000000000000003'");
+        require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+    }
+    SECTION("retry-waiting schedule")
+    {
+        execute(fixture.database,
+                "UPDATE jobu_runs SET state = 'retry_wait', started_at_us = 11 "
+                "WHERE id = X'00000000000070008000000000000003'");
+        require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+    }
+    SECTION("missing current schedule")
+    {
+        execute(fixture.database,
+                "UPDATE jobu_runs SET state = 'cancelled', completed_at_us = 11, result_json = '{}' "
+                "WHERE id = X'00000000000070008000000000000003'");
+        require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+    }
+    SECTION("duplicate manual run")
+    {
+        REQUIRE(service.run_now({.job_id = job_id}));
+        require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+    }
+}
+
+TEST_CASE("Run Now rolls back idempotency failures and rejects corrupted replay records",
+          "[jobu][management][run-now][transaction][sqlite]")
+{
+    auto const     queue_id     = sequence_id(1);
+    auto const     job_id       = sequence_id(2);
+    auto const     scheduled_id = sequence_id(3);
+    auto const     failed_id    = sequence_id(4);
+    auto const     manual_id    = sequence_id(5);
+    auto const     schedule     = cron_schedule();
+    ServiceFixture fixture{
+        {queue_id, job_id, scheduled_id, failed_id, manual_id}
+    };
+    fixture.cron.set_occurrences(schedule, {UtcTimePoint{60s}});
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "rollback"}));
+    REQUIRE(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("true")}));
+    execute(fixture.database,
+            "CREATE TRIGGER fail_run_now_idempotency BEFORE INSERT ON jobu_idempotency "
+            "WHEN NEW.method = 'job.run_now' BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
+
+    require_error(service.run_now({.job_id = job_id, .idempotency_key = "fail"}),
+                  ErrorCategory::Conflict,
+                  "db.constraint");
+    CHECK(count_rows(fixture.database, "jobu_runs") == 1);
+    CHECK(count_rows(fixture.database, "jobu_idempotency") == 0);
+
+    execute(fixture.database, "DROP TRIGGER fail_run_now_idempotency");
+    auto manual = service.run_now({.job_id = job_id, .idempotency_key = "stored"});
+    REQUIRE(manual);
+    execute(fixture.database,
+            "UPDATE jobu_idempotency SET result_json = '{}' WHERE method = 'job.run_now' AND key = 'stored'");
+    require_error(service.run_now({.job_id = job_id, .idempotency_key = "stored"}),
+                  ErrorCategory::Internal,
+                  "jobu.idempotency.invalid_record");
+}
+
+TEST_CASE("Run Now accepts future one-time jobs and scopes idempotency by job",
+          "[jobu][management][run-now][idempotency][once][sqlite]")
+{
+    auto const     queue_id      = sequence_id(1);
+    auto const     first_job_id  = sequence_id(2);
+    auto const     first_run_id  = sequence_id(3);
+    auto const     second_job_id = sequence_id(4);
+    auto const     second_run_id = sequence_id(5);
+    auto const     first_manual  = sequence_id(6);
+    auto const     second_manual = sequence_id(7);
+    ServiceFixture fixture{
+        {queue_id, first_job_id, first_run_id, second_job_id, second_run_id, first_manual, second_manual}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "once"}));
+    REQUIRE(service.create_job({
+        .queue    = queue_id,
+        .schedule = OnceSchedule{.planned_at = UtcTimePoint{60s}},
+        .payload  = cli_payload("first"),
+    }));
+    REQUIRE(service.create_job({
+        .queue    = queue_id,
+        .schedule = OnceSchedule{.planned_at = UtcTimePoint{70s}},
+        .payload  = cli_payload("second"),
+    }));
+
+    auto first  = service.run_now({.job_id = first_job_id, .idempotency_key = "shared"});
+    auto second = service.run_now({.job_id = second_job_id, .idempotency_key = "shared"});
+    REQUIRE(first);
+    REQUIRE(second);
+    CHECK(first->id == first_manual);
+    CHECK(second->id == second_manual);
+    CHECK(count_rows(fixture.database, "jobu_runs") == 4);
+    CHECK(count_rows(fixture.database, "jobu_idempotency") == 2);
+}

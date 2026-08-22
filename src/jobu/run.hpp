@@ -13,7 +13,7 @@ namespace jb::jobu {
 /// Source that created a run.
 enum class RunOrigin : std::uint8_t {
     Scheduled, ///< Created from a job definition schedule.
-    Manual,    ///< Created by a future Run Now operation.
+    Manual,    ///< Created by a Run Now operation.
     Submitted, ///< Created by a future application-submission operation.
 };
 
@@ -30,8 +30,8 @@ enum class RunState : std::uint8_t {
 
 /** One durable occurrence of a job definition.
  *
- * The runner type, priority, attributes, and payload form an immutable execution snapshot. Phase 3 creates only
- * scheduled, schedule-owned runs and never starts an attempt.
+ * The runner type, priority, attributes, and payload form an immutable execution snapshot. A manual occurrence is
+ * separate from the definition's schedule-owned occurrence and retains its own immutable snapshot.
  */
 struct JobRun {
     /// Stable run identity.

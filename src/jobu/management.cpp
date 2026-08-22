@@ -193,6 +193,13 @@ auto schedule_refresh_conflict() -> jb::core::Error
                          "The pending schedule-owned run could not be refreshed");
 }
 
+auto manual_run_conflict() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::Conflict,
+                         "jobu.run.manual_conflict",
+                         "Run Now preconditions are not satisfied");
+}
+
 auto invalid_idempotency_key() -> jb::core::Error
 {
     return service_error(jb::core::ErrorCategory::InvalidArgument,
@@ -1091,6 +1098,168 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
     }
     return ServiceResult<JobDefinition>::success(std::move(job));
+}
+
+auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRun, jb::core::Error>
+{
+    if (_data->initialization_error) {
+        return ServiceResult<JobRun>::failure(*_data->initialization_error);
+    }
+    auto idempotency = validate_idempotency_key(request.idempotency_key);
+    if (!idempotency) {
+        return ServiceResult<JobRun>::failure(std::move(idempotency).error());
+    }
+
+    auto canonical_request = std::optional<std::string>{};
+    if (request.idempotency_key) {
+        auto encoded = detail::encode_run_now_idempotency_request(request);
+        if (!encoded) {
+            return ServiceResult<JobRun>::failure(std::move(encoded).error());
+        }
+        canonical_request = std::move(encoded).value();
+    }
+
+    auto begun = jb::db::Transaction::begin(_data->database);
+    if (!begun) {
+        return ServiceResult<JobRun>::failure(std::move(begun).error());
+    }
+    auto transaction = std::move(begun).value();
+    if (request.idempotency_key) {
+        auto record = _data->idempotency.find("job.run_now", request.job_id, *request.idempotency_key);
+        if (!record) {
+            return ServiceResult<JobRun>::failure(std::move(record).error());
+        }
+        if (record->has_value()) {
+            auto const& stored = **record;
+            if (stored.method != "job.run_now" || stored.scope_id != request.job_id ||
+                stored.key != *request.idempotency_key) {
+                return ServiceResult<JobRun>::failure(invalid_idempotency_record("run_now_record_identity"));
+            }
+            auto valid = detail::validate_run_now_idempotency_request(stored.request_json);
+            if (!valid) {
+                return ServiceResult<JobRun>::failure(std::move(valid).error());
+            }
+            if (stored.request_json != *canonical_request) {
+                return ServiceResult<JobRun>::failure(idempotency_conflict());
+            }
+            auto replay = detail::decode_run_now_idempotency_result(stored.result_json, _data->attributes);
+            if (!replay) {
+                return ServiceResult<JobRun>::failure(std::move(replay).error());
+            }
+            if (replay->id != stored.resource_id || replay->job_id != request.job_id) {
+                return ServiceResult<JobRun>::failure(invalid_idempotency_record("run_now_resource_id_mismatch"));
+            }
+            auto committed = transaction.commit();
+            if (!committed) {
+                return ServiceResult<JobRun>::failure(std::move(committed).error());
+            }
+            return ServiceResult<JobRun>::success(std::move(replay).value());
+        }
+    }
+
+    auto found_job = _data->jobs.find_by_id(request.job_id, true);
+    if (!found_job) {
+        return ServiceResult<JobRun>::failure(std::move(found_job).error());
+    }
+    if (!found_job->has_value()) {
+        return ServiceResult<JobRun>::failure(job_not_found());
+    }
+    auto const& job = **found_job;
+    if (job.state == JobState::Deleted) {
+        return ServiceResult<JobRun>::failure(job_deleted());
+    }
+    auto found_queue = _data->queues.find_by_id(job.queue_id, true);
+    if (!found_queue) {
+        return ServiceResult<JobRun>::failure(std::move(found_queue).error());
+    }
+    if (!found_queue->has_value()) {
+        return ServiceResult<JobRun>::failure(storage_invariant("run_now_missing_queue"));
+    }
+    if ((**found_queue).state == QueueState::Deleted) {
+        return ServiceResult<JobRun>::failure(manual_run_conflict());
+    }
+    auto schedule_owned = _data->runs.find_schedule_owned(job.id);
+    if (!schedule_owned) {
+        return ServiceResult<JobRun>::failure(std::move(schedule_owned).error());
+    }
+    if (!schedule_owned->has_value()) {
+        return ServiceResult<JobRun>::failure(manual_run_conflict());
+    }
+    auto const& scheduled = **schedule_owned;
+    if (scheduled.job_id != job.id || scheduled.queue_id != job.queue_id || scheduled.origin != RunOrigin::Scheduled ||
+        !scheduled.schedule_owned) {
+        return ServiceResult<JobRun>::failure(storage_invariant("run_now_schedule_relationship"));
+    }
+
+    auto const now = _data->time_source.utc_now();
+    if (scheduled.state != RunState::Scheduled || scheduled.planned_at <= now) {
+        return ServiceResult<JobRun>::failure(manual_run_conflict());
+    }
+    auto busy = _data->runs.has_running_or_retrying_run(job.id);
+    if (!busy) {
+        return ServiceResult<JobRun>::failure(std::move(busy).error());
+    }
+    if (*busy) {
+        return ServiceResult<JobRun>::failure(manual_run_conflict());
+    }
+    auto manual = _data->runs.has_non_terminal_manual_run(job.id);
+    if (!manual) {
+        return ServiceResult<JobRun>::failure(std::move(manual).error());
+    }
+    if (*manual) {
+        return ServiceResult<JobRun>::failure(manual_run_conflict());
+    }
+
+    auto run_id = _data->uuid_generator.generate();
+    if (!run_id) {
+        return ServiceResult<JobRun>::failure(std::move(run_id).error());
+    }
+    auto run = JobRun{
+        .id             = *run_id,
+        .job_id         = job.id,
+        .job_revision   = job.revision,
+        .queue_id       = job.queue_id,
+        .origin         = RunOrigin::Manual,
+        .schedule_owned = false,
+        .planned_at     = now,
+        .runnable_at    = now,
+        .started_at     = std::nullopt,
+        .completed_at   = std::nullopt,
+        .type           = job.type,
+        .priority       = job.priority,
+        .attributes     = job.attributes,
+        .payload        = job.payload,
+        .state          = RunState::Scheduled,
+        .result         = std::nullopt,
+    };
+    auto inserted = _data->runs.insert_manual(run);
+    if (!inserted) {
+        return ServiceResult<JobRun>::failure(std::move(inserted).error());
+    }
+    if (request.idempotency_key) {
+        auto result_json = detail::encode_run_now_idempotency_result(run, _data->attributes);
+        if (!result_json) {
+            return ServiceResult<JobRun>::failure(std::move(result_json).error());
+        }
+        auto recorded = _data->idempotency.insert({
+            .method       = "job.run_now",
+            .scope_id     = job.id,
+            .key          = *request.idempotency_key,
+            .request_json = *canonical_request,
+            .result_json  = std::move(result_json).value(),
+            .resource_id  = run.id,
+            .created_at   = now,
+            .expires_at   = std::nullopt,
+        });
+        if (!recorded) {
+            return ServiceResult<JobRun>::failure(std::move(recorded).error());
+        }
+    }
+    auto committed = transaction.commit();
+    if (!committed) {
+        return ServiceResult<JobRun>::failure(std::move(committed).error());
+    }
+    return ServiceResult<JobRun>::success(std::move(run));
 }
 
 auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>
