@@ -160,8 +160,9 @@ struct SchedulerRun {
     std::uint64_t  total_attempts{0};
 };
 
-auto decode_scheduler_run(jb::db::Record const& record, AttributeRegistry const& attributes)
-    -> RepositoryResult<SchedulerRun>
+auto decode_scheduler_run(jb::db::Record const&    record,
+                          AttributeRegistry const& attributes,
+                          bool                     allow_deleted_owners = false) -> RepositoryResult<SchedulerRun>
 {
     auto run = scheduler_value(read_job_run(record, attributes), "invalid_run");
     if (!run) {
@@ -203,7 +204,7 @@ auto decode_scheduler_run(jb::db::Record const& record, AttributeRegistry const&
     if (run->queue_id != *job_queue_id) {
         return RepositoryResult<SchedulerRun>::failure(invariant("run_job_queue_mismatch"));
     }
-    if (*job_state == JobState::Deleted || *queue_state == QueueState::Deleted) {
+    if (!allow_deleted_owners && (*job_state == JobState::Deleted || *queue_state == QueueState::Deleted)) {
         return RepositoryResult<SchedulerRun>::failure(invariant("non_terminal_owner_deleted"));
     }
     if (*active_attempts + *completed_attempts != *total_attempts || *running_attempts > *active_attempts) {
@@ -933,7 +934,7 @@ auto SchedulerRepository::find_completion_context(jb::core::Uuid const& run_id, 
     if (!*next) {
         return RepositoryResult<CompletionContext>::failure(invariant("missing_completion_run"));
     }
-    auto decoded = decode_scheduler_run(query.record(), _attributes);
+    auto decoded = decode_scheduler_run(query.record(), _attributes, true);
     if (!decoded) {
         return RepositoryResult<CompletionContext>::failure(std::move(decoded).error());
     }

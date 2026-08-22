@@ -10,7 +10,9 @@
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "support/fake_attempt_executor.hpp"
+#include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
+#include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -23,6 +25,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -60,8 +63,9 @@ auto make_database(std::filesystem::path database_file) -> Database
 }
 
 struct CoreFixture {
-    CoreFixture()
-        : attempts{database}
+    explicit CoreFixture(std::vector<Uuid> successor_ids = {})
+        : generator{std::move(successor_ids)}
+        , attempts{database}
         , runs{database, registry}
     {
         REQUIRE(database.open());
@@ -71,7 +75,7 @@ struct CoreFixture {
 
     [[nodiscard]] auto process(SchedulerCoreOptions options) -> Result<void, Error>
     {
-        SchedulerCore core{database, registry, time, executor, options};
+        SchedulerCore core{database, registry, cron, generator, time, executor, options};
         return core.process_cycle();
     }
 
@@ -79,6 +83,8 @@ struct CoreFixture {
     std::filesystem::path     database_file{directory.path() / "jobu.sqlite"};
     Database                  database{make_database(database_file)};
     StandardAttributeRegistry registry;
+    FakeCronEngine            cron;
+    SequenceUuidGenerator     generator;
     FakeTimeSource            time;
     FakeAttemptExecutor       executor;
     AttemptRepository         attempts;
@@ -102,23 +108,80 @@ void insert_queue(Database& database, Uuid const& queue_id, std::uint32_t concur
     REQUIRE(query.exec());
 }
 
-void insert_job(Database&   database,
-                Uuid const& job_id,
-                Uuid const& queue_id,
-                JobType     type,
-                JobState    state = JobState::Active)
+void insert_job(Database&                   database,
+                Uuid const&                 job_id,
+                Uuid const&                 queue_id,
+                JobType                     type,
+                JobState                    state           = JobState::Active,
+                std::optional<CronSchedule> schedule        = std::nullopt,
+                JobRevision                 job_revision    = 1,
+                std::int32_t                priority        = 0,
+                std::string_view            attributes_json = R"({"version":1,"values":{}})",
+                std::string_view            payload_json    = {})
 {
+    auto stored_payload = payload_json;
+    if (stored_payload.empty()) {
+        stored_payload = type == JobType::Cli ? std::string_view{R"({"command":"test"})"}
+                                              : std::string_view{R"({"url":"https://example.test"})"};
+    }
+    auto revision = revision_to_storage(job_revision);
+    REQUIRE(revision);
     Query query{database};
     REQUIRE(query.prepare(
         "INSERT INTO jobu_jobs(id, queue_id, revision, name, state, type, schedule_kind, scheduled_at_us, "
         "cron_expression, cron_timezone, priority, attributes_json, payload_json, created_at_us, updated_at_us, "
-        "deleted_at_us) VALUES(:id, :queue_id, 1, NULL, :state, :type, 'once', 0, NULL, NULL, 0, "
-        "'{\"version\":1,\"values\":{}}', '{}', 0, 0, NULL)"));
+        "deleted_at_us) VALUES(:id, :queue_id, :revision, NULL, :state, :type, :schedule_kind, :scheduled_at_us, "
+        ":cron_expression, :cron_timezone, :priority, :attributes_json, :payload_json, 0, 0, NULL)"));
     REQUIRE(query.bind_value(":id", uuid_to_storage(job_id)));
     REQUIRE(query.bind_value(":queue_id", uuid_to_storage(queue_id)));
+    REQUIRE(query.bind_value(":revision", std::move(revision).value()));
     REQUIRE(query.bind_value(":state", make_text(storage_text(state))));
     REQUIRE(query.bind_value(":type", make_text(storage_text(type))));
+    REQUIRE(query.bind_value(":schedule_kind", make_text(schedule ? "cron" : "once")));
+    REQUIRE(query.bind_value(":scheduled_at_us", schedule ? Value{Null{}} : Value{std::int64_t{0}}));
+    REQUIRE(query.bind_value(":cron_expression", schedule ? Value{schedule->expression} : Value{Null{}}));
+    REQUIRE(query.bind_value(":cron_timezone", schedule ? Value{schedule->timezone} : Value{Null{}}));
+    REQUIRE(query.bind_value(":priority", int32_to_storage(priority)));
+    REQUIRE(query.bind_value(":attributes_json", make_text(attributes_json)));
+    REQUIRE(query.bind_value(":payload_json", make_text(stored_payload)));
     REQUIRE(query.exec());
+}
+
+void update_recurring_job(Database&           database,
+                          Uuid const&         job_id,
+                          JobRevision         revision,
+                          CronSchedule const& schedule,
+                          JobType             type,
+                          std::int32_t        priority,
+                          std::string_view    attributes_json,
+                          std::string_view    payload_json)
+{
+    auto stored_revision = revision_to_storage(revision);
+    REQUIRE(stored_revision);
+    Query query{database};
+    REQUIRE(query.prepare("UPDATE jobu_jobs SET revision = :revision, type = :type, cron_expression = :expression, "
+                          "cron_timezone = :timezone, priority = :priority, attributes_json = :attributes_json, "
+                          "payload_json = :payload_json, updated_at_us = 1 WHERE id = :id"));
+    REQUIRE(query.bind_value(":revision", std::move(stored_revision).value()));
+    REQUIRE(query.bind_value(":type", make_text(storage_text(type))));
+    REQUIRE(query.bind_value(":expression", make_text(schedule.expression)));
+    REQUIRE(query.bind_value(":timezone", make_text(schedule.timezone)));
+    REQUIRE(query.bind_value(":priority", int32_to_storage(priority)));
+    REQUIRE(query.bind_value(":attributes_json", make_text(attributes_json)));
+    REQUIRE(query.bind_value(":payload_json", make_text(payload_json)));
+    REQUIRE(query.bind_value(":id", uuid_to_storage(job_id)));
+    REQUIRE(query.exec());
+    REQUIRE(query.num_rows_affected() == 1);
+}
+
+void mark_job_deleted(Database& database, Uuid const& job_id)
+{
+    Query query{database};
+    REQUIRE(query.prepare("UPDATE jobu_jobs SET state = 'deleted', revision = revision + 1, updated_at_us = 1, "
+                          "deleted_at_us = 1 WHERE id = :id"));
+    REQUIRE(query.bind_value(":id", uuid_to_storage(job_id)));
+    REQUIRE(query.exec());
+    REQUIRE(query.num_rows_affected() == 1);
 }
 
 auto attribute_document(StandardAttributeRegistry const& registry,
@@ -153,6 +216,9 @@ struct RunSpec {
     JobType                     type{JobType::Cli};
     std::int32_t                priority{0};
     std::string                 attributes_json;
+    std::string                 payload_json{"{}"};
+    RunOrigin                   origin{RunOrigin::Scheduled};
+    bool                        schedule_owned{true};
     RunState                    state{RunState::Scheduled};
     std::optional<UtcTimePoint> started_at;
 };
@@ -168,11 +234,13 @@ void insert_run(Database& database, RunSpec const& run)
     REQUIRE(query.prepare(
         "INSERT INTO jobu_runs(id, job_id, job_revision, queue_id, origin, schedule_owned, planned_at_us, "
         "runnable_at_us, started_at_us, completed_at_us, type, priority, attributes_json, payload_json, state, "
-        "result_json) VALUES(:id, :job_id, 1, :queue_id, 'scheduled', 1, :planned_at_us, :runnable_at_us, "
-        ":started_at_us, NULL, :type, :priority, :attributes_json, '{}', :state, NULL)"));
+        "result_json) VALUES(:id, :job_id, 1, :queue_id, :origin, :schedule_owned, :planned_at_us, :runnable_at_us, "
+        ":started_at_us, NULL, :type, :priority, :attributes_json, :payload_json, :state, NULL)"));
     REQUIRE(query.bind_value(":id", uuid_to_storage(run.id)));
     REQUIRE(query.bind_value(":job_id", uuid_to_storage(run.job_id)));
     REQUIRE(query.bind_value(":queue_id", uuid_to_storage(run.queue_id)));
+    REQUIRE(query.bind_value(":origin", make_text(storage_text(run.origin))));
+    REQUIRE(query.bind_value(":schedule_owned", boolean_to_storage(run.schedule_owned)));
     REQUIRE(query.bind_value(":planned_at_us", std::move(planned).value()));
     REQUIRE(query.bind_value(":runnable_at_us", std::move(runnable).value()));
     if (run.started_at) {
@@ -186,6 +254,7 @@ void insert_run(Database& database, RunSpec const& run)
     REQUIRE(query.bind_value(":type", make_text(storage_text(run.type))));
     REQUIRE(query.bind_value(":priority", int32_to_storage(run.priority)));
     REQUIRE(query.bind_value(":attributes_json", make_text(run.attributes_json)));
+    REQUIRE(query.bind_value(":payload_json", make_text(run.payload_json)));
     REQUIRE(query.bind_value(":state", make_text(storage_text(run.state))));
     REQUIRE(query.exec());
 }
@@ -403,6 +472,15 @@ auto success(AttemptKey key, std::string value = "completed") -> AttemptCompleti
     };
 }
 
+auto cancelled(AttemptKey key) -> AttemptCompletion
+{
+    return {
+        .key     = key,
+        .outcome = AttemptOutcome::Cancelled,
+        .result  = result_object("cancelled"),
+    };
+}
+
 auto failure(AttemptKey                  key,
              FailureDisposition          disposition,
              std::optional<UtcTimePoint> retry_not_before = std::nullopt) -> AttemptCompletion
@@ -498,6 +576,8 @@ TEST_CASE("Single-queue scheduler core preserves strict order across bounded bat
     SchedulerCore       core{
         fixture.database,
         fixture.registry,
+        fixture.cron,
+        fixture.generator,
         time,
         fixture.executor,
         {.cli_concurrency = 10, .http_concurrency = 10, .candidate_batch_size = 2}
@@ -557,6 +637,8 @@ TEST_CASE("Scheduler core resets idle credit and applies dynamic weights", "[job
     SchedulerCore core{
         fixture.database,
         fixture.registry,
+        fixture.cron,
+        fixture.generator,
         fixture.time,
         fixture.executor,
         {.cli_concurrency = 7, .http_concurrency = 1, .candidate_batch_size = 3}
@@ -614,6 +696,8 @@ TEST_CASE("Scheduler core alternates the first type across mixed-capacity rounds
     SchedulerCore core{
         fixture.database,
         fixture.registry,
+        fixture.cron,
+        fixture.generator,
         fixture.time,
         fixture.executor,
         {.cli_concurrency = 2, .http_concurrency = 2, .candidate_batch_size = 2}
@@ -655,6 +739,8 @@ TEST_CASE("Scheduler core reconciles suspension and resume by queue UUID", "[job
     SchedulerCore core{
         fixture.database,
         fixture.registry,
+        fixture.cron,
+        fixture.generator,
         fixture.time,
         fixture.executor,
         {.cli_concurrency = 3, .http_concurrency = 1, .candidate_batch_size = 2}
@@ -687,6 +773,8 @@ TEST_CASE("Scheduler core observes dynamic queue concurrency", "[jobu][scheduler
     SchedulerCore core{
         fixture.database,
         fixture.registry,
+        fixture.cron,
+        fixture.generator,
         fixture.time,
         fixture.executor,
         {.cli_concurrency = 4, .http_concurrency = 1, .candidate_batch_size = 2}
@@ -827,6 +915,8 @@ TEST_CASE("Single-queue scheduler core treats dispatch revalidation loss as a no
     SchedulerCore    core{
         fixture.database,
         fixture.registry,
+        fixture.cron,
+        fixture.generator,
         fixture.time,
         executor,
         {.cli_concurrency = 2, .http_concurrency = 2, .candidate_batch_size = 2}
@@ -852,6 +942,8 @@ TEST_CASE("Scheduler core falls through when the selected queue loses eligibilit
     SchedulerCore    core{
         fixture.database,
         fixture.registry,
+        fixture.cron,
+        fixture.generator,
         fixture.time,
         executor,
         {.cli_concurrency = 2, .http_concurrency = 2, .candidate_batch_size = 2}
@@ -876,6 +968,8 @@ TEST_CASE("Scheduler core commits terminal success before releasing capacity",
     SchedulerCore core{
         fixture.database,
         fixture.registry,
+        fixture.cron,
+        fixture.generator,
         fixture.time,
         fixture.executor,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
@@ -909,6 +1003,335 @@ TEST_CASE("Scheduler core commits terminal success before releasing capacity",
     REQUIRE(fixture.executor.complete(second_key, success(second_key)));
 }
 
+TEST_CASE("Scheduler core creates one recurring successor from the newest definition",
+          "[jobu][scheduler][core][completion][recurrence][sqlite]")
+{
+    auto const  original_schedule = CronSchedule{.expression = "0 * * * *", .timezone = "UTC"};
+    auto const  latest_schedule   = CronSchedule{.expression = "30 * * * *", .timezone = "Europe/Tallinn"};
+    auto const  queue_id          = id(150);
+    auto const  job_id            = id(151);
+    auto const  run_id            = id(152);
+    auto const  successor_id      = id(153);
+    CoreFixture fixture{{successor_id}};
+    insert_queue(fixture.database, queue_id, 1);
+    insert_job(fixture.database, job_id, queue_id, JobType::Cli, JobState::Active, original_schedule);
+    auto run = default_run(fixture, run_id, job_id, queue_id, JobType::Cli);
+    insert_run(fixture.database, run);
+    fixture.cron.set_occurrences(latest_schedule, {at(150), at(250), at(350)});
+    fixture.executor.set_available(JobType::Cli, true);
+    fixture.executor.set_available(JobType::Http, true);
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        fixture.time,
+        fixture.executor,
+        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+    };
+
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const key               = fixture.executor.pending_keys().front();
+    auto const latest_attributes = attribute_document(fixture.registry, "blocking", 5);
+    update_recurring_job(fixture.database,
+                         job_id,
+                         2,
+                         latest_schedule,
+                         JobType::Http,
+                         42,
+                         latest_attributes,
+                         R"({"url":"https://updated.example"})");
+
+    fixture.time.set_utc(at(200));
+    REQUIRE(fixture.executor.complete(key, success(key)));
+
+    auto completed = fixture.runs.find_by_id(run_id);
+    REQUIRE(completed);
+    REQUIRE(completed->has_value());
+    CHECK(completed->value().state == RunState::Succeeded);
+    auto successor = fixture.runs.find_schedule_owned(job_id);
+    REQUIRE(successor);
+    REQUIRE(successor->has_value());
+    CHECK(successor->value().id == successor_id);
+    CHECK(successor->value().job_revision == 2);
+    CHECK(successor->value().queue_id == queue_id);
+    CHECK(successor->value().planned_at == at(250));
+    CHECK(successor->value().runnable_at == at(250));
+    CHECK(successor->value().type == JobType::Http);
+    CHECK(successor->value().priority == 42);
+    CHECK(std::get<std::int64_t>(successor->value().attributes.at("retry.max_attempts").data) == 5);
+    CHECK(std::get<std::string>(successor->value().attributes.at("retry.mode").data) == "blocking");
+    CHECK(successor->value().payload.as_object().at("url").as_string() == "https://updated.example");
+    REQUIRE(fixture.cron.validation_calls().size() == 1U);
+    CHECK(fixture.cron.validation_calls().front().expression == latest_schedule.expression);
+    REQUIRE(fixture.cron.next_calls().size() == 1U);
+    CHECK(fixture.cron.next_calls().front().exclusive_lower_bound == at(200));
+
+    fixture.time.set_utc(at(250));
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    CHECK(fixture.executor.pending_keys().front().run_id == successor_id);
+}
+
+TEST_CASE("Scheduler core uses the later planned time as the recurring cancellation lower bound",
+          "[jobu][scheduler][core][completion][recurrence][sqlite]")
+{
+    auto const  schedule     = CronSchedule{.expression = "*/5 * * * *", .timezone = "UTC"};
+    auto const  queue_id     = id(155);
+    auto const  job_id       = id(156);
+    auto const  run_id       = id(157);
+    auto const  successor_id = id(158);
+    CoreFixture fixture{{successor_id}};
+    insert_queue(fixture.database, queue_id, 1);
+    insert_job(fixture.database, job_id, queue_id, JobType::Cli, JobState::Active, schedule);
+    auto run        = default_run(fixture, run_id, job_id, queue_id, JobType::Cli);
+    run.planned_at  = at(150);
+    run.runnable_at = at(100);
+    insert_run(fixture.database, run);
+    fixture.cron.set_occurrences(schedule, {at(140), at(160), at(200)});
+    fixture.executor.set_available(JobType::Cli, true);
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        fixture.time,
+        fixture.executor,
+        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+    };
+
+    REQUIRE(core.process_cycle());
+    auto const key = fixture.executor.pending_keys().front();
+    fixture.time.set_utc(at(130));
+    REQUIRE(fixture.executor.complete(key, cancelled(key)));
+
+    auto completed = fixture.runs.find_by_id(run_id);
+    REQUIRE(completed);
+    REQUIRE(completed->has_value());
+    CHECK(completed->value().state == RunState::Cancelled);
+    auto successor = fixture.runs.find_schedule_owned(job_id);
+    REQUIRE(successor);
+    REQUIRE(successor->has_value());
+    CHECK(successor->value().id == successor_id);
+    CHECK(successor->value().planned_at == at(160));
+    REQUIRE(fixture.cron.next_calls().size() == 1U);
+    CHECK(fixture.cron.next_calls().front().exclusive_lower_bound == at(150));
+}
+
+TEST_CASE("Scheduler core omits recurring successors for excluded terminal work",
+          "[jobu][scheduler][core][completion][recurrence][sqlite]")
+{
+    SECTION("one-time definition")
+    {
+        CoreFixture fixture;
+        auto const  queue_id = id(160);
+        auto const  job_id   = id(161);
+        auto const  run_id   = id(162);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_job(fixture.database, job_id, queue_id, JobType::Cli);
+        insert_run(fixture.database, default_run(fixture, run_id, job_id, queue_id, JobType::Cli));
+        fixture.executor.set_available(JobType::Cli, true);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+        };
+
+        REQUIRE(core.process_cycle());
+        auto const key = fixture.executor.pending_keys().front();
+        REQUIRE(fixture.executor.complete(key, success(key)));
+        auto successor = fixture.runs.find_schedule_owned(job_id);
+        REQUIRE(successor);
+        CHECK_FALSE(successor->has_value());
+        CHECK(fixture.cron.validation_calls().empty());
+    }
+
+    SECTION("manual run")
+    {
+        CoreFixture fixture;
+        auto const  schedule         = CronSchedule{.expression = "*/5 * * * *", .timezone = "UTC"};
+        auto const  queue_id         = id(165);
+        auto const  job_id           = id(166);
+        auto const  run_id           = id(167);
+        auto const  scheduled_run_id = id(168);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_job(fixture.database, job_id, queue_id, JobType::Cli, JobState::Active, schedule);
+        auto scheduled_run        = default_run(fixture, scheduled_run_id, job_id, queue_id, JobType::Cli);
+        scheduled_run.planned_at  = at(300);
+        scheduled_run.runnable_at = at(300);
+        insert_run(fixture.database, scheduled_run);
+        auto run           = default_run(fixture, run_id, job_id, queue_id, JobType::Cli);
+        run.origin         = RunOrigin::Manual;
+        run.schedule_owned = false;
+        insert_run(fixture.database, run);
+        fixture.executor.set_available(JobType::Cli, true);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+        };
+
+        REQUIRE(core.process_cycle());
+        auto const key = fixture.executor.pending_keys().front();
+        REQUIRE(fixture.executor.complete(key, success(key)));
+        auto successor = fixture.runs.find_schedule_owned(job_id);
+        REQUIRE(successor);
+        REQUIRE(successor->has_value());
+        CHECK(successor->value().id == scheduled_run_id);
+        CHECK(successor->value().planned_at == at(300));
+        CHECK(fixture.cron.validation_calls().empty());
+    }
+
+    SECTION("deleted definition")
+    {
+        CoreFixture fixture;
+        auto const  schedule = CronSchedule{.expression = "*/5 * * * *", .timezone = "UTC"};
+        auto const  queue_id = id(170);
+        auto const  job_id   = id(171);
+        auto const  run_id   = id(172);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_job(fixture.database, job_id, queue_id, JobType::Cli, JobState::Active, schedule);
+        insert_run(fixture.database, default_run(fixture, run_id, job_id, queue_id, JobType::Cli));
+        fixture.executor.set_available(JobType::Cli, true);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+        };
+
+        REQUIRE(core.process_cycle());
+        auto const key = fixture.executor.pending_keys().front();
+        mark_job_deleted(fixture.database, job_id);
+        REQUIRE(fixture.executor.complete(key, success(key)));
+        auto successor = fixture.runs.find_schedule_owned(job_id);
+        REQUIRE(successor);
+        CHECK_FALSE(successor->has_value());
+        CHECK(fixture.cron.validation_calls().empty());
+        REQUIRE(core.process_cycle());
+    }
+}
+
+TEST_CASE("Scheduler core rolls recurring successor failures back and fails closed",
+          "[jobu][scheduler][core][completion][recurrence][rollback][sqlite]")
+{
+    enum class FailureKind : std::uint8_t {
+        CronValidation,
+        CronNext,
+        Uuid,
+        ScheduleConflict,
+    };
+
+    auto const verify_failure = [](FailureKind kind) {
+        auto        successor_ids = kind == FailureKind::Uuid ? std::vector<Uuid>{} : std::vector<Uuid>{id(184)};
+        CoreFixture fixture{std::move(successor_ids)};
+        auto const  schedule = CronSchedule{.expression = "*/5 * * * *", .timezone = "UTC"};
+        auto const  queue_id = id(180);
+        auto const  job_id   = id(181);
+        auto const  run_id   = id(182);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_job(fixture.database, job_id, queue_id, JobType::Cli, JobState::Active, schedule);
+        insert_run(fixture.database, default_run(fixture, run_id, job_id, queue_id, JobType::Cli));
+        fixture.cron.set_occurrences(schedule, {at(200)});
+        fixture.executor.set_available(JobType::Cli, true);
+
+        auto expected_code = std::string{};
+        if (kind == FailureKind::CronValidation) {
+            expected_code = "test.cron.validation_failed";
+            fixture.cron.set_validation_error(Error{
+                .category = ErrorCategory::InvalidArgument,
+                .code     = expected_code,
+                .message  = "Configured cron validation failure",
+            });
+        }
+        else if (kind == FailureKind::CronNext) {
+            expected_code = "test.cron.next_failed";
+            fixture.cron.set_next_error(Error{
+                .category = ErrorCategory::ResourceExhausted,
+                .code     = expected_code,
+                .message  = "Configured cron next-occurrence failure",
+            });
+        }
+        else if (kind == FailureKind::Uuid) {
+            expected_code = "test.uuid.sequence_exhausted";
+        }
+        else {
+            expected_code = "jobu.run.schedule_conflict";
+        }
+
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+        };
+        REQUIRE(core.process_cycle());
+        auto const key = fixture.executor.pending_keys().front();
+        if (kind == FailureKind::ScheduleConflict) {
+            Query trigger{fixture.database};
+            REQUIRE(trigger.exec(
+                "CREATE TRIGGER inject_recurring_successor_conflict AFTER UPDATE OF state ON jobu_runs "
+                "WHEN OLD.state = 'running' AND NEW.state = 'succeeded' BEGIN "
+                "INSERT INTO jobu_runs(id, job_id, job_revision, queue_id, origin, schedule_owned, planned_at_us, "
+                "runnable_at_us, started_at_us, completed_at_us, type, priority, attributes_json, payload_json, "
+                "state, result_json) VALUES(zeroblob(16), NEW.job_id, NEW.job_revision, NEW.queue_id, 'scheduled', "
+                "1, NEW.completed_at_us + 1, NEW.completed_at_us + 1, NULL, NULL, NEW.type, NEW.priority, "
+                "NEW.attributes_json, NEW.payload_json, 'scheduled', NULL); END"));
+        }
+
+        fixture.time.set_utc(at(150));
+        REQUIRE(fixture.executor.complete(key, success(key)));
+        auto failed = core.process_cycle();
+        REQUIRE_FALSE(failed);
+        CHECK(failed.error().code == expected_code);
+        auto run = fixture.runs.find_by_id(run_id);
+        REQUIRE(run);
+        REQUIRE(run->has_value());
+        CHECK(run->value().state == RunState::Running);
+        CHECK_FALSE(run->value().completed_at);
+        auto attempt = fixture.attempts.find(run_id, key.attempt_number);
+        REQUIRE(attempt);
+        REQUIRE(attempt->has_value());
+        CHECK(attempt->value().state == AttemptState::Running);
+        auto current = fixture.runs.find_schedule_owned(job_id);
+        REQUIRE(current);
+        REQUIRE(current->has_value());
+        CHECK(current->value().id == run_id);
+    };
+
+    SECTION("cron validation")
+    {
+        verify_failure(FailureKind::CronValidation);
+    }
+    SECTION("cron next occurrence")
+    {
+        verify_failure(FailureKind::CronNext);
+    }
+    SECTION("UUID exhaustion")
+    {
+        verify_failure(FailureKind::Uuid);
+    }
+    SECTION("schedule-owned uniqueness conflict")
+    {
+        verify_failure(FailureKind::ScheduleConflict);
+    }
+}
+
 TEST_CASE("Scheduler core retries the same run and terminally exhausts its policy",
           "[jobu][scheduler][core][completion][retry][sqlite]")
 {
@@ -922,6 +1345,8 @@ TEST_CASE("Scheduler core retries the same run and terminally exhausts its polic
     SchedulerCore core{
         fixture.database,
         fixture.registry,
+        fixture.cron,
+        fixture.generator,
         fixture.time,
         fixture.executor,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
@@ -981,6 +1406,8 @@ TEST_CASE("Scheduler core combines policy delays with executor retry deadlines",
         SchedulerCore core{
             fixture.database,
             fixture.registry,
+            fixture.cron,
+            fixture.generator,
             fixture.time,
             fixture.executor,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
@@ -1013,6 +1440,8 @@ TEST_CASE("Scheduler core accounts for blocking and rescheduled retry waits",
         SchedulerCore core{
             fixture.database,
             fixture.registry,
+            fixture.cron,
+            fixture.generator,
             fixture.time,
             fixture.executor,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
@@ -1074,6 +1503,8 @@ TEST_CASE("Scheduler core completes executor start errors through the normal ter
     SchedulerCore core{
         fixture.database,
         fixture.registry,
+        fixture.cron,
+        fixture.generator,
         fixture.time,
         fixture.executor,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
@@ -1110,6 +1541,8 @@ TEST_CASE("Scheduler core rejects invalid executor completion protocol and fails
         SchedulerCore core{
             fixture.database,
             fixture.registry,
+            fixture.cron,
+            fixture.generator,
             fixture.time,
             executor,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
@@ -1139,6 +1572,8 @@ TEST_CASE("Scheduler core rejects invalid executor completion protocol and fails
         SchedulerCore core{
             fixture.database,
             fixture.registry,
+            fixture.cron,
+            fixture.generator,
             fixture.time,
             executor,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
@@ -1163,6 +1598,8 @@ TEST_CASE("Scheduler core rejects invalid executor completion protocol and fails
         SchedulerCore core{
             fixture.database,
             fixture.registry,
+            fixture.cron,
+            fixture.generator,
             fixture.time,
             executor,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
@@ -1189,6 +1626,8 @@ TEST_CASE("Scheduler core rejects completion invoked synchronously from start",
     SchedulerCore core{
         fixture.database,
         fixture.registry,
+        fixture.cron,
+        fixture.generator,
         fixture.time,
         executor,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
@@ -1214,6 +1653,8 @@ TEST_CASE("Scheduler core rolls completion writes back and stops later dispatch 
     SchedulerCore core{
         fixture.database,
         fixture.registry,
+        fixture.cron,
+        fixture.generator,
         fixture.time,
         fixture.executor,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
