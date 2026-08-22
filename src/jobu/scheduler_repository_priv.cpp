@@ -2,9 +2,11 @@
 
 #include "attempt_repository_priv.hpp"
 #include "domain_storage_priv.hpp"
+#include "job_repository_priv.hpp"
 #include "query.hpp"
 #include "queue_repository_priv.hpp"
 #include "retry_policy_priv.hpp"
+#include "run_repository_priv.hpp"
 #include "value.hpp"
 
 #include <cstdint>
@@ -21,7 +23,9 @@ namespace {
 template <typename T>
 using RepositoryResult = jb::core::Result<T, jb::core::Error>;
 
-constexpr std::size_t kMaximumSchedulerPageRows = 1000U;
+constexpr std::size_t kMaximumSchedulerPageRows    = 1000U;
+// JobRevision is unsigned publicly, but schema version 1 stores revisions in a positive signed 64-bit INTEGER.
+constexpr JobRevision kMaximumPersistedJobRevision = static_cast<JobRevision>(std::numeric_limits<std::int64_t>::max());
 
 auto repository_error(jb::core::ErrorCategory category, std::string_view code, std::string_view message)
     -> jb::core::Error
@@ -45,6 +49,13 @@ auto attempt_number_exhausted() -> jb::core::Error
     return repository_error(jb::core::ErrorCategory::ResourceExhausted,
                             "jobu.attempt.number_exhausted",
                             "The run cannot allocate another attempt number");
+}
+
+auto job_revision_exhausted() -> jb::core::Error
+{
+    return repository_error(jb::core::ErrorCategory::ResourceExhausted,
+                            "jobu.job.revision_exhausted",
+                            "Job revision cannot be incremented");
 }
 
 auto invariant(std::string_view reason, jb::core::Error const* cause = nullptr) -> jb::core::Error
@@ -1068,6 +1079,76 @@ auto SchedulerRepository::set_run_terminal(jb::core::Uuid const&  run_id,
         return RepositoryResult<void>::failure(std::move(executed).error());
     }
     return expect_one_affected(query, "terminal_run_affected_rows");
+}
+
+auto SchedulerRepository::complete_drained_suspensions(jb::core::Uuid const&  queue_id,
+                                                       jb::core::Uuid const&  job_id,
+                                                       jb::core::UtcTimePoint updated_at)
+    -> jb::core::Result<void, jb::core::Error>
+{
+    QueueRepository queues{_database, _attributes};
+    auto            queue = queues.find_by_id(queue_id, true);
+    if (!queue) {
+        return RepositoryResult<void>::failure(std::move(queue).error());
+    }
+    if (!queue->has_value()) {
+        return RepositoryResult<void>::failure(invariant("missing_drain_queue"));
+    }
+    if (queue->value().state == QueueState::Suspending) {
+        RunRepository runs{_database, _attributes};
+        auto          running = runs.count_running_for_queue(queue_id);
+        if (!running) {
+            return RepositoryResult<void>::failure(std::move(running).error());
+        }
+        if (*running == 0) {
+            auto transitioned = queues.set_state(queue_id, QueueState::Suspending, QueueState::Suspended, updated_at);
+            if (!transitioned) {
+                return RepositoryResult<void>::failure(std::move(transitioned).error());
+            }
+            if (!*transitioned) {
+                return RepositoryResult<void>::failure(invariant("drained_queue_state_changed"));
+            }
+        }
+    }
+
+    JobRepository jobs{_database, _attributes};
+    auto          job = jobs.find_by_id(job_id, true);
+    if (!job) {
+        return RepositoryResult<void>::failure(std::move(job).error());
+    }
+    if (!job->has_value()) {
+        return RepositoryResult<void>::failure(invariant("missing_drain_job"));
+    }
+    if (job->value().queue_id != queue_id) {
+        return RepositoryResult<void>::failure(invariant("drain_job_queue_mismatch"));
+    }
+    if (job->value().state == JobState::Suspending) {
+        RunRepository runs{_database, _attributes};
+        auto          running = runs.count_running_for_job(job_id);
+        if (!running) {
+            return RepositoryResult<void>::failure(std::move(running).error());
+        }
+        if (*running == 0) {
+            if (job->value().revision >= kMaximumPersistedJobRevision) {
+                return RepositoryResult<void>::failure(job_revision_exhausted());
+            }
+            auto const expected_revision = job->value().revision;
+            auto const next_revision     = expected_revision + 1;
+            auto       transitioned      = jobs.set_state(job_id,
+                                                          JobState::Suspending,
+                                                          JobState::Suspended,
+                                                          expected_revision,
+                                                          next_revision,
+                                                          updated_at);
+            if (!transitioned) {
+                return RepositoryResult<void>::failure(std::move(transitioned).error());
+            }
+            if (!*transitioned) {
+                return RepositoryResult<void>::failure(invariant("drained_job_state_changed"));
+            }
+        }
+    }
+    return RepositoryResult<void>::success();
 }
 
 auto SchedulerRepository::has_any_running_state() -> jb::core::Result<bool, jb::core::Error>
