@@ -5,6 +5,7 @@
 #include "attribute_registry.hpp"
 #include "database.hpp"
 #include "domain_storage_priv.hpp"
+#include "management.hpp"
 #include "query.hpp"
 #include "run_repository_priv.hpp"
 #include "sqlite/sqlite_driver.hpp"
@@ -22,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -356,29 +358,6 @@ auto starts_for(FakeAttemptExecutor const& executor, Uuid const& queue_id, JobTy
         [&](AttemptStartRequest const& request) { return request.queue_id == queue_id && request.type == type; }));
 }
 
-void update_queue_state(Database& database, Uuid const& queue_id, QueueState state)
-{
-    Query query{database};
-    REQUIRE(query.prepare("UPDATE jobu_queues SET state = :state WHERE id = :id"));
-    REQUIRE(query.bind_value(":state", make_text(storage_text(state))));
-    REQUIRE(query.bind_value(":id", uuid_to_storage(queue_id)));
-    REQUIRE(query.exec());
-}
-
-void update_queue_scheduling(Database&     database,
-                             Uuid const&   queue_id,
-                             std::uint32_t weight,
-                             std::uint32_t concurrency_limit)
-{
-    Query query{database};
-    REQUIRE(query.prepare(
-        "UPDATE jobu_queues SET weight = :weight, concurrency_limit = :concurrency_limit WHERE id = :id"));
-    REQUIRE(query.bind_value(":weight", static_cast<std::int64_t>(weight)));
-    REQUIRE(query.bind_value(":concurrency_limit", static_cast<std::int64_t>(concurrency_limit)));
-    REQUIRE(query.bind_value(":id", uuid_to_storage(queue_id)));
-    REQUIRE(query.exec());
-}
-
 void check_cli_ratio(std::uint32_t first_weight,
                      std::uint32_t second_weight,
                      std::uint32_t dispatches,
@@ -643,11 +622,12 @@ TEST_CASE("Scheduler core resets idle credit and applies dynamic weights", "[job
         fixture.executor,
         {.cli_concurrency = 7, .http_concurrency = 1, .candidate_batch_size = 3}
     };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
 
     REQUIRE(core.process_cycle());
     REQUIRE(fixture.executor.start_requests().size() == 1U);
 
-    update_queue_scheduling(fixture.database, second_queue, 2, 8);
+    REQUIRE(service.update_queue({.queue = second_queue, .weight = 2, .concurrency_limit = 8}));
     insert_scheduled_range(fixture, first_queue, 11, 5, JobType::Cli);
     insert_scheduled_range(fixture, second_queue, 60, 5, JobType::Cli);
     REQUIRE(core.process_cycle());
@@ -745,13 +725,18 @@ TEST_CASE("Scheduler core reconciles suspension and resume by queue UUID", "[job
         fixture.executor,
         {.cli_concurrency = 3, .http_concurrency = 1, .candidate_batch_size = 2}
     };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
 
     REQUIRE(core.process_cycle());
-    update_queue_state(fixture.database, first_queue, QueueState::Suspended);
+    auto suspended = service.suspend_queue(first_queue);
+    REQUIRE(suspended);
+    CHECK(suspended->state == QueueState::Suspending);
     insert_scheduled(fixture, first_queue, 11, JobType::Cli);
     insert_scheduled(fixture, second_queue, 20, JobType::Cli);
     REQUIRE(core.process_cycle());
-    update_queue_state(fixture.database, first_queue, QueueState::Active);
+    auto resumed = service.resume_queue(first_queue);
+    REQUIRE(resumed);
+    CHECK(resumed->state == QueueState::Active);
     insert_scheduled(fixture, second_queue, 21, JobType::Cli);
     REQUIRE(core.process_cycle());
 
@@ -779,13 +764,14 @@ TEST_CASE("Scheduler core observes dynamic queue concurrency", "[jobu][scheduler
         fixture.executor,
         {.cli_concurrency = 4, .http_concurrency = 1, .candidate_batch_size = 2}
     };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
 
     REQUIRE(core.process_cycle());
-    update_queue_scheduling(fixture.database, first_queue, 1, 1);
+    REQUIRE(service.update_queue({.queue = first_queue, .weight = 1, .concurrency_limit = 1}));
     insert_scheduled(fixture, first_queue, 11, JobType::Cli);
     insert_scheduled(fixture, second_queue, 20, JobType::Cli);
     REQUIRE(core.process_cycle());
-    update_queue_scheduling(fixture.database, first_queue, 1, 2);
+    REQUIRE(service.update_queue({.queue = first_queue, .weight = 1, .concurrency_limit = 2}));
     insert_scheduled(fixture, second_queue, 21, JobType::Cli);
     REQUIRE(core.process_cycle());
 
@@ -794,6 +780,172 @@ TEST_CASE("Scheduler core observes dynamic queue concurrency", "[jobu][scheduler
     CHECK(fixture.executor.start_requests()[1].queue_id == second_queue);
     CHECK(fixture.executor.start_requests()[2].queue_id == first_queue);
     CHECK(fixture.executor.start_requests()[3].queue_id == second_queue);
+}
+
+TEST_CASE("Scheduler core completes service-requested suspension drains",
+          "[jobu][scheduler][core][suspension][management][sqlite]")
+{
+    SECTION("a recurring job drains before its successor becomes eligible after resume")
+    {
+        auto const  schedule     = CronSchedule{.expression = "*/5 * * * *", .timezone = "UTC"};
+        auto const  queue_id     = id(1);
+        auto const  job_id       = id(2);
+        auto const  run_id       = id(3);
+        auto const  successor_id = id(4);
+        CoreFixture fixture{{successor_id}};
+        insert_queue(fixture.database, queue_id, 1);
+        insert_job(fixture.database, job_id, queue_id, JobType::Cli, JobState::Active, schedule);
+        insert_run(fixture.database, default_run(fixture, run_id, job_id, queue_id, JobType::Cli));
+        fixture.cron.set_occurrences(schedule, {at(200), at(300)});
+        fixture.executor.set_available(JobType::Cli, true);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+        };
+        ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+
+        REQUIRE(core.process_cycle());
+        REQUIRE(fixture.executor.pending_keys().size() == 1U);
+        auto const key = fixture.executor.pending_keys().front();
+        fixture.time.set_utc(at(130));
+        auto draining = service.suspend_job(job_id);
+        REQUIRE(draining);
+        CHECK(draining->state == JobState::Suspending);
+        CHECK(draining->revision == 2);
+
+        fixture.time.set_utc(at(150));
+        REQUIRE(fixture.executor.complete(key, success(key)));
+        auto suspended = service.get_job(job_id);
+        REQUIRE(suspended);
+        CHECK(suspended->state == JobState::Suspended);
+        CHECK(suspended->revision == 3);
+        CHECK(suspended->updated_at == at(150));
+        auto successor = fixture.runs.find_schedule_owned(job_id);
+        REQUIRE(successor);
+        REQUIRE(successor->has_value());
+        CHECK(successor->value().id == successor_id);
+        CHECK(successor->value().job_revision == 2);
+        CHECK(successor->value().planned_at == at(200));
+
+        fixture.time.set_utc(at(250));
+        REQUIRE(core.process_cycle());
+        CHECK(fixture.executor.start_requests().size() == 1U);
+        auto resumed = service.resume_job(job_id);
+        REQUIRE(resumed);
+        CHECK(resumed->state == JobState::Active);
+        CHECK(resumed->revision == 4);
+        REQUIRE(core.process_cycle());
+        REQUIRE(fixture.executor.start_requests().size() == 2U);
+        CHECK(fixture.executor.start_requests().back().key.run_id == successor_id);
+    }
+
+    SECTION("a queue drain gates pending work until resume")
+    {
+        CoreFixture fixture;
+        auto const  queue_id = id(10);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_scheduled(fixture, queue_id, 11, JobType::Cli);
+        insert_scheduled(fixture, queue_id, 12, JobType::Cli);
+        fixture.executor.set_available(JobType::Cli, true);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
+        };
+        ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+
+        REQUIRE(core.process_cycle());
+        auto const key = fixture.executor.pending_keys().front();
+        fixture.time.set_utc(at(130));
+        auto draining = service.suspend_queue(queue_id);
+        REQUIRE(draining);
+        CHECK(draining->state == QueueState::Suspending);
+
+        fixture.time.set_utc(at(140));
+        REQUIRE(fixture.executor.complete(key, success(key)));
+        auto suspended = service.get_queue(queue_id);
+        REQUIRE(suspended);
+        CHECK(suspended->state == QueueState::Suspended);
+        CHECK(suspended->updated_at == at(140));
+        REQUIRE(core.process_cycle());
+        CHECK(fixture.executor.start_requests().size() == 1U);
+
+        fixture.time.set_utc(at(150));
+        auto resumed = service.resume_queue(queue_id);
+        REQUIRE(resumed);
+        CHECK(resumed->state == QueueState::Active);
+        REQUIRE(core.process_cycle());
+        REQUIRE(fixture.executor.start_requests().size() == 2U);
+        CHECK(fixture.executor.start_requests().back().key.run_id == id(12));
+    }
+
+    SECTION("remaining running work delays its queue while each job drains independently")
+    {
+        CoreFixture fixture;
+        auto const  queue_id   = id(20);
+        auto const  first_run  = id(21);
+        auto const  second_run = id(22);
+        auto const  first_job  = id(121);
+        auto const  second_job = id(122);
+        insert_queue(fixture.database, queue_id, 2);
+        insert_scheduled(fixture, queue_id, 21, JobType::Cli);
+        insert_scheduled(fixture, queue_id, 22, JobType::Cli);
+        fixture.executor.set_available(JobType::Cli, true);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 2, .http_concurrency = 1, .candidate_batch_size = 2}
+        };
+        ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+
+        REQUIRE(core.process_cycle());
+        auto const keys = fixture.executor.pending_keys();
+        REQUIRE(keys.size() == 2U);
+        auto const first  = std::ranges::find_if(keys, [&](AttemptKey const& key) { return key.run_id == first_run; });
+        auto const second = std::ranges::find_if(keys, [&](AttemptKey const& key) { return key.run_id == second_run; });
+        REQUIRE(first != keys.end());
+        REQUIRE(second != keys.end());
+        auto const first_key  = *first;
+        auto const second_key = *second;
+        fixture.time.set_utc(at(130));
+        REQUIRE(service.suspend_job(first_job));
+        REQUIRE(service.suspend_queue(queue_id));
+
+        fixture.time.set_utc(at(140));
+        REQUIRE(fixture.executor.complete(first_key, success(first_key)));
+        auto first_suspended = service.get_job(first_job);
+        REQUIRE(first_suspended);
+        CHECK(first_suspended->state == JobState::Suspended);
+        CHECK(first_suspended->revision == 3);
+        auto queue_draining = service.get_queue(queue_id);
+        REQUIRE(queue_draining);
+        CHECK(queue_draining->state == QueueState::Suspending);
+
+        REQUIRE(service.suspend_job(second_job));
+        fixture.time.set_utc(at(150));
+        REQUIRE(fixture.executor.complete(second_key, success(second_key)));
+        auto second_suspended = service.get_job(second_job);
+        REQUIRE(second_suspended);
+        CHECK(second_suspended->state == JobState::Suspended);
+        CHECK(second_suspended->revision == 3);
+        auto queue_suspended = service.get_queue(queue_id);
+        REQUIRE(queue_suspended);
+        CHECK(queue_suspended->state == QueueState::Suspended);
+        CHECK(queue_suspended->updated_at == at(150));
+    }
 }
 
 TEST_CASE("Single-queue scheduler core enforces global and combined queue limits", "[jobu][scheduler][core][sqlite]")
@@ -1486,6 +1638,78 @@ TEST_CASE("Scheduler core accounts for blocking and rescheduled retry waits",
     }
 }
 
+TEST_CASE("Scheduler core releases and reacquires blocking retry occupancy across job suspension",
+          "[jobu][scheduler][core][completion][retry][capacity][suspension][management][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  queue_id     = id(1);
+    auto const  retry_job_id = id(110);
+    insert_queue(fixture.database, queue_id, 1);
+    auto const retry_attributes =
+        attribute_document(fixture.registry, "blocking", 3, std::chrono::duration_cast<Duration>(100us));
+    insert_scheduled(fixture, queue_id, 10, JobType::Cli, 10, 100, 100, retry_attributes);
+    insert_scheduled(fixture, queue_id, 11, JobType::Cli, 5);
+    insert_scheduled(fixture, queue_id, 12, JobType::Cli);
+    fixture.executor.set_available(JobType::Cli, true);
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        fixture.time,
+        fixture.executor,
+        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+
+    REQUIRE(core.process_cycle());
+    auto const first_key = fixture.executor.pending_keys().front();
+    CHECK(first_key.run_id == id(10));
+    fixture.time.set_utc(at(130));
+    auto draining = service.suspend_job(retry_job_id);
+    REQUIRE(draining);
+    CHECK(draining->state == JobState::Suspending);
+
+    fixture.time.set_utc(at(200));
+    REQUIRE(fixture.executor.complete(first_key, failure(first_key, FailureDisposition::Retryable)));
+    auto suspended = service.get_job(retry_job_id);
+    REQUIRE(suspended);
+    CHECK(suspended->state == JobState::Suspended);
+    auto retry_wait = fixture.runs.find_by_id(first_key.run_id);
+    REQUIRE(retry_wait);
+    REQUIRE(retry_wait->has_value());
+    CHECK(retry_wait->value().state == RunState::RetryWait);
+    CHECK(retry_wait->value().runnable_at == at(300));
+
+    fixture.time.set_utc(at(250));
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const second_key = fixture.executor.pending_keys().front();
+    CHECK(second_key.run_id == id(11));
+    fixture.time.set_utc(at(251));
+    REQUIRE(fixture.executor.complete(second_key, success(second_key)));
+
+    fixture.time.set_utc(at(260));
+    auto resumed = service.resume_job(retry_job_id);
+    REQUIRE(resumed);
+    CHECK(resumed->state == JobState::Active);
+    REQUIRE(core.process_cycle());
+    CHECK(fixture.executor.start_requests().size() == 2U);
+
+    fixture.time.set_utc(at(300));
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const retry_key = fixture.executor.pending_keys().front();
+    CHECK(retry_key.run_id == first_key.run_id);
+    CHECK(retry_key.attempt_number == 2U);
+    fixture.time.set_utc(at(301));
+    REQUIRE(fixture.executor.complete(retry_key, success(retry_key)));
+
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    CHECK(fixture.executor.pending_keys().front().run_id == id(12));
+}
+
 TEST_CASE("Scheduler core completes executor start errors through the normal terminal path",
           "[jobu][scheduler][core][completion][start-error][sqlite]")
 {
@@ -1682,6 +1906,89 @@ TEST_CASE("Scheduler core rolls completion writes back and stops later dispatch 
     auto failed = core.process_cycle();
     REQUIRE_FALSE(failed);
     CHECK(fixture.executor.start_requests().size() == 1U);
+}
+
+TEST_CASE("Scheduler core rolls suspension-drain failures back and fails closed",
+          "[jobu][scheduler][core][completion][suspension][rollback][management][sqlite]")
+{
+    enum class FailureKind : std::uint8_t {
+        Persistence,
+        RevisionExhaustion,
+    };
+
+    auto const verify_failure = [](FailureKind kind) {
+        CoreFixture fixture;
+        auto const  queue_id = id(1);
+        auto const  job_id   = id(110);
+        auto const  run_id   = id(10);
+        insert_queue(fixture.database, queue_id, 2);
+        insert_scheduled(fixture, queue_id, 10, JobType::Cli);
+        fixture.executor.set_available(JobType::Cli, true);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
+        };
+        ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+
+        REQUIRE(core.process_cycle());
+        auto const key = fixture.executor.pending_keys().front();
+        insert_scheduled(fixture, queue_id, 11, JobType::Cli);
+        fixture.time.set_utc(at(130));
+        auto draining = service.suspend_job(job_id);
+        REQUIRE(draining);
+        CHECK(draining->state == JobState::Suspending);
+        CHECK(draining->revision == 2);
+
+        if (kind == FailureKind::Persistence) {
+            Query trigger{fixture.database};
+            REQUIRE(trigger.exec("CREATE TRIGGER fail_scheduler_job_drain BEFORE UPDATE OF state ON jobu_jobs "
+                                 "WHEN OLD.state = 'suspending' AND NEW.state = 'suspended' "
+                                 "BEGIN SELECT RAISE(ABORT, 'injected scheduler drain failure'); END"));
+        }
+        else {
+            Query revision{fixture.database};
+            REQUIRE(revision.prepare("UPDATE jobu_jobs SET revision = :revision WHERE id = :id"));
+            REQUIRE(revision.bind_value(":revision", std::numeric_limits<std::int64_t>::max()));
+            REQUIRE(revision.bind_value(":id", uuid_to_storage(job_id)));
+            REQUIRE(revision.exec());
+            REQUIRE(revision.num_rows_affected() == 1);
+        }
+
+        fixture.time.set_utc(at(200));
+        REQUIRE(fixture.executor.complete(key, success(key)));
+        auto attempt = fixture.attempts.find(run_id, key.attempt_number);
+        REQUIRE(attempt);
+        REQUIRE(attempt->has_value());
+        CHECK(attempt->value().state == AttemptState::Running);
+        auto run = fixture.runs.find_by_id(run_id);
+        REQUIRE(run);
+        REQUIRE(run->has_value());
+        CHECK(run->value().state == RunState::Running);
+        auto still_draining = service.get_job(job_id);
+        REQUIRE(still_draining);
+        CHECK(still_draining->state == JobState::Suspending);
+
+        auto failed = core.process_cycle();
+        REQUIRE_FALSE(failed);
+        if (kind == FailureKind::RevisionExhaustion) {
+            CHECK(failed.error().code == "jobu.job.revision_exhausted");
+        }
+        CHECK(fixture.executor.start_requests().size() == 1U);
+    };
+
+    SECTION("persistence error")
+    {
+        verify_failure(FailureKind::Persistence);
+    }
+    SECTION("job revision exhaustion")
+    {
+        verify_failure(FailureKind::RevisionExhaustion);
+    }
 }
 
 TEST_CASE("Single-queue scheduler core rejects zero limits and batch size", "[jobu][scheduler][core][sqlite]")

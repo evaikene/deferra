@@ -114,6 +114,10 @@ public:
                                         RunState               state,
                                         jb::core::UtcTimePoint completed_at,
                                         std::string_view       result_json) -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto complete_drained_suspensions(jb::core::Uuid const&  queue_id,
+                                                    jb::core::Uuid const&  job_id,
+                                                    jb::core::UtcTimePoint updated_at)
+        -> jb::core::Result<void, jb::core::Error>;
     [[nodiscard]] auto has_any_running_state() -> jb::core::Result<bool, jb::core::Error>;
 
 private:

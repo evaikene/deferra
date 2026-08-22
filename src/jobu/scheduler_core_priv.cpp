@@ -484,6 +484,11 @@ auto process_completion(jb::db::Database&                        database,
         }
     }
 
+    auto drained = repository.complete_drained_suspensions(context->run.queue_id, context->run.job_id, completed_at);
+    if (!drained) {
+        return CoreResult<CompletionEffect>::failure(std::move(drained).error());
+    }
+
     auto committed = guard.commit();
     if (!committed) {
         return CoreResult<CompletionEffect>::failure(std::move(committed).error());
