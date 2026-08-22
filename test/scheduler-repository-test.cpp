@@ -377,6 +377,15 @@ TEST_CASE("Scheduler repository reconstructs global and combined queue capacity"
     CHECK(rows[4].usage == CapacityUsage{});
     CHECK(rows[5].usage == CapacityUsage{});
     CHECK(rows[6].usage == CapacityUsage{.cli_running = 0, .http_running = 0, .queue_slots = 1});
+    CHECK_FALSE(rows[0].blocking_retry);
+    CHECK_FALSE(rows[1].blocking_retry);
+    REQUIRE(rows[2].blocking_retry);
+    CHECK(rows[2].blocking_retry->run_id == id(22));
+    CHECK_FALSE(rows[3].blocking_retry);
+    CHECK_FALSE(rows[4].blocking_retry);
+    CHECK_FALSE(rows[5].blocking_retry);
+    REQUIRE(rows[6].blocking_retry);
+    CHECK(rows[6].blocking_retry->run_id == id(26));
 }
 
 TEST_CASE("Manual blocking retries retain capacity while bypassing job suspension",
@@ -419,6 +428,10 @@ TEST_CASE("Manual blocking retries retain capacity while bypassing job suspensio
     CHECK((*rows)[1].usage.queue_slots == 1U);
     CHECK((*rows)[2].usage.queue_slots == 1U);
     CHECK((*rows)[3].usage.queue_slots == 0U);
+    CHECK((*rows)[0].blocking_retry.has_value());
+    CHECK((*rows)[1].blocking_retry.has_value());
+    CHECK((*rows)[2].blocking_retry.has_value());
+    CHECK_FALSE((*rows)[3].blocking_retry);
 }
 
 TEST_CASE("Scheduler repository reconstructs and validates manual barriers", "[jobu][scheduler][repository][sqlite]")

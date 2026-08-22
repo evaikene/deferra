@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 namespace jb::db {
@@ -34,10 +35,22 @@ struct CapacityUsage {
     auto operator==(CapacityUsage const&) const -> bool = default;
 };
 
+struct BlockingRetryCandidate {
+    jb::core::Uuid         run_id;
+    jb::core::Uuid         queue_id;
+    JobType                type{JobType::Cli};
+    std::int32_t           priority{0};
+    jb::core::UtcTimePoint runnable_at;
+    jb::core::UtcTimePoint planned_at;
+
+    auto operator==(BlockingRetryCandidate const&) const -> bool = default;
+};
+
 struct CapacityRow {
-    jb::core::Uuid run_id;
-    jb::core::Uuid queue_id;
-    CapacityUsage  usage;
+    jb::core::Uuid                        run_id;
+    jb::core::Uuid                        queue_id;
+    CapacityUsage                         usage;
+    std::optional<BlockingRetryCandidate> blocking_retry;
 
     auto operator==(CapacityRow const&) const -> bool = default;
 };
@@ -62,6 +75,12 @@ struct DispatchContext {
     AttemptNumber next_attempt{1};
 };
 
+struct CompletionContext {
+    JobRun     run;
+    JobState   job_state{JobState::Active};
+    QueueState queue_state{QueueState::Active};
+};
+
 class SchedulerRepository final {
 public:
     SchedulerRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept;
@@ -82,6 +101,19 @@ public:
     [[nodiscard]] auto
     mark_dispatch_running(jb::core::Uuid const& run_id, RunState expected_state, jb::core::UtcTimePoint started_at)
         -> jb::core::Result<bool, jb::core::Error>;
+    [[nodiscard]] auto find_completion_context(jb::core::Uuid const& run_id, AttemptNumber attempt_number)
+        -> jb::core::Result<CompletionContext, jb::core::Error>;
+    [[nodiscard]] auto complete_attempt(jb::core::Uuid const&  run_id,
+                                        AttemptNumber          attempt_number,
+                                        jb::core::UtcTimePoint completed_at,
+                                        AttemptOutcome         outcome,
+                                        std::string_view       result_json) -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto set_run_retry_wait(jb::core::Uuid const& run_id, jb::core::UtcTimePoint runnable_at)
+        -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto set_run_terminal(jb::core::Uuid const&  run_id,
+                                        RunState               state,
+                                        jb::core::UtcTimePoint completed_at,
+                                        std::string_view       result_json) -> jb::core::Result<void, jb::core::Error>;
     [[nodiscard]] auto has_any_running_state() -> jb::core::Result<bool, jb::core::Error>;
 
 private:
