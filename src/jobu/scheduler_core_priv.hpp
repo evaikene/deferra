@@ -21,6 +21,7 @@ namespace jb::jobu {
 
 class AttemptExecutor;
 class AttributeRegistry;
+class CronEngine;
 
 namespace detail {
 
@@ -34,6 +35,8 @@ class SchedulerCore final {
 public:
     SchedulerCore(jb::db::Database&        database,
                   AttributeRegistry const& attributes,
+                  CronEngine const&        cron,
+                  jb::core::UuidGenerator& uuid_generator,
                   jb::core::TimeSource&    time_source,
                   AttemptExecutor&         executor,
                   SchedulerCoreOptions     options = {}) noexcept;
@@ -43,6 +46,8 @@ public:
 private:
     jb::db::Database&                       _database;
     AttributeRegistry const&                _attributes;
+    CronEngine const&                       _cron;
+    jb::core::UuidGenerator&                _uuid_generator;
     jb::core::TimeSource&                   _time_source;
     AttemptExecutor&                        _executor;
     SchedulerCoreOptions                    _options;

@@ -1,8 +1,11 @@
 #include "scheduler_core_priv.hpp"
 
 #include "attempt_executor.hpp"
+#include "cron.hpp"
+#include "job_repository_priv.hpp"
 #include "json.hpp"
 #include "retry_policy_priv.hpp"
+#include "run_repository_priv.hpp"
 #include "scheduler_dispatch_priv.hpp"
 #include "scheduler_repository_priv.hpp"
 #include "time_source.hpp"
@@ -18,6 +21,7 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace jb::jobu::detail {
@@ -97,6 +101,90 @@ auto invalid_completion(std::string reason) -> jb::core::Error
                               "Attempt executor completion violates its contract");
     error.detail = "reason=" + std::move(reason);
     return error;
+}
+
+auto recurrence_invariant(std::string reason, jb::core::Error const* cause = nullptr) -> jb::core::Error
+{
+    auto error   = core_error(jb::core::ErrorCategory::Internal,
+                              "jobu.storage.invariant",
+                              "Persisted recurring scheduler state is inconsistent");
+    error.detail = "reason=" + std::move(reason);
+    if (cause != nullptr) {
+        error.detail += ";cause=" + cause->code;
+    }
+    return error;
+}
+
+auto insert_recurring_successor(jb::db::Database&        database,
+                                AttributeRegistry const& attributes,
+                                CronEngine const&        cron,
+                                jb::core::UuidGenerator& uuid_generator,
+                                JobRun const&            completed_run,
+                                jb::core::UtcTimePoint   terminal_at) -> CoreResult<void>
+{
+    if (!completed_run.schedule_owned) {
+        return CoreResult<void>::success();
+    }
+    if (completed_run.origin != RunOrigin::Scheduled) {
+        return CoreResult<void>::failure(recurrence_invariant("schedule_owned_origin"));
+    }
+
+    JobRepository jobs{database, attributes};
+    auto          found = jobs.find_by_id(completed_run.job_id, true);
+    if (!found) {
+        if (found.error().code.starts_with("db.")) {
+            return CoreResult<void>::failure(std::move(found).error());
+        }
+        return CoreResult<void>::failure(recurrence_invariant("invalid_live_definition", &found.error()));
+    }
+    if (!found->has_value()) {
+        return CoreResult<void>::failure(recurrence_invariant("missing_live_definition"));
+    }
+    auto definition = std::move(**found);
+    if (definition.state == JobState::Deleted || std::holds_alternative<OnceSchedule>(definition.schedule)) {
+        return CoreResult<void>::success();
+    }
+
+    auto const* schedule = std::get_if<CronSchedule>(&definition.schedule);
+    if (schedule == nullptr) {
+        return CoreResult<void>::failure(recurrence_invariant("invalid_live_schedule"));
+    }
+    auto valid = cron.validate(*schedule);
+    if (!valid) {
+        return CoreResult<void>::failure(std::move(valid).error());
+    }
+    auto const lower_bound = std::max(terminal_at, completed_run.planned_at);
+    auto       next        = cron.next_after(*schedule, lower_bound);
+    if (!next) {
+        return CoreResult<void>::failure(std::move(next).error());
+    }
+    if (*next <= lower_bound) {
+        return CoreResult<void>::failure(recurrence_invariant("non_future_successor"));
+    }
+    auto run_id = uuid_generator.generate();
+    if (!run_id) {
+        return CoreResult<void>::failure(std::move(run_id).error());
+    }
+
+    RunRepository runs{database, attributes};
+    return runs.insert_schedule_owned(JobRun{
+        .id             = *run_id,
+        .job_id         = definition.id,
+        .job_revision   = definition.revision,
+        .queue_id       = definition.queue_id,
+        .origin         = RunOrigin::Scheduled,
+        .schedule_owned = true,
+        .planned_at     = *next,
+        .runnable_at    = *next,
+        .started_at     = std::nullopt,
+        .completed_at   = std::nullopt,
+        .type           = definition.type,
+        .priority       = definition.priority,
+        .attributes     = std::move(definition.attributes),
+        .payload        = std::move(definition.payload),
+        .state          = RunState::Scheduled,
+        .result         = std::nullopt,
+    });
 }
 
 auto checked_add(std::uint64_t& value, std::uint32_t increment) -> CoreResult<void>
@@ -315,6 +403,8 @@ auto terminal_run_state(AttemptOutcome outcome) -> CoreResult<RunState>
 
 auto process_completion(jb::db::Database&                        database,
                         AttributeRegistry const&                 attributes,
+                        CronEngine const&                        cron,
+                        jb::core::UuidGenerator&                 uuid_generator,
                         jb::core::TimeSource&                    time_source,
                         std::map<jb::core::Uuid, std::uint64_t>& active_attempts,
                         jb::core::Uuid const&                    expected_run_id,
@@ -386,6 +476,11 @@ auto process_completion(jb::db::Database&                        database,
         auto run_completed = repository.set_run_terminal(completion.key.run_id, *terminal, completed_at, *serialized);
         if (!run_completed) {
             return CoreResult<CompletionEffect>::failure(std::move(run_completed).error());
+        }
+        auto successor =
+            insert_recurring_successor(database, attributes, cron, uuid_generator, context->run, completed_at);
+        if (!successor) {
+            return CoreResult<CompletionEffect>::failure(std::move(successor).error());
         }
     }
 
@@ -643,11 +738,15 @@ auto dispatch_visit(jb::db::Database&                        database,
 
 SchedulerCore::SchedulerCore(jb::db::Database&        database,
                              AttributeRegistry const& attributes,
+                             CronEngine const&        cron,
+                             jb::core::UuidGenerator& uuid_generator,
                              jb::core::TimeSource&    time_source,
                              AttemptExecutor&         executor,
                              SchedulerCoreOptions     options) noexcept
     : _database{database}
     , _attributes{attributes}
+    , _cron{cron}
+    , _uuid_generator{uuid_generator}
     , _time_source{time_source}
     , _executor{executor}
     , _options{options}
@@ -681,8 +780,14 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
     auto completion_processor =
         CompletionProcessor{[this](jb::core::Uuid const&    expected_run_id,
                                    AttemptCompletion const& completion) -> CoreResult<CompletionEffect> {
-            auto completed =
-                process_completion(_database, _attributes, _time_source, _active_attempts, expected_run_id, completion);
+            auto completed = process_completion(_database,
+                                                _attributes,
+                                                _cron,
+                                                _uuid_generator,
+                                                _time_source,
+                                                _active_attempts,
+                                                expected_run_id,
+                                                completion);
             if (!completed && !_failure) {
                 _failure = completed.error();
             }
