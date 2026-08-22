@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 
 namespace jb::core {
 class TimeSource;
@@ -48,6 +49,8 @@ private:
     std::map<jb::core::Uuid, std::uint32_t> _queue_weights;
     std::map<jb::core::Uuid, std::int64_t>  _cli_credits;
     std::map<jb::core::Uuid, std::int64_t>  _http_credits;
+    std::map<jb::core::Uuid, std::uint64_t> _active_attempts;
+    std::optional<jb::core::Error>          _failure;
     bool                                    _cli_first{true};
 };
 

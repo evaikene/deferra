@@ -1,5 +1,6 @@
 #include "scheduler_repository_priv.hpp"
 
+#include "attempt_repository_priv.hpp"
 #include "domain_storage_priv.hpp"
 #include "query.hpp"
 #include "queue_repository_priv.hpp"
@@ -434,6 +435,14 @@ auto queue_has_dispatch_capacity(jb::db::Database&        database,
     return RepositoryResult<bool>::success(true);
 }
 
+auto expect_one_affected(jb::db::Query const& query, std::string_view reason) -> RepositoryResult<void>
+{
+    if (query.num_rows_affected() != 1) {
+        return RepositoryResult<void>::failure(invariant(reason));
+    }
+    return RepositoryResult<void>::success();
+}
+
 } // anonymous namespace
 
 SchedulerRepository::SchedulerRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept
@@ -552,7 +561,23 @@ auto SchedulerRepository::list_capacity_rows(std::size_t limit, std::optional<jb
         if (!usage) {
             return RepositoryResult<std::vector<CapacityRow>>::failure(std::move(usage).error());
         }
-        rows.push_back({.run_id = decoded->run.id, .queue_id = decoded->run.queue_id, .usage = *usage});
+        auto blocking_retry = std::optional<BlockingRetryCandidate>{};
+        if (decoded->run.state == RunState::RetryWait && usage->queue_slots == 1) {
+            blocking_retry = BlockingRetryCandidate{
+                .run_id      = decoded->run.id,
+                .queue_id    = decoded->run.queue_id,
+                .type        = decoded->run.type,
+                .priority    = decoded->run.priority,
+                .runnable_at = decoded->run.runnable_at,
+                .planned_at  = decoded->run.planned_at,
+            };
+        }
+        rows.push_back({
+            .run_id         = decoded->run.id,
+            .queue_id       = decoded->run.queue_id,
+            .usage          = *usage,
+            .blocking_retry = blocking_retry,
+        });
     }
     return RepositoryResult<std::vector<CapacityRow>>::success(std::move(rows));
 }
@@ -881,6 +906,167 @@ auto SchedulerRepository::mark_dispatch_running(jb::core::Uuid const&  run_id,
         return RepositoryResult<bool>::failure(invariant("invalid_dispatch_affected_rows"));
     }
     return RepositoryResult<bool>::success(affected == 1);
+}
+
+auto SchedulerRepository::find_completion_context(jb::core::Uuid const& run_id, AttemptNumber attempt_number)
+    -> jb::core::Result<CompletionContext, jb::core::Error>
+{
+    auto const sql =
+        "SELECT " + scheduler_run_columns() + std::string{scheduler_run_joins()} + "WHERE jobu_runs.id = :run_id";
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(sql);
+    if (!prepared) {
+        return RepositoryResult<CompletionContext>::failure(std::move(prepared).error());
+    }
+    auto bound = query.bind_value(":run_id", uuid_to_storage(run_id));
+    if (!bound) {
+        return RepositoryResult<CompletionContext>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<CompletionContext>::failure(std::move(executed).error());
+    }
+    auto next = query.next();
+    if (!next) {
+        return RepositoryResult<CompletionContext>::failure(std::move(next).error());
+    }
+    if (!*next) {
+        return RepositoryResult<CompletionContext>::failure(invariant("missing_completion_run"));
+    }
+    auto decoded = decode_scheduler_run(query.record(), _attributes);
+    if (!decoded) {
+        return RepositoryResult<CompletionContext>::failure(std::move(decoded).error());
+    }
+    auto usage = capacity_usage(*decoded);
+    if (!usage || decoded->run.state != RunState::Running) {
+        return RepositoryResult<CompletionContext>::failure(!usage ? std::move(usage).error()
+                                                                   : invariant("completion_run_not_running"));
+    }
+    auto finished = query.finish();
+    if (!finished) {
+        return RepositoryResult<CompletionContext>::failure(std::move(finished).error());
+    }
+
+    AttemptRepository attempts{_database};
+    auto              attempt = attempts.find(run_id, attempt_number);
+    if (!attempt) {
+        return RepositoryResult<CompletionContext>::failure(std::move(attempt).error());
+    }
+    if (!attempt->has_value() || attempt->value().state != AttemptState::Running) {
+        return RepositoryResult<CompletionContext>::failure(invariant("completion_attempt_not_running"));
+    }
+    return RepositoryResult<CompletionContext>::success({
+        .run         = std::move(decoded->run),
+        .job_state   = decoded->job_state,
+        .queue_state = decoded->queue_state,
+    });
+}
+
+auto SchedulerRepository::complete_attempt(jb::core::Uuid const&  run_id,
+                                           AttemptNumber          attempt_number,
+                                           jb::core::UtcTimePoint completed_at,
+                                           AttemptOutcome         outcome,
+                                           std::string_view result_json) -> jb::core::Result<void, jb::core::Error>
+{
+    auto number = attempt_number_to_storage(attempt_number);
+    if (!number) {
+        return RepositoryResult<void>::failure(std::move(number).error());
+    }
+    auto completed = timestamp_to_storage(completed_at);
+    if (!completed) {
+        return RepositoryResult<void>::failure(std::move(completed).error());
+    }
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(
+        "UPDATE jobu_attempts SET completed_at_us = :completed_at_us, state = 'completed', outcome = :outcome, "
+        "result_json = :result_json WHERE run_id = :run_id AND attempt_number = :attempt_number "
+        "AND state = 'running' AND started_at_us IS NOT NULL AND completed_at_us IS NULL "
+        "AND outcome IS NULL AND result_json IS NULL");
+    if (!prepared) {
+        return RepositoryResult<void>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":completed_at_us", std::move(completed).value()            },
+                              {":outcome",         jb::db::make_text(storage_text(outcome))},
+                              {":result_json",     jb::db::make_text(result_json)          },
+                              {":run_id",          uuid_to_storage(run_id)                 },
+                              {":attempt_number",  std::move(number).value()               },
+    });
+    if (!bound) {
+        return RepositoryResult<void>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<void>::failure(std::move(executed).error());
+    }
+    return expect_one_affected(query, "completion_attempt_affected_rows");
+}
+
+auto SchedulerRepository::set_run_retry_wait(jb::core::Uuid const& run_id, jb::core::UtcTimePoint runnable_at)
+    -> jb::core::Result<void, jb::core::Error>
+{
+    auto runnable = timestamp_to_storage(runnable_at);
+    if (!runnable) {
+        return RepositoryResult<void>::failure(std::move(runnable).error());
+    }
+    jb::db::Query query{_database};
+    auto prepared = query.prepare("UPDATE jobu_runs SET state = 'retry_wait', runnable_at_us = :runnable_at_us "
+                                  "WHERE id = :run_id AND state = 'running' AND started_at_us IS NOT NULL "
+                                  "AND completed_at_us IS NULL AND result_json IS NULL");
+    if (!prepared) {
+        return RepositoryResult<void>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":runnable_at_us", std::move(runnable).value()},
+                              {":run_id",         uuid_to_storage(run_id)    },
+    });
+    if (!bound) {
+        return RepositoryResult<void>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<void>::failure(std::move(executed).error());
+    }
+    return expect_one_affected(query, "retry_wait_run_affected_rows");
+}
+
+auto SchedulerRepository::set_run_terminal(jb::core::Uuid const&  run_id,
+                                           RunState               state,
+                                           jb::core::UtcTimePoint completed_at,
+                                           std::string_view result_json) -> jb::core::Result<void, jb::core::Error>
+{
+    if (state != RunState::Succeeded && state != RunState::Failed && state != RunState::Cancelled) {
+        return RepositoryResult<void>::failure(invariant("invalid_completion_terminal_state"));
+    }
+    auto completed = timestamp_to_storage(completed_at);
+    if (!completed) {
+        return RepositoryResult<void>::failure(std::move(completed).error());
+    }
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(
+        "UPDATE jobu_runs SET state = :state, completed_at_us = :completed_at_us, result_json = :result_json "
+        "WHERE id = :run_id AND state = 'running' AND started_at_us IS NOT NULL "
+        "AND completed_at_us IS NULL AND result_json IS NULL");
+    if (!prepared) {
+        return RepositoryResult<void>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":state",           jb::db::make_text(storage_text(state))},
+                              {":completed_at_us", std::move(completed).value()          },
+                              {":result_json",     jb::db::make_text(result_json)        },
+                              {":run_id",          uuid_to_storage(run_id)               },
+    });
+    if (!bound) {
+        return RepositoryResult<void>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<void>::failure(std::move(executed).error());
+    }
+    return expect_one_affected(query, "terminal_run_affected_rows");
 }
 
 auto SchedulerRepository::has_any_running_state() -> jb::core::Result<bool, jb::core::Error>
