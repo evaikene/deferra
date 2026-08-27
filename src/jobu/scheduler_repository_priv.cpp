@@ -133,7 +133,7 @@ auto bind_after(jb::db::Query& query, std::optional<jb::core::Uuid> const& after
 
 auto scheduler_run_columns() -> std::string
 {
-    // Owner states and aggregate attempt counts let every scheduler read validate cross-table lifecycle invariants
+    // Owner states and aggregate attempt counts let every scheduler validate cross-table lifecycle invariants
     // before using a run for selection, capacity accounting, cancellation, or completion.
     return std::string{job_run_columns()} +
            ", jobu_jobs.queue_id AS job_queue_id, jobu_jobs.state AS job_state, "
