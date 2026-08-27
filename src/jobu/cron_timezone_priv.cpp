@@ -253,6 +253,8 @@ auto abbreviation_is_terminated(std::string_view abbreviations, std::uint8_t ind
 auto parse_section(ByteReader& reader, TzifCounts const& counts, std::size_t time_width, char version)
     -> std::optional<ParsedSection>
 {
+    // Bound the complete encoded section before allocating any vectors whose
+    // sizes originate in the untrusted TZif header.
     auto const encoded_size = section_size(counts, time_width);
     if (!encoded_size || *encoded_size > reader.remaining()) {
         return std::nullopt;
@@ -486,6 +488,8 @@ public:
     auto date_rule() -> std::optional<PosixDateRule>
     {
         PosixDateRule rule;
+        // POSIX defines three calendars: M is an nth weekday, J omits leap day,
+        // and a bare zero-based day includes it. Without /time, 02:00 remains.
         if (consume('M')) {
             auto const month = unsigned_number(1, 12);
             if (!month || !consume('.')) {
@@ -759,6 +763,8 @@ auto append_future_transitions(PosixFutureRule const&         rule,
         return true;
     }
 
+    // Emit and globally order both boundaries for neighboring years so seasons
+    // and signed transition times can cross a calendar-year boundary.
     for (auto current_year = first_year; current_year <= last_year; ++current_year) {
         auto const start = transition_utc_seconds(current_year, rule.daylight->start, rule.standard_utc_offset_seconds);
         auto const end   = transition_utc_seconds(current_year, rule.daylight->end, rule.daylight->utc_offset_seconds);
@@ -869,6 +875,8 @@ auto candidate_offsets(TimezoneData const& data) -> std::vector<std::int32_t>
 auto exact_utc_mappings(TimezoneData const& data, TimezoneLocalTimePoint local) -> MappingCandidatesResult
 {
     MappingCandidates mappings;
+    // Try every known offset and retain only inverses whose UTC interval makes
+    // that offset active; an overlap therefore yields both exact UTC mappings.
     for (auto const offset : candidate_offsets(data)) {
         auto const shifted = shift_time_point(local, -static_cast<std::int64_t>(offset));
         if (!shifted) {
@@ -1016,6 +1024,8 @@ auto parse_timezone_data(std::string_view bytes) -> jb::core::Result<TimezoneDat
         return TimezoneResult::failure(invalid_timezone_data("32-bit section"));
     }
 
+    // Version 1 makes this sole 32-bit section authoritative. Later versions
+    // retain it for compatibility and supply the authoritative 64-bit section.
     if (first_header.version == '\0') {
         if (reader.remaining() != 0) {
             return TimezoneResult::failure(invalid_timezone_data("trailing v1 data"));
@@ -1080,6 +1090,8 @@ auto load_timezone_data(std::string_view timezone, std::span<std::filesystem::pa
     }
 
     std::optional<std::filesystem::path> resolved;
+    // Resolve symlinks in both root and candidate before comparing path
+    // components, so a selected file cannot escape an approved timezone root.
     for (auto const& root : roots) {
         std::error_code error;
         auto const      canonical_root = std::filesystem::canonical(root, error);
@@ -1155,6 +1167,8 @@ auto timezone_utc_time(TimezoneData const& data, TimezoneLocalTimePoint local)
         return Result::failure(std::move(mappings).error());
     }
     if (!mappings->values.empty()) {
+        // Candidates are UTC-sorted, so an overlap resolves to its earliest
+        // exact instant as required by the cron scheduling policy.
         return Result::success(mappings->values.front());
     }
 
@@ -1167,6 +1181,8 @@ auto timezone_utc_time(TimezoneData const& data, TimezoneLocalTimePoint local)
                                                          : invalid_timezone_data("local mapping"));
     }
 
+    // Advance a nonexistent wall time by the exact offset increase, preserving
+    // that scheduled occurrence instead of discarding it for the next local match.
     auto const shifted_local = shift_time_point(local, **shift);
     if (!shifted_local) {
         return Result::failure(occurrence_out_of_range());

@@ -242,6 +242,8 @@ auto parse_weekday_value(std::string_view value) -> std::optional<WeekdayValue>
     if (!parsed || *parsed > 7) {
         return std::nullopt;
     }
+    // Preserve the written numeric convention while normalizing both forms of
+    // Sunday so the complete field can reject mixed 0/7 usage.
     return WeekdayValue{
         .value         = *parsed == 7 ? 0U : *parsed,
         .numeric_zero  = *parsed == 0,
@@ -269,6 +271,8 @@ auto parse_weekday_member(std::string_view member, std::bitset<7>& bits, bool& u
         return false;
     }
     if (base == "*") {
+        // A weekday step needs an explicit range start to anchor its cyclic
+        // sequence; choosing one implicitly for a wildcard would be ambiguous.
         if (slash != std::string_view::npos) {
             return false;
         }
@@ -301,6 +305,8 @@ auto parse_weekday_member(std::string_view member, std::bitset<7>& bits, bool& u
     record_sunday_convention(*first, uses_zero, uses_seven);
     record_sunday_convention(*last, uses_zero, uses_seven);
 
+    // Expand forward modulo seven, anchoring the step at the range's written
+    // first value even when the range wraps through Sunday.
     auto value = first->value;
     for (unsigned offset = 0; offset < 7; ++offset) {
         if (offset % *step == 0) {
@@ -386,6 +392,8 @@ auto parse_cron_expression(std::string_view expression) -> jb::core::Result<Cron
         return CronResult::failure(invalid_expression());
     }
 
+    // Expand aliases first so shorthand follows the same five-field parsing
+    // and validation path as an explicit expression.
     expression        = expanded_alias(trim_field_separators(expression));
     auto const fields = split_fields(expression);
     if (!fields) {
@@ -427,6 +435,8 @@ auto next_local_occurrence(CronExpression const& expression, LocalTimePoint excl
     auto const lower_date = year_month_day{lower_day};
     auto const first_date = year_month_day{first_day};
     auto const first_year = static_cast<int>(first_date.year());
+    // Bound the exhaustive search to the Gregorian calendar's 400-year cycle
+    // so an impossible date/weekday combination terminates deterministically.
     auto const last_year  = static_cast<int>(lower_date.year()) + 399;
     if (!year{last_year}.ok()) {
         return LocalResult::failure(occurrence_out_of_range());
@@ -445,6 +455,8 @@ auto next_local_occurrence(CronExpression const& expression, LocalTimePoint excl
                     continue;
                 }
 
+                // Day-of-month and weekday are conjunctive: a candidate date
+                // must satisfy both fields rather than traditional cron OR semantics.
                 auto const date = year{current_year} / month / day{current_day};
                 auto const dow  = weekday{local_days{date}}.c_encoding();
                 if (!expression.days_of_week.test(dow)) {

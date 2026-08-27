@@ -720,6 +720,8 @@ auto RunRepository::refresh_unstarted_schedule_owned(jb::core::Uuid const&      
     if (!runnable) {
         return RepositoryResult<bool>::failure(std::move(runnable).error());
     }
+    // Only an unclaimed scheduled snapshot may absorb a definition update.
+    // Zero affected rows lets the outer management transaction roll back.
     jb::db::Query query{_database};
     auto          prepared = query.prepare(
         "UPDATE jobu_runs SET job_revision = :job_revision, queue_id = :queue_id, planned_at_us = :planned_at_us, "

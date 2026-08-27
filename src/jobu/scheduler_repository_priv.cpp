@@ -133,6 +133,8 @@ auto bind_after(jb::db::Query& query, std::optional<jb::core::Uuid> const& after
 
 auto scheduler_run_columns() -> std::string
 {
+    // Owner states and aggregate attempt counts let every scheduler validate cross-table lifecycle invariants
+    // before using a run for selection, capacity accounting, cancellation, or completion.
     return std::string{job_run_columns()} +
            ", jobu_jobs.queue_id AS job_queue_id, jobu_jobs.state AS job_state, "
            "jobu_queues.state AS queue_state, "
@@ -237,6 +239,8 @@ auto decode_scheduler_run(jb::db::Record const&    record,
 
 auto candidate_where(std::string_view time_comparison) -> std::string
 {
+    // Scheduled occurrences require active owners. Manual runs survive job suspension but not queue suspension, and a
+    // non-terminal manual run blocks its schedule-owned sibling until the manual run becomes terminal.
     auto sql  = std::string{" WHERE jobu_runs.state IN ('scheduled', 'retry_wait') "
                             "AND jobu_runs.type = :type AND jobu_runs.runnable_at_us "};
     sql      += time_comparison;
@@ -257,6 +261,7 @@ auto validate_candidate(SchedulerRun const&           row,
                         bool                          future,
                         std::optional<jb::core::Uuid> queue_id) -> RepositoryResult<void>
 {
+    // A filtered row that disagrees with its decoded domain state is persisted corruption, not ordinary ineligibility.
     if (queue_id && row.run.queue_id != *queue_id) {
         return RepositoryResult<void>::failure(invariant("candidate_queue_mismatch"));
     }
@@ -298,6 +303,7 @@ auto validate_candidate(SchedulerRun const&           row,
 
 auto capacity_usage(SchedulerRun const& row) -> RepositoryResult<CapacityUsage>
 {
+    // Running attempts occupy global, type, and queue capacity; retry waits may retain only their queue slot.
     auto usage = CapacityUsage{};
     if (row.run.state == RunState::Running) {
         if (row.active_attempts != 1 || row.running_attempts != 1 || row.completed_attempts + 1 != row.total_attempts) {
@@ -321,6 +327,8 @@ auto capacity_usage(SchedulerRun const& row) -> RepositoryResult<CapacityUsage>
     if (!policy) {
         return RepositoryResult<CapacityUsage>::failure(invariant("invalid_retry_policy", &policy.error()));
     }
+    // Blocking occupancy follows current execution gates: manual retries bypass job suspension, but no retry occupies a
+    // suspended queue. Rescheduled retries never retain capacity.
     auto const job_permits_execution = row.job_state == JobState::Active || row.run.origin == RunOrigin::Manual;
     if (policy->mode == RetryMode::Blocking && job_permits_execution && row.queue_state == QueueState::Active) {
         usage.queue_slots = 1;
@@ -373,6 +381,7 @@ auto queue_has_dispatch_capacity(jb::db::Database&        database,
                                  SchedulerRun const&      candidate,
                                  Queue const&             queue) -> RepositoryResult<bool>
 {
+    // A blocking retry already owns its queue slot, so resuming at the configured limit must not require an extra slot.
     auto selected_already_occupies = false;
     if (candidate.run.state == RunState::RetryWait) {
         auto selected_usage = capacity_usage(candidate);
@@ -382,6 +391,8 @@ auto queue_has_dispatch_capacity(jb::db::Database&        database,
         selected_already_occupies = selected_usage->queue_slots == 1;
     }
 
+    // Reconstruct committed occupancy in bounded UUID-keyset pages at dispatch time so an earlier candidate read cannot
+    // overcommit the queue.
     auto                  after_id  = std::optional<jb::core::Uuid>{};
     constexpr std::size_t page_size = kMaximumSchedulerPageRows;
     std::uint64_t         occupied  = 0;
@@ -468,6 +479,7 @@ auto SchedulerRepository::list_runtime_queues(std::size_t limit, std::optional<j
     if (!valid_limit(limit)) {
         return RepositoryResult<std::vector<QueueRuntime>>::failure(invalid_limit());
     }
+    // Reconstruction advances through immutable queue UUIDs, bounding each page without offset drift.
     auto sql = std::string{"SELECT id AS runtime_queue_id, weight AS runtime_queue_weight, "
                            "concurrency_limit AS runtime_queue_concurrency_limit FROM jobu_queues "
                            "WHERE state = 'active'"};
@@ -531,6 +543,8 @@ auto SchedulerRepository::list_capacity_rows(std::size_t limit, std::optional<jb
     if (!valid_limit(limit)) {
         return RepositoryResult<std::vector<CapacityRow>>::failure(invalid_limit());
     }
+    // The run-UUID cursor bounds reconstruction while covering both active attempts and retry waits that may retain a
+    // queue slot; capacity_usage validates and classifies each row after decoding.
     auto sql = "SELECT " + scheduler_run_columns() + std::string{scheduler_run_joins()} +
                "WHERE jobu_runs.state IN ('running', 'retry_wait')";
     add_after_clause(sql, after_run_id);
@@ -600,6 +614,8 @@ auto SchedulerRepository::list_manual_barriers(std::size_t limit, std::optional<
     if (!valid_limit(limit)) {
         return RepositoryResult<std::vector<ManualBarrier>>::failure(invalid_limit());
     }
+    // Scan every non-terminal manual run in bounded UUID pages, not only due candidates, so malformed sibling
+    // relationships fail closed before any schedule-owned occurrence can dispatch.
     auto sql = "SELECT " + scheduler_run_columns() +
                ", (SELECT COUNT(*) FROM jobu_runs AS manual_siblings "
                "WHERE manual_siblings.job_id = jobu_runs.job_id AND manual_siblings.origin = 'manual' "
@@ -673,6 +689,8 @@ auto SchedulerRepository::list_runnable(jb::core::Uuid const&  queue_id,
     if (!now_value) {
         return RepositoryResult<std::vector<DispatchCandidate>>::failure(std::move(now_value).error());
     }
+    // This optimistic read applies lifecycle and manual-barrier gates plus strict domain ordering. Dispatch revalidates
+    // eligibility and capacity before making the external start visible.
     auto sql = "SELECT " + scheduler_run_columns() + std::string{scheduler_run_joins()} + candidate_where("<=") +
                " AND jobu_runs.queue_id = :queue_id "
                "ORDER BY jobu_runs.priority DESC, jobu_runs.runnable_at_us ASC, "
@@ -774,6 +792,8 @@ auto SchedulerRepository::earliest_future_runnable(JobType type, jb::core::UtcTi
 auto SchedulerRepository::find_dispatch_context(jb::core::Uuid const& run_id, jb::core::UtcTimePoint now)
     -> jb::core::Result<std::optional<DispatchContext>, jb::core::Error>
 {
+    // Re-read the selected run and sibling counts at the durable dispatch boundary. A state change is normal
+    // ineligibility, while contradictory sibling cardinality remains a storage invariant violation.
     auto sql = "SELECT " + scheduler_run_columns() +
                ", (SELECT COUNT(*) FROM jobu_runs AS manual_siblings "
                "WHERE manual_siblings.job_id = jobu_runs.job_id AND manual_siblings.origin = 'manual' "
@@ -817,6 +837,8 @@ auto SchedulerRepository::find_dispatch_context(jb::core::Uuid const& run_id, jb
             !manual_count ? std::move(manual_count).error() : std::move(schedule_count).error());
     }
 
+    // One manual run and one schedule-owned sibling form the valid barrier pair. The sibling stays ineligible until the
+    // manual run is terminal; extra siblings indicate corruption rather than a scheduling race.
     if (decoded->run.origin == RunOrigin::Manual) {
         if (decoded->run.schedule_owned || *manual_count != 1 || *schedule_count != 1) {
             return RepositoryResult<std::optional<DispatchContext>>::failure(invariant("manual_barrier_relationship"));
@@ -835,6 +857,7 @@ auto SchedulerRepository::find_dispatch_context(jb::core::Uuid const& run_id, jb
         return RepositoryResult<std::optional<DispatchContext>>::failure(invariant("unsupported_candidate_origin"));
     }
 
+    // Time or owner state can change after selection; return no context so the core can try another candidate.
     if (decoded->run.runnable_at > now || decoded->queue_state != QueueState::Active ||
         (decoded->run.origin == RunOrigin::Scheduled && decoded->job_state != JobState::Active)) {
         return RepositoryResult<std::optional<DispatchContext>>::success(std::nullopt);
@@ -957,6 +980,8 @@ auto SchedulerRepository::find_run_for_cancel(jb::core::Uuid const& run_id)
 auto SchedulerRepository::find_active_attempt(jb::core::Uuid const& run_id)
     -> jb::core::Result<std::optional<AttemptNumber>, jb::core::Error>
 {
+    // Cancellation needs the active attempt number, but duplicate running attempts are an invariant rather than a row
+    // to choose between.
     jb::db::Query query{_database};
     auto          prepared =
         query.prepare("SELECT attempt_number AS active_attempt_number FROM jobu_attempts WHERE run_id = :run_id "
@@ -1057,6 +1082,8 @@ auto SchedulerRepository::mark_dispatch_running(jb::core::Uuid const&  run_id,
     if (!started) {
         return RepositoryResult<bool>::failure(std::move(started).error());
     }
+    // Guard the selected state and untouched terminal fields so revalidation loss becomes zero affected rows.
+    // COALESCE preserves the first start timestamp when a retry attempt begins.
     jb::db::Query query{_database};
     auto          prepared = query.prepare(
         "UPDATE jobu_runs SET state = 'running', started_at_us = COALESCE(started_at_us, :started_at_us) "
@@ -1087,6 +1114,8 @@ auto SchedulerRepository::mark_dispatch_running(jb::core::Uuid const&  run_id,
 auto SchedulerRepository::find_completion_context(jb::core::Uuid const& run_id, AttemptNumber attempt_number)
     -> jb::core::Result<CompletionContext, jb::core::Error>
 {
+    // Completion owns an active correlation, so a missing joined run or invalid running relationship is an invariant,
+    // not a normal not-found result.
     auto const sql =
         "SELECT " + scheduler_run_columns() + std::string{scheduler_run_joins()} + "WHERE jobu_runs.id = :run_id";
     jb::db::Query query{_database};
@@ -1123,6 +1152,8 @@ auto SchedulerRepository::find_completion_context(jb::core::Uuid const& run_id, 
         return RepositoryResult<CompletionContext>::failure(std::move(finished).error());
     }
 
+    // Aggregate validation proves there is exactly one running attempt; resolve the requested number separately to
+    // ensure this completion belongs to it.
     AttemptRepository attempts{_database};
     auto              attempt = attempts.find(run_id, attempt_number);
     if (!attempt) {
@@ -1152,6 +1183,8 @@ auto SchedulerRepository::complete_attempt(jb::core::Uuid const&  run_id,
     if (!completed) {
         return RepositoryResult<void>::failure(std::move(completed).error());
     }
+    // Only an untouched running attempt may complete; stale or duplicate completion fails closed through the affected
+    // row invariant.
     jb::db::Query query{_database};
     auto          prepared = query.prepare(
         "UPDATE jobu_attempts SET completed_at_us = :completed_at_us, state = 'completed', outcome = :outcome, "
@@ -1186,6 +1219,7 @@ auto SchedulerRepository::set_run_retry_wait(jb::core::Uuid const& run_id, jb::c
     if (!runnable) {
         return RepositoryResult<void>::failure(std::move(runnable).error());
     }
+    // Advance only the still-running, non-terminal run paired with the completed attempt.
     jb::db::Query query{_database};
     auto prepared = query.prepare("UPDATE jobu_runs SET state = 'retry_wait', runnable_at_us = :runnable_at_us "
                                   "WHERE id = :run_id AND state = 'running' AND started_at_us IS NOT NULL "
@@ -1220,6 +1254,7 @@ auto SchedulerRepository::set_run_terminal(jb::core::Uuid const&  run_id,
     if (!completed) {
         return RepositoryResult<void>::failure(std::move(completed).error());
     }
+    // Terminal completion uses the same relationship guard, so a changed run cannot be overwritten by stale work.
     jb::db::Query query{_database};
     auto          prepared = query.prepare(
         "UPDATE jobu_runs SET state = :state, completed_at_us = :completed_at_us, result_json = :result_json "
@@ -1250,6 +1285,8 @@ auto SchedulerRepository::complete_drained_suspensions(jb::core::Uuid const&  qu
                                                        jb::core::UtcTimePoint updated_at)
     -> jb::core::Result<void, jb::core::Error>
 {
+    // The completion/cancellation transaction re-reads both owners and advances only suspending states whose running
+    // children have drained, keeping the run, job, and queue transitions atomic.
     QueueRepository queues{_database, _attributes};
     auto            queue = queues.find_by_id(queue_id, true);
     if (!queue) {
@@ -1317,6 +1354,8 @@ auto SchedulerRepository::complete_drained_suspensions(jb::core::Uuid const&  qu
 
 auto SchedulerRepository::has_any_running_state() -> jb::core::Result<bool, jb::core::Error>
 {
+    // Either half of the durable run/attempt relationship requires recovery; an orphaned running row must not look
+    // idle.
     jb::db::Query query{_database};
     auto executed = query.exec("SELECT EXISTS(SELECT 1 FROM jobu_runs WHERE state = 'running') AS running_run_count, "
                                "EXISTS(SELECT 1 FROM jobu_attempts WHERE state = 'running') AS running_attempt_count");

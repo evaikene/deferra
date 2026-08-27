@@ -25,6 +25,8 @@ constexpr std::size_t kMaximumIdempotencyDocumentBytes = std::size_t{1024} * 102
 
 auto invalid_record(std::string_view reason, std::string_view cause = {}) -> jb::core::Error
 {
+    // Idempotency documents may embed attributes and payloads. Report stable
+    // reason and cause codes without copying persisted content into errors.
     auto error = jb::core::Error{
         .category = jb::core::ErrorCategory::Internal,
         .code     = "jobu.idempotency.invalid_record",
@@ -98,6 +100,8 @@ auto parse_document(std::string_view text) -> CodecResult<jb::core::JsonValue>
     if (!parsed) {
         return CodecResult<jb::core::JsonValue>::failure(invalid_record("invalid_json", parsed.error().code));
     }
+    // Replay compares canonical bytes, so semantically equivalent but
+    // noncanonical stored text is corruption rather than an alternate encoding.
     auto canonical = jb::core::serialize_json(*parsed);
     if (!canonical || *canonical != text) {
         return CodecResult<jb::core::JsonValue>::failure(invalid_record("noncanonical_json"));

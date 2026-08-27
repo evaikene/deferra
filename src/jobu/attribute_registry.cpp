@@ -593,6 +593,8 @@ auto materialize_attributes(AttributeRegistry const& registry,
         }
     }
 
+    // Seed built-ins, then apply daemon, queue, and job layers from least to
+    // most specific before validating the completed cross-field policy.
     auto result = AttributeSet{};
     for (auto const& definition : registry.definitions()) {
         if (!definition.scopes.test(AttributeScope::Job)) {

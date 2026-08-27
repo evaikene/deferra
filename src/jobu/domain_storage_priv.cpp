@@ -124,6 +124,8 @@ auto nonnegative_duration_count_to_storage(Rep count) -> StorageResult<jb::db::V
 
 auto json_error(std::string_view field, std::string_view reason) -> jb::core::Error
 {
+    // Persisted JSON may contain payload data; expose only its field and a
+    // stable failure reason, never the stored document itself.
     return storage_error("jobu.storage.invalid_json", "Persisted JSON document is invalid", field, reason);
 }
 
