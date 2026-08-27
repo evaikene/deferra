@@ -1062,7 +1062,10 @@ auto parse_timezone_data(std::string_view bytes) -> jb::core::Result<TimezoneDat
 
 auto load_timezone_data(std::string_view timezone) -> jb::core::Result<TimezoneData, jb::core::Error>
 {
+    // Prefer Darwin's canonical public zoneinfo entry point, then retain the
+    // existing Unix roots so one shared discovery path serves every platform.
     static auto const roots = std::array{
+        std::filesystem::path{"/var/db/timezone/zoneinfo"},
         std::filesystem::path{"/usr/share/zoneinfo"},
         std::filesystem::path{"/usr/share/lib/zoneinfo"},
     };
