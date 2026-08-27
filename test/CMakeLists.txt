@@ -304,6 +304,12 @@ add_executable(${TARGET} net-public-headers-test.cpp)
 target_link_libraries(${TARGET} PRIVATE net)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Generic HTTP client public header must compile as the first include.
+set(TARGET "net-http-client-public-header-test")
+add_executable(${TARGET} net-http-client-public-header-test.cpp)
+target_link_libraries(${TARGET} PRIVATE net)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # JSON codec test
 set(TARGET "json-test")
 add_executable(${TARGET} json-test.cpp)
@@ -474,6 +480,18 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 # TCP socket test
 set(TARGET "tcp-socket-test")
 add_executable(${TARGET} tcp-socket-test.cpp)
+target_link_libraries(${TARGET} PRIVATE net Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# Generic asynchronous HTTP client contract and validation test
+set(TARGET "http-client-contract-test")
+add_executable(${TARGET} http-client-contract-test.cpp)
+target_link_libraries(${TARGET} PRIVATE net Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# Generic bounded HTTP capture primitive test
+set(TARGET "http-capture-buffer-test")
+add_executable(${TARGET} http-capture-buffer-test.cpp)
 target_link_libraries(${TARGET} PRIVATE net Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
