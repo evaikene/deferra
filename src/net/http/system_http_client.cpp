@@ -1,17 +1,24 @@
 #include "system_http_client.hpp"
 
+#include "curl_multi_priv.hpp"
+#include "curl_request_priv.hpp"
 #include "curl_runtime_priv.hpp"
+#include "http_validation_priv.hpp"
 
 #include <curl/curl.h>
 #include <curl/urlapi.h>
 
 #include <fstream>
 #include <ios>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace jb::net::http {
 
@@ -49,6 +56,112 @@ auto runtime_unavailable(std::string_view reason) -> jb::core::Error
         .message  = "The system HTTP runtime does not satisfy the requested configuration",
         .detail   = std::string{reason},
     };
+}
+
+auto unavailable() -> jb::core::Error
+{
+    return {
+        .category = jb::core::ErrorCategory::Unavailable,
+        .code     = "net.http.unavailable",
+        .message  = "The system HTTP transfer engine is unavailable",
+    };
+}
+
+auto invalid_request(std::string_view reason) -> jb::core::Error
+{
+    return {
+        .category = jb::core::ErrorCategory::InvalidArgument,
+        .code     = "net.http.invalid_request",
+        .message  = "HTTP request is invalid",
+        .detail   = std::string{reason},
+    };
+}
+
+auto identifier_exhausted() -> jb::core::Error
+{
+    return {
+        .category = jb::core::ErrorCategory::ResourceExhausted,
+        .code     = "net.http.identifier_exhausted",
+        .message  = "The system HTTP client exhausted its request identifiers",
+    };
+}
+
+auto request_not_found() -> jb::core::Error
+{
+    return {
+        .category = jb::core::ErrorCategory::NotFound,
+        .code     = "net.http.request_not_found",
+        .message  = "The HTTP request is not active",
+    };
+}
+
+auto cancelled() -> jb::net::HttpCompletionResult
+{
+    auto error = jb::core::Error{
+        .category = jb::core::ErrorCategory::Cancelled,
+        .code     = "net.http.cancelled",
+        .message  = "The HTTP request was cancelled",
+    };
+    return jb::net::HttpCompletionResult::failure({
+        .kind  = jb::net::HttpErrorKind::Cancelled,
+        .error = std::move(error),
+    });
+}
+
+auto backend_completion(jb::core::Error const& error) -> jb::net::HttpCompletionResult
+{
+    return jb::net::HttpCompletionResult::failure({
+        .kind  = jb::net::HttpErrorKind::Internal,
+        .error = error,
+    });
+}
+
+auto ascii_starts_with(std::string_view value, std::string_view prefix) noexcept -> bool
+{
+    if (value.size() < prefix.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < prefix.size(); ++index) {
+        auto left  = static_cast<unsigned char>(value[index]);
+        auto right = static_cast<unsigned char>(prefix[index]);
+        if (left >= static_cast<unsigned char>('A') && left <= static_cast<unsigned char>('Z')) {
+            left = static_cast<unsigned char>(left + ('a' - 'A'));
+        }
+        if (right >= static_cast<unsigned char>('A') && right <= static_cast<unsigned char>('Z')) {
+            right = static_cast<unsigned char>(right + ('a' - 'A'));
+        }
+        if (left != right) {
+            return false;
+        }
+    }
+    return true;
+}
+
+auto validate_stage_5_3_subset(jb::net::HttpRequest const& request, SystemHttpClientOptions const& options)
+    -> VoidResult
+{
+    if (request.method != "GET") {
+        return VoidResult::failure(invalid_request("stage_5_3.method_not_supported"));
+    }
+    if (!request.headers.empty()) {
+        return VoidResult::failure(invalid_request("stage_5_3.headers_not_supported"));
+    }
+    if (request.body) {
+        return VoidResult::failure(invalid_request("stage_5_3.body_not_supported"));
+    }
+    if (request.follow_redirects) {
+        return VoidResult::failure(invalid_request("stage_5_3.redirects_not_supported"));
+    }
+    if (!request.verify_tls) {
+        return VoidResult::failure(invalid_request("stage_5_3.unsafe_tls_not_supported"));
+    }
+    if (!ascii_starts_with(request.url, "http://")) {
+        return VoidResult::failure(invalid_request("stage_5_3.https_not_supported"));
+    }
+    if (options.proxy) {
+        return VoidResult::failure(invalid_request("stage_5_3.proxy_not_supported"));
+    }
+    return VoidResult::success();
 }
 
 auto validate_ca_bundle(std::filesystem::path const& path) -> VoidResult
@@ -173,12 +286,240 @@ auto validate_proxy(std::string const& proxy, detail::CurlRuntimeCapabilities co
 } // anonymous namespace
 
 struct SystemHttpClient::Private {
-    explicit Private(SystemHttpClientOptions value)
-        : options{std::move(value)}
-    {}
+    struct CallbackState {
+        Private* owner;
+    };
 
-    // The validated snapshot is retained so future transfer admission never borrows caller-owned configuration.
-    [[maybe_unused]] SystemHttpClientOptions options;
+    explicit Private(SystemHttpClient& owner_value, jb::core::EventLoop& loop_value, SystemHttpClientOptions value)
+        : owner{owner_value}
+        , loop{loop_value}
+        , options{std::move(value)}
+        , callback_state{std::make_shared<CallbackState>(CallbackState{.owner = this})}
+    {
+        auto adapter = detail::CurlMultiAdapter::create(
+            loop,
+            [this](CURL* easy, CURLcode result) -> void { complete(easy, result); },
+            [this](jb::core::Error error) -> void { fail(std::move(error)); });
+        if (!adapter) {
+            initialization_failure = std::move(adapter).error();
+            return;
+        }
+        multi = std::move(adapter).value();
+    }
+
+    ~Private()
+    {
+        callback_state->owner = nullptr;
+        multi.reset();
+        requests.clear();
+    }
+
+    [[nodiscard]] auto start(jb::net::HttpRequest request, jb::net::HttpCompletionHandler completion)
+        -> jb::core::Result<jb::net::HttpRequestId, jb::core::Error>
+    {
+        auto validation = jb::net::detail::validate_http_request(request);
+        if (!validation) {
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(validation).error());
+        }
+        if (!completion) {
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(
+                invalid_request("completion.empty"));
+        }
+        auto subset = validate_stage_5_3_subset(request, options);
+        if (!subset) {
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(subset).error());
+        }
+        if (!is_available()) {
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(unavailable());
+        }
+        if (identifiers_exhausted) {
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(identifier_exhausted());
+        }
+
+        auto const request_id = next_request_id;
+        auto       prepared   = detail::CurlRequest::create(request_id, std::move(request), std::move(completion));
+        if (!prepared) {
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(prepared).error());
+        }
+
+        auto  request_state         = std::move(prepared).value();
+        auto* easy                  = request_state->easy();
+        auto [request_it, inserted] = requests.emplace(request_id, std::move(request_state));
+        if (!inserted) {
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(identifier_exhausted());
+        }
+        try {
+            requests_by_easy.emplace(easy, request_id);
+        }
+        catch (...) {
+            requests.erase(request_it);
+            throw;
+        }
+
+        auto added = multi->add(easy);
+        if (!added) {
+            requests_by_easy.erase(easy);
+            requests.erase(request_it);
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(added).error());
+        }
+        auto queued = multi->queue_initial_drive();
+        if (!queued) {
+            requests_by_easy.erase(easy);
+            requests.erase(request_it);
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(queued).error());
+        }
+
+        request_it->second->mark_accepted();
+        if (next_request_id == std::numeric_limits<jb::net::HttpRequestId>::max()) {
+            identifiers_exhausted = true;
+        }
+        else {
+            ++next_request_id;
+        }
+        return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::success(request_id);
+    }
+
+    [[nodiscard]] auto cancel(jb::net::HttpRequestId request_id) -> VoidResult
+    {
+        auto it = requests.find(request_id);
+        if (it == requests.end() || !it->second->accepted() ||
+            it->second->state() != detail::CurlRequest::State::Running) {
+            return VoidResult::failure(request_not_found());
+        }
+
+        auto* easy    = it->second->easy();
+        auto  removed = multi->remove(easy);
+        if (!removed) {
+            return VoidResult::failure(std::move(removed).error());
+        }
+        requests_by_easy.erase(easy);
+        queue_completion(*it->second, cancelled());
+        return VoidResult::success();
+    }
+
+    [[nodiscard]] auto is_available() const noexcept -> bool
+    {
+        return multi && multi->is_available() && !stored_failure;
+    }
+
+    [[nodiscard]] auto active_request_count() const noexcept -> std::size_t
+    {
+        auto count = std::size_t{0};
+        for (auto const& [id, request] : requests) {
+            (void)id;
+            count += request->accepted() ? 1U : 0U;
+        }
+        return count;
+    }
+
+    void complete(CURL* easy, CURLcode result)
+    {
+        auto const easy_it = requests_by_easy.find(easy);
+        if (easy_it == requests_by_easy.end()) {
+            multi->fail_backend("completion.unknown_request");
+            return;
+        }
+
+        auto request_it = requests.find(easy_it->second);
+        if (request_it == requests.end() || !request_it->second->accepted() ||
+            request_it->second->state() != detail::CurlRequest::State::Running) {
+            multi->fail_backend("completion.invalid_request_state");
+            return;
+        }
+
+        requests_by_easy.erase(easy_it);
+        auto completion = request_it->second->minimal_transfer_result(result);
+        queue_completion(*request_it->second, std::move(completion));
+    }
+
+    void queue_completion(detail::CurlRequest& request, jb::net::HttpCompletionResult result)
+    {
+        request.prepare_completion(std::move(result));
+        auto const request_id = request.id();
+        auto       callback   = callback_state;
+        auto       task       = [callback = std::move(callback), request_id]() -> void {
+            if (callback->owner) {
+                callback->owner->deliver(request_id);
+            }
+        };
+
+        // A completion must remain asynchronous even when EventLoop wakeup has failed. The owner-thread timer is a
+        // safe fallback because post_delayed() queues without invoking the callback inline.
+        if (loop.post(task)) {
+            return;
+        }
+        auto timer = loop.post_delayed(jb::core::Duration::zero(), std::move(task));
+        if (!timer && !stored_failure) {
+            multi->fail_backend("event_loop.completion_queue_failed");
+        }
+    }
+
+    void deliver(jb::net::HttpRequestId request_id)
+    {
+        auto it = requests.find(request_id);
+        if (it == requests.end() || !it->second->accepted() ||
+            it->second->state() != detail::CurlRequest::State::PendingCompletion) {
+            return;
+        }
+
+        auto handler = it->second->take_handler();
+        auto result  = it->second->take_result();
+        requests.erase(it);
+        handler(request_id, std::move(result));
+    }
+
+    void fail(jb::core::Error error)
+    {
+        if (stored_failure) {
+            return;
+        }
+        stored_failure = std::move(error);
+        requests_by_easy.clear();
+
+        std::vector<jb::net::HttpRequestId> active;
+        active.reserve(requests.size());
+        for (auto const& [request_id, request] : requests) {
+            if (request->accepted() && request->state() == detail::CurlRequest::State::Running) {
+                active.push_back(request_id);
+            }
+        }
+        for (auto request_id : active) {
+            queue_completion(*requests.at(request_id), backend_completion(*stored_failure));
+        }
+
+        auto callback = callback_state;
+        auto task     = [callback = std::move(callback)]() -> void {
+            if (callback->owner) {
+                callback->owner->emit_failure();
+            }
+        };
+        if (!loop.post(task)) {
+            static_cast<void>(loop.post_delayed(jb::core::Duration::zero(), std::move(task)));
+        }
+    }
+
+    void emit_failure()
+    {
+        if (failure_emitted || !stored_failure) {
+            return;
+        }
+        failure_emitted = true;
+        owner.emit(owner.failed, *stored_failure);
+    }
+
+    // Retain the validated snapshot so transfer admission never borrows caller-owned configuration.
+    SystemHttpClient&                                                                owner;
+    jb::core::EventLoop&                                                             loop;
+    SystemHttpClientOptions                                                          options;
+    std::shared_ptr<CallbackState>                                                   callback_state;
+    std::unique_ptr<detail::CurlMultiAdapter>                                        multi;
+    std::optional<jb::core::Error>                                                   initialization_failure;
+    std::optional<jb::core::Error>                                                   stored_failure;
+    std::unordered_map<jb::net::HttpRequestId, std::unique_ptr<detail::CurlRequest>> requests;
+    std::unordered_map<CURL*, jb::net::HttpRequestId>                                requests_by_easy;
+    jb::net::HttpRequestId                                                           next_request_id{1};
+    bool                                                                             identifiers_exhausted{false};
+    bool                                                                             failure_emitted{false};
 };
 
 auto SystemHttpClient::create(jb::core::EventLoop& loop, SystemHttpClientOptions options) -> ClientResult
@@ -208,47 +549,45 @@ auto SystemHttpClient::create(jb::core::EventLoop& loop, SystemHttpClientOptions
         }
     }
 
-    return ClientResult::success(std::unique_ptr<SystemHttpClient>{new SystemHttpClient{std::move(options)}});
+    auto client = std::unique_ptr<SystemHttpClient>{
+        new SystemHttpClient{loop, std::move(options)}
+    };
+    if (client->_data->initialization_failure) {
+        return ClientResult::failure(std::move(*client->_data->initialization_failure));
+    }
+    return ClientResult::success(std::move(client));
 }
 
-SystemHttpClient::SystemHttpClient(SystemHttpClientOptions options)
-    : _data{std::make_unique<Private>(std::move(options))}
+SystemHttpClient::SystemHttpClient(jb::core::EventLoop& loop, SystemHttpClientOptions options)
+    : _data{std::make_unique<Private>(*this, loop, std::move(options))}
 {}
 
 SystemHttpClient::~SystemHttpClient() = default;
 
 auto SystemHttpClient::is_available() const noexcept -> bool
 {
-    return false;
+    return _data->is_available();
 }
 
-auto SystemHttpClient::start(jb::net::HttpRequest /*request*/, jb::net::HttpCompletionHandler /*completion*/)
+auto SystemHttpClient::start(jb::net::HttpRequest request, jb::net::HttpCompletionHandler completion)
     -> jb::core::Result<jb::net::HttpRequestId, jb::core::Error>
 {
-    return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure({
-        .category = jb::core::ErrorCategory::Unavailable,
-        .code     = "net.http.unavailable",
-        .message  = "The system HTTP transfer engine is unavailable",
-    });
+    return _data->start(std::move(request), std::move(completion));
 }
 
-auto SystemHttpClient::cancel(jb::net::HttpRequestId /*request_id*/) -> jb::core::Result<void, jb::core::Error>
+auto SystemHttpClient::cancel(jb::net::HttpRequestId request_id) -> jb::core::Result<void, jb::core::Error>
 {
-    return jb::core::Result<void, jb::core::Error>::failure({
-        .category = jb::core::ErrorCategory::NotFound,
-        .code     = "net.http.request_not_found",
-        .message  = "The HTTP request is not active",
-    });
+    return _data->cancel(request_id);
 }
 
 auto SystemHttpClient::active_request_count() const noexcept -> std::size_t
 {
-    return 0;
+    return _data->active_request_count();
 }
 
 auto SystemHttpClient::failure() const -> std::optional<jb::core::Error>
 {
-    return std::nullopt;
+    return _data->stored_failure;
 }
 
 } // namespace jb::net::http

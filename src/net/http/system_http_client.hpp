@@ -26,7 +26,8 @@ struct SystemHttpClientOptions {
     /** Optional explicit HTTP or HTTPS proxy URL.
      *
      * The URL must be absolute and contain no user information. An HTTPS proxy requires corresponding runtime
-     * support. Absence means proxy environment variables will not be inherited when transfers are implemented.
+     * support. Stage 5.3 validates this value but rejects proxy-backed starts until Stage 5.7. Absence makes admitted
+     * transfers explicitly ignore proxy environment variables.
      */
     std::optional<std::string>           proxy;
     /** Inclusive hard limit for parsed response-header bytes, independent of user-visible raw capture.
@@ -43,13 +44,21 @@ struct SystemHttpClientOptions {
  * that loop's owner thread. The returned unique pointer is the sole owner; the client is a root Object without a
  * parent.
  *
- * Stage 5.2 constructs only the checked backend boundary. Until the EventLoop transfer engine is installed, the
- * client reports unavailable and rejects every request without retaining its completion handler.
+ * The client owns one libcurl multi handle driven by the borrowed EventLoop. Stage 5.3 admits only HTTP GET requests
+ * with empty headers, no body, redirects disabled, ordinary TLS verification, and no configured proxy. The handler of
+ * every accepted request runs exactly once later on the owner thread, after active transfer state is retired. A
+ * rejected start retains no handler. Later stages complete the remaining method, data, response, error, redirect,
+ * TLS, and proxy behavior.
+ *
+ * A fatal multi, watch, timer, or deferred-drive error permanently makes the client unavailable, records a safe
+ * `net.http.backend_failed` error, completes accepted work once with HttpErrorKind::Internal, and emits failed once.
+ * Destruction removes backend work and suppresses retained handlers; callback consumers must still be destroyed first.
  *
  * @par Stable factory error codes
  * `net.http.event_loop_unavailable` reports an invalid or non-current loop; `net.http.invalid_options` reports a
  * rejected option using only a safe reason token; `net.http.runtime_unavailable` reports missing libcurl
  * initialization, version, protocol, TLS, compression, asynchronous-DNS, or requested HTTPS-proxy support.
+ * `net.http.backend_failed` reports failure to construct the multi adapter.
  */
 class SystemHttpClient final : public jb::net::HttpClient {
 public:
@@ -62,7 +71,7 @@ public:
     [[nodiscard]] static auto create(jb::core::EventLoop& loop, SystemHttpClientOptions options = {})
         -> jb::core::Result<std::unique_ptr<SystemHttpClient>, jb::core::Error>;
 
-    /** Releases the retained option snapshot. No transfer callbacks exist in this stage. */
+    /** Removes all multi handles, watches, and timers and suppresses retained request handlers. */
     ~SystemHttpClient() override;
 
     /// Prevents copying a thread-affine client with fixed backend ownership.
@@ -75,36 +84,39 @@ public:
     auto operator=(SystemHttpClient&&) -> SystemHttpClient&      = delete;
 
     /** Reports transfer admission availability.
-     * @return False until the EventLoop transfer engine is installed.
+     * @return True while the multi adapter accepts the Stage 5.3 request subset; false after shared failure.
      */
     [[nodiscard]] auto is_available() const noexcept -> bool override;
 
-    /** Rejects a request without retaining either owning argument.
-     * @param request Owning request discarded when this construction-only backend rejects admission.
-     * @param completion Owning handler discarded without invocation.
-     * @return `net.http.unavailable`; no request identifier or callback obligation is created.
+    /** Validates and starts one minimal asynchronous GET.
+     * @param request Owning request transferred into the client only on success.
+     * @param completion Owning nonempty handler invoked exactly once later after success.
+     * @return A positive request identifier, or a safe `net.http.*` error. Failure retains no handler and creates no
+     * callback obligation. Stage 5.3 rejects non-GET methods, headers, bodies, redirects, HTTPS, unsafe TLS, and
+     * configured-proxy transfers until their later implementation stages.
      */
     [[nodiscard]] auto start(jb::net::HttpRequest request, jb::net::HttpCompletionHandler completion)
         -> jb::core::Result<jb::net::HttpRequestId, jb::core::Error> override;
 
-    /** Rejects cancellation because this stage cannot have active requests.
-     * @param request_id Request identifier that cannot name active work in this stage.
-     * @return `net.http.request_not_found`.
+    /** Requests asynchronous cancellation of an active transfer.
+     * @param request_id Positive identifier returned by start().
+     * @return Success when cancellation is accepted, or `net.http.request_not_found` when the identifier is inactive.
+     * A successful call delivers one later HttpErrorKind::Cancelled completion and repeated cancellation is rejected.
      */
     [[nodiscard]] auto cancel(jb::net::HttpRequestId request_id) -> jb::core::Result<void, jb::core::Error> override;
 
     /** Returns the number of retained completion obligations.
-     * @return Zero because request admission is disabled.
+     * @return Accepted requests whose handlers have not yet run, including queued cancellation/failure completions.
      */
     [[nodiscard]] auto active_request_count() const noexcept -> std::size_t override;
 
-    /** Returns a shared backend failure recorded after construction.
-     * @return No value because this stage has no transfer engine that can enter a failed state.
+    /** Returns the first shared backend failure recorded after construction.
+     * @return Safe `net.http.backend_failed` value after availability is lost, or no value beforehand.
      */
     [[nodiscard]] auto failure() const -> std::optional<jb::core::Error> override;
 
 private:
-    explicit SystemHttpClient(SystemHttpClientOptions options);
+    explicit SystemHttpClient(jb::core::EventLoop& loop, SystemHttpClientOptions options);
 
     struct Private;
     std::unique_ptr<Private> _data;

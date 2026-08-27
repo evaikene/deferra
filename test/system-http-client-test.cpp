@@ -1,22 +1,56 @@
 #include "http/system_http_client.hpp"
 
 #include "application.hpp"
+#include "event_loop_types.hpp"
+#include "http/curl_multi_priv.hpp"
+#include "http/curl_multi_test_priv.hpp"
 #include "http/curl_runtime_priv.hpp"
+#include "support/fake_event_loop_backend.hpp"
+#include "support/http_test_server.hpp"
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace {
 
 using jb::net::http::SystemHttpClient;
 using jb::net::http::SystemHttpClientOptions;
+using namespace std::chrono_literals;
+
+auto minimal_request(std::string url) -> jb::net::HttpRequest
+{
+    return {.url = std::move(url)};
+}
+
+template <typename Predicate>
+auto process_until(jb::core::Application& app, Predicate&& predicate, std::chrono::milliseconds timeout = 5s) -> bool
+{
+    auto const deadline = std::chrono::steady_clock::now() + timeout;
+    while (!predicate() && std::chrono::steady_clock::now() < deadline) {
+        if (app.process_events(jb::core::EventFlag::All, 25) == jb::core::ProcessEventsResult::Failed) {
+            return false;
+        }
+    }
+    return predicate();
+}
+
+void drain_fake_loop(jb::core::EventLoop& loop)
+{
+    for (auto index = 0; index < 8; ++index) {
+        REQUIRE(loop.process_events(jb::core::EventFlag::All, 0) != jb::core::ProcessEventsResult::Failed);
+    }
+}
 
 auto complete_runtime_capabilities() -> jb::net::http::detail::CurlRuntimeCapabilities
 {
@@ -149,7 +183,7 @@ TEST_CASE("system HTTP client validates owning options without leaking their val
     REQUIRE(client);
 }
 
-TEST_CASE("system HTTP runtime preflight creates a construction-only client", "[net][http]")
+TEST_CASE("system HTTP runtime preflight creates a ready minimal client", "[net][http]")
 {
     auto app    = jb::core::Application{0, nullptr};
     auto result = SystemHttpClient::create(*app.event_loop());
@@ -159,7 +193,7 @@ TEST_CASE("system HTTP runtime preflight creates a construction-only client", "[
     REQUIRE(client);
     CHECK(client->parent() == nullptr);
     CHECK(client->event_loop() == app.event_loop());
-    CHECK_FALSE(client->is_available());
+    CHECK(client->is_available());
     CHECK(client->active_request_count() == 0U);
     CHECK_FALSE(client->failure());
 
@@ -169,11 +203,478 @@ TEST_CASE("system HTTP runtime preflight creates a construction-only client", "[
             callback_called = true;
         });
     REQUIRE_FALSE(start);
-    CHECK(start.error().code == "net.http.unavailable");
+    CHECK(start.error().code == "net.http.invalid_request");
     CHECK_FALSE(callback_called);
 
     auto cancellation = client->cancel(1U);
     REQUIRE_FALSE(cancellation);
     CHECK(cancellation.error().code == "net.http.request_not_found");
     CHECK_FALSE(callback_called);
+}
+
+TEST_CASE("system HTTP client rejects semantics outside the Stage 5.3 subset", "[net][http]")
+{
+    auto app    = jb::core::Application{0, nullptr};
+    auto result = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(result);
+    auto client = std::move(result).value();
+
+    auto callback = [](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void {};
+
+    auto request   = minimal_request("http://127.0.0.1:1/");
+    request.method = "POST";
+    auto start     = client->start(std::move(request), callback);
+    REQUIRE_FALSE(start);
+    CHECK(start.error().detail == "stage_5_3.method_not_supported");
+
+    request = minimal_request("http://127.0.0.1:1/");
+    request.headers.push_back({.name = "X-Test", .value = "value"});
+    start = client->start(std::move(request), callback);
+    REQUIRE_FALSE(start);
+    CHECK(start.error().detail == "stage_5_3.headers_not_supported");
+
+    request      = minimal_request("http://127.0.0.1:1/");
+    request.body = jb::core::ByteBuffer{};
+    start        = client->start(std::move(request), callback);
+    REQUIRE_FALSE(start);
+    CHECK(start.error().detail == "stage_5_3.body_not_supported");
+
+    request                  = minimal_request("http://127.0.0.1:1/");
+    request.follow_redirects = true;
+    start                    = client->start(std::move(request), callback);
+    REQUIRE_FALSE(start);
+    CHECK(start.error().detail == "stage_5_3.redirects_not_supported");
+
+    request = minimal_request("https://127.0.0.1:1/");
+    start   = client->start(std::move(request), callback);
+    REQUIRE_FALSE(start);
+    CHECK(start.error().detail == "stage_5_3.https_not_supported");
+
+    request            = minimal_request("http://127.0.0.1:1/");
+    request.verify_tls = false;
+    start              = client->start(std::move(request), callback);
+    REQUIRE_FALSE(start);
+    CHECK(start.error().detail == "stage_5_3.unsafe_tls_not_supported");
+
+    request = minimal_request("http://127.0.0.1:1/");
+    start   = client->start(std::move(request), {});
+    REQUIRE_FALSE(start);
+    CHECK(start.error().detail == "completion.empty");
+
+    CHECK(client->is_available());
+    CHECK(client->active_request_count() == 0U);
+
+    auto proxied = SystemHttpClient::create(*app.event_loop(), SystemHttpClientOptions{.proxy = "http://127.0.0.1:1"});
+    REQUIRE(proxied);
+    start = (*proxied)->start(minimal_request("http://127.0.0.1:1/"), callback);
+    REQUIRE_FALSE(start);
+    CHECK(start.error().detail == "stage_5_3.proxy_not_supported");
+}
+
+TEST_CASE("system HTTP client completes a loopback GET strictly after start", "[net][http]")
+{
+    auto app    = jb::core::Application{0, nullptr};
+    auto server = jb::test::HttpTestServer{};
+    server.release_responses();
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto callback_count = 0;
+    auto inside_start   = true;
+    auto completion     = std::optional<jb::net::HttpCompletionResult>{};
+    auto started        = client->start(minimal_request(server.url()),
+                                        [&](jb::net::HttpRequestId id, jb::net::HttpCompletionResult result) -> void {
+                                     CHECK_FALSE(inside_start);
+                                     CHECK(id == 1U);
+                                     ++callback_count;
+                                     completion = std::move(result);
+                                        });
+    inside_start        = false;
+
+    REQUIRE(started);
+    CHECK(*started == 1U);
+    CHECK(callback_count == 0);
+    CHECK(client->active_request_count() == 1U);
+    REQUIRE(process_until(app, [&]() -> bool { return callback_count == 1; }));
+    REQUIRE(completion);
+    REQUIRE(*completion);
+    CHECK(completion->value().status_code == 200U);
+    CHECK(client->active_request_count() == 0U);
+    CHECK(client->is_available());
+}
+
+TEST_CASE("system HTTP client drives two held GETs concurrently", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto server  = jb::test::HttpTestServer{};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto callback_count = 0;
+    auto completion     = [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+        REQUIRE(result);
+        ++callback_count;
+    };
+    auto first = client->start(minimal_request(server.url("/first")), completion);
+    REQUIRE(first);
+    auto second = client->start(minimal_request(server.url("/second")), completion);
+    REQUIRE(second);
+    CHECK(*second > *first);
+    CHECK(client->active_request_count() == 2U);
+
+    REQUIRE(process_until(app, [&]() -> bool { return server.wait_for_requests(2U, 0ms); }));
+    CHECK(callback_count == 0);
+    CHECK(client->active_request_count() == 2U);
+
+    server.release_responses();
+    REQUIRE(process_until(app, [&]() -> bool { return callback_count == 2; }));
+    CHECK(client->active_request_count() == 0U);
+}
+
+TEST_CASE("system HTTP cancellation is asynchronous and exact once", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto server  = jb::test::HttpTestServer{};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto callback_count = 0;
+    auto completion     = std::optional<jb::net::HttpCompletionResult>{};
+    auto started        = client->start(minimal_request(server.url()),
+                                        [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+                                     ++callback_count;
+                                     completion = std::move(result);
+                                        });
+    REQUIRE(started);
+    REQUIRE(process_until(app, [&]() -> bool { return server.wait_for_requests(1U, 0ms); }));
+
+    auto cancelled_result = client->cancel(*started);
+    REQUIRE(cancelled_result);
+    CHECK(callback_count == 0);
+    auto repeated = client->cancel(*started);
+    REQUIRE_FALSE(repeated);
+    CHECK(repeated.error().code == "net.http.request_not_found");
+
+    REQUIRE(process_until(app, [&]() -> bool { return callback_count == 1; }));
+    REQUIRE(completion);
+    REQUIRE_FALSE(*completion);
+    CHECK(completion->error().kind == jb::net::HttpErrorKind::Cancelled);
+    CHECK(completion->error().error.code == "net.http.cancelled");
+    CHECK(client->active_request_count() == 0U);
+    server.release_responses();
+}
+
+TEST_CASE("system HTTP client suppresses callbacks during destruction", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto server  = jb::test::HttpTestServer{};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto callback_count = 0;
+    auto started =
+        client->start(minimal_request(server.url()),
+                      [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void { ++callback_count; });
+    REQUIRE(started);
+    REQUIRE(process_until(app, [&]() -> bool { return server.wait_for_requests(1U, 0ms); }));
+
+    client.reset();
+    server.release_responses();
+    for (auto index = 0; index < 4; ++index) {
+        REQUIRE(app.process_events(jb::core::EventFlag::All, 0) != jb::core::ProcessEventsResult::Failed);
+    }
+    CHECK(callback_count == 0);
+}
+
+TEST_CASE("system HTTP client rejects the triggering start when initial drive posting fails", "[net][http]")
+{
+    auto fake         = jb::core::priv::make_fake_event_loop();
+    auto current_loop = jb::core::priv::ScopedCurrentEventLoop{fake.loop.get()};
+    auto created      = SystemHttpClient::create(*fake.loop);
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto first_callbacks  = 0;
+    auto second_callbacks = 0;
+    auto failed_count     = 0;
+    client->failed.connect([&](jb::core::Error const&) -> void {
+        CHECK_FALSE(client->is_available());
+        REQUIRE(client->failure());
+        ++failed_count;
+    });
+    auto first = client->start(minimal_request("http://127.0.0.1:1/first"),
+                               [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+                                   REQUIRE_FALSE(result);
+                                   CHECK(result.error().kind == jb::net::HttpErrorKind::Internal);
+                                   ++first_callbacks;
+                               });
+    REQUIRE(first);
+
+    fake.backend->wakeup_result = false;
+    auto second                 = client->start(
+        minimal_request("http://127.0.0.1:1/second"),
+        [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void { ++second_callbacks; });
+    REQUIRE_FALSE(second);
+    CHECK(second.error().code == "net.http.backend_failed");
+    CHECK_FALSE(client->is_available());
+    REQUIRE(client->failure());
+    CHECK(client->active_request_count() == 1U);
+
+    fake.backend->wakeup_result = true;
+    drain_fake_loop(*fake.loop);
+    CHECK(first_callbacks == 1);
+    CHECK(second_callbacks == 0);
+    CHECK(failed_count == 1);
+    CHECK(client->active_request_count() == 0U);
+}
+
+TEST_CASE("system HTTP adapter failures complete accepted requests and fail once", "[net][http]")
+{
+    auto const failure_point = GENERATE(jb::net::http::detail::CurlMultiFailurePoint::TimerRegistration,
+                                        jb::net::http::detail::CurlMultiFailurePoint::SocketAction);
+
+    auto fake         = jb::core::priv::make_fake_event_loop();
+    auto current_loop = jb::core::priv::ScopedCurrentEventLoop{fake.loop.get()};
+    auto created      = SystemHttpClient::create(*fake.loop);
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto callback_count = 0;
+    auto failed_count   = 0;
+    client->failed.connect([&](jb::core::Error const& error) -> void {
+        CHECK(error.code == "net.http.backend_failed");
+        CHECK_FALSE(client->is_available());
+        REQUIRE(client->failure());
+        ++failed_count;
+    });
+    auto completion = [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+        REQUIRE_FALSE(result);
+        CHECK(result.error().kind == jb::net::HttpErrorKind::Internal);
+        CHECK(result.error().error.code == "net.http.backend_failed");
+        ++callback_count;
+    };
+    REQUIRE(client->start(minimal_request("http://127.0.0.1:1/first"), completion));
+    REQUIRE(client->start(minimal_request("http://127.0.0.1:1/second"), completion));
+    CHECK(client->active_request_count() == 2U);
+
+    jb::net::http::detail::fail_next_curl_multi_operation_for_testing(failure_point);
+    drain_fake_loop(*fake.loop);
+
+    CHECK(callback_count == 2);
+    CHECK(failed_count == 1);
+    CHECK(client->active_request_count() == 0U);
+    CHECK_FALSE(client->is_available());
+    REQUIRE(client->failure());
+
+    auto later = client->start(minimal_request("http://127.0.0.1:1/later"), completion);
+    REQUIRE_FALSE(later);
+    CHECK(later.error().code == "net.http.unavailable");
+    drain_fake_loop(*fake.loop);
+    CHECK(callback_count == 2);
+    CHECK(failed_count == 1);
+}
+
+TEST_CASE("system HTTP client fails closed when EventLoop watch registration fails", "[net][http]")
+{
+    auto fake         = jb::core::priv::make_fake_event_loop();
+    auto current_loop = jb::core::priv::ScopedCurrentEventLoop{fake.loop.get()};
+    auto created      = SystemHttpClient::create(*fake.loop);
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto callback_count = 0;
+    auto failed_count   = 0;
+    client->failed.connect([&](jb::core::Error const&) -> void { ++failed_count; });
+    auto started =
+        client->start(minimal_request("http://127.0.0.1:1/"),
+                      [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void { ++callback_count; });
+    REQUIRE(started);
+
+    fake.backend->add_fd_result = false;
+    drain_fake_loop(*fake.loop);
+
+    CHECK_FALSE(client->is_available());
+    REQUIRE(client->failure());
+    CHECK(client->failure()->detail == "event_loop.watch_registration_failed");
+    CHECK(callback_count == 1);
+    CHECK(failed_count == 1);
+}
+
+TEST_CASE("system HTTP client leaves persistent failed-watch callbacks inert", "[net][http]")
+{
+    auto fake         = jb::core::priv::make_fake_event_loop();
+    auto current_loop = jb::core::priv::ScopedCurrentEventLoop{fake.loop.get()};
+    auto created      = SystemHttpClient::create(*fake.loop);
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto callback_count = 0;
+    REQUIRE(
+        client->start(minimal_request("http://127.0.0.1:1/"),
+                      [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void { ++callback_count; }));
+    drain_fake_loop(*fake.loop);
+    REQUIRE(fake.backend->add_fd_calls > 0);
+    auto const watched_fd = fake.backend->last_added_fd;
+
+    fake.backend->remove_fd_result = false;
+    client.reset();
+    fake.backend->ready_events.push_back({.fd = watched_fd, .events = jb::core::FdEvent::Read});
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Watchers, 0) != jb::core::ProcessEventsResult::Failed);
+    CHECK(callback_count == 0);
+}
+
+TEST_CASE("curl multi adapter defers and coalesces socket watch changes", "[net][http]")
+{
+    using jb::net::http::detail::CurlMultiAdapterTestAccess;
+    using jb::net::http::detail::CurlMultiSocketInterest;
+
+    auto fake         = jb::core::priv::make_fake_event_loop();
+    auto current_loop = jb::core::priv::ScopedCurrentEventLoop{fake.loop.get()};
+    REQUIRE(jb::net::http::detail::preflight_curl_runtime());
+
+    auto completion_count = 0;
+    auto failure_count    = 0;
+    auto created          = jb::net::http::detail::CurlMultiAdapter::create(
+        *fake.loop,
+        [&](auto*, auto) -> void { ++completion_count; },
+        [&](jb::core::Error const&) -> void { ++failure_count; });
+    REQUIRE(created);
+    auto adapter = std::move(created).value();
+
+    auto const initial_add_calls    = fake.backend->add_fd_calls;
+    auto const initial_remove_calls = fake.backend->remove_fd_calls;
+    auto const initial_wakeup_calls = fake.backend->wakeup_calls;
+
+    REQUIRE(CurlMultiAdapterTestAccess::record_socket_update(*adapter, 42, CurlMultiSocketInterest::Read));
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    REQUIRE(CurlMultiAdapterTestAccess::record_socket_update(*adapter, 42, CurlMultiSocketInterest::Write));
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+
+    auto state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK(state.watch_count == 0U);
+    CHECK(state.pending_watch_update_count == 1U);
+    CHECK(state.reconcile_queued);
+    CHECK(fake.backend->add_fd_calls == initial_add_calls);
+    CHECK(fake.backend->wakeup_calls == initial_wakeup_calls + 1);
+
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK(state.watch_count == 1U);
+    CHECK(state.pending_watch_update_count == 0U);
+    CHECK_FALSE(state.reconcile_queued);
+    CHECK(fake.backend->add_fd_calls == initial_add_calls + 1);
+    CHECK(fake.backend->last_added_fd == 42);
+    CHECK_FALSE(fake.backend->last_added_events.test(jb::core::FdEvent::Read));
+    CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Write));
+    auto superseded_callback = jb::core::priv::EventLoopTestAccess::fd_callback(*fake.loop, 42);
+    REQUIRE(superseded_callback);
+
+    REQUIRE(CurlMultiAdapterTestAccess::record_socket_update(*adapter, 42, CurlMultiSocketInterest::ReadWrite));
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    CHECK(fake.backend->add_fd_calls == initial_add_calls + 1);
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    CHECK(fake.backend->add_fd_calls == initial_add_calls + 2);
+    CHECK(fake.backend->remove_fd_calls == initial_remove_calls);
+    CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Read));
+    CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Write));
+
+    jb::net::http::detail::fail_next_curl_multi_operation_for_testing(
+        jb::net::http::detail::CurlMultiFailurePoint::SocketAction);
+    superseded_callback(42, jb::core::FdEvent::Read);
+    jb::net::http::detail::fail_next_curl_multi_operation_for_testing(
+        jb::net::http::detail::CurlMultiFailurePoint::None);
+    CHECK(adapter->is_available());
+    CHECK(failure_count == 0);
+
+    REQUIRE(CurlMultiAdapterTestAccess::record_socket_update(*adapter, 42, CurlMultiSocketInterest::Remove));
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK(state.watch_count == 0U);
+    CHECK(fake.backend->remove_fd_calls == initial_remove_calls + 1);
+    CHECK(fake.backend->last_removed_fd == 42);
+    CHECK(completion_count == 0);
+    CHECK(failure_count == 0);
+}
+
+TEST_CASE("curl multi adapter cancels timers and unwatches final socket handles", "[net][http]")
+{
+    using jb::net::http::detail::CurlMultiAdapterTestAccess;
+    using jb::net::http::detail::CurlMultiSocketInterest;
+
+    auto fake         = jb::core::priv::make_fake_event_loop();
+    auto current_loop = jb::core::priv::ScopedCurrentEventLoop{fake.loop.get()};
+    REQUIRE(jb::net::http::detail::preflight_curl_runtime());
+
+    auto completion_count = 0;
+    auto failure_count    = 0;
+    auto created          = jb::net::http::detail::CurlMultiAdapter::create(
+        *fake.loop,
+        [&](auto*, auto) -> void { ++completion_count; },
+        [&](jb::core::Error const&) -> void { ++failure_count; });
+    REQUIRE(created);
+    auto adapter = std::move(created).value();
+
+    CurlMultiAdapterTestAccess::record_timer_update(*adapter, 0L);
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    CHECK(CurlMultiAdapterTestAccess::state(*adapter).timer_update_pending);
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    auto state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK(state.timer_armed);
+    CHECK_FALSE(state.timer_update_pending);
+
+    CurlMultiAdapterTestAccess::record_timer_update(*adapter, 60'000L);
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK_FALSE(state.timer_armed);
+    CHECK(state.timer_update_pending);
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Watchers, 37) != jb::core::ProcessEventsResult::Failed);
+    CHECK(fake.backend->last_timeout_ms == 37);
+
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    CHECK(CurlMultiAdapterTestAccess::state(*adapter).timer_armed);
+    CurlMultiAdapterTestAccess::record_timer_update(*adapter, -1L);
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Watchers, 37) != jb::core::ProcessEventsResult::Failed);
+    CHECK(fake.backend->last_timeout_ms == 37);
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    CHECK_FALSE(CurlMultiAdapterTestAccess::state(*adapter).timer_armed);
+
+    CurlMultiAdapterTestAccess::record_timer_update(*adapter, 0L);
+    REQUIRE(CurlMultiAdapterTestAccess::record_socket_update(*adapter, 43, CurlMultiSocketInterest::Read));
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    state = CurlMultiAdapterTestAccess::state(*adapter);
+    REQUIRE(state.timer_armed);
+    REQUIRE(state.watch_count == 1U);
+    auto const remove_calls = fake.backend->remove_fd_calls;
+
+    CurlMultiAdapterTestAccess::shutdown(*adapter);
+    state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK_FALSE(state.timer_armed);
+    CHECK(state.watch_count == 0U);
+    CHECK(fake.backend->remove_fd_calls == remove_calls + 1);
+    CHECK(fake.backend->last_removed_fd == 43);
+
+    fake.backend->ready_events.push_back({.fd = 43, .events = jb::core::FdEvent::Read});
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Watchers, 37) != jb::core::ProcessEventsResult::Failed);
+    CHECK(fake.backend->last_timeout_ms == 37);
+    CHECK(completion_count == 0);
+    CHECK(failure_count == 0);
+}
+
+TEST_CASE("system HTTP client factory reports multi construction failure without a client", "[net][http]")
+{
+    auto app = jb::core::Application{0, nullptr};
+    jb::net::http::detail::fail_next_curl_multi_operation_for_testing(
+        jb::net::http::detail::CurlMultiFailurePoint::Initialization);
+
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE_FALSE(created);
+    CHECK(created.error().code == "net.http.backend_failed");
+    CHECK(created.error().detail == "multi.initialization_failed");
 }
