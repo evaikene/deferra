@@ -70,7 +70,10 @@ Follow existing naming patterns: snake_case file names such as `event_loop.cpp`,
 
 ## Documentation & Comments
 
-Document public APIs with Doxygen-style comments. For internal code, use comments to explain non-obvious logic, especially around platform-specific behavior, event loop mechanics, and threading. Avoid redundant comments that restate the code; focus on intent and rationale.
+Document public APIs with Doxygen-style comments. In `.cpp` files, document multi-step method/function bodies
+when the implementation is not self-documenting. Focus internal comments on intent, rationale, ordering,
+invariants, and failure behavior. Avoid comments that merely restate the function name or individual statements;
+no body comment is needed when the name and implementation already make the behavior clear.
 
 ## Testing Guidelines
 
@@ -79,3 +82,5 @@ Tests use Catch2 with `Catch2::Catch2WithMain`. Add new tests under `test/` as `
 ## Commit & Pull Request Guidelines
 
 Use a short subject that describes the behavior change; avoid vague subjects except for temporary local work. The subject implicitly includes "This commit changes the software to" prefix. The description explains the rationale, design decisions, and any relevant context.
+
+Do not commit yourself, only suggest a commit message when asked.
