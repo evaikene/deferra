@@ -35,18 +35,19 @@ is not a v1 runtime target.
 
 ## Requirements
 
-The build requires CMake 3.20 or newer, a C++20 compiler, fmt, SQLite,
-nlohmann/json, Catch2 3.x for tests, and Ninja or another CMake-supported build
-tool. The planned HTTP runner will require libcurl, but it is not yet a build
-dependency.
+The build requires CMake 3.20 or newer, a C++20 compiler, fmt, SQLite, libcurl
+7.85 or newer, nlohmann/json, Catch2 3.x for tests, and Ninja or another
+CMake-supported build tool. The private system HTTP backend verifies its linked
+libcurl runtime before construction; real HTTP job execution is not yet
+available.
 
 ### Ubuntu 24.04
 
 ```sh
 sudo apt-get update
 sudo apt-get install --yes --no-install-recommends \
-    catch2 cmake g++ libfmt-dev libsqlite3-dev ninja-build \
-    nlohmann-json3-dev
+    catch2 cmake g++ libcurl4-openssl-dev libfmt-dev libsqlite3-dev \
+    ninja-build nlohmann-json3-dev
 ```
 
 ### Alpine Linux 3.22
@@ -56,7 +57,7 @@ install `sudo` first):
 
 ```sh
 apk add --no-cache \
-    catch2-3 cmake fmt-dev g++ nlohmann-json samurai sqlite-dev tzdata
+    catch2-3 cmake curl-dev fmt-dev g++ nlohmann-json samurai sqlite-dev tzdata
 ```
 
 ### macOS
@@ -66,8 +67,12 @@ Install the Xcode Command Line Tools and
 
 ```sh
 xcode-select --install
-brew install catch2 cmake fmt ninja nlohmann-json sqlite
+brew install catch2 cmake curl fmt ninja nlohmann-json sqlite
 ```
+
+Homebrew's curl formula may be keg-only. If CMake selects the system curl
+instead, configure with `-DCMAKE_PREFIX_PATH="$(brew --prefix curl)"` to select
+the Homebrew installation without hard-coding its architecture-specific path.
 
 ## Build and test
 
