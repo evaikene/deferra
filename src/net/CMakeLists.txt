@@ -4,6 +4,7 @@ message("** Setting up ${TARGET}")
 
 # Public headers exposed to library users
 set(HDRS
+    http_client.hpp
     local_server.hpp
     local_socket.hpp
     tcp_socket.hpp
@@ -11,6 +12,8 @@ set(HDRS
 
 # Private headers not exposed to library users
 set(PRIV_HDRS
+    http_capture_priv.hpp
+    http_validation_priv.hpp
     local_server_priv.hpp
     local_socket_priv.hpp
     tcp_socket_priv.hpp
@@ -18,6 +21,9 @@ set(PRIV_HDRS
 
 # Library source files
 set(SRCS
+    http_capture_priv.cpp
+    http_client.cpp
+    http_validation_priv.cpp
     tcp_socket.cpp
 )
 
