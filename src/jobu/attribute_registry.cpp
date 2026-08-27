@@ -36,9 +36,9 @@ auto invalid_value(std::string message = "JobU attribute value is invalid") -> j
     return attribute_error("jobu.attribute.invalid_value", std::move(message));
 }
 
-auto make_json(auto value) -> jb::rpc::JsonValue
+auto make_json(auto value) -> jb::core::JsonValue
 {
-    jb::rpc::JsonValue result;
+    jb::core::JsonValue result;
     result.data = std::move(value);
     return result;
 }
@@ -143,7 +143,7 @@ auto duration_to_milliseconds(jb::core::Duration value) -> Result<std::int64_t>
     return Result<std::int64_t>::success(converted.count());
 }
 
-auto json_signed_integer(jb::rpc::JsonValue const& value) -> Result<std::int64_t>
+auto json_signed_integer(jb::core::JsonValue const& value) -> Result<std::int64_t>
 {
     if (value.is_int()) {
         return Result<std::int64_t>::success(value.as_int());
@@ -154,7 +154,7 @@ auto json_signed_integer(jb::rpc::JsonValue const& value) -> Result<std::int64_t
     return Result<std::int64_t>::failure(invalid_value("JobU attribute requires a signed 64-bit integer"));
 }
 
-auto milliseconds_to_duration(jb::rpc::JsonValue const& value) -> Result<jb::core::Duration>
+auto milliseconds_to_duration(jb::core::JsonValue const& value) -> Result<jb::core::Duration>
 {
     auto count = json_signed_integer(value);
     if (!count) {
@@ -217,56 +217,56 @@ auto hex_to_bytes(std::string const& text) -> Result<jb::core::ByteBuffer>
     return Result<jb::core::ByteBuffer>::success(std::move(result));
 }
 
-auto natural_value_to_json(AttributeValue const& value, std::size_t depth) -> Result<jb::rpc::JsonValue>
+auto natural_value_to_json(AttributeValue const& value, std::size_t depth) -> Result<jb::core::JsonValue>
 {
     if (auto const* boolean = std::get_if<bool>(&value.data)) {
-        return Result<jb::rpc::JsonValue>::success(make_json(*boolean));
+        return Result<jb::core::JsonValue>::success(make_json(*boolean));
     }
     if (auto const* integer = std::get_if<std::int64_t>(&value.data)) {
-        return Result<jb::rpc::JsonValue>::success(make_json(*integer));
+        return Result<jb::core::JsonValue>::success(make_json(*integer));
     }
     if (auto const* number = std::get_if<double>(&value.data)) {
         if (!std::isfinite(*number)) {
-            return Result<jb::rpc::JsonValue>::failure(invalid_value("JobU number attribute must be finite"));
+            return Result<jb::core::JsonValue>::failure(invalid_value("JobU number attribute must be finite"));
         }
-        return Result<jb::rpc::JsonValue>::success(make_json(*number));
+        return Result<jb::core::JsonValue>::success(make_json(*number));
     }
     if (auto const* text = std::get_if<std::string>(&value.data)) {
-        return Result<jb::rpc::JsonValue>::success(make_json(*text));
+        return Result<jb::core::JsonValue>::success(make_json(*text));
     }
     if (std::holds_alternative<jb::core::Duration>(value.data) ||
         std::holds_alternative<jb::core::ByteBuffer>(value.data)) {
-        return Result<jb::rpc::JsonValue>::failure(
+        return Result<jb::core::JsonValue>::failure(
             invalid_value("Nested JobU durations and bytes have no public JSON element schema"));
     }
     if (depth >= kMaxAttributeDepth) {
-        return Result<jb::rpc::JsonValue>::failure(invalid_value("JobU attribute nesting is too deep"));
+        return Result<jb::core::JsonValue>::failure(invalid_value("JobU attribute nesting is too deep"));
     }
     if (auto const* list = std::get_if<AttributeValue::List>(&value.data)) {
-        auto result = jb::rpc::JsonValue::Array{};
+        auto result = jb::core::JsonValue::Array{};
         result.reserve(list->size());
         for (auto const& entry : *list) {
             auto encoded = natural_value_to_json(entry, depth + 1U);
             if (!encoded) {
-                return Result<jb::rpc::JsonValue>::failure(std::move(encoded).error());
+                return Result<jb::core::JsonValue>::failure(std::move(encoded).error());
             }
             result.push_back(std::move(encoded).value());
         }
-        return Result<jb::rpc::JsonValue>::success(make_json(std::move(result)));
+        return Result<jb::core::JsonValue>::success(make_json(std::move(result)));
     }
 
-    auto result = jb::rpc::JsonValue::Object{};
+    auto result = jb::core::JsonValue::Object{};
     for (auto const& [name, entry] : std::get<AttributeValue::Map>(value.data)) {
         auto encoded = natural_value_to_json(entry, depth + 1U);
         if (!encoded) {
-            return Result<jb::rpc::JsonValue>::failure(std::move(encoded).error());
+            return Result<jb::core::JsonValue>::failure(std::move(encoded).error());
         }
         result.emplace(name, std::move(encoded).value());
     }
-    return Result<jb::rpc::JsonValue>::success(make_json(std::move(result)));
+    return Result<jb::core::JsonValue>::success(make_json(std::move(result)));
 }
 
-auto natural_value_from_json(jb::rpc::JsonValue const& value, std::size_t depth) -> Result<AttributeValue>
+auto natural_value_from_json(jb::core::JsonValue const& value, std::size_t depth) -> Result<AttributeValue>
 {
     if (value.is_bool()) {
         return Result<AttributeValue>::success({.data = value.as_bool()});
@@ -320,22 +320,23 @@ auto natural_value_from_json(jb::rpc::JsonValue const& value, std::size_t depth)
 }
 
 auto definition_value_to_json(AttributeDefinition const& definition, AttributeValue const& value)
-    -> Result<jb::rpc::JsonValue>
+    -> Result<jb::core::JsonValue>
 {
     if (definition.type == AttributeType::Duration) {
         auto milliseconds = duration_to_milliseconds(std::get<jb::core::Duration>(value.data));
         if (!milliseconds) {
-            return Result<jb::rpc::JsonValue>::failure(std::move(milliseconds).error());
+            return Result<jb::core::JsonValue>::failure(std::move(milliseconds).error());
         }
-        return Result<jb::rpc::JsonValue>::success(make_json(*milliseconds));
+        return Result<jb::core::JsonValue>::success(make_json(*milliseconds));
     }
     if (definition.type == AttributeType::Bytes) {
-        return Result<jb::rpc::JsonValue>::success(make_json(bytes_to_hex(std::get<jb::core::ByteBuffer>(value.data))));
+        return Result<jb::core::JsonValue>::success(
+            make_json(bytes_to_hex(std::get<jb::core::ByteBuffer>(value.data))));
     }
     return natural_value_to_json(value, 0);
 }
 
-auto definition_value_from_json(AttributeDefinition const& definition, jb::rpc::JsonValue const& value)
+auto definition_value_from_json(AttributeDefinition const& definition, jb::core::JsonValue const& value)
     -> Result<AttributeValue>
 {
     switch (definition.type) {
@@ -617,39 +618,39 @@ auto materialize_attributes(AttributeRegistry const& registry,
 }
 
 auto attribute_set_to_json(AttributeSet const& values, AttributeRegistry const& registry, AttributeScope scope)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
-    auto object = jb::rpc::JsonValue::Object{};
+    auto object = jb::core::JsonValue::Object{};
     for (auto const& [name, value] : values) {
         auto const* definition = registry.find(name);
         if (definition == nullptr) {
-            return Result<jb::rpc::JsonValue>::failure(
+            return Result<jb::core::JsonValue>::failure(
                 attribute_error("jobu.attribute.unknown", "JobU attribute is not registered"));
         }
         auto validated = registry.validate(name, value, scope);
         if (!validated) {
-            return Result<jb::rpc::JsonValue>::failure(std::move(validated).error());
+            return Result<jb::core::JsonValue>::failure(std::move(validated).error());
         }
         auto encoded = definition_value_to_json(*definition, value);
         if (!encoded) {
-            return Result<jb::rpc::JsonValue>::failure(std::move(encoded).error());
+            return Result<jb::core::JsonValue>::failure(std::move(encoded).error());
         }
         object.emplace(name, std::move(encoded).value());
     }
     auto cross_fields = validate_standard_cross_fields(registry, values);
     if (!cross_fields) {
-        return Result<jb::rpc::JsonValue>::failure(std::move(cross_fields).error());
+        return Result<jb::core::JsonValue>::failure(std::move(cross_fields).error());
     }
 
     auto result     = make_json(std::move(object));
-    auto serialized = jb::rpc::serialize_json(result);
+    auto serialized = jb::core::serialize_json(result);
     if (!serialized) {
-        return Result<jb::rpc::JsonValue>::failure(invalid_value("JobU attribute text is not valid UTF-8"));
+        return Result<jb::core::JsonValue>::failure(invalid_value("JobU attribute text is not valid UTF-8"));
     }
-    return Result<jb::rpc::JsonValue>::success(std::move(result));
+    return Result<jb::core::JsonValue>::success(std::move(result));
 }
 
-auto attribute_set_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry, AttributeScope scope)
+auto attribute_set_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry, AttributeScope scope)
     -> jb::core::Result<AttributeSet, jb::core::Error>
 {
     if (!value.is_object()) {

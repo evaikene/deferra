@@ -77,7 +77,7 @@ struct JobDefinition {
     /// Complete materialized attribute set.
     AttributeSet                          attributes;
     /// Owning runner payload JSON object.
-    jb::rpc::JsonValue                    payload;
+    jb::core::JsonValue                   payload;
     /// Creation time in UTC.
     jb::core::UtcTimePoint                created_at;
     /// Time of the most recent durable mutation in UTC.

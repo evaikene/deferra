@@ -25,7 +25,7 @@ auto register_system_info_method(jb::rpc::Server& server, SystemInfo info) -> bo
 {
     return server.register_method(
         std::string{system_info_method},
-        [info = std::move(info)](jb::rpc::RequestContext const&, std::optional<jb::rpc::JsonValue> const&)
+        [info = std::move(info)](jb::rpc::RequestContext const&, std::optional<jb::core::JsonValue> const&)
             -> jb::rpc::MethodResult { return jb::rpc::MethodResult::success(system_info_to_json(info)); });
 }
 

@@ -133,12 +133,12 @@ auto scheduler_invariant(std::string reason) -> jb::core::Error
     return error;
 }
 
-auto cancellation_result() -> jb::rpc::JsonValue
+auto cancellation_result() -> jb::core::JsonValue
 {
-    auto reason = jb::rpc::JsonValue{};
+    auto reason = jb::core::JsonValue{};
     reason.data = std::string{"cancelled"};
-    auto result = jb::rpc::JsonValue{};
-    result.data = jb::rpc::JsonValue::Object{
+    auto result = jb::core::JsonValue{};
+    result.data = jb::core::JsonValue::Object{
         {"reason", std::move(reason)},
     };
     return result;
@@ -436,7 +436,7 @@ auto validate_completion(AttemptCompletion const& completion) -> CoreResult<std:
     if (!completion.result.is_object()) {
         return CoreResult<std::string>::failure(invalid_completion("result_not_object"));
     }
-    auto serialized = jb::rpc::serialize_json(completion.result);
+    auto serialized = jb::core::serialize_json(completion.result);
     if (!serialized) {
         return CoreResult<std::string>::failure(invalid_completion("result_not_serializable"));
     }
@@ -895,7 +895,7 @@ auto SchedulerCore::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result
     // Re-read pending work under an immediate transaction so cancellation never relies on the earlier classification.
     auto const completed_at = _time_source.utc_now();
     auto       result       = cancellation_result();
-    auto       serialized   = jb::rpc::serialize_json(result);
+    auto       serialized   = jb::core::serialize_json(result);
     if (!serialized) {
         return CancellationResult::failure(std::move(serialized).error());
     }

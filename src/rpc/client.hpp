@@ -25,15 +25,15 @@ namespace jb::rpc {
  */
 struct ClientOptions {
     /// Inbound and outbound framing limits; defaults to 16 KiB of headers and a 1 MiB body.
-    FramingLimits framing;
+    FramingLimits        framing;
     /// Per-response JSON nesting limits; the default permits 64 nested containers.
-    JsonLimits    json;
+    jb::core::JsonLimits json;
     /// Maximum entries accepted in one response batch; defaults to 64, while zero rejects every response batch.
-    std::size_t   max_batch_entries{64};
+    std::size_t          max_batch_entries{64};
     /// Maximum simultaneously pending calls; defaults to 128, while zero rejects every call.
-    std::size_t   max_pending_requests{128};
+    std::size_t          max_pending_requests{128};
     /// Maximum unacknowledged framed-output bytes; defaults to 2 MiB, while zero permits no request or notification.
-    std::size_t   max_queued_output_bytes{std::size_t{2} * 1024U * 1024U};
+    std::size_t          max_queued_output_bytes{std::size_t{2} * 1024U * 1024U};
 };
 
 /** Sends and correlates JSON-RPC calls over one borrowed byte-stream device.
@@ -73,7 +73,7 @@ public:
      * @param params Optional owning parameters copied into the request.
      * @return Generated request identifier, or a stable local error. Failed never-written calls consume no identifier.
      */
-    [[nodiscard]] auto call(std::string_view method, std::optional<JsonValue> params = std::nullopt)
+    [[nodiscard]] auto call(std::string_view method, std::optional<jb::core::JsonValue> params = std::nullopt)
         -> jb::core::Result<RequestId, jb::core::Error>;
 
     /** Sends one notification without creating pending correlation state.
@@ -85,7 +85,7 @@ public:
      * @param params Optional object or array parameters; primitive values are rejected.
      * @return Success after the complete frame is accepted, or a stable local error.
      */
-    [[nodiscard]] auto notify(std::string_view method, std::optional<JsonValue> params = std::nullopt)
+    [[nodiscard]] auto notify(std::string_view method, std::optional<jb::core::JsonValue> params = std::nullopt)
         -> jb::core::Result<void, jb::core::Error>;
 
     /** Forgets one local request correlation without sending a wire message.
@@ -111,7 +111,7 @@ public:
      * The identifier is removed before emission. A listener may cancel another call, create a new call, or close the
      * client. Closing stops delivery of later entries from the same response batch.
      */
-    jb::core::Signal<RequestId, JsonValue> result_received;
+    jb::core::Signal<RequestId, jb::core::JsonValue> result_received;
 
     /** Emitted synchronously after a remote JSON-RPC error is correlated.
      *

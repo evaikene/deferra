@@ -69,7 +69,7 @@ auto validate_completion(jobu::AttemptCompletion const& completion) -> core::Res
     if (!completion.result.is_object()) {
         return Result::failure(invalid_completion("result_not_object"));
     }
-    auto serialized = rpc::serialize_json(completion.result);
+    auto serialized = core::serialize_json(completion.result);
     if (!serialized) {
         return Result::failure(invalid_completion("result_not_serializable"));
     }

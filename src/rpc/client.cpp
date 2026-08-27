@@ -18,6 +18,9 @@ namespace {
 
 using jb::core::Error;
 using jb::core::ErrorCategory;
+using jb::core::JsonValue;
+using jb::core::parse_json;
+using jb::core::serialize_json;
 
 auto invalid_method_error() -> Error
 {

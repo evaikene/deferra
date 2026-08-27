@@ -55,7 +55,7 @@ struct SystemInfo {
  * @param info Typed daemon information to encode.
  * @return Owning JSON object containing `daemon_version`, `api_version`, and `capabilities`.
  */
-[[nodiscard]] auto system_info_to_json(SystemInfo const& info) -> jb::rpc::JsonValue;
+[[nodiscard]] auto system_info_to_json(SystemInfo const& info) -> jb::core::JsonValue;
 
 /** Decodes and validates a `system.info` result.
  *
@@ -66,7 +66,7 @@ struct SystemInfo {
  * @param value JSON-RPC result value to decode without retaining references to it.
  * @return Typed daemon information, or `jobu.system_info.invalid_response` when the required shape is invalid.
  */
-[[nodiscard]] auto system_info_from_json(jb::rpc::JsonValue const& value)
+[[nodiscard]] auto system_info_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<SystemInfo, jb::core::Error>;
 
 } // namespace jb::jobu

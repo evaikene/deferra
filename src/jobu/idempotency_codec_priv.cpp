@@ -37,49 +37,49 @@ auto invalid_record(std::string_view reason, std::string_view cause = {}) -> jb:
     return error;
 }
 
-auto json_null() -> jb::rpc::JsonValue
+auto json_null() -> jb::core::JsonValue
 {
     return {};
 }
 
-auto json_bool(bool value) -> jb::rpc::JsonValue
+auto json_bool(bool value) -> jb::core::JsonValue
 {
-    auto result = jb::rpc::JsonValue{};
+    auto result = jb::core::JsonValue{};
     result.data = value;
     return result;
 }
 
-auto json_string(std::string value) -> jb::rpc::JsonValue
+auto json_string(std::string value) -> jb::core::JsonValue
 {
-    auto result = jb::rpc::JsonValue{};
+    auto result = jb::core::JsonValue{};
     result.data = std::move(value);
     return result;
 }
 
-auto json_uint(std::uint64_t value) -> jb::rpc::JsonValue
+auto json_uint(std::uint64_t value) -> jb::core::JsonValue
 {
-    auto result = jb::rpc::JsonValue{};
+    auto result = jb::core::JsonValue{};
     result.data = value;
     return result;
 }
 
-auto json_int(std::int64_t value) -> jb::rpc::JsonValue
+auto json_int(std::int64_t value) -> jb::core::JsonValue
 {
-    auto result = jb::rpc::JsonValue{};
+    auto result = jb::core::JsonValue{};
     result.data = value;
     return result;
 }
 
-auto json_object(jb::rpc::JsonValue::Object value) -> jb::rpc::JsonValue
+auto json_object(jb::core::JsonValue::Object value) -> jb::core::JsonValue
 {
-    auto result = jb::rpc::JsonValue{};
+    auto result = jb::core::JsonValue{};
     result.data = std::move(value);
     return result;
 }
 
-auto serialize_document(jb::rpc::JsonValue const& value) -> CodecResult<std::string>
+auto serialize_document(jb::core::JsonValue const& value) -> CodecResult<std::string>
 {
-    auto serialized = jb::rpc::serialize_json(value);
+    auto serialized = jb::core::serialize_json(value);
     if (!serialized) {
         return CodecResult<std::string>::failure(invalid_record("encode_failed", serialized.error().code));
     }
@@ -89,46 +89,46 @@ auto serialize_document(jb::rpc::JsonValue const& value) -> CodecResult<std::str
     return CodecResult<std::string>::success(std::move(serialized).value());
 }
 
-auto parse_document(std::string_view text) -> CodecResult<jb::rpc::JsonValue>
+auto parse_document(std::string_view text) -> CodecResult<jb::core::JsonValue>
 {
     if (text.empty() || text.size() > kMaximumIdempotencyDocumentBytes) {
-        return CodecResult<jb::rpc::JsonValue>::failure(invalid_record("document_size"));
+        return CodecResult<jb::core::JsonValue>::failure(invalid_record("document_size"));
     }
-    auto parsed = jb::rpc::parse_json(text);
+    auto parsed = jb::core::parse_json(text);
     if (!parsed) {
-        return CodecResult<jb::rpc::JsonValue>::failure(invalid_record("invalid_json", parsed.error().code));
+        return CodecResult<jb::core::JsonValue>::failure(invalid_record("invalid_json", parsed.error().code));
     }
-    auto canonical = jb::rpc::serialize_json(*parsed);
+    auto canonical = jb::core::serialize_json(*parsed);
     if (!canonical || *canonical != text) {
-        return CodecResult<jb::rpc::JsonValue>::failure(invalid_record("noncanonical_json"));
+        return CodecResult<jb::core::JsonValue>::failure(invalid_record("noncanonical_json"));
     }
-    return CodecResult<jb::rpc::JsonValue>::success(std::move(parsed).value());
+    return CodecResult<jb::core::JsonValue>::success(std::move(parsed).value());
 }
 
-auto object_with_members(jb::rpc::JsonValue const& value, std::initializer_list<std::string_view> names)
-    -> CodecResult<jb::rpc::JsonValue::Object const*>
+auto object_with_members(jb::core::JsonValue const& value, std::initializer_list<std::string_view> names)
+    -> CodecResult<jb::core::JsonValue::Object const*>
 {
     if (!value.is_object()) {
-        return CodecResult<jb::rpc::JsonValue::Object const*>::failure(invalid_record("expected_object"));
+        return CodecResult<jb::core::JsonValue::Object const*>::failure(invalid_record("expected_object"));
     }
     auto const& object = value.as_object();
     if (object.size() != names.size()) {
-        return CodecResult<jb::rpc::JsonValue::Object const*>::failure(invalid_record("unexpected_members"));
+        return CodecResult<jb::core::JsonValue::Object const*>::failure(invalid_record("unexpected_members"));
     }
     for (auto const name : names) {
         if (!object.contains(name)) {
-            return CodecResult<jb::rpc::JsonValue::Object const*>::failure(invalid_record("missing_member"));
+            return CodecResult<jb::core::JsonValue::Object const*>::failure(invalid_record("missing_member"));
         }
     }
-    return CodecResult<jb::rpc::JsonValue::Object const*>::success(&object);
+    return CodecResult<jb::core::JsonValue::Object const*>::success(&object);
 }
 
-auto value_member(jb::rpc::JsonValue::Object const& object, std::string_view name) -> jb::rpc::JsonValue const&
+auto value_member(jb::core::JsonValue::Object const& object, std::string_view name) -> jb::core::JsonValue const&
 {
     return object.find(name)->second;
 }
 
-auto text_member(jb::rpc::JsonValue::Object const& object, std::string_view name) -> CodecResult<std::string>
+auto text_member(jb::core::JsonValue::Object const& object, std::string_view name) -> CodecResult<std::string>
 {
     auto const& value = value_member(object, name);
     if (!value.is_string()) {
@@ -137,7 +137,7 @@ auto text_member(jb::rpc::JsonValue::Object const& object, std::string_view name
     return CodecResult<std::string>::success(value.as_string());
 }
 
-auto unsigned_member(jb::rpc::JsonValue::Object const& object, std::string_view name) -> CodecResult<std::uint64_t>
+auto unsigned_member(jb::core::JsonValue::Object const& object, std::string_view name) -> CodecResult<std::uint64_t>
 {
     auto const& value = value_member(object, name);
     if (!value.is_uint()) {
@@ -146,7 +146,7 @@ auto unsigned_member(jb::rpc::JsonValue::Object const& object, std::string_view 
     return CodecResult<std::uint64_t>::success(value.as_uint());
 }
 
-auto signed_member(jb::rpc::JsonValue::Object const& object, std::string_view name) -> CodecResult<std::int64_t>
+auto signed_member(jb::core::JsonValue::Object const& object, std::string_view name) -> CodecResult<std::int64_t>
 {
     auto const& value = value_member(object, name);
     if (value.is_int()) {
@@ -167,7 +167,7 @@ auto decode_uuid(std::string_view text) -> CodecResult<jb::core::Uuid>
     return CodecResult<jb::core::Uuid>::success(*parsed);
 }
 
-auto uuid_member(jb::rpc::JsonValue::Object const& object, std::string_view name) -> CodecResult<jb::core::Uuid>
+auto uuid_member(jb::core::JsonValue::Object const& object, std::string_view name) -> CodecResult<jb::core::Uuid>
 {
     auto text = text_member(object, name);
     if (!text) {
@@ -176,16 +176,17 @@ auto uuid_member(jb::rpc::JsonValue::Object const& object, std::string_view name
     return decode_uuid(*text);
 }
 
-auto encode_time(jb::core::UtcTimePoint value) -> CodecResult<jb::rpc::JsonValue>
+auto encode_time(jb::core::UtcTimePoint value) -> CodecResult<jb::core::JsonValue>
 {
     auto formatted = format_utc_timestamp(value);
     if (!formatted) {
-        return CodecResult<jb::rpc::JsonValue>::failure(invalid_record("invalid_time", formatted.error().code));
+        return CodecResult<jb::core::JsonValue>::failure(invalid_record("invalid_time", formatted.error().code));
     }
-    return CodecResult<jb::rpc::JsonValue>::success(json_string(std::move(formatted).value()));
+    return CodecResult<jb::core::JsonValue>::success(json_string(std::move(formatted).value()));
 }
 
-auto time_member(jb::rpc::JsonValue::Object const& object, std::string_view name) -> CodecResult<jb::core::UtcTimePoint>
+auto time_member(jb::core::JsonValue::Object const& object, std::string_view name)
+    -> CodecResult<jb::core::UtcTimePoint>
 {
     auto text = text_member(object, name);
     if (!text) {
@@ -202,7 +203,7 @@ auto time_member(jb::rpc::JsonValue::Object const& object, std::string_view name
     return CodecResult<jb::core::UtcTimePoint>::success(*parsed);
 }
 
-auto nullable_time(jb::rpc::JsonValue::Object const& object, std::string_view name)
+auto nullable_time(jb::core::JsonValue::Object const& object, std::string_view name)
     -> CodecResult<std::optional<jb::core::UtcTimePoint>>
 {
     if (value_member(object, name).is_null()) {
@@ -259,29 +260,29 @@ auto decode_job_type(std::string_view text) -> CodecResult<JobType>
     return CodecResult<JobType>::failure(invalid_record("invalid_job_type"));
 }
 
-auto encode_schedule(JobSchedule const& schedule) -> CodecResult<jb::rpc::JsonValue>
+auto encode_schedule(JobSchedule const& schedule) -> CodecResult<jb::core::JsonValue>
 {
     if (auto const* once = std::get_if<OnceSchedule>(&schedule)) {
         auto at = encode_time(once->planned_at);
         if (!at) {
-            return CodecResult<jb::rpc::JsonValue>::failure(std::move(at).error());
+            return CodecResult<jb::core::JsonValue>::failure(std::move(at).error());
         }
-        return CodecResult<jb::rpc::JsonValue>::success(json_object({
+        return CodecResult<jb::core::JsonValue>::success(json_object({
             {"at",   std::move(at).value()},
             {"kind", json_string("once")  },
         }));
     }
     if (auto const* cron = std::get_if<CronSchedule>(&schedule)) {
-        return CodecResult<jb::rpc::JsonValue>::success(json_object({
+        return CodecResult<jb::core::JsonValue>::success(json_object({
             {"expression", json_string(cron->expression)},
             {"kind",       json_string("cron")          },
             {"timezone",   json_string(cron->timezone)  },
         }));
     }
-    return CodecResult<jb::rpc::JsonValue>::failure(invalid_record("invalid_schedule_kind"));
+    return CodecResult<jb::core::JsonValue>::failure(invalid_record("invalid_schedule_kind"));
 }
 
-auto decode_schedule(jb::rpc::JsonValue const& value) -> CodecResult<JobSchedule>
+auto decode_schedule(jb::core::JsonValue const& value) -> CodecResult<JobSchedule>
 {
     if (!value.is_object()) {
         return CodecResult<JobSchedule>::failure(invalid_record("invalid_schedule"));
@@ -320,16 +321,16 @@ auto decode_schedule(jb::rpc::JsonValue const& value) -> CodecResult<JobSchedule
 }
 
 auto encode_attributes(AttributeSet const& values, AttributeRegistry const& attributes, AttributeScope scope)
-    -> CodecResult<jb::rpc::JsonValue>
+    -> CodecResult<jb::core::JsonValue>
 {
     auto encoded = attribute_set_to_json(values, attributes, scope);
     if (!encoded) {
-        return CodecResult<jb::rpc::JsonValue>::failure(invalid_record("invalid_attributes", encoded.error().code));
+        return CodecResult<jb::core::JsonValue>::failure(invalid_record("invalid_attributes", encoded.error().code));
     }
-    return CodecResult<jb::rpc::JsonValue>::success(std::move(encoded).value());
+    return CodecResult<jb::core::JsonValue>::success(std::move(encoded).value());
 }
 
-auto decode_attributes(jb::rpc::JsonValue const& value, AttributeRegistry const& attributes, AttributeScope scope)
+auto decode_attributes(jb::core::JsonValue const& value, AttributeRegistry const& attributes, AttributeScope scope)
     -> CodecResult<AttributeSet>
 {
     auto decoded = attribute_set_from_json(value, attributes, scope);
@@ -349,17 +350,17 @@ auto require_materialized(AttributeSet const& values, AttributeRegistry const& a
     return CodecResult<void>::success();
 }
 
-auto valid_payload(JobType type, jb::rpc::JsonValue const& payload) -> bool
+auto valid_payload(JobType type, jb::core::JsonValue const& payload) -> bool
 {
     return static_cast<bool>(validate_and_serialize_job_payload(type, payload));
 }
 
-auto encode_optional_name(std::optional<std::string> const& name) -> jb::rpc::JsonValue
+auto encode_optional_name(std::optional<std::string> const& name) -> jb::core::JsonValue
 {
     return name ? json_string(*name) : json_null();
 }
 
-auto decode_optional_name(jb::rpc::JsonValue const& value) -> CodecResult<std::optional<std::string>>
+auto decode_optional_name(jb::core::JsonValue const& value) -> CodecResult<std::optional<std::string>>
 {
     if (value.is_null()) {
         return CodecResult<std::optional<std::string>>::success(std::nullopt);
@@ -370,18 +371,18 @@ auto decode_optional_name(jb::rpc::JsonValue const& value) -> CodecResult<std::o
     return CodecResult<std::optional<std::string>>::success(value.as_string());
 }
 
-auto encode_retention(std::optional<std::chrono::seconds> value) -> CodecResult<jb::rpc::JsonValue>
+auto encode_retention(std::optional<std::chrono::seconds> value) -> CodecResult<jb::core::JsonValue>
 {
     if (!value) {
-        return CodecResult<jb::rpc::JsonValue>::success(json_null());
+        return CodecResult<jb::core::JsonValue>::success(json_null());
     }
     if (value->count() < 0) {
-        return CodecResult<jb::rpc::JsonValue>::failure(invalid_record("negative_retention"));
+        return CodecResult<jb::core::JsonValue>::failure(invalid_record("negative_retention"));
     }
-    return CodecResult<jb::rpc::JsonValue>::success(json_uint(static_cast<std::uint64_t>(value->count())));
+    return CodecResult<jb::core::JsonValue>::success(json_uint(static_cast<std::uint64_t>(value->count())));
 }
 
-auto decode_retention(jb::rpc::JsonValue const& value) -> CodecResult<std::optional<std::chrono::seconds>>
+auto decode_retention(jb::core::JsonValue const& value) -> CodecResult<std::optional<std::chrono::seconds>>
 {
     if (value.is_null()) {
         return CodecResult<std::optional<std::chrono::seconds>>::success(std::nullopt);
@@ -393,7 +394,7 @@ auto decode_retention(jb::rpc::JsonValue const& value) -> CodecResult<std::optio
         std::chrono::seconds{static_cast<std::int64_t>(value.as_uint())});
 }
 
-auto validate_queue_fields(jb::rpc::JsonValue::Object const& object, AttributeRegistry const& attributes)
+auto validate_queue_fields(jb::core::JsonValue::Object const& object, AttributeRegistry const& attributes)
     -> CodecResult<void>
 {
     auto name = text_member(object, "name");
@@ -511,7 +512,7 @@ auto encode_queue_idempotency_result(Queue const& queue, AttributeRegistry const
         return CodecResult<std::string>::failure(invalid_record("invalid_queue_result"));
     }
     auto deleted =
-        queue.deleted_at ? encode_time(*queue.deleted_at) : CodecResult<jb::rpc::JsonValue>::success(json_null());
+        queue.deleted_at ? encode_time(*queue.deleted_at) : CodecResult<jb::core::JsonValue>::success(json_null());
     if (!deleted) {
         return CodecResult<std::string>::failure(std::move(deleted).error());
     }
@@ -652,7 +653,7 @@ auto encode_job_idempotency_result(JobDefinition const& job, AttributeRegistry c
         return CodecResult<std::string>::failure(invalid_record("invalid_job_result"));
     }
     auto deleted =
-        job.deleted_at ? encode_time(*job.deleted_at) : CodecResult<jb::rpc::JsonValue>::success(json_null());
+        job.deleted_at ? encode_time(*job.deleted_at) : CodecResult<jb::core::JsonValue>::success(json_null());
     if (!deleted) {
         return CodecResult<std::string>::failure(std::move(deleted).error());
     }

@@ -140,7 +140,7 @@ auto optional_timestamp_to_storage(std::optional<jb::core::UtcTimePoint> value) 
     return timestamp_to_storage(*value);
 }
 
-auto optional_json_to_storage(std::optional<jb::rpc::JsonValue> const& value) -> RepositoryResult<jb::db::Value>
+auto optional_json_to_storage(std::optional<jb::core::JsonValue> const& value) -> RepositoryResult<jb::db::Value>
 {
     if (!value) {
         return RepositoryResult<jb::db::Value>::success(jb::db::Null{});
@@ -157,12 +157,12 @@ auto affected_rows(jb::db::Query const& query) -> RepositoryResult<std::size_t>
     return RepositoryResult<std::size_t>::success(static_cast<std::size_t>(count));
 }
 
-auto cancellation_result(std::string_view reason) -> jb::rpc::JsonValue
+auto cancellation_result(std::string_view reason) -> jb::core::JsonValue
 {
-    auto reason_value = jb::rpc::JsonValue{};
+    auto reason_value = jb::core::JsonValue{};
     reason_value.data = std::string{reason};
-    auto result       = jb::rpc::JsonValue{};
-    result.data       = jb::rpc::JsonValue::Object{
+    auto result       = jb::core::JsonValue{};
+    result.data       = jb::core::JsonValue::Object{
         {"reason", std::move(reason_value)}
     };
     return result;

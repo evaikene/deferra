@@ -13,7 +13,6 @@
 #include <variant>
 
 using namespace jb::core;
-using namespace jb::rpc;
 
 namespace {
 
@@ -32,7 +31,7 @@ auto contains(std::string const& text, std::string_view marker) -> bool
 
 } // anonymous namespace
 
-TEST_CASE("JSON values expose owning dependency-independent alternatives", "[rpc][json]")
+TEST_CASE("JSON values expose owning dependency-independent alternatives", "[core][json]")
 {
     static_assert(std::is_same_v<JsonValue::Array, std::vector<JsonValue>>);
     static_assert(std::is_same_v<JsonValue::Object, std::map<std::string, JsonValue, std::less<>>>);
@@ -49,7 +48,7 @@ TEST_CASE("JSON values expose owning dependency-independent alternatives", "[rpc
     CHECK(std::get<std::string>(json.data) == "owned");
 }
 
-TEST_CASE("JSON values report their active alternatives", "[rpc][json]")
+TEST_CASE("JSON values report their active alternatives", "[core][json]")
 {
     auto check_flags = [](JsonValue const& value,
                           bool             is_null,
@@ -82,7 +81,7 @@ TEST_CASE("JSON values report their active alternatives", "[rpc][json]")
     check_flags(make_json(JsonValue::Object{}), false, false, false, false, false, false, false, true);
 }
 
-TEST_CASE("JSON values provide typed accessors", "[rpc][json]")
+TEST_CASE("JSON values provide typed accessors", "[core][json]")
 {
     CHECK(make_json(true).as_bool());
     CHECK(make_json(std::int64_t{-1}).as_int() == -1);
@@ -101,7 +100,7 @@ TEST_CASE("JSON values provide typed accessors", "[rpc][json]")
     CHECK_THROWS_AS(make_json(true).as_int(), std::bad_variant_access);
 }
 
-TEST_CASE("JSON parsing preserves scalar alternatives", "[rpc][json]")
+TEST_CASE("JSON parsing preserves scalar alternatives", "[core][json]")
 {
     SECTION("null")
     {
@@ -153,7 +152,7 @@ TEST_CASE("JSON parsing preserves scalar alternatives", "[rpc][json]")
     }
 }
 
-TEST_CASE("JSON round trips every value alternative in nested containers", "[rpc][json]")
+TEST_CASE("JSON round trips every value alternative in nested containers", "[core][json]")
 {
     auto const expected = make_json(JsonValue::Object{
         {"array",
@@ -178,7 +177,7 @@ TEST_CASE("JSON round trips every value alternative in nested containers", "[rpc
     CHECK(*decoded == expected);
 }
 
-TEST_CASE("JSON parsing decodes escapes and Unicode", "[rpc][json]")
+TEST_CASE("JSON parsing decodes escapes and Unicode", "[core][json]")
 {
     auto value = parse_json(R"({"escaped":"line\nquote\"slash\\","euro":"\u20ac","face":"\uD83D\uDE03"})");
     REQUIRE(value);
@@ -189,7 +188,7 @@ TEST_CASE("JSON parsing decodes escapes and Unicode", "[rpc][json]")
     CHECK(std::get<std::string>(object.at("face").data) == "\xf0\x9f\x98\x83");
 }
 
-TEST_CASE("JSON serialization orders object members and preserves floating syntax", "[rpc][json]")
+TEST_CASE("JSON serialization orders object members and preserves floating syntax", "[core][json]")
 {
     auto const object = make_json(JsonValue::Object{
         {"zeta",   make_json(std::uint64_t{1})    },
@@ -207,7 +206,7 @@ TEST_CASE("JSON serialization orders object members and preserves floating synta
     CHECK(std::holds_alternative<double>(decoded_object.at("alpha").data));
 }
 
-TEST_CASE("JSON positive signed integers serialize but parse as unsigned", "[rpc][json]")
+TEST_CASE("JSON positive signed integers serialize but parse as unsigned", "[core][json]")
 {
     auto encoded = serialize_json(make_json(std::int64_t{7}));
     REQUIRE(encoded);
@@ -219,7 +218,7 @@ TEST_CASE("JSON positive signed integers serialize but parse as unsigned", "[rpc
     CHECK(std::get<std::uint64_t>(decoded->data) == 7);
 }
 
-TEST_CASE("JSON parsing rejects invalid syntax and trailing roots", "[rpc][json]")
+TEST_CASE("JSON parsing rejects invalid syntax and trailing roots", "[core][json]")
 {
     auto const invalid = std::array<std::string_view, 7>{
         "",
@@ -236,11 +235,11 @@ TEST_CASE("JSON parsing rejects invalid syntax and trailing roots", "[rpc][json]
         auto result = parse_json(input);
         REQUIRE_FALSE(result);
         CHECK(result.error().category == ErrorCategory::InvalidArgument);
-        CHECK(result.error().code == "rpc.json.syntax");
+        CHECK(result.error().code == "core.json.syntax");
     }
 }
 
-TEST_CASE("JSON parsing rejects invalid UTF-8 and malformed Unicode escapes", "[rpc][json]")
+TEST_CASE("JSON parsing rejects invalid UTF-8 and malformed Unicode escapes", "[core][json]")
 {
     auto const invalid_utf8 = std::array{
         std::string{"\"\xc3\x28\""},
@@ -252,7 +251,7 @@ TEST_CASE("JSON parsing rejects invalid UTF-8 and malformed Unicode escapes", "[
     for (auto const& input : invalid_utf8) {
         auto result = parse_json(input);
         REQUIRE_FALSE(result);
-        CHECK(result.error().code == "rpc.json.invalid_utf8");
+        CHECK(result.error().code == "core.json.invalid_utf8");
     }
 
     auto const malformed_escapes = std::array<std::string_view, 3>{
@@ -264,11 +263,11 @@ TEST_CASE("JSON parsing rejects invalid UTF-8 and malformed Unicode escapes", "[
         CAPTURE(input);
         auto result = parse_json(input);
         REQUIRE_FALSE(result);
-        CHECK(result.error().code == "rpc.json.syntax");
+        CHECK(result.error().code == "core.json.syntax");
     }
 }
 
-TEST_CASE("JSON parsing rejects duplicate members at every nesting level", "[rpc][json]")
+TEST_CASE("JSON parsing rejects duplicate members at every nesting level", "[core][json]")
 {
     auto const duplicates = std::array<std::string_view, 2>{
         R"({"key":1,"key":2})",
@@ -280,11 +279,11 @@ TEST_CASE("JSON parsing rejects duplicate members at every nesting level", "[rpc
         auto result = parse_json(input);
         REQUIRE_FALSE(result);
         CHECK(result.error().category == ErrorCategory::InvalidArgument);
-        CHECK(result.error().code == "rpc.json.duplicate_member");
+        CHECK(result.error().code == "core.json.duplicate_member");
     }
 }
 
-TEST_CASE("JSON depth limits count only array and object containers", "[rpc][json]")
+TEST_CASE("JSON depth limits count only array and object containers", "[core][json]")
 {
     auto scalar_at_zero = parse_json("0", {.max_depth = 0});
     REQUIRE(scalar_at_zero);
@@ -292,17 +291,17 @@ TEST_CASE("JSON depth limits count only array and object containers", "[rpc][jso
     auto container_at_zero = parse_json("[]", {.max_depth = 0});
     REQUIRE_FALSE(container_at_zero);
     CHECK(container_at_zero.error().category == ErrorCategory::ResourceExhausted);
-    CHECK(container_at_zero.error().code == "rpc.json.depth_limit");
+    CHECK(container_at_zero.error().code == "core.json.depth_limit");
 
     auto boundary = parse_json(R"([{"value":1}])", {.max_depth = 2});
     REQUIRE(boundary);
 
     auto beyond = parse_json(R"([{"value":[]}])", {.max_depth = 2});
     REQUIRE_FALSE(beyond);
-    CHECK(beyond.error().code == "rpc.json.depth_limit");
+    CHECK(beyond.error().code == "core.json.depth_limit");
 }
 
-TEST_CASE("JSON parsing preserves integer boundaries and rejects overflow", "[rpc][json]")
+TEST_CASE("JSON parsing preserves integer boundaries and rejects overflow", "[core][json]")
 {
     auto minimum = parse_json("-9223372036854775808");
     REQUIRE(minimum);
@@ -336,11 +335,11 @@ TEST_CASE("JSON parsing preserves integer boundaries and rejects overflow", "[rp
         auto result = parse_json(input);
         REQUIRE_FALSE(result);
         CHECK(result.error().category == ErrorCategory::InvalidArgument);
-        CHECK(result.error().code == "rpc.json.integer_overflow");
+        CHECK(result.error().code == "core.json.integer_overflow");
     }
 }
 
-TEST_CASE("JSON parsing rejects non-finite results and non-JSON number spellings", "[rpc][json]")
+TEST_CASE("JSON parsing rejects non-finite results and non-JSON number spellings", "[core][json]")
 {
     auto finite = parse_json("1e308");
     REQUIRE(finite);
@@ -349,18 +348,18 @@ TEST_CASE("JSON parsing rejects non-finite results and non-JSON number spellings
 
     auto overflow = parse_json("1e9999");
     REQUIRE_FALSE(overflow);
-    CHECK(overflow.error().code == "rpc.json.non_finite");
+    CHECK(overflow.error().code == "core.json.non_finite");
 
     auto const invalid_spellings = std::array<std::string_view, 3>{"NaN", "Infinity", "-Infinity"};
     for (auto input : invalid_spellings) {
         CAPTURE(input);
         auto result = parse_json(input);
         REQUIRE_FALSE(result);
-        CHECK(result.error().code == "rpc.json.syntax");
+        CHECK(result.error().code == "core.json.syntax");
     }
 }
 
-TEST_CASE("JSON serialization rejects non-finite floating-point values", "[rpc][json]")
+TEST_CASE("JSON serialization rejects non-finite floating-point values", "[core][json]")
 {
     auto const values = std::array{
         std::numeric_limits<double>::infinity(),
@@ -372,31 +371,31 @@ TEST_CASE("JSON serialization rejects non-finite floating-point values", "[rpc][
         auto result = serialize_json(make_json(value));
         REQUIRE_FALSE(result);
         CHECK(result.error().category == ErrorCategory::InvalidArgument);
-        CHECK(result.error().code == "rpc.json.non_finite");
+        CHECK(result.error().code == "core.json.non_finite");
         CHECK(result.error().detail.empty());
     }
 }
 
-TEST_CASE("JSON serialization rejects invalid UTF-8 in values and keys", "[rpc][json]")
+TEST_CASE("JSON serialization rejects invalid UTF-8 in values and keys", "[core][json]")
 {
     auto invalid_string = serialize_json(make_json(std::string{"\xc3\x28"}));
     REQUIRE_FALSE(invalid_string);
-    CHECK(invalid_string.error().code == "rpc.json.invalid_utf8");
+    CHECK(invalid_string.error().code == "core.json.invalid_utf8");
 
     auto invalid_key = serialize_json(make_json(JsonValue::Object{
         {std::string{"\xc3\x28"}, make_json(JsonNull{})},
     }));
     REQUIRE_FALSE(invalid_key);
-    CHECK(invalid_key.error().code == "rpc.json.invalid_utf8");
+    CHECK(invalid_key.error().code == "core.json.invalid_utf8");
 }
 
-TEST_CASE("JSON errors never expose input bodies", "[rpc][json]")
+TEST_CASE("JSON errors never expose input bodies", "[core][json]")
 {
     constexpr auto marker = std::string_view{"super-secret-marker"};
     auto           result = parse_json(R"({"super-secret-marker":})");
     REQUIRE_FALSE(result);
 
-    CHECK(result.error().code == "rpc.json.syntax");
+    CHECK(result.error().code == "core.json.syntax");
     CHECK_FALSE(contains(result.error().message, marker));
     CHECK_FALSE(contains(result.error().detail, marker));
 }

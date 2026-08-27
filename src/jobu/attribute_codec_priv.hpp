@@ -41,7 +41,7 @@ private:
                                              AttributeSet const&      values,
                                              AttributeScope           scope,
                                              AttributeDocumentMode    mode)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 [[nodiscard]] auto encode_and_serialize_attribute_document(AttributeRegistry const& registry,
                                                            AttributeSet const&      values,
@@ -49,10 +49,10 @@ private:
                                                            AttributeDocumentMode    mode)
     -> jb::core::Result<SerializedAttributeDocument, jb::core::Error>;
 
-[[nodiscard]] auto decode_attribute_document(AttributeRegistry const&  registry,
-                                             jb::rpc::JsonValue const& document,
-                                             AttributeScope            scope,
-                                             AttributeDocumentMode     mode)
+[[nodiscard]] auto decode_attribute_document(AttributeRegistry const&   registry,
+                                             jb::core::JsonValue const& document,
+                                             AttributeScope             scope,
+                                             AttributeDocumentMode      mode)
     -> jb::core::Result<AttributeSet, jb::core::Error>;
 
 } // namespace jb::jobu::detail

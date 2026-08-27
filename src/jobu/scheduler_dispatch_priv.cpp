@@ -24,12 +24,12 @@ auto rollback_ineligible(jb::db::Transaction& transaction) -> DispatchResult<std
 
 auto executor_start_failure(AttemptKey key, jb::core::Error const& error) -> AttemptCompletion
 {
-    auto error_code = jb::rpc::JsonValue{};
+    auto error_code = jb::core::JsonValue{};
     error_code.data = error.code;
-    auto message    = jb::rpc::JsonValue{};
+    auto message    = jb::core::JsonValue{};
     message.data    = error.message;
-    auto result     = jb::rpc::JsonValue{};
-    result.data     = jb::rpc::JsonValue::Object{
+    auto result     = jb::core::JsonValue{};
+    result.data     = jb::core::JsonValue::Object{
         {"error_code", std::move(error_code)},
         {"message",    std::move(message)   },
     };

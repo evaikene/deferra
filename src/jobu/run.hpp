@@ -4,6 +4,7 @@
 #pragma once
 
 #include "job.hpp"
+#include "json.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -61,11 +62,11 @@ struct JobRun {
     /// Complete snapshotted attributes.
     AttributeSet                          attributes;
     /// Snapshotted runner payload JSON object.
-    jb::rpc::JsonValue                    payload;
+    jb::core::JsonValue                   payload;
     /// Current durable lifecycle state.
     RunState                              state{RunState::Scheduled};
     /// Terminal result summary, or no value while non-terminal.
-    std::optional<jb::rpc::JsonValue>     result;
+    std::optional<jb::core::JsonValue>    result;
 };
 
 } // namespace jb::jobu

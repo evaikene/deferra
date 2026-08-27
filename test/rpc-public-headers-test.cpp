@@ -1,7 +1,7 @@
 #include "client.hpp"
 
 #include "framing.hpp"
-#include "json.hpp"
+#include "json.hpp" // IWYU pragma: keep for canonical core JSON types used by the RPC API
 #include "protocol.hpp"
 #include "rpc.hpp" // IWYU pragma: keep for public header self-containment coverage
 #include "server.hpp"
@@ -22,7 +22,7 @@ void compile_client_api(jb::core::IODevice& device, jb::core::Object* parent)
     client.cancel(jb::rpc::RequestId{std::uint64_t{1}});
     static_cast<void>(client.pending_request_count());
 
-    auto result       = client.result_received.connect([](jb::rpc::RequestId const&, jb::rpc::JsonValue const&) {});
+    auto result       = client.result_received.connect([](jb::rpc::RequestId const&, jb::core::JsonValue const&) {});
     auto remote_error = client.error_received.connect([](jb::rpc::RequestId const&, jb::rpc::RpcError const&) {});
     auto failed       = client.request_failed.connect([](jb::rpc::RequestId const&, jb::core::Error const&) {});
     auto protocol     = client.protocol_error.connect([](jb::core::Error const&) {});
@@ -60,7 +60,7 @@ auto main() -> int
 
     auto server = jb::rpc::Server{options};
     static_cast<void>(server.register_method("echo", [](auto const&, auto const&) {
-        return jb::rpc::MethodResult::success(jb::rpc::JsonValue{});
+        return jb::rpc::MethodResult::success(jb::core::JsonValue{});
     }));
     static_cast<void>(server.has_method("echo"));
     static_cast<void>(server.connection_count());
@@ -82,8 +82,8 @@ auto main() -> int
     context.operation.peer.process_id         = std::uint64_t{42};
     context.operation.authenticated_principal = std::string{"user"};
     auto handler                              = jb::rpc::MethodHandler{
-        [](jb::rpc::RequestContext const& request, std::optional<jb::rpc::JsonValue> const& params) {
-            auto value = params.value_or(jb::rpc::JsonValue{});
+        [](jb::rpc::RequestContext const& request, std::optional<jb::core::JsonValue> const& params) {
+            auto value = params.value_or(jb::core::JsonValue{});
             if (request.connection_id == 0U) {
                 return jb::rpc::MethodResult::failure({.message = "missing connection"});
             }

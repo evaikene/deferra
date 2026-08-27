@@ -16,7 +16,7 @@ namespace jb::rpc {
 struct Client::Private {
     explicit Private(Client& client, jb::core::IODevice& client_device, ClientOptions client_options);
 
-    [[nodiscard]] auto validate_request(std::string_view method, std::optional<JsonValue> const& params) const
+    [[nodiscard]] auto validate_request(std::string_view method, std::optional<jb::core::JsonValue> const& params) const
         -> std::optional<jb::core::Error>;
     [[nodiscard]] auto allocate_request_id() const -> jb::core::Result<std::uint64_t, jb::core::Error>;
     void               advance_request_id(std::uint64_t id) noexcept;

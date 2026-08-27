@@ -247,7 +247,8 @@ auto validate_job_name(std::optional<std::string> const& name) -> ServiceResult<
     return ServiceResult<void>::success();
 }
 
-auto validate_job_payload(JobType type, jb::rpc::JsonValue const& payload) -> ServiceResult<detail::ValidatedJobPayload>
+auto validate_job_payload(JobType type, jb::core::JsonValue const& payload)
+    -> ServiceResult<detail::ValidatedJobPayload>
 {
     auto validated = detail::validate_and_serialize_job_payload(type, payload);
     if (!validated) {

@@ -17,7 +17,6 @@
 using namespace jb::core;
 using namespace jb::jobu;
 using namespace jb::jobu::detail;
-using namespace jb::rpc;
 using namespace std::chrono_literals;
 
 static_assert(std::is_move_constructible_v<SerializedAttributeDocument>);

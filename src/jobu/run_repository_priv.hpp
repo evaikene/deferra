@@ -41,7 +41,7 @@ struct RunSnapshot {
     JobType                type{JobType::Cli};
     std::int32_t           priority{0};
     AttributeSet           attributes;
-    jb::rpc::JsonValue     payload;
+    jb::core::JsonValue    payload;
 };
 
 /** Non-owning serialized fields for refreshing one pending schedule-owned run.

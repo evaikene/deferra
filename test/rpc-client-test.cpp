@@ -205,10 +205,10 @@ TEST_CASE("Local validation and codec failures are nonterminal and consume no ID
     auto invalid_method = std::string{1U, static_cast<char>(0xFF)};
     auto invalid_utf8   = client.call(invalid_method);
     REQUIRE_FALSE(invalid_utf8);
-    CHECK(invalid_utf8.error().code == "rpc.json.invalid_utf8");
+    CHECK(invalid_utf8.error().code == "core.json.invalid_utf8");
     auto non_finite = client.notify("bad-number", make_json(JsonValue::Array{make_json(std::nan(""))}));
     REQUIRE_FALSE(non_finite);
-    CHECK(non_finite.error().code == "rpc.json.non_finite");
+    CHECK(non_finite.error().code == "core.json.non_finite");
 
     auto constrained                   = ClientOptions{};
     constrained.framing.max_body_bytes = 1U;
@@ -487,7 +487,7 @@ TEST_CASE("Malformed response framing JSON and envelopes are terminal", "[rpc][c
 {
     auto const inputs = std::vector<std::pair<std::string, std::string>>{
         {"Broken\r\n\r\n",                                       "rpc.framing.invalid_header"},
-        {frame_message("{broken").value(),                       "rpc.json.syntax"           },
+        {frame_message("{broken").value(),                       "core.json.syntax"          },
         {encode_frame(make_json(std::string{"not a response"})), "rpc.protocol_error"        },
         {encode_frame(make_json(JsonValue::Array{})),            "rpc.protocol_error"        },
     };
@@ -566,7 +566,7 @@ TEST_CASE("Response batch and JSON depth limits are enforced independently", "[r
         device.inject_input(
             success_frame(std::uint64_t{1},
                           make_json(JsonValue::Array{make_json(JsonValue::Array{make_json(JsonNull{})})})));
-        CHECK(errors == std::vector<std::string>{"rpc.json.depth_limit"});
+        CHECK(errors == std::vector<std::string>{"core.json.depth_limit"});
     }
 }
 

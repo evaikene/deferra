@@ -292,6 +292,12 @@ add_executable(${TARGET} rpc-public-headers-test.cpp)
 target_link_libraries(${TARGET} PRIVATE rpc)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Core JSON public header boundary test
+set(TARGET "core-json-public-header-test")
+add_executable(${TARGET} core-json-public-header-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Net public header boundary test
 set(TARGET "net-public-headers-test")
 add_executable(${TARGET} net-public-headers-test.cpp)
@@ -301,7 +307,7 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 # JSON codec test
 set(TARGET "json-test")
 add_executable(${TARGET} json-test.cpp)
-target_link_libraries(${TARGET} PRIVATE rpc Catch2::Catch2WithMain)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # RPC stream framing test

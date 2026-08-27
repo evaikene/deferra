@@ -30,7 +30,7 @@ namespace jb::jobu {
  * @return Owning JSON object, or `jobu.protocol.invalid_response` when the queue cannot be represented.
  */
 [[nodiscard]] auto queue_to_json(Queue const& queue, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes and validates a queue result.
  *
@@ -41,7 +41,7 @@ namespace jb::jobu {
  * @param registry Attribute registry borrowed for this conversion.
  * @return Owning Queue, or `jobu.protocol.invalid_response` when a known field is missing or invalid.
  */
-[[nodiscard]] auto queue_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+[[nodiscard]] auto queue_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<Queue, jb::core::Error>;
 
 /** Encodes a bounded queue page using the stable management wire shape.
@@ -53,7 +53,7 @@ namespace jb::jobu {
  * @return Owning JSON object, or `jobu.protocol.invalid_response` when the page cannot be represented.
  */
 [[nodiscard]] auto queue_page_to_json(QueuePage const& page, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes and validates a bounded queue page.
  *
@@ -65,7 +65,7 @@ namespace jb::jobu {
  * @param registry Attribute registry borrowed while decoding each queue.
  * @return Owning QueuePage, or `jobu.protocol.invalid_response` when a known field is missing or invalid.
  */
-[[nodiscard]] auto queue_page_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+[[nodiscard]] auto queue_page_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<QueuePage, jb::core::Error>;
 
 /** Encodes queue operation parameters containing exactly one selector.
@@ -77,7 +77,7 @@ namespace jb::jobu {
  * @return Owning JSON object, or `jobu.protocol.invalid_request` when the selector cannot be represented.
  */
 [[nodiscard]] auto queue_selector_to_json(QueueSelector const& selector)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes queue operation parameters containing exactly one selector.
  *
@@ -86,7 +86,7 @@ namespace jb::jobu {
  * @param value JSON request object to decode without retaining references to it.
  * @return Owning QueueSelector, or `jobu.protocol.invalid_request` when the object is ambiguous or invalid.
  */
-[[nodiscard]] auto queue_selector_from_json(jb::rpc::JsonValue const& value)
+[[nodiscard]] auto queue_selector_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<QueueSelector, jb::core::Error>;
 
 /** Encodes queue.create parameters.
@@ -100,7 +100,7 @@ namespace jb::jobu {
  * @return Owning JSON object, or `jobu.protocol.invalid_request` when the request cannot be represented.
  */
 [[nodiscard]] auto create_queue_request_to_json(CreateQueueRequest const& request, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes queue.create parameters.
  *
@@ -112,7 +112,7 @@ namespace jb::jobu {
  * @param registry Attribute registry borrowed for this conversion.
  * @return Owning CreateQueueRequest, or `jobu.protocol.invalid_request` when the request shape or value is invalid.
  */
-[[nodiscard]] auto create_queue_request_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+[[nodiscard]] auto create_queue_request_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<CreateQueueRequest, jb::core::Error>;
 
 /** Encodes queue.list parameters.
@@ -124,7 +124,7 @@ namespace jb::jobu {
  * @return Owning JSON object, or `jobu.protocol.invalid_request` when the request cannot be represented.
  */
 [[nodiscard]] auto queue_list_request_to_json(QueueListRequest const& request)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes queue.list parameters.
  *
@@ -134,7 +134,7 @@ namespace jb::jobu {
  * @param value JSON request object to decode without retaining references to it.
  * @return Owning QueueListRequest, or `jobu.protocol.invalid_request` when the request shape or value is invalid.
  */
-[[nodiscard]] auto queue_list_request_from_json(jb::rpc::JsonValue const& value)
+[[nodiscard]] auto queue_list_request_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<QueueListRequest, jb::core::Error>;
 
 /** Encodes queue.update parameters.
@@ -148,7 +148,7 @@ namespace jb::jobu {
  * @return Owning JSON object, or `jobu.protocol.invalid_request` when the update is empty or cannot be represented.
  */
 [[nodiscard]] auto update_queue_request_to_json(UpdateQueueRequest const& request, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes queue.update parameters.
  *
@@ -161,7 +161,7 @@ namespace jb::jobu {
  * @param registry Attribute registry borrowed for this conversion.
  * @return Owning UpdateQueueRequest, or `jobu.protocol.invalid_request` when the request shape or value is invalid.
  */
-[[nodiscard]] auto update_queue_request_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+[[nodiscard]] auto update_queue_request_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<UpdateQueueRequest, jb::core::Error>;
 
 /** Encodes a job-definition result using the stable management wire shape.
@@ -174,7 +174,7 @@ namespace jb::jobu {
  * @return Owning JSON object, or `jobu.protocol.invalid_response` when the definition cannot be represented.
  */
 [[nodiscard]] auto job_to_json(JobDefinition const& job, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes and validates a job-definition result.
  *
@@ -185,7 +185,7 @@ namespace jb::jobu {
  * @param registry Attribute registry borrowed for this conversion.
  * @return Owning JobDefinition, or `jobu.protocol.invalid_response` when a known field is missing or invalid.
  */
-[[nodiscard]] auto job_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+[[nodiscard]] auto job_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<JobDefinition, jb::core::Error>;
 
 /** Encodes a bounded job page using the stable management wire shape.
@@ -198,7 +198,7 @@ namespace jb::jobu {
  * @return Owning JSON object, or `jobu.protocol.invalid_response` when the page cannot be represented.
  */
 [[nodiscard]] auto job_page_to_json(JobPage const& page, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes and validates a bounded job page.
  *
@@ -210,7 +210,7 @@ namespace jb::jobu {
  * @param registry Attribute registry borrowed while decoding each definition.
  * @return Owning JobPage, or `jobu.protocol.invalid_response` when a known field is missing or invalid.
  */
-[[nodiscard]] auto job_page_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+[[nodiscard]] auto job_page_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<JobPage, jb::core::Error>;
 
 /** Encodes job operation parameters containing one definition ID.
@@ -220,7 +220,7 @@ namespace jb::jobu {
  * @param id Stable job-definition UUID to encode.
  * @return Owning JSON object containing `job_id`.
  */
-[[nodiscard]] auto job_id_to_json(jb::core::Uuid const& id) -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+[[nodiscard]] auto job_id_to_json(jb::core::Uuid const& id) -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes job operation parameters containing one definition ID.
  *
@@ -229,7 +229,7 @@ namespace jb::jobu {
  * @param value JSON request object to decode without retaining references to it.
  * @return Job-definition UUID, or `jobu.protocol.invalid_request` when the object is invalid.
  */
-[[nodiscard]] auto job_id_from_json(jb::rpc::JsonValue const& value)
+[[nodiscard]] auto job_id_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<jb::core::Uuid, jb::core::Error>;
 
 /** Encodes job.create parameters.
@@ -243,7 +243,7 @@ namespace jb::jobu {
  * @return Owning JSON object, or `jobu.protocol.invalid_request` when the request cannot be represented.
  */
 [[nodiscard]] auto create_job_request_to_json(CreateJobRequest const& request, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes job.create parameters.
  *
@@ -255,7 +255,7 @@ namespace jb::jobu {
  * @param registry Attribute registry borrowed while decoding partial Job-scope attributes.
  * @return Owning CreateJobRequest, or `jobu.protocol.invalid_request` when the request shape or value is invalid.
  */
-[[nodiscard]] auto create_job_request_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+[[nodiscard]] auto create_job_request_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<CreateJobRequest, jb::core::Error>;
 
 /** Encodes job.list parameters.
@@ -267,7 +267,7 @@ namespace jb::jobu {
  * @return Owning JSON object, or `jobu.protocol.invalid_request` when the request cannot be represented.
  */
 [[nodiscard]] auto job_list_request_to_json(JobListRequest const& request)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes job.list parameters.
  *
@@ -277,7 +277,7 @@ namespace jb::jobu {
  * @param value JSON request object to decode without retaining references to it.
  * @return Owning JobListRequest, or `jobu.protocol.invalid_request` when the request shape or value is invalid.
  */
-[[nodiscard]] auto job_list_request_from_json(jb::rpc::JsonValue const& value)
+[[nodiscard]] auto job_list_request_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<JobListRequest, jb::core::Error>;
 
 /** Encodes job.update parameters.
@@ -291,7 +291,7 @@ namespace jb::jobu {
  * @return Owning JSON object, or `jobu.protocol.invalid_request` when the update is empty or cannot be represented.
  */
 [[nodiscard]] auto update_job_request_to_json(UpdateJobRequest const& request, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes job.update parameters.
  *
@@ -303,7 +303,7 @@ namespace jb::jobu {
  * @param registry Attribute registry borrowed while decoding partial Job-scope changes.
  * @return Owning UpdateJobRequest, or `jobu.protocol.invalid_request` when the request shape or value is invalid.
  */
-[[nodiscard]] auto update_job_request_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+[[nodiscard]] auto update_job_request_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<UpdateJobRequest, jb::core::Error>;
 
 /** Encodes job.move parameters.
@@ -315,7 +315,7 @@ namespace jb::jobu {
  * @return Owning JSON object, or `jobu.protocol.invalid_request` when the request cannot be represented.
  */
 [[nodiscard]] auto move_job_request_to_json(MoveJobRequest const& request)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes job.move parameters.
  *
@@ -325,7 +325,7 @@ namespace jb::jobu {
  * @param value JSON request object to decode without retaining references to it.
  * @return Owning MoveJobRequest, or `jobu.protocol.invalid_request` when the request shape or value is invalid.
  */
-[[nodiscard]] auto move_job_request_from_json(jb::rpc::JsonValue const& value)
+[[nodiscard]] auto move_job_request_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<MoveJobRequest, jb::core::Error>;
 
 /** Encodes job.delete parameters.
@@ -336,7 +336,7 @@ namespace jb::jobu {
  * @return Owning JSON object containing `job_id` and `expected_revision`.
  */
 [[nodiscard]] auto delete_job_request_to_json(DeleteJobRequest const& request)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes job.delete parameters.
  *
@@ -346,7 +346,7 @@ namespace jb::jobu {
  * @param value JSON request object to decode without retaining references to it.
  * @return Owning DeleteJobRequest, or `jobu.protocol.invalid_request` when the request shape or value is invalid.
  */
-[[nodiscard]] auto delete_job_request_from_json(jb::rpc::JsonValue const& value)
+[[nodiscard]] auto delete_job_request_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<DeleteJobRequest, jb::core::Error>;
 
 } // namespace jb::jobu

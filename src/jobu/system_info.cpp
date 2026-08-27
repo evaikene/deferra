@@ -11,9 +11,9 @@ namespace jb::jobu {
 
 namespace {
 
-auto make_json(auto value) -> jb::rpc::JsonValue
+auto make_json(auto value) -> jb::core::JsonValue
 {
-    jb::rpc::JsonValue result;
+    jb::core::JsonValue result;
     result.data = std::move(value);
     return result;
 }
@@ -35,13 +35,13 @@ auto invalid_response() -> jb::core::Result<SystemInfo, jb::core::Error>
     });
 }
 
-auto find_member(jb::rpc::JsonValue::Object const& object, std::string const& name) -> jb::rpc::JsonValue const*
+auto find_member(jb::core::JsonValue::Object const& object, std::string const& name) -> jb::core::JsonValue const*
 {
     auto const iterator = object.find(name);
     return iterator == object.end() ? nullptr : &iterator->second;
 }
 
-auto decode_version_component(jb::rpc::JsonValue const* value, std::uint32_t& result) -> bool
+auto decode_version_component(jb::core::JsonValue const* value, std::uint32_t& result) -> bool
 {
     if (!value || !value->is_uint() || value->as_uint() > std::numeric_limits<std::uint32_t>::max()) {
         return false;
@@ -52,26 +52,26 @@ auto decode_version_component(jb::rpc::JsonValue const* value, std::uint32_t& re
 
 } // anonymous namespace
 
-auto system_info_to_json(SystemInfo const& info) -> jb::rpc::JsonValue
+auto system_info_to_json(SystemInfo const& info) -> jb::core::JsonValue
 {
-    auto capabilities = jb::rpc::JsonValue::Array{};
+    auto capabilities = jb::core::JsonValue::Array{};
     for (auto& capability : canonical_capabilities(info.capabilities)) {
         capabilities.push_back(make_json(std::move(capability)));
     }
 
-    auto api_version = jb::rpc::JsonValue::Object{
+    auto api_version = jb::core::JsonValue::Object{
         {"major", make_json(static_cast<std::uint64_t>(info.api_version.major))},
         {"minor", make_json(static_cast<std::uint64_t>(info.api_version.minor))},
     };
 
-    return make_json(jb::rpc::JsonValue::Object{
+    return make_json(jb::core::JsonValue::Object{
         {"api_version",    make_json(std::move(api_version))          },
         {"capabilities",   make_json(std::move(capabilities))         },
         {"daemon_version", make_json(std::string{info.daemon_version})},
     });
 }
 
-auto system_info_from_json(jb::rpc::JsonValue const& value) -> jb::core::Result<SystemInfo, jb::core::Error>
+auto system_info_from_json(jb::core::JsonValue const& value) -> jb::core::Result<SystemInfo, jb::core::Error>
 {
     using Result = jb::core::Result<SystemInfo, jb::core::Error>;
 

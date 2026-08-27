@@ -15,7 +15,7 @@
 #include <variant>
 #include <vector>
 
-namespace jb::rpc {
+namespace jb::core {
 
 /** Represents the JSON null value without relying on a codec-library type.
  *
@@ -132,8 +132,8 @@ struct JsonLimits {
  *
  * Negative integer tokens, including `-0`, become std::int64_t; non-negative integer tokens become std::uint64_t;
  * tokens containing a fraction or exponent become double. Invalid syntax, UTF-8, duplicate members, excessive depth,
- * integer overflow, and non-finite floating-point results are reported with stable `rpc.json.*` errors. Returned errors
- * never contain the input body.
+ * integer overflow, and non-finite floating-point results are reported with stable `core.json.*` errors. Returned
+ * errors never contain the input body.
  *
  * @param text Complete JSON text to parse; the returned tree does not borrow from it.
  * @param limits Container-nesting limits for this parse.
@@ -145,11 +145,11 @@ struct JsonLimits {
 /** Serializes an owning JSON tree to deterministic JSON text.
  *
  * Object members are emitted in lexicographic key order. Invalid UTF-8 in strings or object keys and non-finite
- * floating-point values are rejected with stable `rpc.json.*` errors.
+ * floating-point values are rejected with stable `core.json.*` errors.
  *
  * @param value JSON tree to serialize.
  * @return Complete JSON text, or a dependency-independent error.
  */
 [[nodiscard]] auto serialize_json(JsonValue const& value) -> jb::core::Result<std::string, jb::core::Error>;
 
-} // namespace jb::rpc
+} // namespace jb::core
