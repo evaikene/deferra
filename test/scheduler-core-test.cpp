@@ -2190,6 +2190,590 @@ TEST_CASE("Scheduler core reconstructs manual barriers before dispatch",
     CHECK(fixture.executor.start_requests().empty());
 }
 
+TEST_CASE("Scheduler core completes pending cancellation atomically",
+          "[jobu][scheduler][core][cancellation][capacity][sqlite]")
+{
+    SECTION("scheduled run")
+    {
+        CoreFixture fixture;
+        auto const  queue_id = id(10);
+        auto const  job_id   = id(110);
+        auto const  run_id   = id(11);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_job(fixture.database, job_id, queue_id, JobType::Cli);
+        insert_run(fixture.database, default_run(fixture, run_id, job_id, queue_id, JobType::Cli));
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+        };
+
+        fixture.time.set_utc(at(200));
+        auto cancelled = core.cancel_run(run_id);
+        REQUIRE(cancelled);
+        CHECK(cancelled->disposition == CancelDisposition::Completed);
+        CHECK(cancelled->run.state == RunState::Cancelled);
+        CHECK(cancelled->run.completed_at == at(200));
+        REQUIRE(cancelled->run.result);
+        CHECK(cancelled->run.result->as_object().at("reason").as_string() == "cancelled");
+        CHECK(fixture.executor.cancel_calls().empty());
+
+        auto persisted = fixture.runs.find_by_id(run_id);
+        REQUIRE(persisted);
+        REQUIRE(persisted->has_value());
+        CHECK(persisted->value().state == RunState::Cancelled);
+        CHECK(persisted->value().completed_at == at(200));
+        REQUIRE(persisted->value().result);
+        CHECK(persisted->value().result->as_object().at("reason").as_string() == "cancelled");
+    }
+
+    SECTION("blocking retry releases its queue slot after commit")
+    {
+        CoreFixture fixture;
+        auto const  queue_id = id(20);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_blocking_retry(fixture, queue_id, 21);
+        insert_scheduled(fixture, queue_id, 22, JobType::Cli);
+        fixture.executor.set_available(JobType::Cli, true);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
+        };
+
+        auto cancelled = core.cancel_run(id(21));
+        REQUIRE(cancelled);
+        CHECK(cancelled->disposition == CancelDisposition::Completed);
+        CHECK(cancelled->run.state == RunState::Cancelled);
+        CHECK(cancelled->run.started_at == at(70));
+
+        REQUIRE(core.process_cycle());
+        REQUIRE(fixture.executor.pending_keys().size() == 1U);
+        CHECK(fixture.executor.pending_keys().front().run_id == id(22));
+    }
+}
+
+TEST_CASE("Scheduler core retains running cancellation until forced terminal completion",
+          "[jobu][scheduler][core][cancellation][completion][capacity][sqlite]")
+{
+    auto const verify_completion = [](bool retryable_completion) {
+        CoreFixture fixture;
+        auto const  queue_id = id(30);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_scheduled(fixture, queue_id, 31, JobType::Cli);
+        insert_scheduled(fixture, queue_id, 32, JobType::Cli);
+        fixture.executor.set_available(JobType::Cli, true);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
+        };
+
+        REQUIRE(core.process_cycle());
+        REQUIRE(fixture.executor.pending_keys().size() == 1U);
+        auto const key = fixture.executor.pending_keys().front();
+        REQUIRE(key.run_id == id(31));
+
+        auto requested = core.cancel_run(key.run_id);
+        REQUIRE(requested);
+        CHECK(requested->disposition == CancelDisposition::Requested);
+        CHECK(requested->run.state == RunState::Running);
+        REQUIRE(fixture.executor.cancel_calls().size() == 1U);
+        CHECK(fixture.executor.cancel_calls().front() == key);
+
+        auto repeated = core.cancel_run(key.run_id);
+        REQUIRE(repeated);
+        CHECK(repeated->disposition == CancelDisposition::Requested);
+        CHECK(fixture.executor.cancel_calls().size() == 1U);
+
+        REQUIRE(core.process_cycle());
+        CHECK(fixture.executor.start_requests().size() == 1U);
+
+        fixture.time.set_utc(at(200));
+        auto completion = retryable_completion ? failure(key, FailureDisposition::Retryable, at(400))
+                                               : success(key, "finished-during-cancel");
+        REQUIRE(fixture.executor.complete(key, std::move(completion)));
+
+        auto run = fixture.runs.find_by_id(key.run_id);
+        REQUIRE(run);
+        REQUIRE(run->has_value());
+        CHECK(run->value().state == RunState::Cancelled);
+        CHECK(run->value().completed_at == at(200));
+        REQUIRE(run->value().result);
+        CHECK(run->value().result->as_object().at("reason").as_string() == "cancelled");
+        auto attempt = fixture.attempts.find(key.run_id, key.attempt_number);
+        REQUIRE(attempt);
+        REQUIRE(attempt->has_value());
+        CHECK(attempt->value().state == AttemptState::Completed);
+        CHECK(attempt->value().outcome == AttemptOutcome::Cancelled);
+        REQUIRE(attempt->value().result);
+        CHECK(attempt->value().result->as_object().at("reason").as_string() == "cancelled");
+
+        REQUIRE(core.process_cycle());
+        REQUIRE(fixture.executor.pending_keys().size() == 1U);
+        CHECK(fixture.executor.pending_keys().front().run_id == id(32));
+    };
+
+    SECTION("successful executor completion")
+    {
+        verify_completion(false);
+    }
+    SECTION("retryable executor completion")
+    {
+        verify_completion(true);
+    }
+}
+
+TEST_CASE("Scheduler core handles cancellation errors and invalid run states",
+          "[jobu][scheduler][core][cancellation][errors][sqlite]")
+{
+    SECTION("executor refusal leaves cancellation retryable")
+    {
+        CoreFixture fixture;
+        auto const  queue_id = id(40);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_scheduled(fixture, queue_id, 41, JobType::Cli);
+        fixture.executor.set_available(JobType::Cli, true);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+        };
+        REQUIRE(core.process_cycle());
+        auto const key = fixture.executor.pending_keys().front();
+        fixture.executor.set_cancel_error(Error{
+            .category = ErrorCategory::Unavailable,
+            .code     = "test.executor.cancel_unavailable",
+            .message  = "Configured cancellation failure",
+        });
+
+        auto refused = core.cancel_run(key.run_id);
+        REQUIRE_FALSE(refused);
+        CHECK(refused.error().code == "test.executor.cancel_unavailable");
+        CHECK(fixture.executor.cancel_calls().size() == 1U);
+        auto running = fixture.runs.find_by_id(key.run_id);
+        REQUIRE(running);
+        REQUIRE(running->has_value());
+        CHECK(running->value().state == RunState::Running);
+
+        fixture.executor.set_cancel_error(std::nullopt);
+        auto requested = core.cancel_run(key.run_id);
+        REQUIRE(requested);
+        CHECK(requested->disposition == CancelDisposition::Requested);
+        CHECK(fixture.executor.cancel_calls().size() == 2U);
+        REQUIRE(fixture.executor.complete(key, success(key)));
+        auto cancelled = fixture.runs.find_by_id(key.run_id);
+        REQUIRE(cancelled);
+        REQUIRE(cancelled->has_value());
+        CHECK(cancelled->value().state == RunState::Cancelled);
+    }
+
+    SECTION("unknown run")
+    {
+        CoreFixture   fixture;
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+        };
+        auto missing = core.cancel_run(id(42));
+        REQUIRE_FALSE(missing);
+        CHECK(missing.error().category == ErrorCategory::NotFound);
+        CHECK(missing.error().code == "jobu.run.not_found");
+    }
+
+    SECTION("terminal run")
+    {
+        CoreFixture fixture;
+        auto const  queue_id = id(43);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_scheduled(fixture, queue_id, 44, JobType::Cli);
+        fixture.executor.set_available(JobType::Cli, true);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+        };
+        REQUIRE(core.process_cycle());
+        auto const key = fixture.executor.pending_keys().front();
+        REQUIRE(fixture.executor.complete(key, success(key)));
+
+        auto conflict = core.cancel_run(key.run_id);
+        REQUIRE_FALSE(conflict);
+        CHECK(conflict.error().category == ErrorCategory::Conflict);
+        CHECK(conflict.error().code == "jobu.run.state_conflict");
+    }
+
+    SECTION("running work from another scheduler instance")
+    {
+        CoreFixture fixture;
+        auto const  queue_id = id(45);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_running(fixture, queue_id, 46, JobType::Cli);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+        };
+
+        auto recovered = core.cancel_run(id(46));
+        REQUIRE_FALSE(recovered);
+        CHECK(recovered.error().category == ErrorCategory::Conflict);
+        CHECK(recovered.error().code == "jobu.scheduler.recovery_required");
+        CHECK(fixture.executor.cancel_calls().empty());
+    }
+
+    SECTION("contradictory scheduled attempt relationship")
+    {
+        CoreFixture fixture;
+        auto const  queue_id = id(47);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_scheduled(fixture, queue_id, 48, JobType::Cli);
+        REQUIRE(fixture.attempts.insert_attempt(JobAttempt{
+            .run_id         = id(48),
+            .attempt_number = 1,
+            .due_at         = at(80),
+            .started_at     = at(90),
+            .state          = AttemptState::Running,
+        }));
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+        };
+
+        auto invalid = core.cancel_run(id(48));
+        REQUIRE_FALSE(invalid);
+        CHECK(invalid.error().category == ErrorCategory::Internal);
+        CHECK(invalid.error().code == "jobu.storage.invariant");
+        CHECK(fixture.executor.cancel_calls().empty());
+    }
+}
+
+TEST_CASE("Scheduler core retains cancelled running state when completion persistence fails",
+          "[jobu][scheduler][core][cancellation][completion][rollback][capacity][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  queue_id = id(49);
+    insert_queue(fixture.database, queue_id, 2);
+    insert_scheduled(fixture, queue_id, 50, JobType::Cli);
+    insert_scheduled(fixture, queue_id, 51, JobType::Cli);
+    fixture.executor.set_available(JobType::Cli, true);
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        fixture.time,
+        fixture.executor,
+        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
+    };
+
+    REQUIRE(core.process_cycle());
+    auto const key = fixture.executor.pending_keys().front();
+    REQUIRE(core.cancel_run(key.run_id));
+    Query trigger{fixture.database};
+    REQUIRE(trigger.exec("CREATE TRIGGER fail_cancelled_completion BEFORE UPDATE OF state ON jobu_runs "
+                         "WHEN OLD.state = 'running' AND NEW.state = 'cancelled' "
+                         "BEGIN SELECT RAISE(ABORT, 'injected cancelled completion failure'); END"));
+
+    fixture.time.set_utc(at(200));
+    REQUIRE(fixture.executor.complete(key, success(key)));
+    auto run = fixture.runs.find_by_id(key.run_id);
+    REQUIRE(run);
+    REQUIRE(run->has_value());
+    CHECK(run->value().state == RunState::Running);
+    auto attempt = fixture.attempts.find(key.run_id, key.attempt_number);
+    REQUIRE(attempt);
+    REQUIRE(attempt->has_value());
+    CHECK(attempt->value().state == AttemptState::Running);
+
+    auto failed = core.process_cycle();
+    REQUIRE_FALSE(failed);
+    CHECK(failed.error().code == "db.constraint");
+    CHECK(fixture.executor.start_requests().size() == 1U);
+}
+
+TEST_CASE("Scheduler core still validates executor protocol after accepting cancellation",
+          "[jobu][scheduler][core][cancellation][completion][protocol][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  queue_id = id(52);
+    insert_queue(fixture.database, queue_id, 1);
+    insert_scheduled(fixture, queue_id, 53, JobType::Cli);
+    RawAttemptExecutor executor;
+    SchedulerCore      core{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        fixture.time,
+        executor,
+        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+    };
+
+    REQUIRE(core.process_cycle());
+    REQUIRE(executor.requests.size() == 1U);
+    auto const key = executor.requests.front().key;
+    REQUIRE(core.cancel_run(key.run_id));
+    auto invalid                = success(key);
+    invalid.failure_disposition = FailureDisposition::Terminal;
+    executor.emit(std::move(invalid));
+
+    auto failed = core.process_cycle();
+    REQUIRE_FALSE(failed);
+    CHECK(failed.error().code == "jobu.executor.invalid_completion");
+    auto run = fixture.runs.find_by_id(key.run_id);
+    REQUIRE(run);
+    REQUIRE(run->has_value());
+    CHECK(run->value().state == RunState::Running);
+}
+
+TEST_CASE("Scheduler core creates recurring successors during immediate cancellation",
+          "[jobu][scheduler][core][cancellation][recurrence][sqlite]")
+{
+    auto const  schedule     = CronSchedule{.expression = "*/5 * * * *", .timezone = "UTC"};
+    auto const  queue_id     = id(50);
+    auto const  job_id       = id(150);
+    auto const  run_id       = id(51);
+    auto const  successor_id = id(52);
+    CoreFixture fixture{{successor_id}};
+    insert_queue(fixture.database, queue_id, 1);
+    insert_job(fixture.database, job_id, queue_id, JobType::Cli, JobState::Active, schedule);
+    auto run        = default_run(fixture, run_id, job_id, queue_id, JobType::Cli);
+    run.planned_at  = at(150);
+    run.runnable_at = at(300);
+    insert_run(fixture.database, run);
+    fixture.cron.set_occurrences(schedule, {at(140), at(160), at(200)});
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        fixture.time,
+        fixture.executor,
+    };
+
+    fixture.time.set_utc(at(130));
+    auto cancelled = core.cancel_run(run_id);
+    REQUIRE(cancelled);
+    CHECK(cancelled->disposition == CancelDisposition::Completed);
+    CHECK(cancelled->run.state == RunState::Cancelled);
+    auto successor = fixture.runs.find_schedule_owned(job_id);
+    REQUIRE(successor);
+    REQUIRE(successor->has_value());
+    CHECK(successor->value().id == successor_id);
+    CHECK(successor->value().planned_at == at(160));
+    REQUIRE(fixture.cron.next_calls().size() == 1U);
+    CHECK(fixture.cron.next_calls().front().exclusive_lower_bound == at(150));
+}
+
+TEST_CASE("Scheduler core rolls immediate recurring cancellation failures back",
+          "[jobu][scheduler][core][cancellation][recurrence][rollback][sqlite]")
+{
+    enum class FailureKind : std::uint8_t {
+        Cron,
+        Uuid,
+        Persistence,
+        ScheduleConflict,
+    };
+
+    auto const verify_failure = [](FailureKind kind) {
+        auto        successor_ids = kind == FailureKind::Uuid ? std::vector<Uuid>{} : std::vector<Uuid>{id(62)};
+        CoreFixture fixture{std::move(successor_ids)};
+        auto const  schedule = CronSchedule{.expression = "*/5 * * * *", .timezone = "UTC"};
+        auto const  queue_id = id(60);
+        auto const  job_id   = id(160);
+        auto const  run_id   = id(61);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_job(fixture.database, job_id, queue_id, JobType::Cli, JobState::Active, schedule);
+        insert_run(fixture.database, default_run(fixture, run_id, job_id, queue_id, JobType::Cli));
+        fixture.cron.set_occurrences(schedule, {at(200)});
+
+        auto expected_code = std::string{};
+        if (kind == FailureKind::Cron) {
+            expected_code = "test.cron.next_failed";
+            fixture.cron.set_next_error(Error{
+                .category = ErrorCategory::ResourceExhausted,
+                .code     = expected_code,
+                .message  = "Configured cron next-occurrence failure",
+            });
+        }
+        else if (kind == FailureKind::Uuid) {
+            expected_code = "test.uuid.sequence_exhausted";
+        }
+        else if (kind == FailureKind::Persistence) {
+            expected_code = "db.constraint";
+            Query trigger{fixture.database};
+            REQUIRE(trigger.exec("CREATE TRIGGER fail_run_cancellation BEFORE UPDATE OF state ON jobu_runs "
+                                 "WHEN OLD.state = 'scheduled' AND NEW.state = 'cancelled' "
+                                 "BEGIN SELECT RAISE(ABORT, 'injected cancellation failure'); END"));
+        }
+        else {
+            expected_code = "jobu.run.schedule_conflict";
+            Query trigger{fixture.database};
+            REQUIRE(trigger.exec(
+                "CREATE TRIGGER inject_cancellation_successor AFTER UPDATE OF state ON jobu_runs "
+                "WHEN OLD.state = 'scheduled' AND NEW.state = 'cancelled' BEGIN "
+                "INSERT INTO jobu_runs(id, job_id, job_revision, queue_id, origin, schedule_owned, planned_at_us, "
+                "runnable_at_us, started_at_us, completed_at_us, type, priority, attributes_json, payload_json, "
+                "state, result_json) VALUES(zeroblob(16), NEW.job_id, NEW.job_revision, NEW.queue_id, 'scheduled', "
+                "1, NEW.completed_at_us + 1, NEW.completed_at_us + 1, NULL, NULL, NEW.type, NEW.priority, "
+                "NEW.attributes_json, NEW.payload_json, 'scheduled', NULL); END"));
+        }
+
+        fixture.time.set_utc(at(150));
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+        };
+        auto failed = core.cancel_run(run_id);
+        REQUIRE_FALSE(failed);
+        CHECK(failed.error().code == expected_code);
+        auto preserved = fixture.runs.find_by_id(run_id);
+        REQUIRE(preserved);
+        REQUIRE(preserved->has_value());
+        CHECK(preserved->value().state == RunState::Scheduled);
+        CHECK_FALSE(preserved->value().completed_at);
+        CHECK_FALSE(preserved->value().result);
+        auto current = fixture.runs.find_schedule_owned(job_id);
+        REQUIRE(current);
+        REQUIRE(current->has_value());
+        CHECK(current->value().id == run_id);
+    };
+
+    SECTION("cron occurrence failure")
+    {
+        verify_failure(FailureKind::Cron);
+    }
+    SECTION("UUID exhaustion")
+    {
+        verify_failure(FailureKind::Uuid);
+    }
+    SECTION("persistence failure")
+    {
+        verify_failure(FailureKind::Persistence);
+    }
+    SECTION("schedule-owned uniqueness conflict")
+    {
+        verify_failure(FailureKind::ScheduleConflict);
+    }
+}
+
+TEST_CASE("Scheduler cancellation releases manual barriers and completes suspension drains",
+          "[jobu][scheduler][core][cancellation][run-now][suspension][management][sqlite]")
+{
+    SECTION("pending manual run")
+    {
+        CoreFixture fixture;
+        auto const  schedule         = CronSchedule{.expression = "*/5 * * * *", .timezone = "UTC"};
+        auto const  queue_id         = id(70);
+        auto const  job_id           = id(170);
+        auto const  scheduled_run_id = id(71);
+        auto const  manual_run_id    = id(72);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_job(fixture.database, job_id, queue_id, JobType::Cli, JobState::Active, schedule);
+        insert_run(fixture.database, default_run(fixture, scheduled_run_id, job_id, queue_id, JobType::Cli));
+        auto manual           = default_run(fixture, manual_run_id, job_id, queue_id, JobType::Cli);
+        manual.origin         = RunOrigin::Manual;
+        manual.schedule_owned = false;
+        insert_run(fixture.database, manual);
+        fixture.executor.set_available(JobType::Cli, true);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
+        };
+
+        auto cancelled = core.cancel_run(manual_run_id);
+        REQUIRE(cancelled);
+        CHECK(cancelled->disposition == CancelDisposition::Completed);
+        CHECK(fixture.cron.next_calls().empty());
+        REQUIRE(core.process_cycle());
+        REQUIRE(fixture.executor.pending_keys().size() == 1U);
+        CHECK(fixture.executor.pending_keys().front().run_id == scheduled_run_id);
+    }
+
+    SECTION("running job drain")
+    {
+        CoreFixture fixture;
+        auto const  queue_id = id(73);
+        auto const  job_id   = id(174);
+        auto const  run_id   = id(74);
+        insert_queue(fixture.database, queue_id, 1);
+        insert_job(fixture.database, job_id, queue_id, JobType::Cli);
+        insert_run(fixture.database, default_run(fixture, run_id, job_id, queue_id, JobType::Cli));
+        fixture.executor.set_available(JobType::Cli, true);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            fixture.executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+        };
+        ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+
+        REQUIRE(core.process_cycle());
+        auto const key = fixture.executor.pending_keys().front();
+        fixture.time.set_utc(at(130));
+        auto draining = service.suspend_job(job_id);
+        REQUIRE(draining);
+        CHECK(draining->state == JobState::Suspending);
+        auto requested = core.cancel_run(run_id);
+        REQUIRE(requested);
+        CHECK(requested->disposition == CancelDisposition::Requested);
+
+        fixture.time.set_utc(at(200));
+        REQUIRE(fixture.executor.complete(key, success(key)));
+        auto suspended = service.get_job(job_id);
+        REQUIRE(suspended);
+        CHECK(suspended->state == JobState::Suspended);
+        auto cancelled = fixture.runs.find_by_id(run_id);
+        REQUIRE(cancelled);
+        REQUIRE(cancelled->has_value());
+        CHECK(cancelled->value().state == RunState::Cancelled);
+    }
+}
+
 TEST_CASE("Single-queue scheduler core rejects zero limits and batch size", "[jobu][scheduler][core][sqlite]")
 {
     CoreFixture fixture;

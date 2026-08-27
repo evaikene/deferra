@@ -72,6 +72,7 @@ target_sources(${TARGET}
         management_rpc.hpp
         queue.hpp
         run.hpp
+        scheduler.hpp
         secret.hpp
         system_info.hpp
         system_info_rpc.hpp

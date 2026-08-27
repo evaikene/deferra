@@ -255,6 +255,7 @@ foreach(JOBU_DOMAIN_HEADER IN ITEMS
         management-rpc
         queue
         run
+        scheduler
         secret
         system-info-rpc
         utc-timestamp
