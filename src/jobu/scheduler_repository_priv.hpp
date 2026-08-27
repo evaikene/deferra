@@ -98,6 +98,14 @@ public:
         -> jb::core::Result<std::optional<jb::core::UtcTimePoint>, jb::core::Error>;
     [[nodiscard]] auto find_dispatch_context(jb::core::Uuid const& run_id, jb::core::UtcTimePoint now)
         -> jb::core::Result<std::optional<DispatchContext>, jb::core::Error>;
+    [[nodiscard]] auto find_run_for_cancel(jb::core::Uuid const& run_id)
+        -> jb::core::Result<std::optional<JobRun>, jb::core::Error>;
+    [[nodiscard]] auto find_active_attempt(jb::core::Uuid const& run_id)
+        -> jb::core::Result<std::optional<AttemptNumber>, jb::core::Error>;
+    [[nodiscard]] auto cancel_pending_run(jb::core::Uuid const&  run_id,
+                                          RunState               expected_state,
+                                          jb::core::UtcTimePoint completed_at,
+                                          std::string_view result_json) -> jb::core::Result<bool, jb::core::Error>;
     [[nodiscard]] auto
     mark_dispatch_running(jb::core::Uuid const& run_id, RunState expected_state, jb::core::UtcTimePoint started_at)
         -> jb::core::Result<bool, jb::core::Error>;

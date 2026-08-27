@@ -20,6 +20,7 @@
 #include "result.hpp"             // IWYU pragma: keep for public header self-containment coverage
 #include "rpc.hpp"                // IWYU pragma: keep for public header self-containment coverage
 #include "run.hpp"                // IWYU pragma: keep for public header self-containment coverage
+#include "scheduler.hpp"          // IWYU pragma: keep for public header self-containment coverage
 #include "secret.hpp"             // IWYU pragma: keep for public header self-containment coverage
 #include "system_info.hpp"        // IWYU pragma: keep for public header self-containment coverage
 #include "system_info_rpc.hpp"    // IWYU pragma: keep for public header self-containment coverage

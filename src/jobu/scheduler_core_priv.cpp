@@ -20,6 +20,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -31,8 +32,9 @@ namespace {
 template <typename T>
 using CoreResult = jb::core::Result<T, jb::core::Error>;
 
-constexpr std::size_t kMaximumRepositoryPageRows    = 1000U;
-constexpr std::size_t kMaximumCompletionResultBytes = std::size_t{256} * 1024U;
+constexpr std::size_t      kMaximumRepositoryPageRows    = 1000U;
+constexpr std::size_t      kMaximumCompletionResultBytes = std::size_t{256} * 1024U;
+constexpr std::string_view kCancellationResultJson       = R"({"reason":"cancelled"})";
 
 struct CapacityState {
     std::uint64_t                                                 cli_running{0};
@@ -101,6 +103,45 @@ auto invalid_completion(std::string reason) -> jb::core::Error
                               "Attempt executor completion violates its contract");
     error.detail = "reason=" + std::move(reason);
     return error;
+}
+
+auto run_not_found() -> jb::core::Error
+{
+    return core_error(jb::core::ErrorCategory::NotFound, "jobu.run.not_found", "The requested run does not exist");
+}
+
+auto run_state_conflict() -> jb::core::Error
+{
+    return core_error(jb::core::ErrorCategory::Conflict,
+                      "jobu.run.state_conflict",
+                      "The run state does not permit cancellation");
+}
+
+auto recovery_required() -> jb::core::Error
+{
+    return core_error(jb::core::ErrorCategory::Conflict,
+                      "jobu.scheduler.recovery_required",
+                      "The running attempt is not owned by this scheduler instance");
+}
+
+auto scheduler_invariant(std::string reason) -> jb::core::Error
+{
+    auto error   = core_error(jb::core::ErrorCategory::Internal,
+                              "jobu.storage.invariant",
+                              "Persisted scheduler cancellation state is inconsistent");
+    error.detail = "reason=" + std::move(reason);
+    return error;
+}
+
+auto cancellation_result() -> jb::rpc::JsonValue
+{
+    auto reason = jb::rpc::JsonValue{};
+    reason.data = std::string{"cancelled"};
+    auto result = jb::rpc::JsonValue{};
+    result.data = jb::rpc::JsonValue::Object{
+        {"reason", std::move(reason)},
+    };
+    return result;
 }
 
 auto recurrence_invariant(std::string reason, jb::core::Error const* cause = nullptr) -> jb::core::Error
@@ -426,9 +467,12 @@ auto process_completion(jb::db::Database&                        database,
                         jb::core::UuidGenerator&                 uuid_generator,
                         jb::core::TimeSource&                    time_source,
                         std::map<jb::core::Uuid, std::uint64_t>& active_attempts,
+                        std::set<jb::core::Uuid>&                cancellation_requests,
                         jb::core::Uuid const&                    expected_run_id,
                         AttemptCompletion const&                 completion) -> CoreResult<CompletionEffect>
 {
+    // Validate the executor's original callback before applying any accepted-cancellation override. Cancellation may
+    // change the durable outcome, but it must not conceal a key mismatch or another executor protocol violation.
     auto const active = active_attempts.find(expected_run_id);
     if (active == active_attempts.end()) {
         return CoreResult<CompletionEffect>::failure(invalid_completion("unexpected_callback"));
@@ -441,6 +485,19 @@ auto process_completion(jb::db::Database&                        database,
         return CoreResult<CompletionEffect>::failure(std::move(serialized).error());
     }
 
+    // Normalize every downstream decision and write to one effective outcome so a successful or retryable executor
+    // observation cannot escape an accepted cancellation request.
+    auto const cancellation_requested = cancellation_requests.contains(expected_run_id);
+    auto const outcome                = cancellation_requested ? AttemptOutcome::Cancelled : completion.outcome;
+    auto const failure_disposition =
+        cancellation_requested ? std::optional<FailureDisposition>{} : completion.failure_disposition;
+    auto const retry_not_before =
+        cancellation_requested ? std::optional<jb::core::UtcTimePoint>{} : completion.retry_not_before;
+    if (cancellation_requested) {
+        *serialized = kCancellationResultJson;
+    }
+
+    // Attempt completion, retry or terminal run state, recurrence, and suspension drain are one durable transition.
     auto const completed_at = time_source.utc_now();
     auto       transaction  = jb::db::Transaction::begin(database);
     if (!transaction) {
@@ -458,11 +515,11 @@ auto process_completion(jb::db::Database&                        database,
         {
             .run_id           = completion.key.run_id,
             .attempt_number   = completion.key.attempt_number,
-            .outcome          = completion.outcome,
-            .retryable        = completion.failure_disposition == FailureDisposition::Retryable,
+            .outcome          = outcome,
+            .retryable        = failure_disposition == FailureDisposition::Retryable,
             .retry_allowed    = context->job_state != JobState::Deleted && context->queue_state != QueueState::Deleted,
             .completed_at     = completed_at,
-            .retry_not_before = completion.retry_not_before,
+            .retry_not_before = retry_not_before,
         });
     if (!decision) {
         return CoreResult<CompletionEffect>::failure(std::move(decision).error());
@@ -470,7 +527,7 @@ auto process_completion(jb::db::Database&                        database,
     auto attempt_completed = repository.complete_attempt(completion.key.run_id,
                                                          completion.key.attempt_number,
                                                          completed_at,
-                                                         completion.outcome,
+                                                         outcome,
                                                          *serialized);
     if (!attempt_completed) {
         return CoreResult<CompletionEffect>::failure(std::move(attempt_completed).error());
@@ -488,7 +545,7 @@ auto process_completion(jb::db::Database&                        database,
                                      context->queue_state == QueueState::Active;
     }
     else {
-        auto terminal = terminal_run_state(completion.outcome);
+        auto terminal = terminal_run_state(outcome);
         if (!terminal) {
             return CoreResult<CompletionEffect>::failure(std::move(terminal).error());
         }
@@ -512,7 +569,9 @@ auto process_completion(jb::db::Database&                        database,
     if (!committed) {
         return CoreResult<CompletionEffect>::failure(std::move(committed).error());
     }
+    // In-memory ownership and cancellation state remain live until the corresponding durable transition commits.
     active_attempts.erase(active);
+    cancellation_requests.erase(expected_run_id);
     return CoreResult<CompletionEffect>::success(effect);
 }
 
@@ -776,6 +835,113 @@ SchedulerCore::SchedulerCore(jb::db::Database&        database,
     , _options{options}
 {}
 
+auto SchedulerCore::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result<CancelRunResult, jb::core::Error>
+{
+    using CancellationResult = CoreResult<CancelRunResult>;
+
+    if (_failure) {
+        return CancellationResult::failure(*_failure);
+    }
+
+    // Resolve and validate the durable state before choosing between an executor request and a database transition.
+    // Running cancellation deliberately occurs without an open transaction around the external executor call.
+    SchedulerRepository repository{_database, _attributes};
+    auto                found = repository.find_run_for_cancel(run_id);
+    if (!found) {
+        return CancellationResult::failure(std::move(found).error());
+    }
+    if (!found->has_value()) {
+        return CancellationResult::failure(run_not_found());
+    }
+    auto run = std::move(**found);
+
+    if (run.state == RunState::Running) {
+        // A persisted running attempt is controllable only when this core owns the exact durable attempt identity.
+        auto const active = _active_attempts.find(run_id);
+        if (active == _active_attempts.end()) {
+            return CancellationResult::failure(recovery_required());
+        }
+        auto durable_attempt = repository.find_active_attempt(run_id);
+        if (!durable_attempt) {
+            return CancellationResult::failure(std::move(durable_attempt).error());
+        }
+        if (!durable_attempt->has_value() || **durable_attempt != active->second) {
+            return CancellationResult::failure(scheduler_invariant("active_attempt_mismatch"));
+        }
+        // Record only accepted requests. The marker makes repeats idempotent while an executor error remains retryable.
+        if (!_cancellation_requests.contains(run_id)) {
+            auto cancelled = _executor.cancel({.run_id = run_id, .attempt_number = active->second});
+            if (!cancelled) {
+                return CancellationResult::failure(std::move(cancelled).error());
+            }
+            auto const [request, inserted] = _cancellation_requests.insert(run_id);
+            (void)request;
+            if (!inserted) {
+                return CancellationResult::failure(scheduler_invariant("duplicate_cancellation_request"));
+            }
+        }
+        return CancellationResult::success({
+            .run         = std::move(run),
+            .disposition = CancelDisposition::Requested,
+        });
+    }
+
+    if (run.state != RunState::Scheduled && run.state != RunState::RetryWait) {
+        return CancellationResult::failure(run_state_conflict());
+    }
+
+    // Re-read pending work under an immediate transaction so cancellation never relies on the earlier classification.
+    auto const completed_at = _time_source.utc_now();
+    auto       result       = cancellation_result();
+    auto       serialized   = jb::rpc::serialize_json(result);
+    if (!serialized) {
+        return CancellationResult::failure(std::move(serialized).error());
+    }
+    auto transaction = jb::db::Transaction::begin(_database);
+    if (!transaction) {
+        return CancellationResult::failure(std::move(transaction).error());
+    }
+    auto guard = std::move(transaction).value();
+
+    auto current = repository.find_run_for_cancel(run_id);
+    if (!current) {
+        return CancellationResult::failure(std::move(current).error());
+    }
+    if (!current->has_value() || current->value().state != run.state) {
+        return CancellationResult::failure(run_state_conflict());
+    }
+    run = std::move(**current);
+
+    // Terminalization, a possible recurring successor, and suspension drains must all commit or roll back together.
+    auto cancelled = repository.cancel_pending_run(run_id, run.state, completed_at, *serialized);
+    if (!cancelled) {
+        return CancellationResult::failure(std::move(cancelled).error());
+    }
+    if (!*cancelled) {
+        return CancellationResult::failure(run_state_conflict());
+    }
+    auto successor = insert_recurring_successor(_database, _attributes, _cron, _uuid_generator, run, completed_at);
+    if (!successor) {
+        return CancellationResult::failure(std::move(successor).error());
+    }
+    auto drained = repository.complete_drained_suspensions(run.queue_id, run.job_id, completed_at);
+    if (!drained) {
+        return CancellationResult::failure(std::move(drained).error());
+    }
+    auto committed = guard.commit();
+    if (!committed) {
+        return CancellationResult::failure(std::move(committed).error());
+    }
+
+    run.state        = RunState::Cancelled;
+    run.completed_at = completed_at;
+    run.result       = std::move(result);
+    return CancellationResult::success({
+        .run         = std::move(run),
+        .disposition = CancelDisposition::Completed,
+    });
+}
+
 auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
 {
     if (_failure) {
@@ -814,6 +980,7 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
                                                 _uuid_generator,
                                                 _time_source,
                                                 _active_attempts,
+                                                _cancellation_requests,
                                                 expected_run_id,
                                                 completion);
             if (!completed && !_failure) {

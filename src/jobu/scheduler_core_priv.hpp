@@ -2,12 +2,14 @@
 
 #include "error.hpp"
 #include "result.hpp"
+#include "scheduler.hpp"
 #include "uuid.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 
 namespace jb::core {
 class TimeSource;
@@ -41,6 +43,7 @@ public:
                   AttemptExecutor&         executor,
                   SchedulerCoreOptions     options = {}) noexcept;
 
+    [[nodiscard]] auto cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result<CancelRunResult, jb::core::Error>;
     [[nodiscard]] auto process_cycle() -> jb::core::Result<void, jb::core::Error>;
 
 private:
@@ -55,6 +58,7 @@ private:
     std::map<jb::core::Uuid, std::int64_t>  _cli_credits;
     std::map<jb::core::Uuid, std::int64_t>  _http_credits;
     std::map<jb::core::Uuid, std::uint64_t> _active_attempts;
+    std::set<jb::core::Uuid>                _cancellation_requests;
     std::optional<jb::core::Error>          _failure;
     bool                                    _cli_first{true};
 };

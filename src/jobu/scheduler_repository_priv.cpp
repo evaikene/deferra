@@ -881,6 +881,170 @@ auto SchedulerRepository::find_dispatch_context(jb::core::Uuid const& run_id, jb
     });
 }
 
+auto SchedulerRepository::find_run_for_cancel(jb::core::Uuid const& run_id)
+    -> jb::core::Result<std::optional<JobRun>, jb::core::Error>
+{
+    // Establish existence independently so a broken owner join is reported as an invariant instead of run-not-found.
+    RunRepository runs{_database, _attributes};
+    auto          existing = runs.find_by_id(run_id);
+    if (!existing) {
+        return RepositoryResult<std::optional<JobRun>>::failure(std::move(existing).error());
+    }
+    if (!existing->has_value()) {
+        return RepositoryResult<std::optional<JobRun>>::success(std::nullopt);
+    }
+
+    auto const sql =
+        "SELECT " + scheduler_run_columns() + std::string{scheduler_run_joins()} + "WHERE jobu_runs.id = :run_id";
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(sql);
+    if (!prepared) {
+        return RepositoryResult<std::optional<JobRun>>::failure(std::move(prepared).error());
+    }
+    auto bound = query.bind_value(":run_id", uuid_to_storage(run_id));
+    if (!bound) {
+        return RepositoryResult<std::optional<JobRun>>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<std::optional<JobRun>>::failure(std::move(executed).error());
+    }
+    auto next = query.next();
+    if (!next) {
+        return RepositoryResult<std::optional<JobRun>>::failure(std::move(next).error());
+    }
+    if (!*next) {
+        return RepositoryResult<std::optional<JobRun>>::failure(invariant("missing_cancellation_owners"));
+    }
+    auto decoded = decode_scheduler_run(query.record(), _attributes, true);
+    if (!decoded) {
+        return RepositoryResult<std::optional<JobRun>>::failure(std::move(decoded).error());
+    }
+    auto finished = query.finish();
+    if (!finished) {
+        return RepositoryResult<std::optional<JobRun>>::failure(std::move(finished).error());
+    }
+
+    // Cancellation needs stable domain errors for every state, but the core must not act on contradictory attempt rows.
+    switch (decoded->run.state) {
+        case RunState::Scheduled:
+            if (decoded->active_attempts != 0 || decoded->completed_attempts != 0 || decoded->total_attempts != 0) {
+                return RepositoryResult<std::optional<JobRun>>::failure(
+                    invariant("scheduled_cancellation_attempt_relationship"));
+            }
+            break;
+        case RunState::Running:
+        case RunState::RetryWait: {
+            auto usage = capacity_usage(*decoded);
+            if (!usage) {
+                return RepositoryResult<std::optional<JobRun>>::failure(std::move(usage).error());
+            }
+            break;
+        }
+        case RunState::Succeeded:
+        case RunState::Failed:
+        case RunState::Interrupted:
+        case RunState::Cancelled:
+            if (decoded->active_attempts != 0 || decoded->running_attempts != 0) {
+                return RepositoryResult<std::optional<JobRun>>::failure(
+                    invariant("terminal_cancellation_attempt_relationship"));
+            }
+            break;
+    }
+    return RepositoryResult<std::optional<JobRun>>::success(std::move(decoded->run));
+}
+
+auto SchedulerRepository::find_active_attempt(jb::core::Uuid const& run_id)
+    -> jb::core::Result<std::optional<AttemptNumber>, jb::core::Error>
+{
+    jb::db::Query query{_database};
+    auto          prepared =
+        query.prepare("SELECT attempt_number AS active_attempt_number FROM jobu_attempts WHERE run_id = :run_id "
+                      "AND state = 'running' ORDER BY attempt_number ASC LIMIT 2");
+    if (!prepared) {
+        return RepositoryResult<std::optional<AttemptNumber>>::failure(std::move(prepared).error());
+    }
+    auto bound = query.bind_value(":run_id", uuid_to_storage(run_id));
+    if (!bound) {
+        return RepositoryResult<std::optional<AttemptNumber>>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<std::optional<AttemptNumber>>::failure(std::move(executed).error());
+    }
+    auto next = query.next();
+    if (!next) {
+        return RepositoryResult<std::optional<AttemptNumber>>::failure(std::move(next).error());
+    }
+    if (!*next) {
+        auto finished = query.finish();
+        if (!finished) {
+            return RepositoryResult<std::optional<AttemptNumber>>::failure(std::move(finished).error());
+        }
+        return RepositoryResult<std::optional<AttemptNumber>>::success(std::nullopt);
+    }
+    auto number =
+        scheduler_value(read_attempt_number(query.record(), "active_attempt_number"), "invalid_active_attempt_number");
+    if (!number) {
+        return RepositoryResult<std::optional<AttemptNumber>>::failure(std::move(number).error());
+    }
+    auto second = query.next();
+    if (!second) {
+        return RepositoryResult<std::optional<AttemptNumber>>::failure(std::move(second).error());
+    }
+    if (*second) {
+        return RepositoryResult<std::optional<AttemptNumber>>::failure(invariant("multiple_active_attempts"));
+    }
+    auto finished = query.finish();
+    if (!finished) {
+        return RepositoryResult<std::optional<AttemptNumber>>::failure(std::move(finished).error());
+    }
+    return RepositoryResult<std::optional<AttemptNumber>>::success(*number);
+}
+
+auto SchedulerRepository::cancel_pending_run(jb::core::Uuid const&  run_id,
+                                             RunState               expected_state,
+                                             jb::core::UtcTimePoint completed_at,
+                                             std::string_view result_json) -> jb::core::Result<bool, jb::core::Error>
+{
+    if (expected_state != RunState::Scheduled && expected_state != RunState::RetryWait) {
+        return RepositoryResult<bool>::failure(invariant("invalid_cancellation_expected_state"));
+    }
+    auto completed = timestamp_to_storage(completed_at);
+    if (!completed) {
+        return RepositoryResult<bool>::failure(std::move(completed).error());
+    }
+    // State and timestamp predicates turn revalidation loss into a zero-row result without rewriting newer state.
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(
+        "UPDATE jobu_runs SET state = 'cancelled', completed_at_us = :completed_at_us, result_json = :result_json "
+        "WHERE id = :run_id AND state = :expected_state AND completed_at_us IS NULL AND result_json IS NULL "
+        "AND ((:expected_state = 'scheduled' AND started_at_us IS NULL) "
+        "OR (:expected_state = 'retry_wait' AND started_at_us IS NOT NULL))");
+    if (!prepared) {
+        return RepositoryResult<bool>::failure(std::move(prepared).error());
+    }
+    auto bound = bind_all(query,
+                          {
+                              {":completed_at_us", std::move(completed).value()                   },
+                              {":result_json",     jb::db::make_text(result_json)                 },
+                              {":run_id",          uuid_to_storage(run_id)                        },
+                              {":expected_state",  jb::db::make_text(storage_text(expected_state))},
+    });
+    if (!bound) {
+        return RepositoryResult<bool>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<bool>::failure(std::move(executed).error());
+    }
+    auto const affected = query.num_rows_affected();
+    if (affected < 0 || affected > 1) {
+        return RepositoryResult<bool>::failure(invariant("invalid_cancellation_affected_rows"));
+    }
+    return RepositoryResult<bool>::success(affected == 1);
+}
+
 auto SchedulerRepository::mark_dispatch_running(jb::core::Uuid const&  run_id,
                                                 RunState               expected_state,
                                                 jb::core::UtcTimePoint started_at)
