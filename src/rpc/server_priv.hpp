@@ -39,9 +39,10 @@ struct Server::Private {
     void               process_readable(ConnectionId id);
     void               process_body(ConnectionId id, std::string const& body);
     [[nodiscard]] auto dispatch_document(ConnectionId id, detail::RequestDocument const& document)
-        -> std::optional<JsonValue>;
-    [[nodiscard]] auto dispatch_entry(ConnectionId id, detail::RequestEntry const& entry) -> std::optional<JsonValue>;
-    [[nodiscard]] auto write_response(ConnectionId id, JsonValue const& response) -> bool;
+        -> std::optional<jb::core::JsonValue>;
+    [[nodiscard]] auto dispatch_entry(ConnectionId id, detail::RequestEntry const& entry)
+        -> std::optional<jb::core::JsonValue>;
+    [[nodiscard]] auto write_response(ConnectionId id, jb::core::JsonValue const& response) -> bool;
     void               acknowledge_output(ConnectionId id, std::size_t bytes);
     void               handle_device_error(ConnectionId id, jb::core::IOError error);
     void               fail_connection(ConnectionId id, jb::core::Error const& error);

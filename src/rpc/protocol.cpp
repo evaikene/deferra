@@ -15,6 +15,8 @@ namespace {
 
 using jb::core::Error;
 using jb::core::ErrorCategory;
+using jb::core::JsonNull;
+using jb::core::JsonValue;
 
 template <typename T>
 auto make_json(T value) -> JsonValue

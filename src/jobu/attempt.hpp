@@ -51,7 +51,7 @@ struct JobAttempt {
     /// Terminal classification, or no value while incomplete.
     std::optional<AttemptOutcome>         outcome;
     /// Detailed terminal result object, or no value when unavailable.
-    std::optional<jb::rpc::JsonValue>     result;
+    std::optional<jb::core::JsonValue>    result;
 };
 
 } // namespace jb::jobu

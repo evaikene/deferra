@@ -102,17 +102,17 @@ auto count_rows(Database& database, std::string_view table) -> std::int64_t
     return *count;
 }
 
-auto json_string(std::string value) -> jb::rpc::JsonValue
+auto json_string(std::string value) -> jb::core::JsonValue
 {
-    auto json = jb::rpc::JsonValue{};
+    auto json = jb::core::JsonValue{};
     json.data = std::move(value);
     return json;
 }
 
-auto cli_payload(std::string command) -> jb::rpc::JsonValue
+auto cli_payload(std::string command) -> jb::core::JsonValue
 {
-    auto payload = jb::rpc::JsonValue{};
-    payload.data = jb::rpc::JsonValue::Object{
+    auto payload = jb::core::JsonValue{};
+    payload.data = jb::core::JsonValue::Object{
         {"command", json_string(std::move(command))}
     };
     return payload;

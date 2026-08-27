@@ -6,6 +6,7 @@
 #include "attribute.hpp"
 #include "error.hpp"
 #include "job.hpp"
+#include "json.hpp"
 #include "queue.hpp"
 #include "result.hpp"
 #include "run.hpp"
@@ -131,7 +132,7 @@ struct CreateJobRequest {
     /// Partial job-specific attribute layer.
     AttributeSet               attributes;
     /// Owning CLI or HTTP payload object, limited to 256 KiB when deterministically encoded.
-    jb::rpc::JsonValue         payload;
+    jb::core::JsonValue        payload;
     /// Optional 1-through-128-byte UTF-8 key reserved for durable create replay.
     std::optional<std::string> idempotency_key;
 };
@@ -159,7 +160,7 @@ struct UpdateJobRequest {
     /// Job-scope values that replace the corresponding stored materialized values.
     AttributeSet                              attribute_changes;
     /// Replacement owning runner payload.
-    std::optional<jb::rpc::JsonValue>         payload;
+    std::optional<jb::core::JsonValue>        payload;
 };
 
 /// Filters and bounds for listing job definitions.

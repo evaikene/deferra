@@ -53,11 +53,11 @@ enum class ErrorCode : std::int64_t { // NOLINT(performance-enum-size) Codes are
 /// Owns a JSON-RPC error object independently of its wire representation.
 struct RpcError {
     /// Numeric JSON-RPC error code; defaults to `ErrorCode::InternalError`.
-    std::int64_t             code{static_cast<std::int64_t>(ErrorCode::InternalError)};
+    std::int64_t                       code{static_cast<std::int64_t>(ErrorCode::InternalError)};
     /// User-safe error message suitable for transmission to the peer.
-    std::string              message;
+    std::string                        message;
     /// Optional owned error data; explicit JSON null remains distinct from absence.
-    std::optional<JsonValue> data;
+    std::optional<jb::core::JsonValue> data;
 
     /// Compares the numeric code, message, and optional data.
     /// @param other RPC error to compare.
@@ -95,14 +95,14 @@ struct RequestContext {
 };
 
 /// Owning success value or represented RPC error returned synchronously by a method handler.
-using MethodResult = jb::core::Result<JsonValue, RpcError>;
+using MethodResult = jb::core::Result<jb::core::JsonValue, RpcError>;
 
 /** Synchronous method callback invoked by the RPC server.
  *
  * The request context and optional parameters are borrowed for the duration of the call. The returned result owns its
  * JSON value or RPC error. Handlers must not retain references to either argument.
  */
-using MethodHandler = std::function<MethodResult(RequestContext const&, std::optional<JsonValue> const&)>;
+using MethodHandler = std::function<MethodResult(RequestContext const&, std::optional<jb::core::JsonValue> const&)>;
 
 /** Converts a project error to the stable JobU application-error representation.
  *

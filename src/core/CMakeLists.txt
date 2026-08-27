@@ -4,6 +4,7 @@ message("** Setting up ${TARGET}")
 
 # Find {fmt}
 find_package(fmt CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 
 # Public headers exposed to library users
 set(HDRS
@@ -20,6 +21,7 @@ set(HDRS
     file.hpp
     ini_file.hpp
     io_device.hpp
+    json.hpp
     logging.hpp
     object.hpp
     result.hpp
@@ -52,6 +54,7 @@ set(SRCS
     file.cpp
     ini_file.cpp
     io_device.cpp
+    json.cpp
     logging.cpp
     object.cpp
     thread_context.cpp
@@ -86,4 +89,7 @@ target_sources(${TARGET}
 
 target_compile_features(${TARGET} PUBLIC cxx_std_20)
 
-target_link_libraries(${TARGET} PUBLIC fmt::fmt)
+target_link_libraries(${TARGET}
+    PUBLIC fmt::fmt
+    PRIVATE nlohmann_json::nlohmann_json
+)

@@ -84,7 +84,7 @@ auto optional_outcome_to_storage(std::optional<AttemptOutcome> value) -> jb::db:
     return jb::db::make_text(storage_text(*value));
 }
 
-auto optional_json_to_storage(std::optional<jb::rpc::JsonValue> const& value) -> RepositoryResult<jb::db::Value>
+auto optional_json_to_storage(std::optional<jb::core::JsonValue> const& value) -> RepositoryResult<jb::db::Value>
 {
     if (!value) {
         return RepositoryResult<jb::db::Value>::success(jb::db::Null{});

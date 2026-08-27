@@ -24,9 +24,9 @@ using ConversionResult = jb::core::Result<T, jb::core::Error>;
 
 inline constexpr std::size_t maximum_page_size{200};
 
-auto make_json(auto value) -> jb::rpc::JsonValue
+auto make_json(auto value) -> jb::core::JsonValue
 {
-    jb::rpc::JsonValue result;
+    jb::core::JsonValue result;
     result.data = std::move(value);
     return result;
 }
@@ -46,21 +46,22 @@ auto invalid(bool request) -> ConversionResult<T>
     return ConversionResult<T>::failure(protocol_error(request));
 }
 
-auto checked_json(jb::rpc::JsonValue value, bool request) -> ConversionResult<jb::rpc::JsonValue>
+auto checked_json(jb::core::JsonValue value, bool request) -> ConversionResult<jb::core::JsonValue>
 {
-    if (!jb::rpc::serialize_json(value)) {
-        return invalid<jb::rpc::JsonValue>(request);
+    if (!jb::core::serialize_json(value)) {
+        return invalid<jb::core::JsonValue>(request);
     }
-    return ConversionResult<jb::rpc::JsonValue>::success(std::move(value));
+    return ConversionResult<jb::core::JsonValue>::success(std::move(value));
 }
 
-auto find_member(jb::rpc::JsonValue::Object const& object, std::string_view name) -> jb::rpc::JsonValue const*
+auto find_member(jb::core::JsonValue::Object const& object, std::string_view name) -> jb::core::JsonValue const*
 {
     auto const iterator = object.find(name);
     return iterator == object.end() ? nullptr : &iterator->second;
 }
 
-auto has_only_members(jb::rpc::JsonValue::Object const& object, std::initializer_list<std::string_view> allowed) -> bool
+auto has_only_members(jb::core::JsonValue::Object const& object, std::initializer_list<std::string_view> allowed)
+    -> bool
 {
     for (auto const& [name, value] : object) {
         static_cast<void>(value);
@@ -79,8 +80,8 @@ auto has_only_members(jb::rpc::JsonValue::Object const& object, std::initializer
 }
 
 template <typename T>
-requires(std::is_integral_v<T>&& std::is_unsigned_v<T>) auto decode_unsigned(jb::rpc::JsonValue const& value, T& result)
-    -> bool
+requires(std::is_integral_v<T>&& std::is_unsigned_v<T>) auto decode_unsigned(jb::core::JsonValue const& value,
+                                                                             T&                         result) -> bool
 {
     auto decoded = std::uint64_t{};
     if (value.is_uint()) {
@@ -100,7 +101,7 @@ requires(std::is_integral_v<T>&& std::is_unsigned_v<T>) auto decode_unsigned(jb:
 }
 
 template <typename T>
-requires(std::is_integral_v<T>&& std::is_signed_v<T>) auto decode_signed(jb::rpc::JsonValue const& value, T& result)
+requires(std::is_integral_v<T>&& std::is_signed_v<T>) auto decode_signed(jb::core::JsonValue const& value, T& result)
     -> bool
 {
     auto decoded = std::int64_t{};
@@ -137,7 +138,7 @@ auto queue_state_text(QueueState state) -> std::optional<std::string_view>
     return std::nullopt;
 }
 
-auto queue_state_from_json(jb::rpc::JsonValue const& value, QueueState& state) -> bool
+auto queue_state_from_json(jb::core::JsonValue const& value, QueueState& state) -> bool
 {
     if (!value.is_string()) {
         return false;
@@ -171,7 +172,7 @@ auto recovery_policy_text(RecoveryPolicy policy) -> std::optional<std::string_vi
     return std::nullopt;
 }
 
-auto recovery_policy_from_json(jb::rpc::JsonValue const& value, RecoveryPolicy& policy) -> bool
+auto recovery_policy_from_json(jb::core::JsonValue const& value, RecoveryPolicy& policy) -> bool
 {
     if (!value.is_string()) {
         return false;
@@ -203,7 +204,7 @@ auto job_state_text(JobState state) -> std::optional<std::string_view>
     return std::nullopt;
 }
 
-auto job_state_from_json(jb::rpc::JsonValue const& value, JobState& state) -> bool
+auto job_state_from_json(jb::core::JsonValue const& value, JobState& state) -> bool
 {
     if (!value.is_string()) {
         return false;
@@ -237,7 +238,7 @@ auto job_type_text(JobType type) -> std::optional<std::string_view>
     return std::nullopt;
 }
 
-auto job_type_from_json(jb::rpc::JsonValue const& value, JobType& type) -> bool
+auto job_type_from_json(jb::core::JsonValue const& value, JobType& type) -> bool
 {
     if (!value.is_string()) {
         return false;
@@ -254,7 +255,7 @@ auto job_type_from_json(jb::rpc::JsonValue const& value, JobType& type) -> bool
     return true;
 }
 
-auto decode_uuid(jb::rpc::JsonValue const& value, jb::core::Uuid& result) -> bool
+auto decode_uuid(jb::core::JsonValue const& value, jb::core::Uuid& result) -> bool
 {
     if (!value.is_string()) {
         return false;
@@ -267,7 +268,7 @@ auto decode_uuid(jb::rpc::JsonValue const& value, jb::core::Uuid& result) -> boo
     return true;
 }
 
-auto decode_time(jb::rpc::JsonValue const& value, jb::core::UtcTimePoint& result) -> bool
+auto decode_time(jb::core::JsonValue const& value, jb::core::UtcTimePoint& result) -> bool
 {
     if (!value.is_string()) {
         return false;
@@ -280,7 +281,7 @@ auto decode_time(jb::rpc::JsonValue const& value, jb::core::UtcTimePoint& result
     return true;
 }
 
-auto encode_time(jb::core::UtcTimePoint value) -> std::optional<jb::rpc::JsonValue>
+auto encode_time(jb::core::UtcTimePoint value) -> std::optional<jb::core::JsonValue>
 {
     auto formatted = format_utc_timestamp(value);
     if (!formatted) {
@@ -289,29 +290,29 @@ auto encode_time(jb::core::UtcTimePoint value) -> std::optional<jb::rpc::JsonVal
     return make_json(std::move(formatted).value());
 }
 
-auto schedule_to_json(JobSchedule const& schedule, bool request) -> ConversionResult<jb::rpc::JsonValue>
+auto schedule_to_json(JobSchedule const& schedule, bool request) -> ConversionResult<jb::core::JsonValue>
 {
     if (auto const* once = std::get_if<OnceSchedule>(&schedule)) {
         auto at = encode_time(once->planned_at);
         if (!at) {
-            return invalid<jb::rpc::JsonValue>(request);
+            return invalid<jb::core::JsonValue>(request);
         }
-        return ConversionResult<jb::rpc::JsonValue>::success(make_json(jb::rpc::JsonValue::Object{
+        return ConversionResult<jb::core::JsonValue>::success(make_json(jb::core::JsonValue::Object{
             {"at",   std::move(*at)                },
             {"kind", make_json(std::string{"once"})},
         }));
     }
     if (auto const* cron = std::get_if<CronSchedule>(&schedule)) {
-        return ConversionResult<jb::rpc::JsonValue>::success(make_json(jb::rpc::JsonValue::Object{
+        return ConversionResult<jb::core::JsonValue>::success(make_json(jb::core::JsonValue::Object{
             {"expression", make_json(cron->expression)   },
             {"kind",       make_json(std::string{"cron"})},
             {"timezone",   make_json(cron->timezone)     },
         }));
     }
-    return invalid<jb::rpc::JsonValue>(request);
+    return invalid<jb::core::JsonValue>(request);
 }
 
-auto schedule_from_json(jb::rpc::JsonValue const& value, bool request) -> ConversionResult<JobSchedule>
+auto schedule_from_json(jb::core::JsonValue const& value, bool request) -> ConversionResult<JobSchedule>
 {
     if (!value.is_object()) {
         return invalid<JobSchedule>(request);
@@ -347,10 +348,10 @@ auto schedule_from_json(jb::rpc::JsonValue const& value, bool request) -> Conver
     return invalid<JobSchedule>(request);
 }
 
-auto add_selector_members(jb::rpc::JsonValue::Object& object,
-                          QueueSelector const&        selector,
-                          std::string                 id_name   = "queue_id",
-                          std::string                 name_name = "queue_name") -> bool
+auto add_selector_members(jb::core::JsonValue::Object& object,
+                          QueueSelector const&         selector,
+                          std::string                  id_name   = "queue_id",
+                          std::string                  name_name = "queue_name") -> bool
 {
     if (auto const* id = std::get_if<jb::core::Uuid>(&selector)) {
         object.emplace(std::move(id_name), make_json(id->to_string()));
@@ -363,9 +364,9 @@ auto add_selector_members(jb::rpc::JsonValue::Object& object,
     return false;
 }
 
-auto decode_selector(jb::rpc::JsonValue::Object const& object,
-                     std::string_view                  id_name   = "queue_id",
-                     std::string_view                  name_name = "queue_name") -> ConversionResult<QueueSelector>
+auto decode_selector(jb::core::JsonValue::Object const& object,
+                     std::string_view                   id_name   = "queue_id",
+                     std::string_view                   name_name = "queue_name") -> ConversionResult<QueueSelector>
 {
     auto const* id   = find_member(object, id_name);
     auto const* name = find_member(object, name_name);
@@ -385,7 +386,7 @@ auto decode_selector(jb::rpc::JsonValue::Object const& object,
     return ConversionResult<QueueSelector>::success(QueueSelector{name->as_string()});
 }
 
-auto decode_nullable_seconds(jb::rpc::JsonValue const& value, std::optional<std::chrono::seconds>& result) -> bool
+auto decode_nullable_seconds(jb::core::JsonValue const& value, std::optional<std::chrono::seconds>& result) -> bool
 {
     if (value.is_null()) {
         result.reset();
@@ -399,10 +400,10 @@ auto decode_nullable_seconds(jb::rpc::JsonValue const& value, std::optional<std:
     return true;
 }
 
-auto encode_nullable_seconds(std::optional<std::chrono::seconds> value) -> jb::rpc::JsonValue
+auto encode_nullable_seconds(std::optional<std::chrono::seconds> value) -> jb::core::JsonValue
 {
     if (!value) {
-        return make_json(jb::rpc::JsonNull{});
+        return make_json(jb::core::JsonNull{});
     }
     return make_json(static_cast<std::int64_t>(value->count()));
 }
@@ -446,7 +447,7 @@ auto valid_page(Page const& page) -> bool
 } // anonymous namespace
 
 auto queue_to_json(Queue const& queue, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
     auto const state    = queue_state_text(queue.state);
     auto const recovery = recovery_policy_text(queue.recovery_policy);
@@ -456,20 +457,20 @@ auto queue_to_json(Queue const& queue, AttributeRegistry const& registry)
     if (!state || !recovery || !defaults || !created || !updated || queue.weight == 0 || queue.concurrency_limit == 0 ||
         (queue.history_retention && *queue.history_retention < std::chrono::seconds::zero()) ||
         queue.runnable_wait_warning < std::chrono::milliseconds::zero()) {
-        return invalid<jb::rpc::JsonValue>(false);
+        return invalid<jb::core::JsonValue>(false);
     }
 
-    auto deleted = make_json(jb::rpc::JsonNull{});
+    auto deleted = make_json(jb::core::JsonNull{});
     if (queue.deleted_at) {
         auto encoded = encode_time(*queue.deleted_at);
         if (!encoded) {
-            return invalid<jb::rpc::JsonValue>(false);
+            return invalid<jb::core::JsonValue>(false);
         }
         deleted = std::move(*encoded);
     }
 
     return checked_json(
-        make_json(jb::rpc::JsonValue::Object{
+        make_json(jb::core::JsonValue::Object{
             {"concurrency_limit",         make_json(static_cast<std::uint64_t>(queue.concurrency_limit))           },
             {"created_at",                std::move(*created)                                                      },
             {"defaults",                  std::move(defaults).value()                                              },
@@ -486,7 +487,7 @@ auto queue_to_json(Queue const& queue, AttributeRegistry const& registry)
         false);
 }
 
-auto queue_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+auto queue_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<Queue, jb::core::Error>
 {
     if (!value.is_object()) {
@@ -547,33 +548,33 @@ auto queue_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& r
 }
 
 auto queue_page_to_json(QueuePage const& page, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
     if (!valid_page(page)) {
-        return invalid<jb::rpc::JsonValue>(false);
+        return invalid<jb::core::JsonValue>(false);
     }
-    auto items = jb::rpc::JsonValue::Array{};
+    auto items = jb::core::JsonValue::Array{};
     items.reserve(page.items.size());
     for (auto const& queue : page.items) {
         auto encoded = queue_to_json(queue, registry);
         if (!encoded) {
-            return invalid<jb::rpc::JsonValue>(false);
+            return invalid<jb::core::JsonValue>(false);
         }
         items.push_back(std::move(encoded).value());
     }
 
-    auto next = make_json(jb::rpc::JsonNull{});
+    auto next = make_json(jb::core::JsonNull{});
     if (page.next_after_id) {
         next = make_json(page.next_after_id->to_string());
     }
-    return checked_json(make_json(jb::rpc::JsonValue::Object{
+    return checked_json(make_json(jb::core::JsonValue::Object{
                             {"items",         make_json(std::move(items))},
                             {"next_after_id", std::move(next)            },
     }),
                         false);
 }
 
-auto queue_page_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+auto queue_page_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<QueuePage, jb::core::Error>
 {
     if (!value.is_object()) {
@@ -611,16 +612,16 @@ auto queue_page_from_json(jb::rpc::JsonValue const& value, AttributeRegistry con
     return ConversionResult<QueuePage>::success(std::move(result));
 }
 
-auto queue_selector_to_json(QueueSelector const& selector) -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+auto queue_selector_to_json(QueueSelector const& selector) -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
-    auto object = jb::rpc::JsonValue::Object{};
+    auto object = jb::core::JsonValue::Object{};
     if (!add_selector_members(object, selector)) {
-        return invalid<jb::rpc::JsonValue>(true);
+        return invalid<jb::core::JsonValue>(true);
     }
     return checked_json(make_json(std::move(object)), true);
 }
 
-auto queue_selector_from_json(jb::rpc::JsonValue const& value) -> jb::core::Result<QueueSelector, jb::core::Error>
+auto queue_selector_from_json(jb::core::JsonValue const& value) -> jb::core::Result<QueueSelector, jb::core::Error>
 {
     if (!value.is_object() || !has_only_members(value.as_object(), {"queue_id", "queue_name"})) {
         return invalid<QueueSelector>(true);
@@ -629,14 +630,14 @@ auto queue_selector_from_json(jb::rpc::JsonValue const& value) -> jb::core::Resu
 }
 
 auto create_queue_request_to_json(CreateQueueRequest const& request, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
     auto const recovery = recovery_policy_text(request.recovery_policy);
     auto       defaults = attribute_set_to_json(request.defaults, registry, AttributeScope::QueueDefault);
     if (!recovery || !defaults) {
-        return invalid<jb::rpc::JsonValue>(true);
+        return invalid<jb::core::JsonValue>(true);
     }
-    auto object = jb::rpc::JsonValue::Object{
+    auto object = jb::core::JsonValue::Object{
         {"concurrency_limit",         make_json(static_cast<std::uint64_t>(request.concurrency_limit))           },
         {"defaults",                  std::move(defaults).value()                                                },
         {"history_retention_seconds", encode_nullable_seconds(request.history_retention)                         },
@@ -651,7 +652,7 @@ auto create_queue_request_to_json(CreateQueueRequest const& request, AttributeRe
     return checked_json(make_json(std::move(object)), true);
 }
 
-auto create_queue_request_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+auto create_queue_request_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<CreateQueueRequest, jb::core::Error>
 {
     if (!value.is_object() || !has_only_members(value.as_object(),
@@ -711,19 +712,19 @@ auto create_queue_request_from_json(jb::rpc::JsonValue const& value, AttributeRe
 }
 
 auto queue_list_request_to_json(QueueListRequest const& request)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
     if (request.page.limit == 0 || request.page.limit > maximum_page_size) {
-        return invalid<jb::rpc::JsonValue>(true);
+        return invalid<jb::core::JsonValue>(true);
     }
-    auto object = jb::rpc::JsonValue::Object{
+    auto object = jb::core::JsonValue::Object{
         {"include_deleted", make_json(request.include_deleted)                       },
         {"limit",           make_json(static_cast<std::uint64_t>(request.page.limit))},
     };
     if (request.state) {
         auto const state = queue_state_text(*request.state);
         if (!state) {
-            return invalid<jb::rpc::JsonValue>(true);
+            return invalid<jb::core::JsonValue>(true);
         }
         object.emplace("state", make_json(std::string{*state}));
     }
@@ -733,7 +734,7 @@ auto queue_list_request_to_json(QueueListRequest const& request)
     return checked_json(make_json(std::move(object)), true);
 }
 
-auto queue_list_request_from_json(jb::rpc::JsonValue const& value)
+auto queue_list_request_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<QueueListRequest, jb::core::Error>
 {
     if (!value.is_object() || !has_only_members(value.as_object(), {"include_deleted", "state", "limit", "after_id"})) {
@@ -771,14 +772,14 @@ auto queue_list_request_from_json(jb::rpc::JsonValue const& value)
 }
 
 auto update_queue_request_to_json(UpdateQueueRequest const& request, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
     if (!has_queue_update(request)) {
-        return invalid<jb::rpc::JsonValue>(true);
+        return invalid<jb::core::JsonValue>(true);
     }
-    auto object = jb::rpc::JsonValue::Object{};
+    auto object = jb::core::JsonValue::Object{};
     if (!add_selector_members(object, request.queue)) {
-        return invalid<jb::rpc::JsonValue>(true);
+        return invalid<jb::core::JsonValue>(true);
     }
     if (request.name) {
         object.emplace("name", make_json(*request.name));
@@ -792,14 +793,14 @@ auto update_queue_request_to_json(UpdateQueueRequest const& request, AttributeRe
     if (request.recovery_policy) {
         auto const recovery = recovery_policy_text(*request.recovery_policy);
         if (!recovery) {
-            return invalid<jb::rpc::JsonValue>(true);
+            return invalid<jb::core::JsonValue>(true);
         }
         object.emplace("recovery_policy", make_json(std::string{*recovery}));
     }
     if (request.defaults) {
         auto defaults = attribute_set_to_json(*request.defaults, registry, AttributeScope::QueueDefault);
         if (!defaults) {
-            return invalid<jb::rpc::JsonValue>(true);
+            return invalid<jb::core::JsonValue>(true);
         }
         object.emplace("defaults", std::move(defaults).value());
     }
@@ -813,7 +814,7 @@ auto update_queue_request_to_json(UpdateQueueRequest const& request, AttributeRe
     return checked_json(make_json(std::move(object)), true);
 }
 
-auto update_queue_request_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+auto update_queue_request_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<UpdateQueueRequest, jb::core::Error>
 {
     if (!value.is_object() || !has_only_members(value.as_object(),
@@ -889,7 +890,7 @@ auto update_queue_request_from_json(jb::rpc::JsonValue const& value, AttributeRe
 }
 
 auto job_to_json(JobDefinition const& job, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
     auto const state      = job_state_text(job.state);
     auto const type       = job_type_text(job.type);
@@ -899,23 +900,23 @@ auto job_to_json(JobDefinition const& job, AttributeRegistry const& registry)
     auto       updated    = encode_time(job.updated_at);
     if (!state || !type || !schedule || !attributes || !created || !updated || job.revision == 0 ||
         !job.payload.is_object()) {
-        return invalid<jb::rpc::JsonValue>(false);
+        return invalid<jb::core::JsonValue>(false);
     }
 
-    auto name = make_json(jb::rpc::JsonNull{});
+    auto name = make_json(jb::core::JsonNull{});
     if (job.name) {
         name = make_json(*job.name);
     }
-    auto deleted = make_json(jb::rpc::JsonNull{});
+    auto deleted = make_json(jb::core::JsonNull{});
     if (job.deleted_at) {
         auto encoded = encode_time(*job.deleted_at);
         if (!encoded) {
-            return invalid<jb::rpc::JsonValue>(false);
+            return invalid<jb::core::JsonValue>(false);
         }
         deleted = std::move(*encoded);
     }
 
-    return checked_json(make_json(jb::rpc::JsonValue::Object{
+    return checked_json(make_json(jb::core::JsonValue::Object{
                             {"attributes", std::move(attributes).value()                      },
                             {"created_at", std::move(*created)                                },
                             {"deleted_at", std::move(deleted)                                 },
@@ -933,7 +934,7 @@ auto job_to_json(JobDefinition const& job, AttributeRegistry const& registry)
                         false);
 }
 
-auto job_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+auto job_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<JobDefinition, jb::core::Error>
 {
     if (!value.is_object()) {
@@ -996,33 +997,33 @@ auto job_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& reg
 }
 
 auto job_page_to_json(JobPage const& page, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
     if (!valid_page(page)) {
-        return invalid<jb::rpc::JsonValue>(false);
+        return invalid<jb::core::JsonValue>(false);
     }
-    auto items = jb::rpc::JsonValue::Array{};
+    auto items = jb::core::JsonValue::Array{};
     items.reserve(page.items.size());
     for (auto const& job : page.items) {
         auto encoded = job_to_json(job, registry);
         if (!encoded) {
-            return invalid<jb::rpc::JsonValue>(false);
+            return invalid<jb::core::JsonValue>(false);
         }
         items.push_back(std::move(encoded).value());
     }
 
-    auto next = make_json(jb::rpc::JsonNull{});
+    auto next = make_json(jb::core::JsonNull{});
     if (page.next_after_id) {
         next = make_json(page.next_after_id->to_string());
     }
-    return checked_json(make_json(jb::rpc::JsonValue::Object{
+    return checked_json(make_json(jb::core::JsonValue::Object{
                             {"items",         make_json(std::move(items))},
                             {"next_after_id", std::move(next)            },
     }),
                         false);
 }
 
-auto job_page_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+auto job_page_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<JobPage, jb::core::Error>
 {
     if (!value.is_object()) {
@@ -1060,15 +1061,15 @@ auto job_page_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const
     return ConversionResult<JobPage>::success(std::move(result));
 }
 
-auto job_id_to_json(jb::core::Uuid const& id) -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+auto job_id_to_json(jb::core::Uuid const& id) -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
-    return checked_json(make_json(jb::rpc::JsonValue::Object{
+    return checked_json(make_json(jb::core::JsonValue::Object{
                             {"job_id", make_json(id.to_string())},
     }),
                         true);
 }
 
-auto job_id_from_json(jb::rpc::JsonValue const& value) -> jb::core::Result<jb::core::Uuid, jb::core::Error>
+auto job_id_from_json(jb::core::JsonValue const& value) -> jb::core::Result<jb::core::Uuid, jb::core::Error>
 {
     if (!value.is_object() || !has_only_members(value.as_object(), {"job_id"})) {
         return invalid<jb::core::Uuid>(true);
@@ -1082,17 +1083,17 @@ auto job_id_from_json(jb::rpc::JsonValue const& value) -> jb::core::Result<jb::c
 }
 
 auto create_job_request_to_json(CreateJobRequest const& request, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
     auto const type       = job_type_text(request.type);
     auto       schedule   = schedule_to_json(request.schedule, true);
     auto       attributes = attribute_set_to_json(request.attributes, registry, AttributeScope::Job);
     if (!type || !schedule || !attributes || !request.payload.is_object()) {
-        return invalid<jb::rpc::JsonValue>(true);
+        return invalid<jb::core::JsonValue>(true);
     }
-    auto object = jb::rpc::JsonValue::Object{};
+    auto object = jb::core::JsonValue::Object{};
     if (!add_selector_members(object, request.queue)) {
-        return invalid<jb::rpc::JsonValue>(true);
+        return invalid<jb::core::JsonValue>(true);
     }
     object.emplace("attributes", std::move(attributes).value());
     object.emplace("payload", request.payload);
@@ -1108,7 +1109,7 @@ auto create_job_request_to_json(CreateJobRequest const& request, AttributeRegist
     return checked_json(make_json(std::move(object)), true);
 }
 
-auto create_job_request_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+auto create_job_request_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<CreateJobRequest, jb::core::Error>
 {
     if (!value.is_object() || !has_only_members(value.as_object(),
@@ -1168,29 +1169,29 @@ auto create_job_request_from_json(jb::rpc::JsonValue const& value, AttributeRegi
     return ConversionResult<CreateJobRequest>::success(std::move(result));
 }
 
-auto job_list_request_to_json(JobListRequest const& request) -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+auto job_list_request_to_json(JobListRequest const& request) -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
     if (request.page.limit == 0 || request.page.limit > maximum_page_size) {
-        return invalid<jb::rpc::JsonValue>(true);
+        return invalid<jb::core::JsonValue>(true);
     }
-    auto object = jb::rpc::JsonValue::Object{
+    auto object = jb::core::JsonValue::Object{
         {"include_deleted", make_json(request.include_deleted)                       },
         {"limit",           make_json(static_cast<std::uint64_t>(request.page.limit))},
     };
     if (request.queue && !add_selector_members(object, *request.queue)) {
-        return invalid<jb::rpc::JsonValue>(true);
+        return invalid<jb::core::JsonValue>(true);
     }
     if (request.state) {
         auto const state = job_state_text(*request.state);
         if (!state) {
-            return invalid<jb::rpc::JsonValue>(true);
+            return invalid<jb::core::JsonValue>(true);
         }
         object.emplace("state", make_json(std::string{*state}));
     }
     if (request.type) {
         auto const type = job_type_text(*request.type);
         if (!type) {
-            return invalid<jb::rpc::JsonValue>(true);
+            return invalid<jb::core::JsonValue>(true);
         }
         object.emplace("type", make_json(std::string{*type}));
     }
@@ -1200,7 +1201,7 @@ auto job_list_request_to_json(JobListRequest const& request) -> jb::core::Result
     return checked_json(make_json(std::move(object)), true);
 }
 
-auto job_list_request_from_json(jb::rpc::JsonValue const& value) -> jb::core::Result<JobListRequest, jb::core::Error>
+auto job_list_request_from_json(jb::core::JsonValue const& value) -> jb::core::Result<JobListRequest, jb::core::Error>
 {
     if (!value.is_object() ||
         !has_only_members(value.as_object(),
@@ -1253,29 +1254,29 @@ auto job_list_request_from_json(jb::rpc::JsonValue const& value) -> jb::core::Re
 }
 
 auto update_job_request_to_json(UpdateJobRequest const& request, AttributeRegistry const& registry)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
     if (!has_job_update(request)) {
-        return invalid<jb::rpc::JsonValue>(true);
+        return invalid<jb::core::JsonValue>(true);
     }
-    auto object = jb::rpc::JsonValue::Object{
+    auto object = jb::core::JsonValue::Object{
         {"expected_revision", make_json(static_cast<std::uint64_t>(request.expected_revision))},
         {"job_id",            make_json(request.job_id.to_string())                           },
     };
     if (request.name) {
-        object.emplace("name", *request.name ? make_json(**request.name) : make_json(jb::rpc::JsonNull{}));
+        object.emplace("name", *request.name ? make_json(**request.name) : make_json(jb::core::JsonNull{}));
     }
     if (request.type) {
         auto const type = job_type_text(*request.type);
         if (!type) {
-            return invalid<jb::rpc::JsonValue>(true);
+            return invalid<jb::core::JsonValue>(true);
         }
         object.emplace("type", make_json(std::string{*type}));
     }
     if (request.schedule) {
         auto schedule = schedule_to_json(*request.schedule, true);
         if (!schedule) {
-            return invalid<jb::rpc::JsonValue>(true);
+            return invalid<jb::core::JsonValue>(true);
         }
         object.emplace("schedule", std::move(schedule).value());
     }
@@ -1285,20 +1286,20 @@ auto update_job_request_to_json(UpdateJobRequest const& request, AttributeRegist
     if (!request.attribute_changes.empty()) {
         auto attributes = attribute_set_to_json(request.attribute_changes, registry, AttributeScope::Job);
         if (!attributes) {
-            return invalid<jb::rpc::JsonValue>(true);
+            return invalid<jb::core::JsonValue>(true);
         }
         object.emplace("attributes", std::move(attributes).value());
     }
     if (request.payload) {
         if (!request.payload->is_object()) {
-            return invalid<jb::rpc::JsonValue>(true);
+            return invalid<jb::core::JsonValue>(true);
         }
         object.emplace("payload", *request.payload);
     }
     return checked_json(make_json(std::move(object)), true);
 }
 
-auto update_job_request_from_json(jb::rpc::JsonValue const& value, AttributeRegistry const& registry)
+auto update_job_request_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<UpdateJobRequest, jb::core::Error>
 {
     if (!value.is_object() ||
@@ -1365,19 +1366,19 @@ auto update_job_request_from_json(jb::rpc::JsonValue const& value, AttributeRegi
     return ConversionResult<UpdateJobRequest>::success(std::move(result));
 }
 
-auto move_job_request_to_json(MoveJobRequest const& request) -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+auto move_job_request_to_json(MoveJobRequest const& request) -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
-    auto object = jb::rpc::JsonValue::Object{
+    auto object = jb::core::JsonValue::Object{
         {"expected_revision", make_json(static_cast<std::uint64_t>(request.expected_revision))},
         {"job_id",            make_json(request.job_id.to_string())                           },
     };
     if (!add_selector_members(object, request.target_queue, "target_queue_id", "target_queue_name")) {
-        return invalid<jb::rpc::JsonValue>(true);
+        return invalid<jb::core::JsonValue>(true);
     }
     return checked_json(make_json(std::move(object)), true);
 }
 
-auto move_job_request_from_json(jb::rpc::JsonValue const& value) -> jb::core::Result<MoveJobRequest, jb::core::Error>
+auto move_job_request_from_json(jb::core::JsonValue const& value) -> jb::core::Result<MoveJobRequest, jb::core::Error>
 {
     if (!value.is_object() ||
         !has_only_members(value.as_object(), {"job_id", "expected_revision", "target_queue_id", "target_queue_name"})) {
@@ -1400,16 +1401,16 @@ auto move_job_request_from_json(jb::rpc::JsonValue const& value) -> jb::core::Re
 }
 
 auto delete_job_request_to_json(DeleteJobRequest const& request)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
-    return checked_json(make_json(jb::rpc::JsonValue::Object{
+    return checked_json(make_json(jb::core::JsonValue::Object{
                             {"expected_revision", make_json(static_cast<std::uint64_t>(request.expected_revision))},
                             {"job_id",            make_json(request.job_id.to_string())                           },
     }),
                         true);
 }
 
-auto delete_job_request_from_json(jb::rpc::JsonValue const& value)
+auto delete_job_request_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<DeleteJobRequest, jb::core::Error>
 {
     if (!value.is_object() || !has_only_members(value.as_object(), {"job_id", "expected_revision"})) {

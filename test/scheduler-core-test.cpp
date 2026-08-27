@@ -35,7 +35,6 @@ using namespace jb::core;
 using namespace jb::db;
 using namespace jb::jobu;
 using namespace jb::jobu::detail;
-using namespace jb::rpc;
 using namespace jb::test;
 using namespace std::chrono_literals;
 

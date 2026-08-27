@@ -37,15 +37,15 @@ public:
 private:
     explicit ValidatedJobPayload(std::string serialized) noexcept;
 
-    friend auto validate_and_serialize_job_payload(JobType type, jb::rpc::JsonValue const& payload)
+    friend auto validate_and_serialize_job_payload(JobType type, jb::core::JsonValue const& payload)
         -> jb::core::Result<ValidatedJobPayload, JobPayloadIssue>;
 
     std::string _serialized;
 };
 
 [[nodiscard]] auto is_valid_job_name(std::string_view name) noexcept -> bool;
-[[nodiscard]] auto job_payload_structure_issue(JobType type, jb::rpc::JsonValue const& payload) -> JobPayloadIssue;
-[[nodiscard]] auto validate_and_serialize_job_payload(JobType type, jb::rpc::JsonValue const& payload)
+[[nodiscard]] auto job_payload_structure_issue(JobType type, jb::core::JsonValue const& payload) -> JobPayloadIssue;
+[[nodiscard]] auto validate_and_serialize_job_payload(JobType type, jb::core::JsonValue const& payload)
     -> jb::core::Result<ValidatedJobPayload, JobPayloadIssue>;
 [[nodiscard]] auto job_payload_issue_text(JobPayloadIssue issue) noexcept -> std::string_view;
 

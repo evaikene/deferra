@@ -21,14 +21,14 @@ namespace {
 constexpr std::size_t kMaximumResultBytes = std::size_t{256} * 1024U;
 
 template <typename T>
-auto make_json(T value) -> jb::rpc::JsonValue
+auto make_json(T value) -> jb::core::JsonValue
 {
     return {.data = std::move(value)};
 }
 
-auto object_with_text(std::string text) -> jb::rpc::JsonValue
+auto object_with_text(std::string text) -> jb::core::JsonValue
 {
-    auto object = jb::rpc::JsonValue::Object{};
+    auto object = jb::core::JsonValue::Object{};
     object.emplace("value", make_json(std::move(text)));
     return make_json(std::move(object));
 }
@@ -327,7 +327,7 @@ TEST_CASE("FakeAttemptExecutor accepts every valid completion shape", "[test][at
 
     completions.push_back(attempt_completion(key, jb::jobu::AttemptOutcome::Cancelled));
 
-    auto empty_serialized = jb::rpc::serialize_json(object_with_text(""));
+    auto empty_serialized = jb::core::serialize_json(object_with_text(""));
     REQUIRE(empty_serialized);
     REQUIRE(empty_serialized->size() < kMaximumResultBytes);
     auto maximum_result   = attempt_completion(key);

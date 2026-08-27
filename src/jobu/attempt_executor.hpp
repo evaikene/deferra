@@ -6,6 +6,7 @@
 #include "attempt.hpp"
 #include "error.hpp"
 #include "job.hpp"
+#include "json.hpp"
 #include "result.hpp"
 #include "time_source.hpp"
 
@@ -53,7 +54,7 @@ struct AttemptStartRequest {
     /// Complete materialized attribute snapshot owned by this request.
     AttributeSet           attributes;
     /// Owning runner payload JSON object captured by the run.
-    jb::rpc::JsonValue     payload;
+    jb::core::JsonValue    payload;
     /// UTC time durably recorded as the attempt start.
     jb::core::UtcTimePoint started_at;
 };
@@ -75,7 +76,7 @@ struct AttemptCompletion {
     /// Optional executor-imposed retry lower bound, valid only for retryable failures.
     std::optional<jb::core::UtcTimePoint> retry_not_before;
     /// User-safe owning result metadata encoded as a bounded JSON object.
-    jb::rpc::JsonValue                    result;
+    jb::core::JsonValue                   result;
 };
 
 /** Owning callback retained by an executor until one asynchronous completion.

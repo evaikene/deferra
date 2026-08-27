@@ -105,37 +105,37 @@ auto count_rows(Database& database, std::string_view table) -> std::int64_t
     return *count;
 }
 
-auto json_string(std::string value) -> jb::rpc::JsonValue
+auto json_string(std::string value) -> jb::core::JsonValue
 {
-    auto json = jb::rpc::JsonValue{};
+    auto json = jb::core::JsonValue{};
     json.data = std::move(value);
     return json;
 }
 
-auto json_bool(bool value) -> jb::rpc::JsonValue
+auto json_bool(bool value) -> jb::core::JsonValue
 {
-    auto json = jb::rpc::JsonValue{};
+    auto json = jb::core::JsonValue{};
     json.data = value;
     return json;
 }
 
-auto json_array(jb::rpc::JsonValue::Array value) -> jb::rpc::JsonValue
+auto json_array(jb::core::JsonValue::Array value) -> jb::core::JsonValue
 {
-    auto json = jb::rpc::JsonValue{};
+    auto json = jb::core::JsonValue{};
     json.data = std::move(value);
     return json;
 }
 
-auto json_object(jb::rpc::JsonValue::Object value) -> jb::rpc::JsonValue
+auto json_object(jb::core::JsonValue::Object value) -> jb::core::JsonValue
 {
-    auto json = jb::rpc::JsonValue{};
+    auto json = jb::core::JsonValue{};
     json.data = std::move(value);
     return json;
 }
 
-auto cli_payload(std::string command, std::vector<std::string> arguments = {}) -> jb::rpc::JsonValue
+auto cli_payload(std::string command, std::vector<std::string> arguments = {}) -> jb::core::JsonValue
 {
-    auto argument_values = jb::rpc::JsonValue::Array{};
+    auto argument_values = jb::core::JsonValue::Array{};
     argument_values.reserve(arguments.size());
     for (auto& argument : arguments) {
         argument_values.push_back(json_string(std::move(argument)));
@@ -147,9 +147,9 @@ auto cli_payload(std::string command, std::vector<std::string> arguments = {}) -
     });
 }
 
-auto http_payload(std::string url, std::optional<std::string> method = std::nullopt) -> jb::rpc::JsonValue
+auto http_payload(std::string url, std::optional<std::string> method = std::nullopt) -> jb::core::JsonValue
 {
-    auto object = jb::rpc::JsonValue::Object{
+    auto object = jb::core::JsonValue::Object{
         {"future", json_bool(true)            },
         {"url",    json_string(std::move(url))},
     };
@@ -171,7 +171,7 @@ auto once_at(UtcTimePoint time) -> JobSchedule
     return OnceSchedule{.planned_at = time};
 }
 
-auto attributes_json(AttributeSet const& values, AttributeRegistry const& registry) -> jb::rpc::JsonValue
+auto attributes_json(AttributeSet const& values, AttributeRegistry const& registry) -> jb::core::JsonValue
 {
     auto encoded = attribute_set_to_json(values, registry, AttributeScope::Job);
     REQUIRE(encoded);
@@ -314,7 +314,7 @@ TEST_CASE("Job management creates durable one-time definitions and immutable run
     auto const documents = stored_documents(fixture.database, cli_id);
     CHECK(documents.job_attributes == documents.run_attributes);
     CHECK(documents.job_payload == documents.run_payload);
-    auto parsed_attributes = jb::rpc::parse_json(documents.job_attributes);
+    auto parsed_attributes = jb::core::parse_json(documents.job_attributes);
     REQUIRE(parsed_attributes);
     auto decoded_attributes = jb::jobu::detail::decode_attribute_document(fixture.registry,
                                                                           *parsed_attributes,
@@ -601,7 +601,7 @@ TEST_CASE("Job management rejects invalid requests before durable creation", "[j
     }),
                   ErrorCategory::InvalidArgument,
                   "jobu.job.invalid_name");
-    require_error(service.create_job({.queue = queue_id, .schedule = schedule, .payload = jb::rpc::JsonValue{}}),
+    require_error(service.create_job({.queue = queue_id, .schedule = schedule, .payload = jb::core::JsonValue{}}),
                   ErrorCategory::InvalidArgument,
                   "jobu.job.invalid_payload");
     require_error(service.create_job({.queue = queue_id, .schedule = schedule, .payload = json_object({})}),

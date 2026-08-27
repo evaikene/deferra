@@ -66,14 +66,14 @@ namespace jb::jobu::detail {
 [[nodiscard]] auto read_optional_blob(jb::db::Record const& record, std::string_view field)
     -> jb::core::Result<std::optional<jb::core::ByteBuffer>, jb::core::Error>;
 
-[[nodiscard]] auto json_to_storage(jb::rpc::JsonValue const& value, bool require_object, std::size_t max_size)
+[[nodiscard]] auto json_to_storage(jb::core::JsonValue const& value, bool require_object, std::size_t max_size)
     -> jb::core::Result<jb::db::Value, jb::core::Error>;
 [[nodiscard]] auto
 read_json(jb::db::Record const& record, std::string_view field, bool require_object, std::size_t max_size)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 [[nodiscard]] auto
 read_optional_json(jb::db::Record const& record, std::string_view field, bool require_object, std::size_t max_size)
-    -> jb::core::Result<std::optional<jb::rpc::JsonValue>, jb::core::Error>;
+    -> jb::core::Result<std::optional<jb::core::JsonValue>, jb::core::Error>;
 
 [[nodiscard]] auto job_run_columns() noexcept -> std::string_view;
 [[nodiscard]] auto read_job_run(jb::db::Record const& record, AttributeRegistry const& attributes)

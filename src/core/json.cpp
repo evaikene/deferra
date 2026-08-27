@@ -8,7 +8,7 @@
 #include <type_traits>
 #include <utility>
 
-namespace jb::rpc {
+namespace jb::core {
 
 namespace {
 
@@ -33,50 +33,50 @@ auto make_json_error(JsonFailure failure) -> jb::core::Error
         case JsonFailure::Syntax:
             return Error{
                 .category = ErrorCategory::InvalidArgument,
-                .code     = "rpc.json.syntax",
+                .code     = "core.json.syntax",
                 .message  = "JSON text is invalid",
             };
         case JsonFailure::InvalidUtf8:
             return Error{
                 .category = ErrorCategory::InvalidArgument,
-                .code     = "rpc.json.invalid_utf8",
+                .code     = "core.json.invalid_utf8",
                 .message  = "JSON contains invalid UTF-8",
             };
         case JsonFailure::DuplicateMember:
             return Error{
                 .category = ErrorCategory::InvalidArgument,
-                .code     = "rpc.json.duplicate_member",
+                .code     = "core.json.duplicate_member",
                 .message  = "JSON object contains a duplicate member",
             };
         case JsonFailure::DepthLimit:
             return Error{
                 .category = ErrorCategory::ResourceExhausted,
-                .code     = "rpc.json.depth_limit",
+                .code     = "core.json.depth_limit",
                 .message  = "JSON nesting exceeds the configured limit",
             };
         case JsonFailure::IntegerOverflow:
             return Error{
                 .category = ErrorCategory::InvalidArgument,
-                .code     = "rpc.json.integer_overflow",
+                .code     = "core.json.integer_overflow",
                 .message  = "JSON integer is outside the supported range",
             };
         case JsonFailure::NonFinite:
             return Error{
                 .category = ErrorCategory::InvalidArgument,
-                .code     = "rpc.json.non_finite",
+                .code     = "core.json.non_finite",
                 .message  = "JSON number is not finite",
             };
         case JsonFailure::Internal:
             return Error{
                 .category = ErrorCategory::Internal,
-                .code     = "rpc.json.internal",
+                .code     = "core.json.internal",
                 .message  = "JSON codec failed",
             };
     }
 
     return Error{
         .category = ErrorCategory::Internal,
-        .code     = "rpc.json.internal",
+        .code     = "core.json.internal",
         .message  = "JSON codec failed",
     };
 }
@@ -188,6 +188,8 @@ public:
 
     auto number_float(number_float_t value, string_t const& token) -> bool override
     {
+        // The private codec reports an out-of-range integer through this callback. Preserve the written token category
+        // so integer overflow cannot be accepted as an imprecise floating-point value.
         if (token_is_integer(token)) {
             return fail(JsonFailure::IntegerOverflow);
         }
@@ -234,6 +236,8 @@ public:
 
         auto& frame  = _frames.back();
         auto& object = std::get<JsonValue::Object>(frame.value.data);
+        // Reject duplicates while the source member names are still visible; inserting into the public map later
+        // would otherwise collapse the duplicate into an ordinary object member.
         if (frame.key || object.contains(value)) {
             return fail(JsonFailure::DuplicateMember);
         }
@@ -289,6 +293,8 @@ private:
     template <typename Container>
     auto start_container(Container container) -> bool
     {
+        // Enforce the resource limit as containers open so untrusted input cannot build an over-deep public tree
+        // before a completed value is available for validation.
         if (_depth >= _limits.max_depth) {
             return fail(JsonFailure::DepthLimit);
         }
@@ -348,6 +354,8 @@ private:
     std::optional<JsonFailure> _failure;
 };
 
+// Validate strings and floating-point values during recursive conversion so the private codec never normalizes an
+// invalid project-owned value into apparently valid JSON text.
 auto encode_json(JsonValue const& value, CodecJson& output) -> std::optional<JsonFailure>
 {
     return std::visit(
@@ -420,6 +428,7 @@ auto parse_json(std::string_view text, JsonLimits limits) -> jb::core::Result<Js
         return Result::failure(make_json_error(parser.failure().value_or(JsonFailure::Syntax)));
     }
     catch (nlohmann::json::exception const&) {
+        // Codec exception text can contain input fragments; translate it to a fixed project-owned error instead.
         return Result::failure(make_json_error(JsonFailure::Internal));
     }
 }
@@ -436,8 +445,9 @@ auto serialize_json(JsonValue const& value) -> jb::core::Result<std::string, jb:
         return Result::success(encoded.dump());
     }
     catch (nlohmann::json::exception const&) {
+        // Keep private codec diagnostics out of the dependency-independent public error contract.
         return Result::failure(make_json_error(JsonFailure::Internal));
     }
 }
 
-} // namespace jb::rpc
+} // namespace jb::core

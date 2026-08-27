@@ -72,23 +72,23 @@ auto cron_schedule(std::string expression = "*/5 * * * *", std::string timezone 
     return {.expression = std::move(expression), .timezone = std::move(timezone)};
 }
 
-auto cli_payload(std::string command) -> jb::rpc::JsonValue
+auto cli_payload(std::string command) -> jb::core::JsonValue
 {
-    auto command_value = jb::rpc::JsonValue{};
+    auto command_value = jb::core::JsonValue{};
     command_value.data = std::move(command);
-    auto payload       = jb::rpc::JsonValue{};
-    payload.data       = jb::rpc::JsonValue::Object{
+    auto payload       = jb::core::JsonValue{};
+    payload.data       = jb::core::JsonValue::Object{
         {"command", std::move(command_value)}
     };
     return payload;
 }
 
-auto http_payload(std::string url) -> jb::rpc::JsonValue
+auto http_payload(std::string url) -> jb::core::JsonValue
 {
-    auto url_value = jb::rpc::JsonValue{};
+    auto url_value = jb::core::JsonValue{};
     url_value.data = std::move(url);
-    auto payload   = jb::rpc::JsonValue{};
-    payload.data   = jb::rpc::JsonValue::Object{
+    auto payload   = jb::core::JsonValue{};
+    payload.data   = jb::core::JsonValue::Object{
         {"url", std::move(url_value)}
     };
     return payload;

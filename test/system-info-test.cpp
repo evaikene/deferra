@@ -10,7 +10,6 @@
 
 using namespace jb::core;
 using namespace jb::jobu;
-using namespace jb::rpc;
 
 namespace {
 

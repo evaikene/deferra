@@ -23,9 +23,9 @@ using Result = jb::core::Result<T, jb::core::Error>;
 constexpr std::uint64_t kAttributeDocumentVersion{1};
 constexpr std::size_t   kMaxAttributeDepth{64};
 
-auto make_json(auto value) -> jb::rpc::JsonValue
+auto make_json(auto value) -> jb::core::JsonValue
 {
-    jb::rpc::JsonValue result;
+    jb::core::JsonValue result;
     result.data = std::move(value);
     return result;
 }
@@ -55,13 +55,13 @@ auto document_failure(std::string_view reason) -> Result<T>
     return Result<T>::failure(invalid_document(reason));
 }
 
-auto find_member(jb::rpc::JsonValue::Object const& object, std::string_view name) -> jb::rpc::JsonValue const*
+auto find_member(jb::core::JsonValue::Object const& object, std::string_view name) -> jb::core::JsonValue const*
 {
     auto const iterator = object.find(name);
     return iterator == object.end() ? nullptr : &iterator->second;
 }
 
-auto signed_integer(jb::rpc::JsonValue const& value) -> Result<std::int64_t>
+auto signed_integer(jb::core::JsonValue const& value) -> Result<std::int64_t>
 {
     if (value.is_int()) {
         return Result<std::int64_t>::success(value.as_int());
@@ -83,7 +83,7 @@ auto duration_to_nanoseconds(jb::core::Duration value) -> Result<std::int64_t>
     return Result<std::int64_t>::success(converted.count());
 }
 
-auto nanoseconds_to_duration(jb::rpc::JsonValue const& value) -> Result<jb::core::Duration>
+auto nanoseconds_to_duration(jb::core::JsonValue const& value) -> Result<jb::core::Duration>
 {
     auto count = signed_integer(value);
     if (!count) {
@@ -127,7 +127,7 @@ auto hex_value(char character) noexcept -> int
     return -1;
 }
 
-auto hex_to_bytes(jb::rpc::JsonValue const& value) -> Result<jb::core::ByteBuffer>
+auto hex_to_bytes(jb::core::JsonValue const& value) -> Result<jb::core::ByteBuffer>
 {
     if (!value.is_string() || value.as_string().size() % 2U != 0U) {
         return document_failure<jb::core::ByteBuffer>("invalid_hex");
@@ -146,10 +146,10 @@ auto hex_to_bytes(jb::rpc::JsonValue const& value) -> Result<jb::core::ByteBuffe
     return Result<jb::core::ByteBuffer>::success(std::move(result));
 }
 
-auto typed_value_to_json(AttributeValue const& value, std::size_t depth) -> Result<jb::rpc::JsonValue>
+auto typed_value_to_json(AttributeValue const& value, std::size_t depth) -> Result<jb::core::JsonValue>
 {
     auto tag           = std::string{};
-    auto encoded_value = jb::rpc::JsonValue{};
+    auto encoded_value = jb::core::JsonValue{};
 
     if (auto const* boolean = std::get_if<bool>(&value.data)) {
         tag           = "boolean";
@@ -161,14 +161,15 @@ auto typed_value_to_json(AttributeValue const& value, std::size_t depth) -> Resu
     }
     else if (auto const* number = std::get_if<double>(&value.data)) {
         if (!std::isfinite(*number)) {
-            return Result<jb::rpc::JsonValue>::failure(attribute_input_error("JobU number attribute must be finite"));
+            return Result<jb::core::JsonValue>::failure(attribute_input_error("JobU number attribute must be finite"));
         }
         tag           = "number";
         encoded_value = make_json(*number);
     }
     else if (auto const* text = std::get_if<std::string>(&value.data)) {
         if (!is_valid_utf8(*text)) {
-            return Result<jb::rpc::JsonValue>::failure(attribute_input_error("JobU attribute text is not valid UTF-8"));
+            return Result<jb::core::JsonValue>::failure(
+                attribute_input_error("JobU attribute text is not valid UTF-8"));
         }
         tag           = "string";
         encoded_value = make_json(*text);
@@ -176,7 +177,7 @@ auto typed_value_to_json(AttributeValue const& value, std::size_t depth) -> Resu
     else if (auto const* duration = std::get_if<jb::core::Duration>(&value.data)) {
         auto nanoseconds = duration_to_nanoseconds(*duration);
         if (!nanoseconds) {
-            return Result<jb::rpc::JsonValue>::failure(std::move(nanoseconds).error());
+            return Result<jb::core::JsonValue>::failure(std::move(nanoseconds).error());
         }
         tag           = "duration_ns";
         encoded_value = make_json(*nanoseconds);
@@ -187,15 +188,15 @@ auto typed_value_to_json(AttributeValue const& value, std::size_t depth) -> Resu
     }
     else {
         if (depth >= kMaxAttributeDepth) {
-            return Result<jb::rpc::JsonValue>::failure(attribute_input_error("JobU attribute nesting is too deep"));
+            return Result<jb::core::JsonValue>::failure(attribute_input_error("JobU attribute nesting is too deep"));
         }
         if (auto const* list = std::get_if<AttributeValue::List>(&value.data)) {
-            auto array = jb::rpc::JsonValue::Array{};
+            auto array = jb::core::JsonValue::Array{};
             array.reserve(list->size());
             for (auto const& entry : *list) {
                 auto encoded = typed_value_to_json(entry, depth + 1U);
                 if (!encoded) {
-                    return Result<jb::rpc::JsonValue>::failure(std::move(encoded).error());
+                    return Result<jb::core::JsonValue>::failure(std::move(encoded).error());
                 }
                 array.push_back(std::move(encoded).value());
             }
@@ -203,15 +204,15 @@ auto typed_value_to_json(AttributeValue const& value, std::size_t depth) -> Resu
             encoded_value = make_json(std::move(array));
         }
         else {
-            auto object = jb::rpc::JsonValue::Object{};
+            auto object = jb::core::JsonValue::Object{};
             for (auto const& [name, entry] : std::get<AttributeValue::Map>(value.data)) {
                 if (!is_valid_utf8(name)) {
-                    return Result<jb::rpc::JsonValue>::failure(
+                    return Result<jb::core::JsonValue>::failure(
                         attribute_input_error("JobU attribute text is not valid UTF-8"));
                 }
                 auto encoded = typed_value_to_json(entry, depth + 1U);
                 if (!encoded) {
-                    return Result<jb::rpc::JsonValue>::failure(std::move(encoded).error());
+                    return Result<jb::core::JsonValue>::failure(std::move(encoded).error());
                 }
                 object.emplace(name, std::move(encoded).value());
             }
@@ -220,13 +221,13 @@ auto typed_value_to_json(AttributeValue const& value, std::size_t depth) -> Resu
         }
     }
 
-    return Result<jb::rpc::JsonValue>::success(make_json(jb::rpc::JsonValue::Object{
+    return Result<jb::core::JsonValue>::success(make_json(jb::core::JsonValue::Object{
         {"type",  make_json(std::move(tag))},
         {"value", std::move(encoded_value) },
     }));
 }
 
-auto typed_value_from_json(jb::rpc::JsonValue const& value, std::size_t depth) -> Result<AttributeValue>
+auto typed_value_from_json(jb::core::JsonValue const& value, std::size_t depth) -> Result<AttributeValue>
 {
     if (!value.is_object() || value.as_object().size() != 2U) {
         return document_failure<AttributeValue>("typed_value_shape");
@@ -360,26 +361,26 @@ SerializedAttributeDocument::SerializedAttributeDocument(std::string serialized)
 auto encode_attribute_document(AttributeRegistry const& registry,
                                AttributeSet const&      values,
                                AttributeScope           scope,
-                               AttributeDocumentMode    mode) -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+                               AttributeDocumentMode    mode) -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
     auto validated = validate_encoding(registry, values, scope, mode);
     if (!validated) {
-        return Result<jb::rpc::JsonValue>::failure(std::move(validated).error());
+        return Result<jb::core::JsonValue>::failure(std::move(validated).error());
     }
 
-    auto encoded_values = jb::rpc::JsonValue::Object{};
+    auto encoded_values = jb::core::JsonValue::Object{};
     for (auto const& [name, value] : values) {
         auto encoded = typed_value_to_json(value, 0);
         if (!encoded) {
-            return Result<jb::rpc::JsonValue>::failure(std::move(encoded).error());
+            return Result<jb::core::JsonValue>::failure(std::move(encoded).error());
         }
         encoded_values.emplace(name, std::move(encoded).value());
     }
-    auto result = make_json(jb::rpc::JsonValue::Object{
+    auto result = make_json(jb::core::JsonValue::Object{
         {"values",  make_json(std::move(encoded_values))},
         {"version", make_json(kAttributeDocumentVersion)},
     });
-    return Result<jb::rpc::JsonValue>::success(std::move(result));
+    return Result<jb::core::JsonValue>::success(std::move(result));
 }
 
 auto encode_and_serialize_attribute_document(AttributeRegistry const& registry,
@@ -392,7 +393,7 @@ auto encode_and_serialize_attribute_document(AttributeRegistry const& registry,
     if (!encoded) {
         return Result<SerializedAttributeDocument>::failure(std::move(encoded).error());
     }
-    auto serialized = jb::rpc::serialize_json(*encoded);
+    auto serialized = jb::core::serialize_json(*encoded);
     if (!serialized) {
         return Result<SerializedAttributeDocument>::failure(
             attribute_input_error("JobU attribute text is not valid UTF-8"));
@@ -400,10 +401,10 @@ auto encode_and_serialize_attribute_document(AttributeRegistry const& registry,
     return Result<SerializedAttributeDocument>::success(SerializedAttributeDocument{std::move(serialized).value()});
 }
 
-auto decode_attribute_document(AttributeRegistry const&  registry,
-                               jb::rpc::JsonValue const& document,
-                               AttributeScope            scope,
-                               AttributeDocumentMode     mode) -> jb::core::Result<AttributeSet, jb::core::Error>
+auto decode_attribute_document(AttributeRegistry const&   registry,
+                               jb::core::JsonValue const& document,
+                               AttributeScope             scope,
+                               AttributeDocumentMode      mode) -> jb::core::Result<AttributeSet, jb::core::Error>
 {
     if (!document.is_object() || document.as_object().size() != 2U) {
         return document_failure<AttributeSet>("document_shape");

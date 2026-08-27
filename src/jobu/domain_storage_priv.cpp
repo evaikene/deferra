@@ -156,22 +156,22 @@ auto valid_started_at(RunState state, bool has_started_at) noexcept -> bool
 }
 
 auto decode_json(jb::db::Value const& value, std::string_view field, bool require_object, std::size_t max_size)
-    -> StorageResult<jb::rpc::JsonValue>
+    -> StorageResult<jb::core::JsonValue>
 {
     auto const* text = std::get_if<std::string>(&value);
     if (text == nullptr) {
-        return StorageResult<jb::rpc::JsonValue>::failure(json_error(field, "wrong_type"));
+        return StorageResult<jb::core::JsonValue>::failure(json_error(field, "wrong_type"));
     }
     if (text->size() > max_size) {
-        return StorageResult<jb::rpc::JsonValue>::failure(json_error(field, "too_large"));
+        return StorageResult<jb::core::JsonValue>::failure(json_error(field, "too_large"));
     }
 
-    auto parsed = jb::rpc::parse_json(*text);
+    auto parsed = jb::core::parse_json(*text);
     if (!parsed) {
-        return StorageResult<jb::rpc::JsonValue>::failure(json_error(field, parsed.error().code));
+        return StorageResult<jb::core::JsonValue>::failure(json_error(field, parsed.error().code));
     }
     if (require_object && !parsed->is_object()) {
-        return StorageResult<jb::rpc::JsonValue>::failure(json_error(field, "object_required"));
+        return StorageResult<jb::core::JsonValue>::failure(json_error(field, "object_required"));
     }
     return parsed;
 }
@@ -439,13 +439,13 @@ auto read_optional_blob(jb::db::Record const& record, std::string_view field)
     return StorageResult<std::optional<jb::core::ByteBuffer>>::success(*bytes);
 }
 
-auto json_to_storage(jb::rpc::JsonValue const& value, bool require_object, std::size_t max_size)
+auto json_to_storage(jb::core::JsonValue const& value, bool require_object, std::size_t max_size)
     -> jb::core::Result<jb::db::Value, jb::core::Error>
 {
     if (require_object && !value.is_object()) {
         return StorageResult<jb::db::Value>::failure(json_error({}, "object_required"));
     }
-    auto serialized = jb::rpc::serialize_json(value);
+    auto serialized = jb::core::serialize_json(value);
     if (!serialized) {
         return StorageResult<jb::db::Value>::failure(json_error({}, serialized.error().code));
     }
@@ -456,30 +456,30 @@ auto json_to_storage(jb::rpc::JsonValue const& value, bool require_object, std::
 }
 
 auto read_json(jb::db::Record const& record, std::string_view field, bool require_object, std::size_t max_size)
-    -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
     auto value = required_value(record, field, "jobu.storage.invalid_json");
     if (!value) {
-        return StorageResult<jb::rpc::JsonValue>::failure(std::move(value).error());
+        return StorageResult<jb::core::JsonValue>::failure(std::move(value).error());
     }
     return decode_json(**value, field, require_object, max_size);
 }
 
 auto read_optional_json(jb::db::Record const& record, std::string_view field, bool require_object, std::size_t max_size)
-    -> jb::core::Result<std::optional<jb::rpc::JsonValue>, jb::core::Error>
+    -> jb::core::Result<std::optional<jb::core::JsonValue>, jb::core::Error>
 {
     auto value = required_value(record, field, "jobu.storage.invalid_json");
     if (!value) {
-        return StorageResult<std::optional<jb::rpc::JsonValue>>::failure(std::move(value).error());
+        return StorageResult<std::optional<jb::core::JsonValue>>::failure(std::move(value).error());
     }
     if (std::holds_alternative<jb::db::Null>(**value)) {
-        return StorageResult<std::optional<jb::rpc::JsonValue>>::success(std::nullopt);
+        return StorageResult<std::optional<jb::core::JsonValue>>::success(std::nullopt);
     }
     auto decoded = decode_json(**value, field, require_object, max_size);
     if (!decoded) {
-        return StorageResult<std::optional<jb::rpc::JsonValue>>::failure(std::move(decoded).error());
+        return StorageResult<std::optional<jb::core::JsonValue>>::failure(std::move(decoded).error());
     }
-    return StorageResult<std::optional<jb::rpc::JsonValue>>::success(std::move(decoded).value());
+    return StorageResult<std::optional<jb::core::JsonValue>>::success(std::move(decoded).value());
 }
 
 auto job_run_columns() noexcept -> std::string_view

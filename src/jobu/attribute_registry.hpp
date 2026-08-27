@@ -92,9 +92,9 @@ private:
  * @param scope Scope at which each supplied value must be accepted.
  * @return Owning JSON object, or an error with a stable `jobu.attribute.*` code.
  */
-[[nodiscard]] auto attribute_set_to_json(AttributeSet const&      values,
-                                         AttributeRegistry const& registry,
-                                         AttributeScope scope) -> jb::core::Result<jb::rpc::JsonValue, jb::core::Error>;
+[[nodiscard]] auto
+attribute_set_to_json(AttributeSet const& values, AttributeRegistry const& registry, AttributeScope scope)
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /** Decodes the public definition-directed JSON object into an attribute set.
  *
@@ -108,8 +108,8 @@ private:
  * @param scope Scope at which each decoded value must be accepted.
  * @return Owning lexicographically ordered set, or an error with a stable `jobu.attribute.*` code.
  */
-[[nodiscard]] auto attribute_set_from_json(jb::rpc::JsonValue const& value,
-                                           AttributeRegistry const&  registry,
+[[nodiscard]] auto attribute_set_from_json(jb::core::JsonValue const& value,
+                                           AttributeRegistry const&   registry,
                                            AttributeScope scope) -> jb::core::Result<AttributeSet, jb::core::Error>;
 
 } // namespace jb::jobu

@@ -25,15 +25,15 @@ namespace jb::rpc {
  */
 struct ServerOptions {
     /// Per-connection framing limits; defaults to 16 KiB of headers and a 1 MiB body.
-    FramingLimits framing;
+    FramingLimits        framing;
     /// Per-message JSON nesting limits; the default permits 64 nested containers.
-    JsonLimits    json;
+    jb::core::JsonLimits json;
     /// Maximum accepted entries in one request batch; defaults to 64, while zero rejects every non-empty batch.
-    std::size_t   max_batch_entries{64};
+    std::size_t          max_batch_entries{64};
     /// Maximum simultaneously live connections; defaults to 128, while zero rejects every connection.
-    std::size_t   max_connections{128};
+    std::size_t          max_connections{128};
     /// Maximum unacknowledged framed-output bytes per connection; defaults to 2 MiB, while zero permits no reply.
-    std::size_t   max_queued_output_bytes{std::size_t{2} * 1024U * 1024U};
+    std::size_t          max_queued_output_bytes{std::size_t{2} * 1024U * 1024U};
 };
 
 /** Owns generic byte-stream connections and dispatches JSON-RPC requests.
