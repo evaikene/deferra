@@ -219,8 +219,7 @@ struct SchedulerFixture {
 
 } // anonymous namespace
 
-TEST_CASE("Scheduler integrates deterministic Phase 4 behavior on Linux",
-          "[jobu][scheduler][integration][linux][sqlite]")
+TEST_CASE("Scheduler integrates deterministic Phase 4 behavior", "[jobu][scheduler][integration][sqlite]")
 {
     SchedulerFixture fixture{
         {
