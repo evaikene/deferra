@@ -51,6 +51,8 @@ auto dispatch_selected(jb::db::Database&        database,
                        AttemptCompletionHandler completion)
     -> jb::core::Result<std::optional<DispatchStart>, jb::core::Error>
 {
+    // Revalidate the optimistic candidate under an immediate transaction and make the attempt plus run transition one
+    // durable start boundary. Expected eligibility loss rolls back as a normal skip.
     auto transaction = jb::db::Transaction::begin(database);
     if (!transaction) {
         return DispatchResult<std::optional<DispatchStart>>::failure(std::move(transaction).error());
@@ -66,6 +68,7 @@ auto dispatch_selected(jb::db::Database&        database,
         return rollback_ineligible(guard);
     }
 
+    // Persist the running attempt before transitioning its run so every committed running run has a concrete owner.
     auto& selected = context->value();
     auto  attempt  = JobAttempt{
         .run_id         = selected.run.id,
@@ -87,6 +90,7 @@ auto dispatch_selected(jb::db::Database&        database,
         return rollback_ineligible(guard);
     }
 
+    // No external executor call may occur until both durable writes commit.
     auto committed = guard.commit();
     if (!committed) {
         return DispatchResult<std::optional<DispatchStart>>::failure(std::move(committed).error());
@@ -104,6 +108,7 @@ auto dispatch_selected(jb::db::Database&        database,
     };
     auto started = executor.start(std::move(request), std::move(completion));
     if (!started) {
+        // The durable start cannot be rolled back now; route executor start failure through the normal completion path.
         return DispatchResult<std::optional<DispatchStart>>::success(DispatchStart{
             .key                  = key,
             .immediate_completion = executor_start_failure(key, started.error()),

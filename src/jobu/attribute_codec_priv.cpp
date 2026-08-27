@@ -148,6 +148,8 @@ auto hex_to_bytes(jb::core::JsonValue const& value) -> Result<jb::core::ByteBuff
 
 auto typed_value_to_json(AttributeValue const& value, std::size_t depth) -> Result<jb::core::JsonValue>
 {
+    // Tag every node recursively so all AttributeValue alternatives, including
+    // nested durations and bytes, round-trip without JSON type inference.
     auto tag           = std::string{};
     auto encoded_value = jb::core::JsonValue{};
 
@@ -444,6 +446,8 @@ auto decode_attribute_document(AttributeRegistry const&   registry,
         return Result<AttributeSet>::success(std::move(result));
     }
 
+    // Re-materialize stored snapshots to add built-in job attributes introduced
+    // after an older document was written; partial documents retain omissions.
     auto materialized = materialize_attributes(registry, {}, {}, result);
     if (!materialized) {
         return document_failure<AttributeSet>(materialized.error().code);

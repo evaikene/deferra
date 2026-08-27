@@ -244,6 +244,7 @@ auto page_size(SchedulerCoreOptions const& options) noexcept -> std::size_t
 
 auto load_runtime_queues(SchedulerRepository& repository, std::size_t limit) -> CoreResult<std::vector<QueueRuntime>>
 {
+    // Rebuild the active queue view in bounded keyset pages before reconciling this cycle's fairness state.
     auto queues   = std::vector<QueueRuntime>{};
     auto after_id = std::optional<jb::core::Uuid>{};
     while (true) {
@@ -265,6 +266,8 @@ auto load_runtime_queues(SchedulerRepository& repository, std::size_t limit) -> 
 
 auto load_capacity(SchedulerRepository& repository, std::size_t limit) -> CoreResult<CapacityState>
 {
+    // Reconstruct committed global, per-type, and per-queue occupancy in bounded pages. Blocking retry identities are
+    // retained because they may resume without acquiring another queue slot.
     auto state    = CapacityState{};
     auto after_id = std::optional<jb::core::Uuid>{};
     while (true) {
@@ -299,6 +302,7 @@ auto load_capacity(SchedulerRepository& repository, std::size_t limit) -> CoreRe
             break;
         }
     }
+    // When a full queue can dispatch only retained retries, keep their repository priority and time ordering stable.
     auto const ordered_before = [](BlockingRetryCandidate const& left, BlockingRetryCandidate const& right) {
         if (left.priority != right.priority) {
             return left.priority > right.priority;
@@ -320,6 +324,7 @@ auto load_capacity(SchedulerRepository& repository, std::size_t limit) -> CoreRe
 
 auto validate_manual_barriers(SchedulerRepository& repository, std::size_t limit) -> CoreResult<void>
 {
+    // Scan every barrier page before selecting work so corruption outside the currently due candidates fails closed.
     auto after_id = std::optional<jb::core::Uuid>{};
     while (true) {
         auto page = repository.list_manual_barriers(limit, after_id);
@@ -356,6 +361,7 @@ auto queue_slots_for(CapacityState const& state, jb::core::Uuid const& queue_id)
 auto record_start(CapacityState& state, JobType type, jb::core::Uuid const& queue_id, bool queue_slot_already_occupied)
     -> CoreResult<void>
 {
+    // Every start acquires type capacity, while a resumed blocking retry reuses the queue slot it already retained.
     auto* running = &state.http_running;
     if (type == JobType::Cli) {
         running = &state.cli_running;
@@ -375,6 +381,7 @@ auto record_start(CapacityState& state, JobType type, jb::core::Uuid const& queu
 auto record_completion(CapacityState& state, JobType type, jb::core::Uuid const& queue_id, CompletionEffect effect)
     -> CoreResult<void>
 {
+    // Completion releases type capacity; only an eligible blocking retry keeps its queue slot across attempts.
     auto* running = &state.http_running;
     if (type == JobType::Cli) {
         running = &state.cli_running;
@@ -539,6 +546,8 @@ auto process_completion(jb::db::Database&                        database,
         if (!retry_wait) {
             return CoreResult<CompletionEffect>::failure(std::move(retry_wait).error());
         }
+        // Rescheduled retries release capacity. Blocking retries retain the slot only while owner gates permit
+        // execution.
         auto const job_permits_execution =
             context->job_state == JobState::Active || context->run.origin == RunOrigin::Manual;
         effect.queue_slot_retained = decision->retry->mode == RetryMode::Blocking && job_permits_execution &&
@@ -645,6 +654,8 @@ auto load_candidate_batch(SchedulerRepository&   repository,
                           std::size_t            limit,
                           CandidateBatch&        batch) -> CoreResult<void>
 {
+    // Keep an unconsumed repository-ordered page across weighted visits so arbitration cannot skip higher-priority
+    // work.
     if (batch.next < batch.candidates.size() || (batch.queried && !batch.may_have_more)) {
         return CoreResult<void>::success();
     }
@@ -683,6 +694,8 @@ auto dispatch_visit(jb::db::Database&                        database,
         return CoreResult<bool>::success(false);
     }
 
+    // A full queue remains eligible only for a due blocking retry that already owns its slot; queues with capacity use
+    // their cached repository-ordered candidate batch.
     auto const limit    = page_size(options);
     auto       eligible = std::vector<EligibleQueue>{};
     eligible.reserve(queues.size());
@@ -746,6 +759,8 @@ auto dispatch_visit(jb::db::Database&                        database,
         auto try_dispatch = [&](jb::core::Uuid const& run_id, bool queue_slot_already_occupied) -> CoreResult<bool> {
             auto completion = [expected_run_id = run_id,
                                processor       = completion_processor](AttemptCompletion const& value) mutable {
+                // The shared processor records a sticky failure or rescan request before this callback drops the
+                // Result.
                 auto handled = processor(expected_run_id, value);
                 (void)handled;
             };
@@ -769,6 +784,7 @@ auto dispatch_visit(jb::db::Database&                        database,
                 return CoreResult<bool>::failure(std::move(recorded).error());
             }
             if (dispatched->value().immediate_completion) {
+                // Executor start errors enter the same completion path after correlation and occupancy are recorded.
                 auto completed = completion_processor(run_id, *dispatched->value().immediate_completion);
                 if (!completed) {
                     return CoreResult<bool>::failure(std::move(completed).error());
@@ -964,6 +980,8 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<SchedulerCycleResult, jb
         return CoreResult<SchedulerCycleResult>::failure(invalid_options());
     }
 
+    // Sample UTC once, then rebuild queues, barriers, and capacity before selection; reconstruction failure prevents
+    // every start in this cycle.
     auto const          now   = _time_source.utc_now();
     auto const          limit = page_size(_options);
     SchedulerRepository repository{_database, _attributes};
@@ -984,6 +1002,8 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<SchedulerCycleResult, jb
     auto http_candidates         = CandidateCache{};
     auto attempted_cli_blocking  = std::set<jb::core::Uuid>{};
     auto attempted_http_blocking = std::set<jb::core::Uuid>{};
+    // All asynchronous and immediate completions share one processor. Its first error becomes sticky and successful
+    // state changes request a rescan so newly available work is considered promptly.
     auto completion_processor =
         CompletionProcessor{[this](jb::core::Uuid const&    expected_run_id,
                                    AttemptCompletion const& completion) -> CoreResult<CompletionEffect> {
@@ -1008,6 +1028,8 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<SchedulerCycleResult, jb
             return completed;
         }};
 
+    // Manual and schedule-owned runs share each repository-ordered batch; only the CLI/HTTP first opportunity
+    // alternates after a productive round, so origin handling cannot bypass strict priority.
     while (true) {
         auto const first_type        = _cli_first ? JobType::Cli : JobType::Http;
         auto const second_type       = _cli_first ? JobType::Http : JobType::Cli;
@@ -1065,6 +1087,8 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<SchedulerCycleResult, jb
         _cli_first = !_cli_first;
     }
 
+    // Recompute the wake after this cycle's transitions. Unavailable executor types cannot create useful wakes, and the
+    // repository applies the same lifecycle and manual-barrier gates used for runnable selection.
     auto next_wake = std::optional<jb::core::UtcTimePoint>{};
     for (auto const type : {JobType::Cli, JobType::Http}) {
         if (!_executor.is_available(type)) {

@@ -742,6 +742,8 @@ auto ManagementService::suspend_queue(QueueSelector const& selector) -> jb::core
         return ServiceResult<Queue>::success(std::move(queue));
     }
     if (queue.state == QueueState::Active) {
+        // Establish the suspension gate before consulting durable occupancy.
+        // Completion processing finishes the transition later when work remains.
         auto transitioned = _data->queues.set_state(queue.id, QueueState::Active, QueueState::Suspending, now);
         if (!transitioned) {
             return ServiceResult<Queue>::failure(std::move(transitioned).error());
@@ -854,6 +856,8 @@ auto ManagementService::delete_queue(QueueSelector const& selector) -> jb::core:
         return ServiceResult<void>::failure(queue_not_suspended());
     }
 
+    // Preflight every destructive condition before changing related tables,
+    // including revision capacity for all job tombstones in this queue.
     auto running = _data->runs.count_running_for_queue(queue.id);
     if (!running) {
         return ServiceResult<void>::failure(std::move(running).error());
@@ -873,6 +877,8 @@ auto ManagementService::delete_queue(QueueSelector const& selector) -> jb::core:
         return ServiceResult<void>::failure(job_revision_exhausted());
     }
 
+    // Reference cleanup, job tombstones, pending-run cancellation, and the
+    // queue tombstone commit together to preserve all cross-table relationships.
     auto references = _data->secrets.erase_references_for_queue(queue.id);
     if (!references) {
         return ServiceResult<void>::failure(std::move(references).error());
@@ -909,6 +915,8 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
     if (_data->initialization_error) {
         return ServiceResult<JobDefinition>::failure(*_data->initialization_error);
     }
+    // Reject and serialize caller-owned input before opening a transaction so
+    // validation failures cannot hold the database write lock.
     auto selector = validate_selector(request.queue);
     if (!selector) {
         return ServiceResult<JobDefinition>::failure(std::move(selector).error());
@@ -930,6 +938,8 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
         return ServiceResult<JobDefinition>::failure(std::move(idempotency).error());
     }
 
+    // Non-idempotent calls can reserve identities immediately. Idempotent calls
+    // defer allocation until replay has been ruled out to avoid consuming IDs.
     auto job_id            = std::optional<jb::core::Uuid>{};
     auto run_id            = std::optional<jb::core::Uuid>{};
     auto generate_identity = [&]() -> ServiceResult<void> {
@@ -969,6 +979,8 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
         return ServiceResult<JobDefinition>::failure(queue_state_conflict());
     }
 
+    // Resolve a canonical replay before any durable mutation and, for an
+    // idempotent first call, before generating its job and run identities.
     auto canonical_request = std::optional<std::string>{};
     if (request.idempotency_key) {
         auto encoded = detail::encode_job_create_idempotency_request(request, queue.id, _data->attributes);
@@ -1008,6 +1020,8 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
         }
     }
 
+    // Resolve one planned instant and materialize the effective attributes so
+    // the initial run owns an immutable snapshot of revision one.
     auto const now        = _data->time_source.utc_now();
     auto       planned_at = jb::core::UtcTimePoint{};
     if (auto const* once = std::get_if<OnceSchedule>(&request.schedule)) {
@@ -1067,6 +1081,8 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
         .payload_json    = payload->serialized(),
     };
 
+    // Commit the definition, first schedule-owned run, and optional replay
+    // result atomically so none can exist without the others.
     auto inserted_job = _data->jobs.insert(job, *serialized_attributes, *payload);
     if (!inserted_job) {
         return ServiceResult<JobDefinition>::failure(std::move(inserted_job).error());
@@ -1120,6 +1136,8 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
         canonical_request = std::move(encoded).value();
     }
 
+    // Check replay before eligibility or identifier generation so retries
+    // return the original durable snapshot without consuming another run ID.
     auto begun = jb::db::Transaction::begin(_data->database);
     if (!begun) {
         return ServiceResult<JobRun>::failure(std::move(begun).error());
@@ -1158,6 +1176,8 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
         }
     }
 
+    // Establish the job, queue, and future schedule-owned relationship, then
+    // require an idle job with no existing non-terminal manual barrier.
     auto found_job = _data->jobs.find_by_id(request.job_id, true);
     if (!found_job) {
         return ServiceResult<JobRun>::failure(std::move(found_job).error());
@@ -1211,6 +1231,8 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
         return ServiceResult<JobRun>::failure(manual_run_conflict());
     }
 
+    // The manual row snapshots the current definition and itself blocks the
+    // recurring schedule-owned successor until the manual run is terminal.
     auto run_id = _data->uuid_generator.generate();
     if (!run_id) {
         return ServiceResult<JobRun>::failure(std::move(run_id).error());
@@ -1233,6 +1255,8 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
         .state          = RunState::Scheduled,
         .result         = std::nullopt,
     };
+    // Store the manual snapshot and its optional idempotent result in one
+    // transaction so a replay can never name a run that was rolled back.
     auto inserted = _data->runs.insert_manual(run);
     if (!inserted) {
         return ServiceResult<JobRun>::failure(std::move(inserted).error());
@@ -1315,6 +1339,8 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
         return ServiceResult<JobDefinition>::failure(job_state_conflict());
     }
 
+    // A once definition becomes immutable after execution starts. Recurring
+    // definitions remain mutable because every run owns a revisioned snapshot.
     auto const recurring = std::holds_alternative<CronSchedule>(replacement.schedule);
     if (!recurring) {
         auto started = _data->attempts.has_started_for_job(replacement.id);
@@ -1333,6 +1359,9 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
         return ServiceResult<JobDefinition>::failure(schedule_refresh_conflict());
     }
 
+    // Refresh only an untouched scheduled successor. Once recurring work has
+    // been claimed, preserve its snapshot and defer edits to the next successor;
+    // conversion to a once schedule cannot be deferred safely.
     auto refresh_snapshot = false;
     if ((**schedule_owned).state == RunState::Scheduled) {
         auto has_attempt = _data->attempts.has_any_for_run((**schedule_owned).id);
@@ -1383,6 +1412,8 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
     ++replacement.revision;
     replacement.updated_at = now;
 
+    // The definition revision and any eligible successor refresh share this
+    // transaction, so a lost refresh rolls back rather than leaving disagreement.
     auto replaced =
         _data->jobs.update_definition(replacement, request.expected_revision, *serialized_attributes, *payload);
     if (!replaced) {
@@ -1474,6 +1505,8 @@ auto ManagementService::suspend_job(jb::core::Uuid const& id) -> jb::core::Resul
         return ServiceResult<JobDefinition>::success(std::move(job));
     }
     if (job.state == JobState::Active) {
+        // Each durable job-state transition advances the revision. If running
+        // work remains, completion processing advances it again when drained.
         if (job.revision >= kMaximumPersistedJobRevision) {
             return ServiceResult<JobDefinition>::failure(job_revision_exhausted());
         }
@@ -1632,6 +1665,8 @@ auto ManagementService::move_job(MoveJobRequest const& request) -> jb::core::Res
     if (job.revision >= kMaximumPersistedJobRevision) {
         return ServiceResult<JobDefinition>::failure(job_revision_exhausted());
     }
+    // Move the definition and every non-terminal run snapshot in one transaction
+    // so their queue and revision references cannot disagree.
     auto const next_revision = job.revision + 1;
     auto       moved_job     = _data->jobs.move(job.id, job.revision, target_queue.id, next_revision, now);
     if (!moved_job) {
@@ -1703,6 +1738,8 @@ auto ManagementService::delete_job(DeleteJobRequest const& request) -> jb::core:
     if (job.state != JobState::Suspended) {
         return ServiceResult<void>::failure(job_not_suspended());
     }
+    // Deletion requires a suspended, drained job before atomically tombstoning
+    // it, cancelling pending runs, and removing its secret references.
     auto running = _data->runs.count_running_for_job(job.id);
     if (!running) {
         return ServiceResult<void>::failure(std::move(running).error());
