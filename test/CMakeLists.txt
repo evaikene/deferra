@@ -505,6 +505,7 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 set(TARGET "system-http-client-test")
 add_executable(${TARGET}
     system-http-client-test.cpp
+    support/http_test_server.cpp
     support/temporary_directory.cpp
 )
 target_link_libraries(${TARGET} PRIVATE net-http Catch2::Catch2WithMain)
