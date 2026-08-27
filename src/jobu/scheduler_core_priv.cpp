@@ -825,7 +825,8 @@ SchedulerCore::SchedulerCore(jb::db::Database&        database,
                              jb::core::UuidGenerator& uuid_generator,
                              jb::core::TimeSource&    time_source,
                              AttemptExecutor&         executor,
-                             SchedulerCoreOptions     options) noexcept
+                             SchedulerCoreOptions     options,
+                             SchedulerCoreCallbacks   callbacks) noexcept
     : _database{database}
     , _attributes{attributes}
     , _cron{cron}
@@ -833,6 +834,7 @@ SchedulerCore::SchedulerCore(jb::db::Database&        database,
     , _time_source{time_source}
     , _executor{executor}
     , _options{options}
+    , _callbacks{std::move(callbacks)}
 {}
 
 auto SchedulerCore::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result<CancelRunResult, jb::core::Error>
@@ -942,13 +944,24 @@ auto SchedulerCore::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result
     });
 }
 
-auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
+void SchedulerCore::reset() noexcept
+{
+    _queue_weights.clear();
+    _cli_credits.clear();
+    _http_credits.clear();
+    _active_attempts.clear();
+    _cancellation_requests.clear();
+    _failure.reset();
+    _cli_first = true;
+}
+
+auto SchedulerCore::process_cycle() -> jb::core::Result<SchedulerCycleResult, jb::core::Error>
 {
     if (_failure) {
-        return CoreResult<void>::failure(*_failure);
+        return CoreResult<SchedulerCycleResult>::failure(*_failure);
     }
     if (_options.cli_concurrency == 0 || _options.http_concurrency == 0 || _options.candidate_batch_size == 0) {
-        return CoreResult<void>::failure(invalid_options());
+        return CoreResult<SchedulerCycleResult>::failure(invalid_options());
     }
 
     auto const          now   = _time_source.utc_now();
@@ -956,16 +969,16 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
     SchedulerRepository repository{_database, _attributes};
     auto                queues = load_runtime_queues(repository, limit);
     if (!queues) {
-        return CoreResult<void>::failure(std::move(queues).error());
+        return CoreResult<SchedulerCycleResult>::failure(std::move(queues).error());
     }
     reconcile_fairness(*queues, _queue_weights, _cli_credits, _http_credits);
     auto barriers = validate_manual_barriers(repository, limit);
     if (!barriers) {
-        return CoreResult<void>::failure(std::move(barriers).error());
+        return CoreResult<SchedulerCycleResult>::failure(std::move(barriers).error());
     }
     auto capacity = load_capacity(repository, limit);
     if (!capacity) {
-        return CoreResult<void>::failure(std::move(capacity).error());
+        return CoreResult<SchedulerCycleResult>::failure(std::move(capacity).error());
     }
     auto cli_candidates          = CandidateCache{};
     auto http_candidates         = CandidateCache{};
@@ -985,6 +998,12 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
                                                 completion);
             if (!completed && !_failure) {
                 _failure = completed.error();
+                if (_callbacks.failure_reported) {
+                    _callbacks.failure_reported(*_failure);
+                }
+            }
+            else if (completed && _callbacks.rescan_requested) {
+                _callbacks.rescan_requested();
             }
             return completed;
         }};
@@ -1014,10 +1033,10 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
                                     first_blocking,
                                     completion_processor);
         if (!first) {
-            return CoreResult<void>::failure(std::move(first).error());
+            return CoreResult<SchedulerCycleResult>::failure(std::move(first).error());
         }
         if (_failure) {
-            return CoreResult<void>::failure(*_failure);
+            return CoreResult<SchedulerCycleResult>::failure(*_failure);
         }
         auto second = dispatch_visit(_database,
                                      _attributes,
@@ -1034,10 +1053,10 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
                                      second_blocking,
                                      completion_processor);
         if (!second) {
-            return CoreResult<void>::failure(std::move(second).error());
+            return CoreResult<SchedulerCycleResult>::failure(std::move(second).error());
         }
         if (_failure) {
-            return CoreResult<void>::failure(*_failure);
+            return CoreResult<SchedulerCycleResult>::failure(*_failure);
         }
         if (!*first && !*second) {
             break;
@@ -1045,7 +1064,24 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<void, jb::core::Error>
         // Empty cycles do not consume the token; the next productive round starts with the other type.
         _cli_first = !_cli_first;
     }
-    return CoreResult<void>::success();
+
+    auto next_wake = std::optional<jb::core::UtcTimePoint>{};
+    for (auto const type : {JobType::Cli, JobType::Http}) {
+        if (!_executor.is_available(type)) {
+            continue;
+        }
+        auto earliest = repository.earliest_future_runnable(type, now);
+        if (!earliest) {
+            return CoreResult<SchedulerCycleResult>::failure(std::move(earliest).error());
+        }
+        if (earliest->has_value() && (!next_wake || **earliest < *next_wake)) {
+            next_wake = **earliest;
+        }
+    }
+    return CoreResult<SchedulerCycleResult>::success({
+        .sampled_utc_now = now,
+        .next_wake       = next_wake,
+    });
 }
 
 } // namespace jb::jobu::detail

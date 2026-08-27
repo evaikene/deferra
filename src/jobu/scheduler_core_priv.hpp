@@ -3,17 +3,15 @@
 #include "error.hpp"
 #include "result.hpp"
 #include "scheduler.hpp"
+#include "time_source.hpp"
 #include "uuid.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <optional>
 #include <set>
-
-namespace jb::core {
-class TimeSource;
-}
 
 namespace jb::db {
 class Database;
@@ -33,6 +31,16 @@ struct SchedulerCoreOptions {
     std::size_t   candidate_batch_size{200};
 };
 
+struct SchedulerCycleResult {
+    jb::core::UtcTimePoint                sampled_utc_now;
+    std::optional<jb::core::UtcTimePoint> next_wake;
+};
+
+struct SchedulerCoreCallbacks {
+    std::function<void()>                       rescan_requested;
+    std::function<void(jb::core::Error const&)> failure_reported;
+};
+
 class SchedulerCore final {
 public:
     SchedulerCore(jb::db::Database&        database,
@@ -41,10 +49,12 @@ public:
                   jb::core::UuidGenerator& uuid_generator,
                   jb::core::TimeSource&    time_source,
                   AttemptExecutor&         executor,
-                  SchedulerCoreOptions     options = {}) noexcept;
+                  SchedulerCoreOptions     options   = {},
+                  SchedulerCoreCallbacks   callbacks = {}) noexcept;
 
     [[nodiscard]] auto cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result<CancelRunResult, jb::core::Error>;
-    [[nodiscard]] auto process_cycle() -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto process_cycle() -> jb::core::Result<SchedulerCycleResult, jb::core::Error>;
+    void               reset() noexcept;
 
 private:
     jb::db::Database&                       _database;
@@ -54,6 +64,7 @@ private:
     jb::core::TimeSource&                   _time_source;
     AttemptExecutor&                        _executor;
     SchedulerCoreOptions                    _options;
+    SchedulerCoreCallbacks                  _callbacks;
     std::map<jb::core::Uuid, std::uint32_t> _queue_weights;
     std::map<jb::core::Uuid, std::int64_t>  _cli_credits;
     std::map<jb::core::Uuid, std::int64_t>  _http_credits;

@@ -75,7 +75,7 @@ struct CoreFixture {
         time.set_utc(at(120));
     }
 
-    [[nodiscard]] auto process(SchedulerCoreOptions options) -> Result<void, Error>
+    [[nodiscard]] auto process(SchedulerCoreOptions options) -> Result<SchedulerCycleResult, Error>
     {
         SchedulerCore core{database, registry, cron, generator, time, executor, options};
         return core.process_cycle();
@@ -2788,4 +2788,101 @@ TEST_CASE("Single-queue scheduler core rejects zero limits and batch size", "[jo
         CHECK(result.error().category == ErrorCategory::InvalidArgument);
         CHECK(result.error().code == "jobu.scheduler.invalid_options");
     }
+}
+
+TEST_CASE("Scheduler core returns the earliest future wake for available executor types",
+          "[jobu][scheduler][core][wake][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  queue_id = id(90);
+    insert_queue(fixture.database, queue_id, 2);
+    insert_scheduled(fixture, queue_id, 91, JobType::Cli, 0, 150, 150);
+    insert_scheduled(fixture, queue_id, 92, JobType::Http, 0, 140, 140);
+    fixture.executor.set_available(JobType::Cli, true);
+    fixture.executor.set_available(JobType::Http, false);
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        fixture.time,
+        fixture.executor,
+        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
+    };
+
+    auto cycle = core.process_cycle();
+    REQUIRE(cycle);
+    CHECK(cycle->sampled_utc_now == at(120));
+    REQUIRE(cycle->next_wake);
+    CHECK(*cycle->next_wake == at(150));
+
+    fixture.executor.set_available(JobType::Http, true);
+    cycle = core.process_cycle();
+    REQUIRE(cycle);
+    REQUIRE(cycle->next_wake);
+    CHECK(*cycle->next_wake == at(140));
+}
+
+TEST_CASE("Scheduler core notifies its adapter after asynchronous completion",
+          "[jobu][scheduler][core][completion][notification][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  queue_id = id(93);
+    insert_queue(fixture.database, queue_id, 1);
+    insert_scheduled(fixture, queue_id, 94, JobType::Cli);
+    fixture.executor.set_available(JobType::Cli, true);
+    auto          rescan_count = std::size_t{0};
+    auto          failures     = std::vector<Error>{};
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        fixture.time,
+        fixture.executor,
+        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1},
+        {.rescan_requested = [&rescan_count]() -> void { ++rescan_count; },
+                   .failure_reported = [&failures](Error const& error) -> void { failures.push_back(error); }}
+    };
+
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const key = fixture.executor.pending_keys().front();
+    REQUIRE(fixture.executor.complete(key, success(key)));
+    CHECK(rescan_count == 1U);
+    CHECK(failures.empty());
+}
+
+TEST_CASE("Scheduler core reports one sticky asynchronous completion failure",
+          "[jobu][scheduler][core][completion][notification][failure][sqlite]")
+{
+    CoreFixture        fixture;
+    RawAttemptExecutor executor;
+    auto const         queue_id = id(95);
+    insert_queue(fixture.database, queue_id, 1);
+    insert_scheduled(fixture, queue_id, 96, JobType::Cli);
+    auto          reported = std::vector<Error>{};
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        fixture.time,
+        executor,
+        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1},
+        {.failure_reported = [&reported](Error const& error) -> void { reported.push_back(error); }}
+    };
+
+    REQUIRE(core.process_cycle());
+    REQUIRE(executor.requests.size() == 1U);
+    auto invalid       = success(executor.requests.front().key);
+    invalid.key.run_id = id(97);
+    executor.emit(std::move(invalid));
+    REQUIRE(reported.size() == 1U);
+    CHECK(reported.front().code == "jobu.executor.invalid_completion");
+
+    auto failed = core.process_cycle();
+    REQUIRE_FALSE(failed);
+    CHECK(failed.error() == reported.front());
+    CHECK(reported.size() == 1U);
 }
