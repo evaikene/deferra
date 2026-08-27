@@ -73,10 +73,7 @@ struct Scheduler::Private {
             jb::core::UuidGenerator& uuid_generator,
             jb::core::TimeSource&    time_source,
             AttemptExecutor&         executor,
-            SchedulerOptions         options_value)
-        : owner{
-              owner_value
-    }
+        : owner{owner_value}
         , database{database_value}
         , attributes{attributes_value}
         , options{options_value}
