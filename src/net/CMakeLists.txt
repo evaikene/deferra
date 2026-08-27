@@ -65,3 +65,5 @@ target_compile_definitions(${TARGET}
 )
 
 target_link_libraries(${TARGET} PUBLIC core)
+
+add_subdirectory(http)

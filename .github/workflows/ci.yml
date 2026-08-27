@@ -25,6 +25,7 @@ jobs:
             catch2 \
             cmake \
             g++ \
+            libcurl4-openssl-dev \
             libfmt-dev \
             libsqlite3-dev \
             ninja-build \
@@ -51,6 +52,7 @@ jobs:
           apk add --no-cache \
             catch2-3 \
             cmake \
+            curl-dev \
             fmt-dev \
             g++ \
             gcompat \

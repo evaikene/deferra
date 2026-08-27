@@ -310,6 +310,12 @@ add_executable(${TARGET} net-http-client-public-header-test.cpp)
 target_link_libraries(${TARGET} PRIVATE net)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# System HTTP client public header must compile as the first include.
+set(TARGET "net-http-public-header-test")
+add_executable(${TARGET} net-http-public-header-test.cpp)
+target_link_libraries(${TARGET} PRIVATE net-http)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # JSON codec test
 set(TARGET "json-test")
 add_executable(${TARGET} json-test.cpp)
@@ -493,6 +499,15 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 set(TARGET "http-capture-buffer-test")
 add_executable(${TARGET} http-capture-buffer-test.cpp)
 target_link_libraries(${TARGET} PRIVATE net Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# System HTTP client options and runtime preflight test
+set(TARGET "system-http-client-test")
+add_executable(${TARGET}
+    system-http-client-test.cpp
+    support/temporary_directory.cpp
+)
+target_link_libraries(${TARGET} PRIVATE net-http Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
