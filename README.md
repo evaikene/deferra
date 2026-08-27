@@ -10,8 +10,9 @@ SQLite provides persistence.
 > [!IMPORTANT]
 > JobU is under active development and is not ready for production use. The
 > repository currently provides the foundational libraries, SQLite support,
-> local IPC and JSON-RPC, and the first `jobud`/`jobuctl` `system.info` flow;
-> scheduling and job execution are still being implemented.
+> local IPC and JSON-RPC, and deterministic scheduling tested with a fake
+> executor. Real command-line and HTTP execution are not yet available, and
+> the scheduler is not yet wired into `jobud`.
 
 ## Components
 
