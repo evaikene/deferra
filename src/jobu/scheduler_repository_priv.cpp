@@ -977,6 +977,10 @@ auto SchedulerRepository::find_active_attempt(jb::core::Uuid const& run_id)
         return RepositoryResult<std::optional<AttemptNumber>>::failure(std::move(next).error());
     }
     if (!*next) {
+        auto finished = query.finish();
+        if (!finished) {
+            return RepositoryResult<std::optional<AttemptNumber>>::failure(std::move(finished).error());
+        }
         return RepositoryResult<std::optional<AttemptNumber>>::success(std::nullopt);
     }
     auto number =
@@ -990,6 +994,10 @@ auto SchedulerRepository::find_active_attempt(jb::core::Uuid const& run_id)
     }
     if (*second) {
         return RepositoryResult<std::optional<AttemptNumber>>::failure(invariant("multiple_active_attempts"));
+    }
+    auto finished = query.finish();
+    if (!finished) {
+        return RepositoryResult<std::optional<AttemptNumber>>::failure(std::move(finished).error());
     }
     return RepositoryResult<std::optional<AttemptNumber>>::success(*number);
 }
