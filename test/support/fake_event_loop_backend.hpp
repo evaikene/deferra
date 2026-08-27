@@ -88,6 +88,12 @@ struct EventLoopTestAccess {
     {
         return std::unique_ptr<EventLoop>{new EventLoop(std::move(backend))};
     }
+
+    static auto fd_callback(EventLoop const& loop, int fd) -> FdCallback
+    {
+        auto const watch = loop._watchers.find(fd);
+        return watch == loop._watchers.end() ? FdCallback{} : watch->second.callback;
+    }
 };
 
 /// Owned fake backend and its EventLoop test wrapper.

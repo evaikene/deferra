@@ -2,6 +2,7 @@
 
 #include "application.hpp"
 #include "event_loop_types.hpp"
+#include "http/curl_multi_priv.hpp"
 #include "http/curl_multi_test_priv.hpp"
 #include "http/curl_runtime_priv.hpp"
 #include "support/fake_event_loop_backend.hpp"
@@ -524,6 +525,146 @@ TEST_CASE("system HTTP client leaves persistent failed-watch callbacks inert", "
     fake.backend->ready_events.push_back({.fd = watched_fd, .events = jb::core::FdEvent::Read});
     REQUIRE(fake.loop->process_events(jb::core::EventFlag::Watchers, 0) != jb::core::ProcessEventsResult::Failed);
     CHECK(callback_count == 0);
+}
+
+TEST_CASE("curl multi adapter defers and coalesces socket watch changes", "[net][http]")
+{
+    using jb::net::http::detail::CurlMultiAdapterTestAccess;
+    using jb::net::http::detail::CurlMultiSocketInterest;
+
+    auto fake         = jb::core::priv::make_fake_event_loop();
+    auto current_loop = jb::core::priv::ScopedCurrentEventLoop{fake.loop.get()};
+    REQUIRE(jb::net::http::detail::preflight_curl_runtime());
+
+    auto completion_count = 0;
+    auto failure_count    = 0;
+    auto created          = jb::net::http::detail::CurlMultiAdapter::create(
+        *fake.loop,
+        [&](auto*, auto) -> void { ++completion_count; },
+        [&](jb::core::Error const&) -> void { ++failure_count; });
+    REQUIRE(created);
+    auto adapter = std::move(created).value();
+
+    auto const initial_add_calls    = fake.backend->add_fd_calls;
+    auto const initial_remove_calls = fake.backend->remove_fd_calls;
+    auto const initial_wakeup_calls = fake.backend->wakeup_calls;
+
+    REQUIRE(CurlMultiAdapterTestAccess::record_socket_update(*adapter, 42, CurlMultiSocketInterest::Read));
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    REQUIRE(CurlMultiAdapterTestAccess::record_socket_update(*adapter, 42, CurlMultiSocketInterest::Write));
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+
+    auto state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK(state.watch_count == 0U);
+    CHECK(state.pending_watch_update_count == 1U);
+    CHECK(state.reconcile_queued);
+    CHECK(fake.backend->add_fd_calls == initial_add_calls);
+    CHECK(fake.backend->wakeup_calls == initial_wakeup_calls + 1);
+
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK(state.watch_count == 1U);
+    CHECK(state.pending_watch_update_count == 0U);
+    CHECK_FALSE(state.reconcile_queued);
+    CHECK(fake.backend->add_fd_calls == initial_add_calls + 1);
+    CHECK(fake.backend->last_added_fd == 42);
+    CHECK_FALSE(fake.backend->last_added_events.test(jb::core::FdEvent::Read));
+    CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Write));
+    auto superseded_callback = jb::core::priv::EventLoopTestAccess::fd_callback(*fake.loop, 42);
+    REQUIRE(superseded_callback);
+
+    REQUIRE(CurlMultiAdapterTestAccess::record_socket_update(*adapter, 42, CurlMultiSocketInterest::ReadWrite));
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    CHECK(fake.backend->add_fd_calls == initial_add_calls + 1);
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    CHECK(fake.backend->add_fd_calls == initial_add_calls + 2);
+    CHECK(fake.backend->remove_fd_calls == initial_remove_calls);
+    CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Read));
+    CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Write));
+
+    jb::net::http::detail::fail_next_curl_multi_operation_for_testing(
+        jb::net::http::detail::CurlMultiFailurePoint::SocketAction);
+    superseded_callback(42, jb::core::FdEvent::Read);
+    jb::net::http::detail::fail_next_curl_multi_operation_for_testing(
+        jb::net::http::detail::CurlMultiFailurePoint::None);
+    CHECK(adapter->is_available());
+    CHECK(failure_count == 0);
+
+    REQUIRE(CurlMultiAdapterTestAccess::record_socket_update(*adapter, 42, CurlMultiSocketInterest::Remove));
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK(state.watch_count == 0U);
+    CHECK(fake.backend->remove_fd_calls == initial_remove_calls + 1);
+    CHECK(fake.backend->last_removed_fd == 42);
+    CHECK(completion_count == 0);
+    CHECK(failure_count == 0);
+}
+
+TEST_CASE("curl multi adapter cancels timers and unwatches final socket handles", "[net][http]")
+{
+    using jb::net::http::detail::CurlMultiAdapterTestAccess;
+    using jb::net::http::detail::CurlMultiSocketInterest;
+
+    auto fake         = jb::core::priv::make_fake_event_loop();
+    auto current_loop = jb::core::priv::ScopedCurrentEventLoop{fake.loop.get()};
+    REQUIRE(jb::net::http::detail::preflight_curl_runtime());
+
+    auto completion_count = 0;
+    auto failure_count    = 0;
+    auto created          = jb::net::http::detail::CurlMultiAdapter::create(
+        *fake.loop,
+        [&](auto*, auto) -> void { ++completion_count; },
+        [&](jb::core::Error const&) -> void { ++failure_count; });
+    REQUIRE(created);
+    auto adapter = std::move(created).value();
+
+    CurlMultiAdapterTestAccess::record_timer_update(*adapter, 0L);
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    CHECK(CurlMultiAdapterTestAccess::state(*adapter).timer_update_pending);
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    auto state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK(state.timer_armed);
+    CHECK_FALSE(state.timer_update_pending);
+
+    CurlMultiAdapterTestAccess::record_timer_update(*adapter, 60'000L);
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK_FALSE(state.timer_armed);
+    CHECK(state.timer_update_pending);
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Watchers, 37) != jb::core::ProcessEventsResult::Failed);
+    CHECK(fake.backend->last_timeout_ms == 37);
+
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    CHECK(CurlMultiAdapterTestAccess::state(*adapter).timer_armed);
+    CurlMultiAdapterTestAccess::record_timer_update(*adapter, -1L);
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Watchers, 37) != jb::core::ProcessEventsResult::Failed);
+    CHECK(fake.backend->last_timeout_ms == 37);
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    CHECK_FALSE(CurlMultiAdapterTestAccess::state(*adapter).timer_armed);
+
+    CurlMultiAdapterTestAccess::record_timer_update(*adapter, 0L);
+    REQUIRE(CurlMultiAdapterTestAccess::record_socket_update(*adapter, 43, CurlMultiSocketInterest::Read));
+    REQUIRE(CurlMultiAdapterTestAccess::schedule_reconcile(*adapter));
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    state = CurlMultiAdapterTestAccess::state(*adapter);
+    REQUIRE(state.timer_armed);
+    REQUIRE(state.watch_count == 1U);
+    auto const remove_calls = fake.backend->remove_fd_calls;
+
+    CurlMultiAdapterTestAccess::shutdown(*adapter);
+    state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK_FALSE(state.timer_armed);
+    CHECK(state.watch_count == 0U);
+    CHECK(fake.backend->remove_fd_calls == remove_calls + 1);
+    CHECK(fake.backend->last_removed_fd == 43);
+
+    fake.backend->ready_events.push_back({.fd = 43, .events = jb::core::FdEvent::Read});
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Watchers, 37) != jb::core::ProcessEventsResult::Failed);
+    CHECK(fake.backend->last_timeout_ms == 37);
+    CHECK(completion_count == 0);
+    CHECK(failure_count == 0);
 }
 
 TEST_CASE("system HTTP client factory reports multi construction failure without a client", "[net][http]")

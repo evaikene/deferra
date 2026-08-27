@@ -1,6 +1,5 @@
 #pragma once
 
-#include "curl_multi_test_priv.hpp"
 #include "error.hpp"
 #include "event_loop.hpp"
 #include "result.hpp"
@@ -16,6 +15,8 @@
 #include <unordered_set>
 
 namespace jb::net::http::detail {
+
+struct CurlMultiAdapterTestAccess;
 
 /// Owns one libcurl multi handle and adapts its socket/timer callbacks to EventLoop.
 class CurlMultiAdapter final {
@@ -42,6 +43,8 @@ public:
     [[nodiscard]] auto failure() const -> std::optional<jb::core::Error>;
 
 private:
+    friend struct CurlMultiAdapterTestAccess;
+
     struct CallbackState;
     struct WatchState;
     struct PendingWatchUpdate;

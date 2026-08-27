@@ -1,5 +1,7 @@
 #include "curl_multi_priv.hpp"
 
+#include "curl_multi_test_priv.hpp"
+
 #include <chrono>
 #include <string>
 #include <string_view>
@@ -77,6 +79,54 @@ struct CurlMultiAdapter::PendingWatchUpdate {
 void fail_next_curl_multi_operation_for_testing(CurlMultiFailurePoint point) noexcept
 {
     g_next_failure = point;
+}
+
+auto CurlMultiAdapterTestAccess::record_socket_update(CurlMultiAdapter&       adapter,
+                                                      int                     fd,
+                                                      CurlMultiSocketInterest interest) -> bool
+{
+    auto action = CURL_POLL_REMOVE;
+    switch (interest) {
+        case CurlMultiSocketInterest::Remove:
+            action = CURL_POLL_REMOVE;
+            break;
+        case CurlMultiSocketInterest::Read:
+            action = CURL_POLL_IN;
+            break;
+        case CurlMultiSocketInterest::Write:
+            action = CURL_POLL_OUT;
+            break;
+        case CurlMultiSocketInterest::ReadWrite:
+            action = CURL_POLL_INOUT;
+            break;
+    }
+    return adapter.record_socket_update(static_cast<curl_socket_t>(fd), action) == 0;
+}
+
+void CurlMultiAdapterTestAccess::record_timer_update(CurlMultiAdapter& adapter, long timeout_ms) noexcept
+{
+    static_cast<void>(adapter.record_timer_update(timeout_ms));
+}
+
+auto CurlMultiAdapterTestAccess::schedule_reconcile(CurlMultiAdapter& adapter) -> bool
+{
+    return adapter.schedule_reconcile();
+}
+
+auto CurlMultiAdapterTestAccess::state(CurlMultiAdapter const& adapter) noexcept -> CurlMultiAdapterTestState
+{
+    return {
+        .watch_count                = adapter._watches.size(),
+        .pending_watch_update_count = adapter._pending_watch_updates.size(),
+        .timer_armed                = static_cast<bool>(adapter._timer),
+        .timer_update_pending       = adapter._timer_update_pending,
+        .reconcile_queued           = adapter._reconcile_queued,
+    };
+}
+
+void CurlMultiAdapterTestAccess::shutdown(CurlMultiAdapter& adapter) noexcept
+{
+    adapter.shutdown();
 }
 
 auto CurlMultiAdapter::create(jb::core::EventLoop& loop, CompletionHandler completion, FailureHandler failure)
