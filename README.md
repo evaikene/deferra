@@ -106,6 +106,8 @@ cmake --build .bld
 
 JobU is also an experiment in incremental, AI-supported software development:
 each design stage is reviewed, built, and tested before the next stage begins.
+The approved technical and phase-level design documents are available in
+[docs/planning](docs/planning/README.md).
 
 ## License
 
