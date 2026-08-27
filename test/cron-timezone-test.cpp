@@ -885,7 +885,7 @@ TEST_CASE("System cron engine validates schedules and handles strict UTC occurre
     CHECK(out_of_range.error().code == "jobu.schedule.out_of_range");
 }
 
-TEST_CASE("System cron engine applies installed Linux timezone gap and overlap rules", "[jobu][cron][system]")
+TEST_CASE("System cron engine applies installed timezone gap, overlap, and future rules", "[jobu][cron][system]")
 {
     SystemCronEngine engine;
 
@@ -919,4 +919,33 @@ TEST_CASE("System cron engine applies installed Linux timezone gap and overlap r
                {.expression = "45 1 7 APR *", .timezone = "Australia/Lord_Howe"},
                "2024-04-06T00:00:00Z",
                "2024-04-06T14:45:00Z");
+
+    // These occurrences follow the final explicit transitions in normal
+    // installed TZif data and therefore exercise each zone's POSIX footer.
+    check_next(engine,
+               {.expression = "30 3 27 MAR *", .timezone = "Europe/Tallinn"},
+               "2050-03-26T00:00:00Z",
+               "2050-03-27T01:30:00Z");
+    check_next(engine,
+               {.expression = "30 3 30 OCT *", .timezone = "Europe/Tallinn"},
+               "2050-10-29T00:00:00Z",
+               "2050-10-30T00:30:00Z");
+
+    check_next(engine,
+               {.expression = "30 2 13 MAR *", .timezone = "America/New_York"},
+               "2050-03-12T00:00:00Z",
+               "2050-03-13T07:30:00Z");
+    check_next(engine,
+               {.expression = "30 1 6 NOV *", .timezone = "America/New_York"},
+               "2050-11-05T00:00:00Z",
+               "2050-11-06T05:30:00Z");
+
+    check_next(engine,
+               {.expression = "15 2 2 OCT *", .timezone = "Australia/Lord_Howe"},
+               "2050-10-01T00:00:00Z",
+               "2050-10-01T15:45:00Z");
+    check_next(engine,
+               {.expression = "45 1 3 APR *", .timezone = "Australia/Lord_Howe"},
+               "2050-04-02T00:00:00Z",
+               "2050-04-02T14:45:00Z");
 }

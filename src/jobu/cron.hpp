@@ -51,7 +51,7 @@ public:
 
 /** Calculates cron occurrences from the operating system's IANA timezone data.
  *
- * The engine lazily loads Linux TZif files and keeps immutable data cached by the exact validated timezone name.
+ * The engine lazily loads platform TZif files and keeps immutable data cached by the exact validated timezone name.
  * `UTC` is handled as a fixed zero offset without filesystem access. Cached timezone data is not reloaded during the
  * engine lifetime.
  *
