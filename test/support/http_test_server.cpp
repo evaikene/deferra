@@ -319,12 +319,14 @@ HttpTestServer::HttpTestServer()
 
 HttpTestServer::~HttpTestServer()
 {
-    auto active_connections = std::vector<int>{};
     {
         std::lock_guard lock{_mutex};
         _stopping           = true;
         _responses_released = true;
-        active_connections.assign(_connection_fds.begin(), _connection_fds.end());
+        // Keep membership locked so a handler cannot close and allow descriptor reuse before shutdown reaches it.
+        for (auto fd : _connection_fds) {
+            static_cast<void>(::shutdown(fd, SHUT_RDWR));
+        }
     }
     _condition.notify_all();
 
@@ -332,9 +334,6 @@ HttpTestServer::~HttpTestServer()
     if (listen_fd >= 0) {
         static_cast<void>(::shutdown(listen_fd, SHUT_RDWR));
         close_fd(listen_fd);
-    }
-    for (auto fd : active_connections) {
-        static_cast<void>(::shutdown(fd, SHUT_RDWR));
     }
     if (_accept_thread.joinable()) {
         _accept_thread.join();
