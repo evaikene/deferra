@@ -40,6 +40,7 @@ struct CurlMultiAdapterTestAccess {
     [[nodiscard]] static auto record_socket_update(CurlMultiAdapter& adapter, int fd, CurlMultiSocketInterest interest)
         -> bool;
     static void               record_timer_update(CurlMultiAdapter& adapter, long timeout_ms) noexcept;
+    [[nodiscard]] static auto refresh_socket_watch_after_readiness(CurlMultiAdapter& adapter, int fd) -> bool;
     [[nodiscard]] static auto schedule_reconcile(CurlMultiAdapter& adapter) -> bool;
     [[nodiscard]] static auto state(CurlMultiAdapter const& adapter) noexcept -> CurlMultiAdapterTestState;
     static void               shutdown(CurlMultiAdapter& adapter) noexcept;
