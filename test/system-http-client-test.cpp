@@ -12,11 +12,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -33,6 +36,60 @@ auto minimal_request(std::string url) -> jb::net::HttpRequest
     return {.url = std::move(url)};
 }
 
+auto bytes(std::string_view value) -> jb::core::ByteBuffer
+{
+    auto const view = jb::core::as_bytes(value);
+    return {view.begin(), view.end()};
+}
+
+auto byte_text(jb::core::ByteBuffer const& value) -> std::string
+{
+    auto const view = jb::core::as_string_view(value);
+    return {view.data(), view.size()};
+}
+
+constexpr auto hex_nibble(char character) -> std::uint8_t
+{
+    if (character >= '0' && character <= '9') {
+        return static_cast<std::uint8_t>(character - '0');
+    }
+    if (character >= 'a' && character <= 'f') {
+        return static_cast<std::uint8_t>(character - 'a' + 10);
+    }
+    throw std::invalid_argument{"invalid hexadecimal fixture"};
+}
+
+auto hex_bytes(std::string_view value) -> jb::core::ByteBuffer
+{
+    if (value.size() % 2U != 0U) {
+        throw std::invalid_argument{"invalid hexadecimal fixture length"};
+    }
+    auto result = jb::core::ByteBuffer{};
+    result.reserve(value.size() / 2U);
+    for (std::size_t index = 0; index < value.size(); index += 2U) {
+        auto const byte = static_cast<std::uint8_t>((hex_nibble(value[index]) << 4U) | hex_nibble(value[index + 1U]));
+        result.push_back(static_cast<std::byte>(byte));
+    }
+    return result;
+}
+
+auto header_value(std::vector<jb::test::HttpTestHeader> const& headers, std::string_view name)
+    -> std::optional<std::string_view>
+{
+    auto const match = std::ranges::find_if(headers, [name](jb::test::HttpTestHeader const& header) {
+        return std::ranges::equal(header.name, name, [](char left, char right) {
+            auto lower = [](char value) -> char {
+                return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
+            };
+            return lower(left) == lower(right);
+        });
+    });
+    if (match == headers.end()) {
+        return std::nullopt;
+    }
+    return match->value;
+}
+
 template <typename Predicate>
 auto process_until(jb::core::Application& app, Predicate&& predicate, std::chrono::milliseconds timeout = 5s) -> bool
 {
@@ -43,6 +100,23 @@ auto process_until(jb::core::Application& app, Predicate&& predicate, std::chron
         }
     }
     return predicate();
+}
+
+auto complete_request(jb::core::Application& app, SystemHttpClient& client, jb::net::HttpRequest request)
+    -> jb::net::HttpCompletionResult
+{
+    auto completion = std::optional<jb::net::HttpCompletionResult>{};
+    auto started    = client.start(std::move(request),
+                                   [&completion](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+                                    completion = std::move(result);
+                                   });
+    if (!started) {
+        throw std::runtime_error{started.error().code};
+    }
+    if (!process_until(app, [&completion]() -> bool { return completion.has_value(); })) {
+        throw std::runtime_error{"HTTP completion timed out"};
+    }
+    return std::move(*completion);
 }
 
 void drain_fake_loop(jb::core::EventLoop& loop)
@@ -212,7 +286,7 @@ TEST_CASE("system HTTP runtime preflight creates a ready minimal client", "[net]
     CHECK_FALSE(callback_called);
 }
 
-TEST_CASE("system HTTP client rejects semantics outside the Stage 5.3 subset", "[net][http]")
+TEST_CASE("system HTTP client keeps later transport policy outside the Stage 5.4 scope", "[net][http]")
 {
     auto app    = jb::core::Application{0, nullptr};
     auto result = SystemHttpClient::create(*app.event_loop());
@@ -221,40 +295,22 @@ TEST_CASE("system HTTP client rejects semantics outside the Stage 5.3 subset", "
 
     auto callback = [](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void {};
 
-    auto request   = minimal_request("http://127.0.0.1:1/");
-    request.method = "POST";
-    auto start     = client->start(std::move(request), callback);
-    REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_3.method_not_supported");
-
-    request = minimal_request("http://127.0.0.1:1/");
-    request.headers.push_back({.name = "X-Test", .value = "value"});
-    start = client->start(std::move(request), callback);
-    REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_3.headers_not_supported");
-
-    request      = minimal_request("http://127.0.0.1:1/");
-    request.body = jb::core::ByteBuffer{};
-    start        = client->start(std::move(request), callback);
-    REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_3.body_not_supported");
-
-    request                  = minimal_request("http://127.0.0.1:1/");
+    auto request             = minimal_request("http://127.0.0.1:1/");
     request.follow_redirects = true;
-    start                    = client->start(std::move(request), callback);
+    auto start               = client->start(std::move(request), callback);
     REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_3.redirects_not_supported");
+    CHECK(start.error().detail == "stage_5_4.redirects_not_supported");
 
     request = minimal_request("https://127.0.0.1:1/");
     start   = client->start(std::move(request), callback);
     REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_3.https_not_supported");
+    CHECK(start.error().detail == "stage_5_4.https_not_supported");
 
     request            = minimal_request("http://127.0.0.1:1/");
     request.verify_tls = false;
     start              = client->start(std::move(request), callback);
     REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_3.unsafe_tls_not_supported");
+    CHECK(start.error().detail == "stage_5_4.unsafe_tls_not_supported");
 
     request = minimal_request("http://127.0.0.1:1/");
     start   = client->start(std::move(request), {});
@@ -268,7 +324,293 @@ TEST_CASE("system HTTP client rejects semantics outside the Stage 5.3 subset", "
     REQUIRE(proxied);
     start = (*proxied)->start(minimal_request("http://127.0.0.1:1/"), callback);
     REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_3.proxy_not_supported");
+    CHECK(start.error().detail == "stage_5_4.proxy_not_supported");
+}
+
+TEST_CASE("system HTTP client preserves methods headers and optional binary bodies", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto server  = jb::test::HttpTestServer{};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+    server.release_responses();
+
+    auto const methods = std::vector<std::string>{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "PURGE"};
+    for (auto const& method : methods) {
+        auto request   = minimal_request(server.url("/method-" + method));
+        request.method = method;
+        auto result    = complete_request(app, *client, std::move(request));
+        REQUIRE(result);
+        CHECK(result->status_code == 200U);
+        if (method == "HEAD") {
+            CHECK(result->body.bytes.empty());
+            CHECK(result->body.total_bytes == 0U);
+        }
+        else {
+            CHECK(byte_text(result->body.bytes) == "test-response");
+        }
+    }
+
+    auto absent_body   = minimal_request(server.url("/absent"));
+    absent_body.method = "POST";
+    REQUIRE(complete_request(app, *client, std::move(absent_body)));
+
+    auto empty_body   = minimal_request(server.url("/empty"));
+    empty_body.method = "POST";
+    empty_body.body   = jb::core::ByteBuffer{};
+    REQUIRE(complete_request(app, *client, std::move(empty_body)));
+
+    auto const binary_body = jb::core::ByteBuffer{
+        std::byte{0x00},
+        std::byte{0x41},
+        std::byte{0xff},
+        std::byte{0x7f},
+    };
+    auto binary_request   = minimal_request(server.url("/binary"));
+    binary_request.method = "PATCH";
+    binary_request.body   = binary_body;
+    REQUIRE(complete_request(app, *client, std::move(binary_request)));
+
+    auto header_request    = minimal_request(server.url("/headers"));
+    header_request.method  = "PUT";
+    header_request.headers = {
+        {.name = "X-First", .value = "one"},
+        {.name = "x-Second", .value = "two", .sensitive = true},
+    };
+    REQUIRE(complete_request(app, *client, std::move(header_request)));
+
+    auto large_request   = minimal_request(server.url("/large-body"));
+    large_request.method = "POST";
+    large_request.body   = jb::core::ByteBuffer((std::size_t{1024} * 1024U) + 1U, std::byte{0x5a});
+    REQUIRE(complete_request(app, *client, std::move(large_request)));
+
+    auto get_body   = minimal_request(server.url("/get-body"));
+    get_body.body   = binary_body;
+    auto get_result = complete_request(app, *client, std::move(get_body));
+    REQUIRE(get_result);
+
+    auto const recorded = server.requests();
+    REQUIRE(recorded.size() == methods.size() + 6U);
+    for (std::size_t index = 0; index < methods.size(); ++index) {
+        CHECK(recorded[index].method == methods[index]);
+    }
+
+    auto const& absent = recorded[methods.size()];
+    CHECK(absent.body.empty());
+    CHECK_FALSE(header_value(absent.headers, "Content-Length"));
+
+    auto const& empty = recorded[methods.size() + 1U];
+    CHECK(empty.body.empty());
+    REQUIRE(header_value(empty.headers, "Content-Length"));
+    CHECK(*header_value(empty.headers, "Content-Length") == "0");
+
+    auto const& binary = recorded[methods.size() + 2U];
+    CHECK(binary.body == binary_body);
+    REQUIRE(header_value(binary.headers, "Content-Length"));
+    CHECK(*header_value(binary.headers, "Content-Length") == "4");
+
+    auto const& headers = recorded[methods.size() + 3U].headers;
+    auto const  first =
+        std::ranges::find_if(headers, [](jb::test::HttpTestHeader const& header) { return header.name == "X-First"; });
+    auto const second =
+        std::ranges::find_if(headers, [](jb::test::HttpTestHeader const& header) { return header.name == "x-Second"; });
+    REQUIRE(first != headers.end());
+    REQUIRE(second != headers.end());
+    CHECK(first < second);
+    CHECK(first->value == "one");
+    CHECK(second->value == "two");
+    CHECK_FALSE(header_value(headers, "Expect"));
+
+    auto const& large = recorded[methods.size() + 4U];
+    CHECK(large.body.size() == (std::size_t{1024} * 1024U) + 1U);
+    CHECK_FALSE(header_value(large.headers, "Expect"));
+
+    auto const& recorded_get_body = recorded[methods.size() + 5U];
+    CHECK(recorded_get_body.method == "GET");
+    CHECK(recorded_get_body.body == binary_body);
+}
+
+TEST_CASE("system HTTP client retains only the parsed and raw final response block", "[net][http]")
+{
+    auto app      = jb::core::Application{0, nullptr};
+    auto server   = jb::test::HttpTestServer{};
+    auto response = jb::test::HttpTestResponse{
+        .informational =
+            {
+                            {
+                    .status_code = 103,
+                    .reason      = "Early Hints",
+                    .headers     = {{.name = "Link", .value = "</style.css>; rel=preload"}},
+                }, },
+        .status_code = 201,
+        .reason      = "Created",
+        .headers =
+            {
+                            {.name = "X-Trim", .value = "\tvalue \t"},
+                            {.name = "Set-Cookie", .value = "a=1"},
+                            {.name = "Set-Cookie", .value = "b=2"},
+                            },
+        .body = bytes("response-data"),
+    };
+    server.enqueue_response(response);
+    server.release_responses();
+
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto const expected_raw       = std::string{"HTTP/1.1 201 Created\r\n"
+                                                "X-Trim: \tvalue \t\r\n"
+                                                "Set-Cookie: a=1\r\n"
+                                                "Set-Cookie: b=2\r\n"
+                                                "Content-Length: 13\r\n"
+                                                "Connection: close\r\n\r\n"};
+    auto       request            = minimal_request(server.url());
+    request.response_body_limit   = 13U;
+    request.response_header_limit = expected_raw.size();
+    auto completed                = complete_request(app, *client, std::move(request));
+    REQUIRE(completed);
+    auto const& value = completed.value();
+    CHECK(value.status_code == 201U);
+    REQUIRE(value.headers.size() == 5U);
+    CHECK(value.headers[0].name == "X-Trim");
+    CHECK(value.headers[0].value == "value");
+    CHECK(value.headers[1].name == "Set-Cookie");
+    CHECK(value.headers[1].value == "a=1");
+    CHECK(value.headers[2].name == "Set-Cookie");
+    CHECK(value.headers[2].value == "b=2");
+    CHECK(byte_text(value.body.bytes) == "response-data");
+    CHECK(value.body.total_bytes == 13U);
+    CHECK_FALSE(value.body.truncated);
+
+    CHECK(byte_text(value.raw_headers.bytes) == expected_raw);
+    CHECK(value.raw_headers.total_bytes == expected_raw.size());
+    CHECK_FALSE(value.raw_headers.truncated);
+    CHECK(value.redirect_count == 0U);
+    CHECK(value.elapsed >= jb::core::Duration::zero());
+    CHECK_FALSE(value.tls_verified);
+}
+
+TEST_CASE("system HTTP client captures first and last bytes while draining complete streams", "[net][http]")
+{
+    auto app    = jb::core::Application{0, nullptr};
+    auto server = jb::test::HttpTestServer{};
+    auto body   = std::string(std::size_t{128} * 1024U, 'm');
+    body.replace(0U, 4U, "abcd");
+    body.replace(body.size() - 3U, 3U, "nop");
+    auto response = jb::test::HttpTestResponse{
+        .headers = {{.name = "X-Test", .value = "value"}},
+        .body    = bytes(body),
+    };
+    server.enqueue_response(response);
+    server.release_responses();
+
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto request                  = minimal_request(server.url());
+    request.response_body_limit   = 7U;
+    request.response_header_limit = 13U;
+    auto completed                = complete_request(app, *client, std::move(request));
+    REQUIRE(completed);
+
+    auto const& value = completed.value();
+    CHECK(byte_text(value.body.bytes) == "abcdnop");
+    CHECK(value.body.total_bytes == body.size());
+    CHECK(value.body.truncated);
+
+    auto const full_headers     = std::string{"HTTP/1.1 200 OK\r\n"
+                                              "X-Test: value\r\n"
+                                              "Content-Length: 131072\r\n"
+                                              "Connection: close\r\n\r\n"};
+    auto const expected_headers = full_headers.substr(0U, 7U) + full_headers.substr(full_headers.size() - 6U);
+    CHECK(byte_text(value.raw_headers.bytes) == expected_headers);
+    CHECK(value.raw_headers.total_bytes == full_headers.size());
+    CHECK(value.raw_headers.truncated);
+}
+
+TEST_CASE("system HTTP client dechunks and decompresses response bodies", "[net][http]")
+{
+    auto app    = jb::core::Application{0, nullptr};
+    auto server = jb::test::HttpTestServer{};
+
+    server.enqueue_response({
+        .body       = bytes("decompressed response body"),
+        .framing    = jb::test::HttpTestBodyFraming::Chunked,
+        .chunk_size = 4U,
+    });
+    server.enqueue_response({
+        .headers = {{.name = "Content-Encoding", .value = "gzip"}},
+        .body = hex_bytes("1f8b08000000000002ff4b494dcecf2d284a2d2e4e4d51005205f979c5a90a49f9299500fa57a4f31a000000"),
+    });
+    server.enqueue_response({
+        .headers = {{.name = "Content-Encoding", .value = "deflate"}},
+        .body    = hex_bytes("789c4b494dcecf2d284a2d2e4e4d51005205f979c5a90a49f92995008d610a5c"),
+    });
+    server.release_responses();
+
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    for (auto const& path : {"/chunked", "/gzip", "/deflate"}) {
+        auto completed = complete_request(app, *client, minimal_request(server.url(path)));
+        REQUIRE(completed);
+        CHECK(byte_text(completed->body.bytes) == "decompressed response body");
+        CHECK(completed->body.total_bytes == 26U);
+        CHECK_FALSE(completed->body.truncated);
+    }
+}
+
+TEST_CASE("system HTTP client enforces the independent parsed header limit safely", "[net][http]")
+{
+    auto app      = jb::core::Application{0, nullptr};
+    auto server   = jb::test::HttpTestServer{};
+    auto response = jb::test::HttpTestResponse{
+        .headers = {{.name = "X-Secret", .value = "server-secret-sentinel-that-exceeds-the-hard-limit"}},
+        .body    = bytes("ignored"),
+    };
+    server.enqueue_response(std::move(response));
+    server.release_responses();
+
+    auto options                                 = SystemHttpClientOptions{};
+    options.maximum_parsed_response_header_bytes = 48U;
+    auto created                                 = SystemHttpClient::create(*app.event_loop(), options);
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto completed = complete_request(app, *client, minimal_request(server.url()));
+    REQUIRE_FALSE(completed);
+    CHECK(completed.error().kind == jb::net::HttpErrorKind::Protocol);
+    CHECK(completed.error().error.code == "net.http.protocol_error");
+    CHECK(completed.error().error.detail == "response.headers_too_large");
+    CHECK(completed.error().error.message.find("server-secret-sentinel") == std::string::npos);
+    CHECK(completed.error().error.detail.find("server-secret-sentinel") == std::string::npos);
+    CHECK(client->is_available());
+    CHECK(client->active_request_count() == 0U);
+}
+
+TEST_CASE("system HTTP client reuses a keep-alive connection", "[net][http]")
+{
+    auto app    = jb::core::Application{0, nullptr};
+    auto server = jb::test::HttpTestServer{};
+    server.enqueue_response({.body = bytes("first"), .keep_alive = true});
+    server.enqueue_response({.body = bytes("second")});
+    server.release_responses();
+
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto first = complete_request(app, *client, minimal_request(server.url("/first")));
+    REQUIRE(first);
+    CHECK(byte_text(first->body.bytes) == "first");
+    auto second = complete_request(app, *client, minimal_request(server.url("/second")));
+    REQUIRE(second);
+    CHECK(byte_text(second->body.bytes) == "second");
+    CHECK(server.accepted_connection_count() == 1U);
 }
 
 TEST_CASE("system HTTP client completes a loopback GET strictly after start", "[net][http]")
@@ -579,6 +921,22 @@ TEST_CASE("curl multi adapter defers and coalesces socket watch changes", "[net]
     REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
     CHECK(fake.backend->add_fd_calls == initial_add_calls + 2);
     CHECK(fake.backend->remove_fd_calls == initial_remove_calls);
+    CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Read));
+    CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Write));
+
+    auto const refresh_wakeup_calls = fake.backend->wakeup_calls;
+    REQUIRE(CurlMultiAdapterTestAccess::refresh_socket_watch_after_readiness(*adapter, 42));
+    REQUIRE(CurlMultiAdapterTestAccess::refresh_socket_watch_after_readiness(*adapter, 42));
+    state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK(state.pending_watch_update_count == 1U);
+    CHECK(state.reconcile_queued);
+    CHECK(fake.backend->add_fd_calls == initial_add_calls + 2);
+    CHECK(fake.backend->wakeup_calls == refresh_wakeup_calls + 1);
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    state = CurlMultiAdapterTestAccess::state(*adapter);
+    CHECK(state.pending_watch_update_count == 0U);
+    CHECK_FALSE(state.reconcile_queued);
+    CHECK(fake.backend->add_fd_calls == initial_add_calls + 3);
     CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Read));
     CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Write));
 

@@ -65,6 +65,7 @@ private:
 
     [[nodiscard]] auto drive(curl_socket_t socket, int events) -> bool;
     [[nodiscard]] auto drain_completions() -> bool;
+    [[nodiscard]] auto refresh_socket_watch_after_readiness(int fd) -> bool;
     [[nodiscard]] auto schedule_reconcile() -> bool;
     [[nodiscard]] auto reconcile() -> bool;
     [[nodiscard]] auto reconcile_watches() -> bool;

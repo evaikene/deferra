@@ -1,5 +1,7 @@
 #pragma once
 
+#include "byte_buffer.hpp"
+
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -7,11 +9,47 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace jb::test {
 
-/// Minimal Stage 5.3 loopback HTTP server with an explicit response barrier.
+struct HttpTestHeader {
+    std::string name;
+    std::string value;
+};
+
+struct HttpTestRequest {
+    std::string                 method;
+    std::string                 target;
+    std::string                 version;
+    std::vector<HttpTestHeader> headers;
+    jb::core::ByteBuffer        body;
+};
+
+struct HttpTestInformationalResponse {
+    std::uint16_t               status_code{103};
+    std::string                 reason{"Early Hints"};
+    std::vector<HttpTestHeader> headers;
+};
+
+enum class HttpTestBodyFraming : std::uint8_t {
+    ContentLength,
+    Chunked,
+};
+
+struct HttpTestResponse {
+    std::vector<HttpTestInformationalResponse> informational;
+    std::uint16_t                              status_code{200};
+    std::string                                reason{"OK"};
+    std::vector<HttpTestHeader>                headers;
+    jb::core::ByteBuffer                       body;
+    HttpTestBodyFraming                        framing{HttpTestBodyFraming::ContentLength};
+    std::size_t                                chunk_size{3};
+    bool                                       keep_alive{false};
+};
+
+/// Scripted loopback HTTP/1.1 server with request recording and an explicit response barrier.
 class HttpTestServer final {
 public:
     HttpTestServer();
@@ -23,22 +61,29 @@ public:
     auto operator=(HttpTestServer&&) -> HttpTestServer&      = delete;
 
     [[nodiscard]] auto url(std::string path = "/") const -> std::string;
+    void               enqueue_response(HttpTestResponse response);
     [[nodiscard]] auto wait_for_requests(std::size_t count, std::chrono::milliseconds timeout) -> bool;
+    [[nodiscard]] auto requests() const -> std::vector<HttpTestRequest>;
+    [[nodiscard]] auto accepted_connection_count() const -> std::size_t;
     void               release_responses();
 
 private:
     void accept_connections(int listen_fd);
     void handle_connection(int connection_fd);
 
-    int                       _listen_fd{-1};
-    std::uint16_t             _port{0};
-    std::jthread              _accept_thread;
-    std::vector<std::jthread> _connection_threads;
-    std::mutex                _mutex;
-    std::condition_variable   _condition;
-    std::size_t               _request_count{0};
-    bool                      _responses_released{false};
-    bool                      _stopping{false};
+    int                           _listen_fd{-1};
+    std::uint16_t                 _port{0};
+    std::jthread                  _accept_thread;
+    std::vector<std::jthread>     _connection_threads;
+    mutable std::mutex            _mutex;
+    std::condition_variable       _condition;
+    std::vector<HttpTestRequest>  _requests;
+    std::vector<HttpTestResponse> _responses;
+    std::unordered_set<int>       _connection_fds;
+    std::size_t                   _next_response{0};
+    std::size_t                   _accepted_connections{0};
+    bool                          _responses_released{false};
+    bool                          _stopping{false};
 };
 
 } // namespace jb::test

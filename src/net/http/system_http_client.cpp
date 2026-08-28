@@ -137,29 +137,19 @@ auto ascii_starts_with(std::string_view value, std::string_view prefix) noexcept
     return true;
 }
 
-auto validate_stage_5_3_subset(jb::net::HttpRequest const& request, SystemHttpClientOptions const& options)
-    -> VoidResult
+auto validate_stage_5_4_scope(jb::net::HttpRequest const& request, SystemHttpClientOptions const& options) -> VoidResult
 {
-    if (request.method != "GET") {
-        return VoidResult::failure(invalid_request("stage_5_3.method_not_supported"));
-    }
-    if (!request.headers.empty()) {
-        return VoidResult::failure(invalid_request("stage_5_3.headers_not_supported"));
-    }
-    if (request.body) {
-        return VoidResult::failure(invalid_request("stage_5_3.body_not_supported"));
-    }
     if (request.follow_redirects) {
-        return VoidResult::failure(invalid_request("stage_5_3.redirects_not_supported"));
+        return VoidResult::failure(invalid_request("stage_5_4.redirects_not_supported"));
     }
     if (!request.verify_tls) {
-        return VoidResult::failure(invalid_request("stage_5_3.unsafe_tls_not_supported"));
+        return VoidResult::failure(invalid_request("stage_5_4.unsafe_tls_not_supported"));
     }
     if (!ascii_starts_with(request.url, "http://")) {
-        return VoidResult::failure(invalid_request("stage_5_3.https_not_supported"));
+        return VoidResult::failure(invalid_request("stage_5_4.https_not_supported"));
     }
     if (options.proxy) {
-        return VoidResult::failure(invalid_request("stage_5_3.proxy_not_supported"));
+        return VoidResult::failure(invalid_request("stage_5_4.proxy_not_supported"));
     }
     return VoidResult::success();
 }
@@ -325,9 +315,9 @@ struct SystemHttpClient::Private {
             return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(
                 invalid_request("completion.empty"));
         }
-        auto subset = validate_stage_5_3_subset(request, options);
-        if (!subset) {
-            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(subset).error());
+        auto stage_scope = validate_stage_5_4_scope(request, options);
+        if (!stage_scope) {
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(stage_scope).error());
         }
         if (!is_available()) {
             return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(unavailable());
@@ -337,7 +327,10 @@ struct SystemHttpClient::Private {
         }
 
         auto const request_id = next_request_id;
-        auto       prepared   = detail::CurlRequest::create(request_id, std::move(request), std::move(completion));
+        auto       prepared   = detail::CurlRequest::create(request_id,
+                                                            std::move(request),
+                                                            std::move(completion),
+                                                            options.maximum_parsed_response_header_bytes);
         if (!prepared) {
             return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(prepared).error());
         }
@@ -428,7 +421,7 @@ struct SystemHttpClient::Private {
         }
 
         requests_by_easy.erase(easy_it);
-        auto completion = request_it->second->minimal_transfer_result(result);
+        auto completion = request_it->second->transfer_result(result);
         queue_completion(*request_it->second, std::move(completion));
     }
 
