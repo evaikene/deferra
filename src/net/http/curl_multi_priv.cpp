@@ -108,11 +108,6 @@ void CurlMultiAdapterTestAccess::record_timer_update(CurlMultiAdapter& adapter, 
     static_cast<void>(adapter.record_timer_update(timeout_ms));
 }
 
-auto CurlMultiAdapterTestAccess::refresh_socket_watch_after_readiness(CurlMultiAdapter& adapter, int fd) -> bool
-{
-    return adapter.refresh_socket_watch_after_readiness(fd);
-}
-
 auto CurlMultiAdapterTestAccess::schedule_reconcile(CurlMultiAdapter& adapter) -> bool
 {
     return adapter.schedule_reconcile();
@@ -318,11 +313,8 @@ void CurlMultiAdapter::handle_socket_ready(int fd, jb::core::FdEvents events)
         return;
     }
     _inside_socket_callback = true;
-    auto const driven       = drive(static_cast<curl_socket_t>(fd), curl_ready_events(events));
+    static_cast<void>(drive(static_cast<curl_socket_t>(fd), curl_ready_events(events)));
     _inside_socket_callback = false;
-    if (driven) {
-        static_cast<void>(refresh_socket_watch_after_readiness(fd));
-    }
 }
 
 void CurlMultiAdapter::handle_timeout()
@@ -401,26 +393,6 @@ auto CurlMultiAdapter::drain_completions() -> bool
     return true;
 }
 
-auto CurlMultiAdapter::refresh_socket_watch_after_readiness(int fd) -> bool
-{
-    if (!is_available()) {
-        return false;
-    }
-    if (_pending_watch_updates.contains(fd)) {
-        return schedule_reconcile();
-    }
-
-    auto const current = _watches.find(fd);
-    if (current == _watches.end()) {
-        return true;
-    }
-
-    // libcurl's socket API expects level-triggered readiness. Refresh an unchanged EventLoop watch after each drive so
-    // an edge-triggered backend can report a socket that remains writable during a sustained transfer.
-    _pending_watch_updates[fd] = {.events = current->second.events, .remove = false};
-    return schedule_reconcile();
-}
-
 auto CurlMultiAdapter::schedule_reconcile() -> bool
 {
     if (!is_available() || (_pending_watch_updates.empty() && !_timer_update_pending) || _reconcile_queued) {
@@ -468,12 +440,15 @@ auto CurlMultiAdapter::reconcile_watches() -> bool
         }
 
         auto callback = std::make_shared<CallbackState>(CallbackState{.owner = this});
-        auto handle   = _loop.watch_fd(fd, update.events, [callback](int ready_fd, jb::core::FdEvents events) -> void {
-            auto* owner = callback->owner;
-            if (owner) {
-                owner->handle_socket_ready(ready_fd, events);
-            }
-        });
+        auto handle   = _loop.watch_fd(fd,
+                                       update.events,
+                                       jb::core::FdTriggerMode::Level,
+                                       [callback](int ready_fd, jb::core::FdEvents events) -> void {
+                                         auto* owner = callback->owner;
+                                         if (owner) {
+                                             owner->handle_socket_ready(ready_fd, events);
+                                         }
+                                       });
         if (!handle) {
             enter_failed("event_loop.watch_registration_failed");
             return false;

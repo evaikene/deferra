@@ -3,6 +3,7 @@
 Status: implementation-ready design  
 Baseline: `main` at `5c80f21c18e41465aba7ca8f38bfcc7e85113429`, after Stage 5.4  
 Prepared: 2026-08-28  
+Revised: 2026-08-28 after native macOS kqueue mode-transition validation
 Parent design: `docs/planning/jobu-phase5-code-design.md`
 
 ## 1. Purpose
@@ -79,6 +80,7 @@ This stage is a prerequisite for Stage 5.5. Do not continue Phase 5 implementati
 | libcurl | Every curl-managed socket uses level-triggered readiness. |
 | epoll mapping | Edge includes `EPOLLET`; Level omits it. |
 | kqueue mapping | Edge includes `EV_CLEAR`; Level omits it. |
+| kqueue mode change | An enabled Edge↔Level filter is deleted and then added in the requested mode because macOS does not change `EV_CLEAR` in place. Both primitive operations participate in rollback. |
 | Replacement | Callback, event mask, and trigger mode are replaced only after any required native registration change succeeds. |
 | Callback-only replacement | If event mask and trigger mode are unchanged, EventLoop performs no native backend operation and only replaces the callback. |
 | No rearm implication | Re-registering an unchanged public watch is not an EventLoop rearm contract. |
@@ -324,7 +326,7 @@ A callback-only replacement does not reach epoll at all.
 
 ### 7.3 Failure semantics
 
-Do not add delete/re-add logic for trigger changes.
+Do not add epoll delete/re-add logic for trigger changes.
 
 `EPOLL_CTL_MOD` is the native replacement operation. If it fails for an existing registration, the old registration remains the EventLoop representation.
 
@@ -393,9 +395,28 @@ Map filter mode as:
 | `Edge` | `EV_ADD | EV_CLEAR` |
 | `Level` | `EV_ADD` |
 
-`EV_ADD` on an existing kqueue filter is deliberately used for trigger-mode changes. Re-adding an existing event modifies its parameters without creating a duplicate filter.
+These mappings apply when a filter is absent and must be added.
 
-Do not implement Edge↔Level transitions using a normal delete followed by a later add.
+Native validation on macOS 26.6.2 (Darwin 25.6.0) showed that re-adding an existing level-triggered `EVFILT_READ` filter with `EV_ADD | EV_CLEAR` did not change its persistent trigger behavior:
+
+- the returned filter flags remained `0x1` (`EV_ADD`), not `0x21` (`EV_ADD | EV_CLEAR`);
+- the unread nonblocking pipe continued to report readiness on every poll;
+- deleting the filter and then adding it with `EV_ADD | EV_CLEAR` returned `0x21` and produced edge behavior.
+
+The generic `kqueue(2)` statement that re-adding an event modifies its parameters is therefore insufficient evidence that macOS changes `EV_CLEAR` in place.
+
+Required native operations are:
+
+| Current mode | Requested mode | Operations |
+|---|---|---|
+| `Disabled` | `Edge` | `EV_ADD | EV_CLEAR` |
+| `Disabled` | `Level` | `EV_ADD` |
+| `Edge` | `Disabled` | `EV_DELETE` |
+| `Level` | `Disabled` | `EV_DELETE` |
+| `Edge` | `Level` | `EV_DELETE`, then `EV_ADD` |
+| `Level` | `Edge` | `EV_DELETE`, then `EV_ADD | EV_CLEAR` |
+
+An enabled Edge↔Level transition must not use an in-place `EV_ADD`. The delete and add are separate transaction primitives so a failed add restores the deleted original filter.
 
 ### 8.4 Transaction helper redesign
 
@@ -411,6 +432,13 @@ auto transition_kqueue_filters(KqueueFdRegistration current,
     -> KqueueTransitionStatus;
 ```
 
+The helper maintains a journal of successful native primitives. Each journal entry records:
+
+```text
+filter
+mode that existed immediately before the successful primitive
+```
+
 For each of `Read` and `Write`:
 
 ```text
@@ -418,18 +446,22 @@ For each of `Read` and `Write`:
 2. Derive requested KqueueFilterMode.
 3. If they are identical:
      - do nothing.
-4. Otherwise:
-     - apply the requested filter mode.
-5. Record each successfully changed filter.
+4. If both modes are enabled and differ:
+     - apply Disabled and record {filter, current mode};
+     - apply the requested mode and record {filter, Disabled}.
+5. Otherwise:
+     - apply the requested mode and record {filter, current mode}.
 ```
+
+Only successful primitives are recorded. The callback contract remains that a failed primitive did not alter native state.
 
 If an operation fails:
 
 ```text
 1. Assume the failed operation itself did not alter native state, matching
    the existing apply callback contract.
-2. Roll back successfully changed filters in reverse order.
-3. Restore each changed filter to its original KqueueFilterMode.
+2. Walk the successful-primitive journal in reverse order.
+3. Restore each journal entry's immediately previous KqueueFilterMode.
 4. If all rollback operations succeed:
      -> FailedRolledBack.
 5. If any rollback operation fails:
@@ -446,6 +478,8 @@ Level    -> Disabled
 Edge     -> Level
 Level    -> Edge
 ```
+
+For a successful mode change the filter is absent only between two synchronous `kevent()` change calls. The EventLoop does not poll in that interval. Registering the replacement filter evaluates its current readiness state, so a condition that remains ready is reported after the add.
 
 ### 8.5 Transition result
 
@@ -532,9 +566,11 @@ requested:
     trigger = Level
 ```
 
-Both enabled filters must be re-added without `EV_CLEAR`.
+Both enabled filters must be deleted and then added without `EV_CLEAR`.
 
-Likewise Level→Edge must re-add both with `EV_CLEAR`.
+Likewise Level→Edge must delete both existing filters and add them with `EV_CLEAR`.
+
+This is native registration work, but it remains one transactional public replacement. EventLoop commits the new callback, event mask, and trigger mode only after every required primitive succeeds.
 
 The existing kqueue test asserting "unchanged mask causes no operation" must be narrowed to:
 
@@ -992,13 +1028,22 @@ Read|Write / Edge -> Read|Write / Level
 Expected:
 
 ```text
+Read  -> Disabled
 Read  -> Level
+Write -> Disabled
 Write -> Level
 ```
 
 ### 14.5 Same mask Level→Edge
 
-Expected both enabled filters to be reapplied as Edge.
+Expected:
+
+```text
+Read  -> Disabled
+Read  -> Edge
+Write -> Disabled
+Write -> Edge
+```
 
 ### 14.6 Add one filter without changing mode
 
@@ -1046,9 +1091,13 @@ Read|Write / Edge -> Read|Write / Level
 with:
 
 ```text
-Read -> Level succeeds
+Read  -> Disabled succeeds
+Read  -> Level succeeds
+Write -> Disabled succeeds
 Write -> Level fails
-Read -> Edge rollback succeeds
+Write -> Edge rollback succeeds
+Read  -> Disabled rollback succeeds
+Read  -> Edge rollback succeeds
 ```
 
 Result:
@@ -1060,6 +1109,8 @@ FailedRolledBack
 ### 14.10 Partial failure rollback after mixed transition
 
 Exercise a sequence containing both disable and mode/add operations.
+
+Also fail the add half of one Edge↔Level transition after its delete succeeds. Restoring the deleted original mode must produce `FailedRolledBack`; failure to restore it must produce `RollbackFailed`.
 
 ### 14.11 Rollback failure
 
@@ -1267,7 +1318,7 @@ If desired, `event_loop_types.hpp` can receive its own first-include boundary te
 Add implementation comments only where rationale is non-obvious:
 
 - why callback-only replacement intentionally skips the backend;
-- why kqueue re-adds enabled filters for a mode change;
+- why kqueue deletes and re-adds enabled filters for a mode change;
 - why rollback failure invalidates the kqueue backend;
 - why curl uses Level while project-owned sockets use Edge.
 
@@ -1305,6 +1356,8 @@ Run focused EventLoop tests on Linux before touching curl.
 ### Step 3 — Implement transactional kqueue modes
 
 Refactor kqueue registration bookkeeping and transition helper.
+
+Implement enabled Edge↔Level transitions as journaled delete/add primitives; do not rely on in-place `EV_ADD` changing `EV_CLEAR`.
 
 Expand `kqueue-backend-test.cpp`.
 
@@ -1416,11 +1469,14 @@ Record:
 
 ## 21. Failure handling during implementation
 
+The original design required in-place `EV_ADD` for kqueue Edge↔Level transitions. Native macOS validation demonstrated that this did not change `EV_CLEAR`, so sections 8 and 14 now require transactional delete/add primitives instead.
+
 Stop and revise this design rather than silently widening the stage if any of these occur:
 
 - a current `watch_fd()` production caller cannot safely be classified as Edge or Level;
 - epoll or kqueue cannot provide the documented Level semantics with the proposed native mappings;
-- changing kqueue `EV_CLEAR` state on an existing filter requires delete/re-add rather than documented `EV_ADD` modification;
+- kqueue delete/add mode replacement cannot restore the original filter after a failed primitive;
+- another supported kqueue platform cannot implement the revised primitive transition and rollback contract;
 - callback-only backend suppression breaks a consumer that was intentionally relying on epoll `EPOLL_CTL_MOD`;
 - libcurl still stalls under true Level registration;
 - level registration produces an unavoidable busy loop under ordinary curl operation;
@@ -1443,7 +1499,8 @@ Such a finding is architectural evidence, not permission to add another platform
 - [ ] epoll Level omits `EPOLLET`.
 - [ ] kqueue Edge uses `EV_CLEAR`.
 - [ ] kqueue Level omits `EV_CLEAR`.
-- [ ] kqueue same-mask Edge↔Level performs native filter modifications.
+- [ ] kqueue same-mask Edge↔Level uses transactional delete/add primitives for every enabled filter.
+- [ ] kqueue does not rely on in-place `EV_ADD` changing `EV_CLEAR`.
 - [ ] kqueue unchanged mask+mode remains a native no-op.
 - [ ] kqueue partial failures roll back successfully or mark the backend unusable.
 - [ ] Fake EventLoop backend records trigger mode.

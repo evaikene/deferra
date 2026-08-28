@@ -30,12 +30,18 @@ public:
 
     virtual ~Backend() = default;
 
-    /// Register an fd for the given events
+    /// Apply or replace the complete native registration for an fd.
     /// @param[in] fd the file descriptor to watch
     /// @param[in] events the events to watch for
+    /// @param[in] trigger_mode the readiness notification mode
     /// @return true when the registration was applied, false when the previous
     ///         registration was retained or the backend became unusable
-    virtual auto add_fd(int fd, FdEvents events) -> bool = 0;
+    ///
+    /// A successful call means native state matches `{events, trigger_mode}`.
+    /// Registration changes are transactional: on failure the previous native
+    /// registration is retained or restored, unless the backend becomes
+    /// unusable because restoration also failed.
+    virtual auto add_fd(int fd, FdEvents events, FdTriggerMode trigger_mode) -> bool = 0;
 
     /// Remove an fd from the poller
     /// @param[in] fd the file descriptor to remove

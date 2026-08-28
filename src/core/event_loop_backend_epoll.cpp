@@ -59,10 +59,13 @@ public:
         return true;
     }
 
-    auto add_fd(int fd, FdEvents events) -> bool override
+    auto add_fd(int fd, FdEvents events, FdTriggerMode trigger_mode) -> bool override
     {
         epoll_event ev{};
-        ev.events  = to_epoll(events) | EPOLLET;
+        ev.events = to_epoll(events);
+        if (trigger_mode == FdTriggerMode::Edge) {
+            ev.events |= EPOLLET;
+        }
         ev.data.fd = fd;
 
         if (::epoll_ctl(_epoll_fd, EPOLL_CTL_MOD, fd, &ev) < 0) {

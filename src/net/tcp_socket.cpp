@@ -541,7 +541,9 @@ auto TcpSocket::update_watch() -> bool
     }
 
     auto const watch =
-        loop->watch_fd(d->fd, events, [this](int, jb::core::FdEvents ready) -> void { handle_fd_event(ready); });
+        loop->watch_fd(d->fd, events, jb::core::FdTriggerMode::Edge, [this](int, jb::core::FdEvents ready) -> void {
+            handle_fd_event(ready);
+        });
     if (!watch) {
         return false;
     }

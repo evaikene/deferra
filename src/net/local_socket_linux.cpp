@@ -651,11 +651,13 @@ auto LocalSocket::Private::update_watch(LocalSocket& socket) -> bool
 
     auto*      owner               = &socket;
     auto const callback_generation = generation;
-    auto const new_watch =
-        loop->watch_fd(fd, events, [owner, callback_generation](int ready_fd, jb::core::FdEvents ready) -> void {
-            auto* data = owner->d_ptr<Private>();
-            data->handle_fd_event(*owner, ready_fd, callback_generation, ready);
-        });
+    auto const new_watch = loop->watch_fd(fd,
+                                          events,
+                                          jb::core::FdTriggerMode::Edge,
+                                          [owner, callback_generation](int ready_fd, jb::core::FdEvents ready) -> void {
+                                              auto* data = owner->d_ptr<Private>();
+                                              data->handle_fd_event(*owner, ready_fd, callback_generation, ready);
+                                          });
     if (!new_watch) {
         return false;
     }

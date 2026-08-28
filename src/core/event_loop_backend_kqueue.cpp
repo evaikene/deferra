@@ -72,12 +72,29 @@ public:
         }
     }
 
-    auto add_fd(int fd, FdEvents events) -> bool override
+    auto add_fd(int fd, FdEvents events, FdTriggerMode trigger_mode) -> bool override
     {
         if (!_healthy.load(std::memory_order_relaxed)) {
             return false;
         }
-        return transition_fd(fd, events);
+
+        auto current = KqueueFdRegistration{
+            .events       = {},
+            .trigger_mode = trigger_mode,
+        };
+        if (auto const it = _registered.find(fd); it != _registered.end()) {
+            current = it->second;
+        }
+        auto const requested = KqueueFdRegistration{
+            .events       = events,
+            .trigger_mode = trigger_mode,
+        };
+        if (transition_fd(fd, current, requested) != KqueueTransitionStatus::Applied) {
+            return false;
+        }
+
+        _registered.insert_or_assign(fd, requested);
+        return true;
     }
 
     auto remove_fd(int fd) -> bool override
@@ -85,7 +102,21 @@ public:
         if (!_healthy.load(std::memory_order_relaxed)) {
             return false;
         }
-        return transition_fd(fd, {});
+
+        auto const current = _registered.find(fd);
+        if (current == _registered.end()) {
+            return true;
+        }
+        auto const requested = KqueueFdRegistration{
+            .events       = {},
+            .trigger_mode = current->second.trigger_mode,
+        };
+        if (transition_fd(fd, current->second, requested) != KqueueTransitionStatus::Applied) {
+            return false;
+        }
+
+        _registered.erase(current);
+        return true;
     }
 
     auto poll(ReadyEvent* out, int max_events, int timeout_ms) -> int override
@@ -180,9 +211,9 @@ private:
     // A fixed ident for the user-event wakeup channel
     static constexpr std::uintptr_t kWakeIdent{0};
 
-    int                               _kq{-1};
-    std::atomic_bool                  _healthy{true};
-    std::unordered_map<int, FdEvents> _registered;
+    int                                           _kq{-1};
+    std::atomic_bool                              _healthy{true};
+    std::unordered_map<int, KqueueFdRegistration> _registered;
 
     void close_kqueue()
     {
@@ -215,36 +246,33 @@ private:
         }
     }
 
-    void set_registered_events(int fd, FdEvents events)
+    static auto filter_flags(KqueueFilterMode mode) noexcept -> std::uint16_t
     {
-        if (events.none()) {
-            _registered.erase(fd);
+        auto flags = static_cast<std::uint16_t>(mode == KqueueFilterMode::Disabled ? EV_DELETE : EV_ADD);
+        if (mode == KqueueFilterMode::Edge) {
+            flags = static_cast<std::uint16_t>(flags | EV_CLEAR);
         }
-        else {
-            _registered[fd] = events;
-        }
+        return flags;
     }
 
-    auto transition_fd(int fd, FdEvents requested) -> bool
+    auto transition_fd(int fd, KqueueFdRegistration const& current, KqueueFdRegistration const& requested)
+        -> KqueueTransitionStatus
     {
-        FdEvents original;
-        if (auto const it = _registered.find(fd); it != _registered.end()) {
-            original = it->second;
-        }
+        auto const status =
+            transition_kqueue_filters(current, requested, [this, fd](FdEvent event, KqueueFilterMode mode) {
+                auto const filter = static_cast<std::int16_t>(event == FdEvent::Read ? EVFILT_READ : EVFILT_WRITE);
+                // macOS does not persist EV_CLEAR changes from an in-place
+                // EV_ADD, so the transition helper deletes an enabled filter
+                // before adding it in a different trigger mode.
+                return apply_filter_change(fd, filter, filter_flags(mode));
+            });
 
-        auto const result = transition_kqueue_filters(original, requested, [this, fd](FdEvent event, bool enable) {
-            auto const filter = static_cast<std::int16_t>(event == FdEvent::Read ? EVFILT_READ : EVFILT_WRITE);
-            auto const flags  = static_cast<std::uint16_t>(enable ? EV_ADD | EV_CLEAR : EV_DELETE);
-            return apply_filter_change(fd, filter, flags);
-        });
-        set_registered_events(fd, result.events);
-
-        if (result.status == KqueueTransitionStatus::RollbackFailed) {
+        if (status == KqueueTransitionStatus::RollbackFailed) {
             log_error("kevent filter rollback failed for fd {}; event-loop backend is unusable", fd);
             _healthy.store(false, std::memory_order_relaxed);
         }
 
-        return result.status == KqueueTransitionStatus::Applied;
+        return status;
     }
 };
 

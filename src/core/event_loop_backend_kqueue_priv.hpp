@@ -15,68 +15,95 @@ enum class KqueueTransitionStatus : std::uint8_t {
     RollbackFailed,
 };
 
-/// Result of a transactional kqueue fd-filter transition.
-struct KqueueTransitionResult {
-    KqueueTransitionStatus status;
-    FdEvents               events;
+/// Complete kqueue registration represented by EventLoop.
+struct KqueueFdRegistration {
+    FdEvents      events;
+    FdTriggerMode trigger_mode{FdTriggerMode::Edge};
 };
 
-/// Applies a requested fd-filter mask and restores the original mask on failure.
+/// Native state of one kqueue read or write filter.
+enum class KqueueFilterMode : std::uint8_t {
+    Disabled,
+    Edge,
+    Level,
+};
+
+/// Returns the native mode for one filter in a complete registration.
+constexpr auto kqueue_filter_mode(KqueueFdRegistration const& registration, FdEvent filter) noexcept -> KqueueFilterMode
+{
+    if (!registration.events.test(filter)) {
+        return KqueueFilterMode::Disabled;
+    }
+    return registration.trigger_mode == FdTriggerMode::Edge ? KqueueFilterMode::Edge : KqueueFilterMode::Level;
+}
+
+/// Applies a complete kqueue fd-filter registration and restores the original
+/// registration on failure.
 ///
-/// The callback receives the filter and whether it should be enabled. A false
-/// callback result means that operation did not change the native filter state.
-/// Successfully applied changes are rolled back in reverse order.
+/// The callback receives the filter and requested native mode. A false callback
+/// result means that operation did not change the native filter state. Successfully
+/// applied primitive changes are journaled and rolled back in reverse order.
 template <typename ApplyFilter>
-auto transition_kqueue_filters(FdEvents current, FdEvents requested, ApplyFilter&& apply_filter)
-    -> KqueueTransitionResult
+auto transition_kqueue_filters(KqueueFdRegistration const& current,
+                               KqueueFdRegistration const& requested,
+                               ApplyFilter&&               apply_filter) -> KqueueTransitionStatus
 {
     static constexpr std::array kFilters{FdEvent::Read, FdEvent::Write};
 
-    auto const                           original = current;
-    std::array<FdEvent, kFilters.size()> changed_filters;
-    std::size_t                          changed_count{0};
+    struct AppliedChange {
+        FdEvent          filter;
+        KqueueFilterMode previous_mode;
+    };
+
+    std::array<AppliedChange, kFilters.size() * 2U> applied_changes;
+    std::size_t                                     applied_count{0};
+
+    auto apply_change = [&](FdEvent filter, KqueueFilterMode previous_mode, KqueueFilterMode requested_mode) {
+        if (!apply_filter(filter, requested_mode)) {
+            return false;
+        }
+        applied_changes[applied_count++] = {
+            .filter        = filter,
+            .previous_mode = previous_mode,
+        };
+        return true;
+    };
+
+    auto transition_succeeded = true;
 
     for (auto const filter : kFilters) {
-        auto const enable = requested.test(filter);
-        if (current.test(filter) == enable) {
+        auto const current_mode   = kqueue_filter_mode(current, filter);
+        auto const requested_mode = kqueue_filter_mode(requested, filter);
+        if (current_mode == requested_mode) {
             continue;
         }
 
-        if (!apply_filter(filter, enable)) {
-            auto rollback_succeeded = true;
-            while (changed_count > 0) {
-                auto const changed_filter = changed_filters[--changed_count];
-                auto const restore        = original.test(changed_filter);
-                if (!apply_filter(changed_filter, restore)) {
-                    rollback_succeeded = false;
-                    continue;
-                }
-
-                if (restore) {
-                    current.set(changed_filter);
-                }
-                else {
-                    current.clear(changed_filter);
-                }
-            }
-
-            return {
-                .status = rollback_succeeded ? KqueueTransitionStatus::FailedRolledBack
-                                             : KqueueTransitionStatus::RollbackFailed,
-                .events = current,
-            };
+        auto const changes_enabled_mode =
+            current_mode != KqueueFilterMode::Disabled && requested_mode != KqueueFilterMode::Disabled;
+        if (changes_enabled_mode && (!apply_change(filter, current_mode, KqueueFilterMode::Disabled) ||
+                                     !apply_change(filter, KqueueFilterMode::Disabled, requested_mode))) {
+            transition_succeeded = false;
+            break;
         }
-
-        if (enable) {
-            current.set(filter);
+        if (!changes_enabled_mode && !apply_change(filter, current_mode, requested_mode)) {
+            transition_succeeded = false;
+            break;
         }
-        else {
-            current.clear(filter);
-        }
-        changed_filters[changed_count++] = filter;
     }
 
-    return {.status = KqueueTransitionStatus::Applied, .events = current};
+    if (transition_succeeded) {
+        return KqueueTransitionStatus::Applied;
+    }
+
+    auto rollback_succeeded = true;
+    while (applied_count > 0) {
+        auto const& change = applied_changes[--applied_count];
+        if (!apply_filter(change.filter, change.previous_mode)) {
+            rollback_succeeded = false;
+        }
+    }
+
+    return rollback_succeeded ? KqueueTransitionStatus::FailedRolledBack : KqueueTransitionStatus::RollbackFailed;
 }
 
 } // namespace jb::core::priv

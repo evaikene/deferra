@@ -33,6 +33,24 @@ enum class FdEvent : std::uint32_t { // NOLINT(performance-enum-size)
 };
 using FdEvents = enum_bitmask<FdEvent>;
 
+/// Readiness notification mode for an EventLoop file-descriptor watch.
+enum class FdTriggerMode : std::uint8_t {
+    /// Report readiness transitions. The descriptor must be nonblocking, and
+    /// the consumer must drain the indicated operation until it would block
+    /// before relying on a later readiness callback. Reads and accepts continue
+    /// through `EAGAIN` or `EWOULDBLOCK`; writes continue until the output is
+    /// drained or the operation would block. Otherwise, the descriptor may
+    /// remain ready without another callback.
+    Edge,
+
+    /// Report the current readiness state. The callback may run again on a
+    /// later poll while the requested condition remains true, so the consumer
+    /// need not own or fully drain the native operation but must make progress,
+    /// change or remove the watch, or tolerate repetition. One callback must not
+    /// be treated as one readiness transition.
+    Level,
+};
+
 using Clock      = std::chrono::steady_clock;
 using TimePoint  = Clock::time_point;
 using Duration   = Clock::duration;
