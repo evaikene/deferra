@@ -9,6 +9,8 @@
 
 namespace jb::core::priv {
 
+struct EventLoopTestAccess;
+
 struct TimerEntry {
     TimerHandle::id_t id;
     Task              callback;
@@ -99,6 +101,8 @@ public:
     }
 
 private:
+
+    friend struct EventLoopTestAccess;
 
     std::vector<TimerEntry>               _heap;
     std::unordered_set<TimerHandle::id_t> _timers;

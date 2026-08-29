@@ -125,6 +125,8 @@ struct EventLoopTestAccess {
             .trigger_mode = watch->second.trigger_mode,
         };
     }
+
+    static auto active_timer_count(EventLoop const& loop) -> std::size_t { return loop._timers._timers.size(); }
 };
 
 /// Owned fake backend and its EventLoop test wrapper.

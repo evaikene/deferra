@@ -431,6 +431,41 @@ TEST_CASE("system HTTP runtime preflight creates a ready minimal client", "[net]
     CHECK_FALSE(callback_called);
 }
 
+TEST_CASE("system HTTP client shares one absolute deadline timer across accepted requests", "[net][http]")
+{
+    auto       app      = jb::core::Application{0, nullptr};
+    auto const baseline = jb::core::priv::EventLoopTestAccess::active_timer_count(*app.event_loop());
+    auto       created  = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto callback_count = 0;
+    auto request_ids    = std::vector<jb::net::HttpRequestId>{};
+    for (auto index = 0; index < 3; ++index) {
+        auto request    = minimal_request("http://127.0.0.1:1/shared-deadline");
+        request.timeout = 1h;
+        auto started    = client->start(
+            std::move(request),
+            [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void { ++callback_count; });
+        REQUIRE(started);
+        request_ids.push_back(*started);
+        CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*app.event_loop()) == baseline + 1U);
+    }
+
+    REQUIRE(client->cancel(request_ids[0]));
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*app.event_loop()) == baseline + 1U);
+    REQUIRE(client->cancel(request_ids[1]));
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*app.event_loop()) == baseline + 1U);
+    REQUIRE(client->cancel(request_ids[2]));
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*app.event_loop()) == baseline);
+    CHECK(callback_count == 0);
+
+    client.reset();
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*app.event_loop()) == baseline);
+    drain_fake_loop(*app.event_loop());
+    CHECK(callback_count == 0);
+}
+
 TEST_CASE("system HTTP client keeps later transport policy outside the Stage 5.4 scope", "[net][http]")
 {
     auto app    = jb::core::Application{0, nullptr};
@@ -860,6 +895,45 @@ TEST_CASE("system HTTP client applies one whole-request timeout while the peer i
     server.release_responses();
 }
 
+TEST_CASE("system HTTP client re-arms its shared timer for the next request deadline", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto server  = jb::test::HttpTestServer{};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto later_completion   = std::optional<jb::net::HttpCompletionResult>{};
+    auto earlier_completion = std::optional<jb::net::HttpCompletionResult>{};
+    auto later_request      = minimal_request(server.url("/later-deadline"));
+    later_request.timeout   = 250ms;
+    auto later_started      = client->start(std::move(later_request),
+                                            [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+                                           later_completion = std::move(result);
+                                            });
+    REQUIRE(later_started);
+
+    auto earlier_request    = minimal_request(server.url("/earlier-deadline"));
+    earlier_request.timeout = 75ms;
+    auto earlier_started    = client->start(std::move(earlier_request),
+                                            [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+                                             earlier_completion = std::move(result);
+                                            });
+    REQUIRE(earlier_started);
+
+    REQUIRE(process_until(app, [&]() -> bool { return earlier_completion.has_value(); }));
+    REQUIRE_FALSE(*earlier_completion);
+    CHECK(earlier_completion->error().kind == jb::net::HttpErrorKind::Timeout);
+    CHECK_FALSE(later_completion.has_value());
+    CHECK(client->active_request_count() == 1U);
+
+    REQUIRE(process_until(app, [&]() -> bool { return later_completion.has_value(); }));
+    REQUIRE_FALSE(*later_completion);
+    CHECK(later_completion->error().kind == jb::net::HttpErrorKind::Timeout);
+    CHECK(client->active_request_count() == 0U);
+    server.release_responses();
+}
+
 TEST_CASE("system HTTP cancellation is asynchronous and exact once", "[net][http]")
 {
     auto app     = jb::core::Application{0, nullptr};
@@ -892,6 +966,46 @@ TEST_CASE("system HTTP cancellation is asynchronous and exact once", "[net][http
     CHECK(completion->error().error.code == "net.http.cancelled");
     CHECK(client->active_request_count() == 0U);
     server.release_responses();
+}
+
+TEST_CASE("system HTTP cancellation cannot override an elapsed undispatched deadline", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    constexpr auto timeout        = 25ms;
+    auto           callback_count = 0;
+    auto           completion     = std::optional<jb::net::HttpCompletionResult>{};
+    auto           request        = minimal_request("http://127.0.0.1:1/expired-before-cancel");
+    request.timeout               = timeout;
+    auto started =
+        client->start(std::move(request), [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+            ++callback_count;
+            completion = std::move(result);
+        });
+    REQUIRE(started);
+
+    // Poll only watchers until the accepted deadline must have elapsed, deliberately leaving timer dispatch pending.
+    auto const definitely_expired = jb::core::Clock::now() + timeout;
+    auto       polling_failed     = false;
+    while (!polling_failed && jb::core::Clock::now() < definitely_expired) {
+        polling_failed = app.process_events(jb::core::EventFlag::Watchers, 25) == jb::core::ProcessEventsResult::Failed;
+    }
+    REQUIRE_FALSE(polling_failed);
+
+    auto cancelled = client->cancel(*started);
+    REQUIRE_FALSE(cancelled);
+    CHECK(cancelled.error().code == "net.http.request_not_found");
+    CHECK(callback_count == 0);
+
+    REQUIRE(process_until(app, [&]() -> bool { return completion.has_value(); }));
+    REQUIRE_FALSE(*completion);
+    CHECK(completion->error().kind == jb::net::HttpErrorKind::Timeout);
+    CHECK(completion->error().error.code == "net.http.timeout");
+    CHECK(callback_count == 1);
+    CHECK(client->active_request_count() == 0U);
 }
 
 TEST_CASE("system HTTP cancellation retains response observations captured before a body barrier", "[net][http]")

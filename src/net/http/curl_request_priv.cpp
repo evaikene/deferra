@@ -322,13 +322,6 @@ void CurlRequest::mark_accepted() noexcept
     _accepted = true;
 }
 
-auto CurlRequest::take_deadline_timer() noexcept -> jb::core::TimerHandle
-{
-    auto timer      = _deadline_timer;
-    _deadline_timer = {};
-    return timer;
-}
-
 void CurlRequest::prepare_completion(HttpCompletionResult result)
 {
     _state  = State::PendingCompletion;
