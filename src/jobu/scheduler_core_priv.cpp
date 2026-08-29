@@ -455,7 +455,9 @@ auto validate_output(AttemptCompletion const& completion) -> CoreResult<void>
     return CoreResult<void>::success();
 }
 
-auto validate_output_capture(AttemptCompletion const& completion, AttributeSet const& attributes) -> CoreResult<void>
+auto validate_output_capture(AttemptCompletion const& completion,
+                             AttributeSet const&      attributes,
+                             AttemptOutcome           outcome) -> CoreResult<void>
 {
     if (!completion.output) {
         return CoreResult<void>::success();
@@ -473,6 +475,9 @@ auto validate_output_capture(AttemptCompletion const& completion, AttributeSet c
     }
     if (*mode != "on_error" && *mode != "always") {
         return CoreResult<void>::failure(invalid_completion("unknown_output_capture"));
+    }
+    if (*mode == "on_error" && outcome == AttemptOutcome::Succeeded) {
+        return CoreResult<void>::failure(invalid_completion("output_capture_on_success"));
     }
     return CoreResult<void>::success();
 }
@@ -598,7 +603,7 @@ auto process_completion(jb::db::Database&                        database,
     if (!context) {
         return CoreResult<CompletionEffect>::failure(std::move(context).error());
     }
-    auto output_capture = validate_output_capture(completion, context->run.attributes);
+    auto output_capture = validate_output_capture(completion, context->run.attributes, outcome);
     if (!output_capture) {
         return CoreResult<CompletionEffect>::failure(std::move(output_capture).error());
     }

@@ -2036,6 +2036,43 @@ TEST_CASE("Scheduler core rejects invalid executor completion protocol and fails
         REQUIRE(output);
         CHECK_FALSE(output->has_value());
     }
+
+    SECTION("successful completion output under on-error capture")
+    {
+        CoreFixture        fixture;
+        RawAttemptExecutor executor;
+        auto const         queue_id = id(146);
+        insert_queue(fixture.database, queue_id, 1);
+        auto const attributes = attribute_document(fixture.registry, "reschedule", 3, Duration::zero(), "on_error");
+        insert_scheduled(fixture, queue_id, 147, JobType::Cli, 0, 100, 100, attributes);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+        };
+
+        REQUIRE(core.process_cycle());
+        auto const key     = executor.requests.front().key;
+        auto       invalid = success(key);
+        invalid.output     = captured_output();
+        executor.emit(std::move(invalid));
+
+        auto failed = core.process_cycle();
+        REQUIRE_FALSE(failed);
+        CHECK(failed.error().code == "jobu.executor.invalid_completion");
+        CHECK(failed.error().detail == "reason=output_capture_on_success");
+        auto attempt = fixture.attempts.find(key.run_id, key.attempt_number);
+        REQUIRE(attempt);
+        REQUIRE(attempt->has_value());
+        CHECK(attempt->value().state == AttemptState::Running);
+        auto output = fixture.attempts.find_output(key.run_id, key.attempt_number);
+        REQUIRE(output);
+        CHECK_FALSE(output->has_value());
+    }
 }
 
 TEST_CASE("Scheduler core rejects completion invoked synchronously from start",
@@ -2516,7 +2553,8 @@ TEST_CASE("Scheduler core retains running cancellation until forced terminal com
         CoreFixture fixture;
         auto const  queue_id = id(30);
         insert_queue(fixture.database, queue_id, 1);
-        insert_scheduled(fixture, queue_id, 31, JobType::Cli);
+        auto const attributes = attribute_document(fixture.registry, "reschedule", 3, Duration::zero(), "on_error");
+        insert_scheduled(fixture, queue_id, 31, JobType::Cli, 0, 100, 100, attributes);
         insert_scheduled(fixture, queue_id, 32, JobType::Cli);
         fixture.executor.set_available(JobType::Cli, true);
         SchedulerCore core{
