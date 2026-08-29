@@ -96,19 +96,6 @@ auto request_not_found() -> jb::core::Error
     };
 }
 
-auto cancelled() -> jb::net::HttpCompletionResult
-{
-    auto error = jb::core::Error{
-        .category = jb::core::ErrorCategory::Cancelled,
-        .code     = "net.http.cancelled",
-        .message  = "The HTTP request was cancelled",
-    };
-    return jb::net::HttpCompletionResult::failure({
-        .kind  = jb::net::HttpErrorKind::Cancelled,
-        .error = std::move(error),
-    });
-}
-
 auto backend_completion(jb::core::Error const& error) -> jb::net::HttpCompletionResult
 {
     return jb::net::HttpCompletionResult::failure({
@@ -289,7 +276,8 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
         auto adapter = detail::CurlMultiAdapter::create(
             loop,
             [this](CURL* easy, CURLcode result) -> void { complete(easy, result); },
-            [this](jb::core::Error error) -> void { fail(std::move(error)); });
+            [this](jb::core::Error error) -> void { fail(std::move(error)); },
+            [this]() -> void { expire_due_requests(); });
         if (!adapter) {
             initialization_failure = std::move(adapter).error();
             return;
@@ -301,10 +289,77 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
 
     void shutdown() noexcept
     {
+        disarm_deadline_timer();
         callback_state->owner = nullptr;
         multi.reset();
         requests.clear();
         owner = nullptr;
+    }
+
+    void disarm_deadline_timer() noexcept
+    {
+        if (deadline_timer) {
+            loop.cancel_timer(deadline_timer);
+            deadline_timer = {};
+        }
+        deadline_timer_at.reset();
+    }
+
+    [[nodiscard]] auto refresh_deadline_timer(std::optional<jb::core::TimePoint> provisional = {}) -> bool
+    {
+        if (!multi || !multi->is_available()) {
+            disarm_deadline_timer();
+            return true;
+        }
+
+        // Include a provisional admission so timer registration can fail before start() creates a callback obligation,
+        // while every accepted Running request still shares the single earliest-deadline timer.
+        auto earliest = provisional;
+        for (auto const& [request_id, request] : requests) {
+            (void)request_id;
+            if (!request->accepted() || request->state() != detail::CurlRequest::State::Running) {
+                continue;
+            }
+            if (!earliest || request->deadline() < *earliest) {
+                earliest = request->deadline();
+            }
+        }
+
+        if (!earliest) {
+            disarm_deadline_timer();
+            return true;
+        }
+        if (deadline_timer && deadline_timer_at == earliest) {
+            return true;
+        }
+
+        disarm_deadline_timer();
+        auto callback = callback_state;
+        auto timer    = loop.post_at(*earliest, [callback = std::move(callback)]() -> void {
+            if (callback->owner) {
+                callback->owner->handle_deadline_timer();
+            }
+        });
+        if (!timer) {
+            return false;
+        }
+        deadline_timer    = timer;
+        deadline_timer_at = *earliest;
+        return true;
+    }
+
+    void refresh_deadline_timer_or_fail()
+    {
+        if (!refresh_deadline_timer()) {
+            multi->fail_backend("event_loop.deadline_timer_failed");
+        }
+    }
+
+    void handle_deadline_timer()
+    {
+        deadline_timer = {};
+        deadline_timer_at.reset();
+        expire_due_requests();
     }
 
     [[nodiscard]] auto start(jb::net::HttpRequest request, jb::net::HttpCompletionHandler completion)
@@ -338,7 +393,11 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
             return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(prepared).error());
         }
 
-        auto  request_state         = std::move(prepared).value();
+        auto request_state = std::move(prepared).value();
+        auto admission     = request_state->prepare_admission(jb::core::Clock::now());
+        if (!admission) {
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(admission).error());
+        }
         auto* easy                  = request_state->easy();
         auto [request_it, inserted] = requests.emplace(request_id, std::move(request_state));
         if (!inserted) {
@@ -358,6 +417,14 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
             requests.erase(request_it);
             return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(added).error());
         }
+
+        if (!refresh_deadline_timer(request_it->second->deadline())) {
+            multi->fail_backend("event_loop.deadline_timer_failed");
+            requests.erase(request_it);
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(
+                stored_failure.value_or(unavailable()));
+        }
+
         auto queued = multi->queue_initial_drive();
         if (!queued) {
             requests_by_easy.erase(easy);
@@ -375,8 +442,37 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
         return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::success(request_id);
     }
 
+    void expire_due_requests()
+    {
+        if (!multi || !multi->is_available()) {
+            return;
+        }
+
+        // Remove every expired easy handle before queuing its timeout completion so a delayed initial drive cannot
+        // create network effects after the accepted absolute deadline.
+        auto const now = jb::core::Clock::now();
+        for (auto const& [request_id, request] : requests) {
+            (void)request_id;
+            if (!request->accepted() || request->state() != detail::CurlRequest::State::Running ||
+                !request->deadline_expired(now)) {
+                continue;
+            }
+
+            auto* easy    = request->easy();
+            auto  removed = multi->remove(easy);
+            if (!removed) {
+                return;
+            }
+            requests_by_easy.erase(easy);
+            queue_completion(*request, request->timeout_result());
+        }
+        refresh_deadline_timer_or_fail();
+    }
+
     [[nodiscard]] auto cancel(jb::net::HttpRequestId request_id) -> VoidResult
     {
+        // A monotonic deadline that has already elapsed wins even when its EventLoop timer has not yet been dispatched.
+        expire_due_requests();
         auto it = requests.find(request_id);
         if (it == requests.end() || !it->second->accepted() ||
             it->second->state() != detail::CurlRequest::State::Running) {
@@ -389,7 +485,9 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
             return VoidResult::failure(std::move(removed).error());
         }
         requests_by_easy.erase(easy);
-        queue_completion(*it->second, cancelled());
+        auto completion = it->second->cancellation_result();
+        queue_completion(*it->second, std::move(completion));
+        refresh_deadline_timer_or_fail();
         return VoidResult::success();
     }
 
@@ -426,6 +524,7 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
         requests_by_easy.erase(easy_it);
         auto completion = request_it->second->transfer_result(result);
         queue_completion(*request_it->second, std::move(completion));
+        refresh_deadline_timer_or_fail();
     }
 
     void queue_completion(detail::CurlRequest& request, jb::net::HttpCompletionResult result)
@@ -471,6 +570,7 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
         }
         stored_failure = std::move(error);
         requests_by_easy.clear();
+        disarm_deadline_timer();
 
         std::vector<jb::net::HttpRequestId> active;
         active.reserve(requests.size());
@@ -511,6 +611,8 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
     std::unique_ptr<detail::CurlMultiAdapter>                                        multi;
     std::optional<jb::core::Error>                                                   initialization_failure;
     std::optional<jb::core::Error>                                                   stored_failure;
+    jb::core::TimerHandle                                                            deadline_timer;
+    std::optional<jb::core::TimePoint>                                               deadline_timer_at;
     std::unordered_map<jb::net::HttpRequestId, std::unique_ptr<detail::CurlRequest>> requests;
     std::unordered_map<CURL*, jb::net::HttpRequestId>                                requests_by_easy;
     jb::net::HttpRequestId                                                           next_request_id{1};

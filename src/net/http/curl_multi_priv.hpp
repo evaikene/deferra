@@ -21,10 +21,14 @@ struct CurlMultiAdapterTestAccess;
 /// Owns one libcurl multi handle and adapts its socket/timer callbacks to EventLoop.
 class CurlMultiAdapter final {
 public:
-    using CompletionHandler = std::function<void(CURL*, CURLcode)>;
-    using FailureHandler    = std::function<void(jb::core::Error)>;
+    using CompletionHandler   = std::function<void(CURL*, CURLcode)>;
+    using FailureHandler      = std::function<void(jb::core::Error)>;
+    using InitialDriveHandler = std::function<void()>;
 
-    [[nodiscard]] static auto create(jb::core::EventLoop& loop, CompletionHandler completion, FailureHandler failure)
+    [[nodiscard]] static auto create(jb::core::EventLoop& loop,
+                                     CompletionHandler    completion,
+                                     FailureHandler       failure,
+                                     InitialDriveHandler  initial_drive = {})
         -> jb::core::Result<std::unique_ptr<CurlMultiAdapter>, jb::core::Error>;
 
     ~CurlMultiAdapter();
@@ -49,7 +53,11 @@ private:
     struct WatchState;
     struct PendingWatchUpdate;
 
-    CurlMultiAdapter(jb::core::EventLoop& loop, CURLM* multi, CompletionHandler completion, FailureHandler failure);
+    CurlMultiAdapter(jb::core::EventLoop& loop,
+                     CURLM*               multi,
+                     CompletionHandler    completion,
+                     FailureHandler       failure,
+                     InitialDriveHandler  initial_drive);
 
     static auto
     socket_callback(CURL* easy, curl_socket_t socket, int action, void* context, void* socket_context) noexcept -> int;
@@ -80,6 +88,7 @@ private:
     CURLM*                                      _multi;
     CompletionHandler                           _completion;
     FailureHandler                              _failure_handler;
+    InitialDriveHandler                         _initial_drive;
     std::optional<jb::core::Error>              _failure;
     std::shared_ptr<CallbackState>              _callback_state;
     std::unordered_map<int, WatchState>         _watches;

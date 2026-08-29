@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -46,6 +47,8 @@ struct HttpTestResponse {
     jb::core::ByteBuffer                       body;
     HttpTestBodyFraming                        framing{HttpTestBodyFraming::ContentLength};
     std::size_t                                chunk_size{3};
+    std::optional<std::size_t>                 pause_after_response_bytes;
+    std::optional<std::size_t>                 close_after_response_bytes;
     bool                                       keep_alive{false};
 };
 
@@ -66,6 +69,11 @@ public:
     [[nodiscard]] auto requests() const -> std::vector<HttpTestRequest>;
     [[nodiscard]] auto accepted_connection_count() const -> std::size_t;
     void               release_responses();
+    void               reset_next_request_after_headers();
+    [[nodiscard]] auto wait_for_request_headers(std::size_t count, std::chrono::milliseconds timeout) -> bool;
+    [[nodiscard]] auto wait_for_response_segments(std::size_t count, std::chrono::milliseconds timeout) -> bool;
+    void               release_response_segment();
+    [[nodiscard]] auto wait_for_peer_closes(std::size_t count, std::chrono::milliseconds timeout) -> bool;
 
 private:
     void accept_connections(int listen_fd);
@@ -82,7 +90,12 @@ private:
     std::unordered_set<int>       _connection_fds;
     std::size_t                   _next_response{0};
     std::size_t                   _accepted_connections{0};
+    std::size_t                   _request_headers_observed{0};
+    std::size_t                   _response_segments_waiting{0};
+    std::size_t                   _response_segments_released{0};
+    std::size_t                   _peer_closes{0};
     bool                          _responses_released{false};
+    bool                          _reset_next_request_after_headers{false};
     bool                          _stopping{false};
 };
 

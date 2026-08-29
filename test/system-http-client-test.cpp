@@ -2,8 +2,10 @@
 
 #include "application.hpp"
 #include "event_loop_types.hpp"
+#include "http/curl_error_priv.hpp"
 #include "http/curl_multi_priv.hpp"
 #include "http/curl_multi_test_priv.hpp"
+#include "http/curl_request_priv.hpp"
 #include "http/curl_runtime_priv.hpp"
 #include "support/fake_event_loop_backend.hpp"
 #include "support/http_test_server.hpp"
@@ -13,11 +15,13 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -158,6 +162,17 @@ void check_safe_option_error(jb::core::Result<std::unique_ptr<SystemHttpClient>,
     CHECK(result.error().detail.find(secret) == std::string::npos);
 }
 
+void check_safe_project_error(jb::net::HttpError const& error, std::initializer_list<std::string_view> sentinels)
+{
+    CHECK_FALSE(error.error.code.empty());
+    CHECK_FALSE(error.error.message.empty());
+    for (auto sentinel : sentinels) {
+        CHECK(error.error.code.find(sentinel) == std::string::npos);
+        CHECK(error.error.message.find(sentinel) == std::string::npos);
+        CHECK(error.error.detail.find(sentinel) == std::string::npos);
+    }
+}
+
 } // anonymous namespace
 
 TEST_CASE("curl runtime validation requires every mandatory capability", "[net][http]")
@@ -187,6 +202,134 @@ TEST_CASE("curl runtime validation requires every mandatory capability", "[net][
     capabilities                           = complete_runtime_capabilities();
     capabilities.supports_asynchronous_dns = false;
     check_runtime_rejection(capabilities, "runtime.asynchronous_dns_unavailable");
+}
+
+TEST_CASE("curl timeout conversion preserves every positive remaining deadline", "[net][http]")
+{
+    using jb::net::http::detail::curl_timeout_milliseconds;
+
+    auto sub_millisecond = curl_timeout_milliseconds(std::chrono::nanoseconds{1});
+    REQUIRE(sub_millisecond);
+    CHECK(*sub_millisecond == 1L);
+
+    auto exact = curl_timeout_milliseconds(1ms);
+    REQUIRE(exact);
+    CHECK(*exact == 1L);
+
+    auto rounded_up = curl_timeout_milliseconds(std::chrono::microseconds{1001});
+    REQUIRE(rounded_up);
+    CHECK(*rounded_up == 2L);
+
+    auto expired = curl_timeout_milliseconds(jb::core::Duration::zero());
+    REQUIRE(expired);
+    CHECK(*expired == 1L);
+
+    auto maximum = curl_timeout_milliseconds(std::chrono::days{30});
+    REQUIRE(maximum);
+    CHECK(*maximum == std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::days{30}).count());
+}
+
+TEST_CASE("curl request expires an accepted deadline before its deferred drive", "[net][http]")
+{
+    auto request    = minimal_request("http://127.0.0.1/deferred-deadline");
+    request.timeout = 5ms;
+    auto created    = jb::net::http::detail::CurlRequest::create(
+        1U,
+        std::move(request),
+        [](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void {},
+        std::size_t{64} * 1024U);
+    REQUIRE(created);
+    auto state = std::move(created).value();
+
+    auto const now         = jb::core::Clock::now();
+    auto const accepted_at = now - 10ms;
+    REQUIRE(state->prepare_admission(accepted_at));
+    state->mark_accepted();
+
+    CHECK(state->deadline() == accepted_at + 5ms);
+    REQUIRE(state->deadline_expired(now));
+    auto result = state->timeout_result();
+    REQUIRE_FALSE(result);
+    CHECK(result.error().kind == jb::net::HttpErrorKind::Timeout);
+    CHECK(result.error().error.category == jb::core::ErrorCategory::Timeout);
+    CHECK(result.error().error.code == "net.http.timeout");
+    CHECK(result.error().elapsed >= 10ms);
+}
+
+TEST_CASE("curl errors map to stable safe request-local categories", "[net][http]")
+{
+    using jb::core::ErrorCategory;
+    using jb::net::HttpErrorKind;
+    using jb::net::http::detail::map_curl_error;
+
+    struct Case {
+        CURLcode         curl_code;
+        HttpErrorKind    kind;
+        ErrorCategory    category;
+        std::string_view code;
+    };
+
+    auto const cases = std::array{
+        Case{.curl_code = CURLE_COULDNT_RESOLVE_HOST,
+             .kind      = HttpErrorKind::Resolve,
+             .category  = ErrorCategory::Unavailable,
+             .code      = "net.http.resolve_failed"         },
+        Case{.curl_code = CURLE_COULDNT_CONNECT,
+             .kind      = HttpErrorKind::Connect,
+             .category  = ErrorCategory::Unavailable,
+             .code      = "net.http.connect_failed"         },
+        Case{.curl_code = CURLE_PEER_FAILED_VERIFICATION,
+             .kind      = HttpErrorKind::TlsVerification,
+             .category  = ErrorCategory::PermissionDenied,
+             .code      = "net.http.tls_verification_failed"},
+        Case{.curl_code = CURLE_SSL_CONNECT_ERROR,
+             .kind      = HttpErrorKind::TlsHandshake,
+             .category  = ErrorCategory::Io,
+             .code      = "net.http.tls_handshake_failed"   },
+        Case{.curl_code = CURLE_OPERATION_TIMEDOUT,
+             .kind      = HttpErrorKind::Timeout,
+             .category  = ErrorCategory::Timeout,
+             .code      = "net.http.timeout"                },
+        Case{.curl_code = CURLE_SEND_ERROR,
+             .kind      = HttpErrorKind::Send,
+             .category  = ErrorCategory::Io,
+             .code      = "net.http.send_failed"            },
+        Case{.curl_code = CURLE_RECV_ERROR,
+             .kind      = HttpErrorKind::Receive,
+             .category  = ErrorCategory::Io,
+             .code      = "net.http.receive_failed"         },
+        Case{.curl_code = CURLE_SSL_SHUTDOWN_FAILED,
+             .kind      = HttpErrorKind::Receive,
+             .category  = ErrorCategory::Io,
+             .code      = "net.http.receive_failed"         },
+        Case{.curl_code = CURLE_TOO_MANY_REDIRECTS,
+             .kind      = HttpErrorKind::Redirect,
+             .category  = ErrorCategory::Io,
+             .code      = "net.http.redirect_failed"        },
+        Case{.curl_code = CURLE_WEIRD_SERVER_REPLY,
+             .kind      = HttpErrorKind::Protocol,
+             .category  = ErrorCategory::Io,
+             .code      = "net.http.protocol_error"         },
+        Case{.curl_code = CURLE_OUT_OF_MEMORY,
+             .kind      = HttpErrorKind::Internal,
+             .category  = ErrorCategory::Internal,
+             .code      = "net.http.internal"               },
+    };
+
+    for (auto const& test : cases) {
+        auto mapped = map_curl_error(test.curl_code);
+        CHECK(mapped.kind == test.kind);
+        CHECK(mapped.error.category == test.category);
+        CHECK(mapped.error.code == test.code);
+        CHECK(mapped.error.detail.empty());
+        check_safe_project_error(mapped, {"secret-url", "secret-header", "secret-body", "curl diagnostic"});
+    }
+
+    auto unmapped = map_curl_error(CURLE_FAILED_INIT);
+    CHECK(unmapped.kind == HttpErrorKind::Internal);
+    CHECK(unmapped.error.category == ErrorCategory::Internal);
+    CHECK(unmapped.error.code == "net.http.internal");
+    CHECK(unmapped.error.detail.empty());
 }
 
 TEST_CASE("system HTTP client factory requires the current EventLoop", "[net][http]")
@@ -286,6 +429,41 @@ TEST_CASE("system HTTP runtime preflight creates a ready minimal client", "[net]
     REQUIRE_FALSE(cancellation);
     CHECK(cancellation.error().code == "net.http.request_not_found");
     CHECK_FALSE(callback_called);
+}
+
+TEST_CASE("system HTTP client shares one absolute deadline timer across accepted requests", "[net][http]")
+{
+    auto       app      = jb::core::Application{0, nullptr};
+    auto const baseline = jb::core::priv::EventLoopTestAccess::active_timer_count(*app.event_loop());
+    auto       created  = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto callback_count = 0;
+    auto request_ids    = std::vector<jb::net::HttpRequestId>{};
+    for (auto index = 0; index < 3; ++index) {
+        auto request    = minimal_request("http://127.0.0.1:1/shared-deadline");
+        request.timeout = 1h;
+        auto started    = client->start(
+            std::move(request),
+            [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void { ++callback_count; });
+        REQUIRE(started);
+        request_ids.push_back(*started);
+        CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*app.event_loop()) == baseline + 1U);
+    }
+
+    REQUIRE(client->cancel(request_ids[0]));
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*app.event_loop()) == baseline + 1U);
+    REQUIRE(client->cancel(request_ids[1]));
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*app.event_loop()) == baseline + 1U);
+    REQUIRE(client->cancel(request_ids[2]));
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*app.event_loop()) == baseline);
+    CHECK(callback_count == 0);
+
+    client.reset();
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*app.event_loop()) == baseline);
+    drain_fake_loop(*app.event_loop());
+    CHECK(callback_count == 0);
 }
 
 TEST_CASE("system HTTP client keeps later transport policy outside the Stage 5.4 scope", "[net][http]")
@@ -677,6 +855,85 @@ TEST_CASE("system HTTP client drives two held GETs concurrently", "[net][http]")
     CHECK(client->active_request_count() == 0U);
 }
 
+TEST_CASE("system HTTP client applies one whole-request timeout while the peer is held", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto server  = jb::test::HttpTestServer{};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto callback_count = 0;
+    auto completion     = std::optional<jb::net::HttpCompletionResult>{};
+    auto request        = minimal_request(server.url("/secret-timeout-url"));
+    request.headers     = {
+        {.name = "X-Secret", .value = "secret-timeout-header"}
+    };
+    request.body    = bytes("secret-timeout-body");
+    request.timeout = 75ms;
+    auto started =
+        client->start(std::move(request), [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+            ++callback_count;
+            completion = std::move(result);
+        });
+    REQUIRE(started);
+    REQUIRE(process_until(app, [&]() -> bool { return server.wait_for_requests(1U, 0ms); }));
+    CHECK(callback_count == 0);
+
+    REQUIRE(process_until(app, [&]() -> bool { return completion.has_value(); }));
+    REQUIRE(completion);
+    REQUIRE_FALSE(*completion);
+    CHECK(callback_count == 1);
+    CHECK(completion->error().kind == jb::net::HttpErrorKind::Timeout);
+    CHECK(completion->error().error.category == jb::core::ErrorCategory::Timeout);
+    CHECK(completion->error().error.code == "net.http.timeout");
+    CHECK(completion->error().elapsed >= 1ms);
+    check_safe_project_error(completion->error(),
+                             {"secret-timeout-url", "secret-timeout-header", "secret-timeout-body"});
+    CHECK(client->active_request_count() == 0U);
+    CHECK(client->is_available());
+    server.release_responses();
+}
+
+TEST_CASE("system HTTP client re-arms its shared timer for the next request deadline", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto server  = jb::test::HttpTestServer{};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto later_completion   = std::optional<jb::net::HttpCompletionResult>{};
+    auto earlier_completion = std::optional<jb::net::HttpCompletionResult>{};
+    auto later_request      = minimal_request(server.url("/later-deadline"));
+    later_request.timeout   = 250ms;
+    auto later_started      = client->start(std::move(later_request),
+                                            [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+                                           later_completion = std::move(result);
+                                            });
+    REQUIRE(later_started);
+
+    auto earlier_request    = minimal_request(server.url("/earlier-deadline"));
+    earlier_request.timeout = 75ms;
+    auto earlier_started    = client->start(std::move(earlier_request),
+                                            [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+                                             earlier_completion = std::move(result);
+                                            });
+    REQUIRE(earlier_started);
+
+    REQUIRE(process_until(app, [&]() -> bool { return earlier_completion.has_value(); }));
+    REQUIRE_FALSE(*earlier_completion);
+    CHECK(earlier_completion->error().kind == jb::net::HttpErrorKind::Timeout);
+    CHECK_FALSE(later_completion.has_value());
+    CHECK(client->active_request_count() == 1U);
+
+    REQUIRE(process_until(app, [&]() -> bool { return later_completion.has_value(); }));
+    REQUIRE_FALSE(*later_completion);
+    CHECK(later_completion->error().kind == jb::net::HttpErrorKind::Timeout);
+    CHECK(client->active_request_count() == 0U);
+    server.release_responses();
+}
+
 TEST_CASE("system HTTP cancellation is asynchronous and exact once", "[net][http]")
 {
     auto app     = jb::core::Application{0, nullptr};
@@ -711,6 +968,194 @@ TEST_CASE("system HTTP cancellation is asynchronous and exact once", "[net][http
     server.release_responses();
 }
 
+TEST_CASE("system HTTP cancellation cannot override an elapsed undispatched deadline", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    constexpr auto timeout        = 25ms;
+    auto           callback_count = 0;
+    auto           completion     = std::optional<jb::net::HttpCompletionResult>{};
+    auto           request        = minimal_request("http://127.0.0.1:1/expired-before-cancel");
+    request.timeout               = timeout;
+    auto started =
+        client->start(std::move(request), [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+            ++callback_count;
+            completion = std::move(result);
+        });
+    REQUIRE(started);
+
+    // Poll only watchers until the accepted deadline must have elapsed, deliberately leaving timer dispatch pending.
+    auto const definitely_expired = jb::core::Clock::now() + timeout;
+    auto       polling_failed     = false;
+    while (!polling_failed && jb::core::Clock::now() < definitely_expired) {
+        polling_failed = app.process_events(jb::core::EventFlag::Watchers, 25) == jb::core::ProcessEventsResult::Failed;
+    }
+    REQUIRE_FALSE(polling_failed);
+
+    auto cancelled = client->cancel(*started);
+    REQUIRE_FALSE(cancelled);
+    CHECK(cancelled.error().code == "net.http.request_not_found");
+    CHECK(callback_count == 0);
+
+    REQUIRE(process_until(app, [&]() -> bool { return completion.has_value(); }));
+    REQUIRE_FALSE(*completion);
+    CHECK(completion->error().kind == jb::net::HttpErrorKind::Timeout);
+    CHECK(completion->error().error.code == "net.http.timeout");
+    CHECK(callback_count == 1);
+    CHECK(client->active_request_count() == 0U);
+}
+
+TEST_CASE("system HTTP cancellation retains response observations captured before a body barrier", "[net][http]")
+{
+    auto app      = jb::core::Application{0, nullptr};
+    auto server   = jb::test::HttpTestServer{};
+    auto response = jb::test::HttpTestResponse{
+        .headers                    = {{.name = "X-Observed", .value = "safe-observed-value"}},
+        .body                       = bytes("prefix-and-secret-response-tail"),
+        .pause_after_response_bytes = 6U,
+    };
+    server.enqueue_response(std::move(response));
+    server.release_responses();
+
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto callback_count = 0;
+    auto completion     = std::optional<jb::net::HttpCompletionResult>{};
+    auto started        = client->start(minimal_request(server.url("/mid-body-cancel")),
+                                        [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+                                     ++callback_count;
+                                     completion = std::move(result);
+                                        });
+    REQUIRE(started);
+    REQUIRE(process_until(app, [&]() -> bool { return server.wait_for_response_segments(1U, 0ms); }));
+    REQUIRE(app.process_events(jb::core::EventFlag::All, 100) != jb::core::ProcessEventsResult::Failed);
+
+    auto cancelled_result = client->cancel(*started);
+    REQUIRE(cancelled_result);
+    CHECK(callback_count == 0);
+    server.release_response_segment();
+
+    REQUIRE(process_until(app, [&]() -> bool { return completion.has_value(); }));
+    REQUIRE(completion);
+    REQUIRE_FALSE(*completion);
+    CHECK(callback_count == 1);
+    auto const& error = completion->error();
+    CHECK(error.kind == jb::net::HttpErrorKind::Cancelled);
+    CHECK(error.error.code == "net.http.cancelled");
+    CHECK(error.status_code == 200U);
+    CHECK(error.body.total_bytes == 6U);
+    CHECK(byte_text(error.body.bytes) == "prefix");
+    CHECK_FALSE(error.raw_headers.bytes.empty());
+    CHECK(error.elapsed >= jb::core::Duration::zero());
+    CHECK(client->active_request_count() == 0U);
+}
+
+TEST_CASE("system HTTP cancellation can win after the peer closes but before readiness is consumed", "[net][http]")
+{
+    auto app      = jb::core::Application{0, nullptr};
+    auto server   = jb::test::HttpTestServer{};
+    auto response = jb::test::HttpTestResponse{
+        .body                       = bytes("unread-response"),
+        .close_after_response_bytes = 0U,
+    };
+    server.enqueue_response(std::move(response));
+
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto callback_count = 0;
+    auto completion     = std::optional<jb::net::HttpCompletionResult>{};
+    auto started        = client->start(minimal_request(server.url("/closed-before-cancel")),
+                                        [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+                                     ++callback_count;
+                                     completion = std::move(result);
+                                        });
+    REQUIRE(started);
+    REQUIRE(process_until(app, [&]() -> bool { return server.wait_for_requests(1U, 0ms); }));
+
+    server.release_responses();
+    REQUIRE(server.wait_for_peer_closes(1U, 2s));
+    REQUIRE(client->cancel(*started));
+    CHECK(callback_count == 0);
+    auto repeated = client->cancel(*started);
+    REQUIRE_FALSE(repeated);
+    CHECK(repeated.error().code == "net.http.request_not_found");
+
+    REQUIRE(process_until(app, [&]() -> bool { return completion.has_value(); }));
+    REQUIRE_FALSE(*completion);
+    CHECK(completion->error().kind == jb::net::HttpErrorKind::Cancelled);
+    CHECK(callback_count == 1);
+    for (auto index = 0; index < 4; ++index) {
+        REQUIRE(app.process_events(jb::core::EventFlag::All, 0) != jb::core::ProcessEventsResult::Failed);
+    }
+    CHECK(callback_count == 1);
+}
+
+TEST_CASE("system HTTP client maps a peer close during the response and retains partial data", "[net][http]")
+{
+    auto app      = jb::core::Application{0, nullptr};
+    auto server   = jb::test::HttpTestServer{};
+    auto response = jb::test::HttpTestResponse{
+        .headers                    = {{.name = "X-Secret", .value = "secret-response-header"}},
+        .body                       = bytes("response-secret-body"),
+        .close_after_response_bytes = 4U,
+    };
+    server.enqueue_response(std::move(response));
+    server.release_responses();
+
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto completed = complete_request(app, *client, minimal_request(server.url("/secret-response-url")));
+    REQUIRE_FALSE(completed);
+    auto const& error = completed.error();
+    CHECK(error.kind == jb::net::HttpErrorKind::Receive);
+    CHECK(error.error.category == jb::core::ErrorCategory::Io);
+    CHECK(error.error.code == "net.http.receive_failed");
+    CHECK(error.status_code == 200U);
+    CHECK(error.body.total_bytes == 4U);
+    CHECK(byte_text(error.body.bytes) == "resp");
+    CHECK_FALSE(error.raw_headers.bytes.empty());
+    check_safe_project_error(error, {"secret-response-url", "secret-response-header", "response-secret-body"});
+    CHECK(client->is_available());
+}
+
+TEST_CASE("system HTTP client keeps a peer reset during request transmission request-local", "[net][http]")
+{
+    auto app    = jb::core::Application{0, nullptr};
+    auto server = jb::test::HttpTestServer{};
+    server.reset_next_request_after_headers();
+
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto request    = minimal_request(server.url("/secret-send-url"));
+    request.method  = "POST";
+    request.headers = {
+        {.name = "X-Secret", .value = "secret-send-header"}
+    };
+    request.body = jb::core::ByteBuffer(std::size_t{8} * 1024U * 1024U, std::byte{0x5a});
+
+    auto completed = complete_request(app, *client, std::move(request));
+    REQUIRE_FALSE(completed);
+    CHECK(server.wait_for_request_headers(1U, 0ms));
+    auto const& error = completed.error();
+    // A reset racing the final upload bytes may be surfaced by the kernel through curl's send or receive path.
+    CHECK((error.kind == jb::net::HttpErrorKind::Send || error.kind == jb::net::HttpErrorKind::Receive));
+    CHECK(error.error.category == jb::core::ErrorCategory::Io);
+    CHECK((error.error.code == "net.http.send_failed" || error.error.code == "net.http.receive_failed"));
+    check_safe_project_error(error, {"secret-send-url", "secret-send-header"});
+    CHECK(client->is_available());
+}
+
 TEST_CASE("system HTTP client suppresses callbacks during destruction", "[net][http]")
 {
     auto app     = jb::core::Application{0, nullptr};
@@ -725,6 +1170,31 @@ TEST_CASE("system HTTP client suppresses callbacks during destruction", "[net][h
                       [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void { ++callback_count; });
     REQUIRE(started);
     REQUIRE(process_until(app, [&]() -> bool { return server.wait_for_requests(1U, 0ms); }));
+
+    client.reset();
+    server.release_responses();
+    for (auto index = 0; index < 4; ++index) {
+        REQUIRE(app.process_events(jb::core::EventFlag::All, 0) != jb::core::ProcessEventsResult::Failed);
+    }
+    CHECK(callback_count == 0);
+}
+
+TEST_CASE("system HTTP client suppresses a queued cancellation completion during destruction", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto server  = jb::test::HttpTestServer{};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    auto callback_count = 0;
+    auto started =
+        client->start(minimal_request(server.url()),
+                      [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void { ++callback_count; });
+    REQUIRE(started);
+    REQUIRE(process_until(app, [&]() -> bool { return server.wait_for_requests(1U, 0ms); }));
+    REQUIRE(client->cancel(*started));
+    CHECK(callback_count == 0);
 
     client.reset();
     server.release_responses();
@@ -869,6 +1339,29 @@ TEST_CASE("system HTTP client leaves persistent failed-watch callbacks inert", "
     fake.backend->ready_events.push_back({.fd = watched_fd, .events = jb::core::FdEvent::Read});
     REQUIRE(fake.loop->process_events(jb::core::EventFlag::Watchers, 0) != jb::core::ProcessEventsResult::Failed);
     CHECK(callback_count == 0);
+}
+
+TEST_CASE("curl multi adapter checks absolute deadlines before the deferred initial drive", "[net][http]")
+{
+    auto fake         = jb::core::priv::make_fake_event_loop();
+    auto current_loop = jb::core::priv::ScopedCurrentEventLoop{fake.loop.get()};
+    REQUIRE(jb::net::http::detail::preflight_curl_runtime());
+
+    auto failure_count       = 0;
+    auto initial_drive_count = 0;
+    auto created             = jb::net::http::detail::CurlMultiAdapter::create(
+        *fake.loop,
+        [](auto*, auto) -> void {},
+        [&](jb::core::Error const&) -> void { ++failure_count; },
+        [&]() -> void { ++initial_drive_count; });
+    REQUIRE(created);
+    auto adapter = std::move(created).value();
+
+    REQUIRE(adapter->queue_initial_drive());
+    CHECK(initial_drive_count == 0);
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    CHECK(initial_drive_count == 1);
+    CHECK(failure_count == 0);
 }
 
 TEST_CASE("curl multi adapter defers and coalesces socket watch changes", "[net][http]")

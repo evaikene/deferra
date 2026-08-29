@@ -16,6 +16,9 @@
 
 namespace jb::net::http::detail {
 
+/// Converts a remaining monotonic deadline duration to curl's positive millisecond representation.
+[[nodiscard]] auto curl_timeout_milliseconds(jb::core::Duration remaining) -> jb::core::Result<long, jb::core::Error>;
+
 struct CurlEasyDeleter {
     void operator()(CURL* easy) const noexcept;
 };
@@ -57,11 +60,18 @@ public:
 
     [[nodiscard]] auto accepted() const noexcept -> bool { return _accepted; }
 
-    void mark_accepted() noexcept;
+    [[nodiscard]] auto prepare_admission(jb::core::TimePoint accepted_at) -> jb::core::Result<void, jb::core::Error>;
+    void               mark_accepted() noexcept;
+
+    [[nodiscard]] auto deadline() const noexcept -> jb::core::TimePoint { return _deadline; }
+
+    [[nodiscard]] auto deadline_expired(jb::core::TimePoint now) const noexcept -> bool { return now >= _deadline; }
 
     void               prepare_completion(HttpCompletionResult result);
     [[nodiscard]] auto take_handler() -> HttpCompletionHandler;
     [[nodiscard]] auto take_result() -> HttpCompletionResult;
+    [[nodiscard]] auto cancellation_result() -> HttpCompletionResult;
+    [[nodiscard]] auto timeout_result() -> HttpCompletionResult;
     [[nodiscard]] auto transfer_result(CURLcode result) -> HttpCompletionResult;
 
 private:
@@ -112,6 +122,7 @@ private:
     CurlSlist                           _request_headers;
     CurlEasy                            _easy;
     jb::core::TimePoint                 _accepted_at;
+    jb::core::TimePoint                 _deadline;
     State                               _state{State::Running};
     HeaderState                         _header_state{HeaderState::AwaitingStatus};
     bool                                _accepted{false};

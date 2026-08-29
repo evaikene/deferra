@@ -8,6 +8,8 @@ add_library(${TARGET} STATIC)
 
 target_sources(${TARGET}
     PRIVATE
+        curl_error_priv.cpp
+        curl_error_priv.hpp
         curl_multi_priv.cpp
         curl_multi_priv.hpp
         curl_multi_test_priv.hpp
