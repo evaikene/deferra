@@ -222,7 +222,7 @@ auto parse_status(std::string_view text) noexcept -> std::optional<std::uint16_t
     return value;
 }
 
-auto parse_status_selector(std::string_view text) noexcept -> std::optional<HttpStatusRange>
+auto parse_status_selector_impl(std::string_view text) noexcept -> std::optional<HttpStatusRange>
 {
     if (text.size() == 3U) {
         auto status = parse_status(text);
@@ -258,7 +258,7 @@ auto decode_expected_statuses(jb::core::JsonValue const* value) -> DecodeResult<
         if (!selector.is_string()) {
             return DecodeResult<std::vector<HttpStatusRange>>::failure(JobPayloadIssue::InvalidExpectedStatuses);
         }
-        auto parsed = parse_status_selector(selector.as_string());
+        auto parsed = parse_http_status_selector(selector.as_string());
         if (!parsed) {
             return DecodeResult<std::vector<HttpStatusRange>>::failure(JobPayloadIssue::InvalidExpectedStatuses);
         }
@@ -298,6 +298,11 @@ auto generic_request_issue(jb::core::Error const& error) noexcept -> JobPayloadI
 }
 
 } // anonymous namespace
+
+auto parse_http_status_selector(std::string_view selector) noexcept -> std::optional<HttpStatusRange>
+{
+    return parse_status_selector_impl(selector);
+}
 
 HttpStatusSet::HttpStatusSet(std::vector<HttpStatusRange> ranges) noexcept
     : _ranges{std::move(ranges)}

@@ -543,6 +543,16 @@ TEST_CASE("Attribute persistence keeps partial documents partial and upgrades Ph
     auto& legacy_values = std::get<JsonValue::Object>(values.data);
     REQUIRE(legacy_values.erase("retry.jitter") == 1U);
     REQUIRE(legacy_values.erase("retry.multiplier") == 1U);
+    for (auto const* name : {"http.follow_redirects",
+                             "http.idempotency_key",
+                             "http.max_redirects",
+                             "http.retry_errors",
+                             "http.retry_statuses",
+                             "http.tls_verify",
+                             "output.http_body_limit",
+                             "output.http_headers_limit"}) {
+        REQUIRE(legacy_values.erase(name) == 1U);
+    }
     REQUIRE(legacy_values.size() == 9U);
 
     auto decoded_older = decode_attribute_document(registry,
@@ -553,6 +563,7 @@ TEST_CASE("Attribute persistence keeps partial documents partial and upgrades Ph
     REQUIRE(decoded_older->size() == registry.definitions().size());
     CHECK(std::get<double>(decoded_older->at("retry.jitter").data) == 0.0);
     CHECK(std::get<double>(decoded_older->at("retry.multiplier").data) == 2.0);
+    CHECK(std::get<std::int64_t>(decoded_older->at("http.max_redirects").data) == 5);
 
     auto decoded_as_partial =
         decode_attribute_document(registry, *encoded_complete, AttributeScope::Job, AttributeDocumentMode::Partial);
@@ -561,7 +572,7 @@ TEST_CASE("Attribute persistence keeps partial documents partial and upgrades Ph
     CHECK_FALSE(decoded_as_partial->contains("retry.jitter"));
     CHECK_FALSE(decoded_as_partial->contains("retry.multiplier"));
 
-    complete->erase("retry.jitter");
+    complete->erase("http.follow_redirects");
     auto incomplete =
         encode_attribute_document(registry, *complete, AttributeScope::Job, AttributeDocumentMode::Materialized);
     REQUIRE_FALSE(incomplete);

@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -103,6 +104,16 @@ auto same_set(AttributeSet const& left, AttributeSet const& right) -> bool
         ++right_entry;
     }
     return true;
+}
+
+auto string_list(std::initializer_list<std::string_view> values) -> AttributeValue::List
+{
+    auto result = AttributeValue::List{};
+    result.reserve(values.size());
+    for (auto const value : values) {
+        result.push_back({.data = std::string{value}});
+    }
+    return result;
 }
 
 auto test_error(std::string code) -> Result<void, Error>
@@ -256,9 +267,17 @@ auto attribute_document(JsonValue::Object values) -> JsonValue
 TEST_CASE("Standard attributes expose the specified definitions and defaults", "[jobu][attribute][materialization]")
 {
     StandardAttributeRegistry                  registry;
-    constexpr std::array<std::string_view, 11> expected_names{
+    constexpr std::array<std::string_view, 19> expected_names{
+        "http.follow_redirects",
+        "http.idempotency_key",
+        "http.max_redirects",
+        "http.retry_errors",
+        "http.retry_statuses",
+        "http.tls_verify",
         "job.timeout",
         "output.capture",
+        "output.http_body_limit",
+        "output.http_headers_limit",
         "output.stderr_limit",
         "output.stdout_limit",
         "retry.initial_delay",
@@ -282,6 +301,14 @@ TEST_CASE("Standard attributes expose the specified definitions and defaults", "
     auto materialized = materialize_attributes(registry, {}, {}, {});
     REQUIRE(materialized);
     REQUIRE(materialized->size() == expected_names.size());
+    CHECK_FALSE(std::get<bool>(materialized->at("http.follow_redirects").data));
+    CHECK_FALSE(std::get<bool>(materialized->at("http.idempotency_key").data));
+    CHECK(std::get<std::int64_t>(materialized->at("http.max_redirects").data) == 5);
+    CHECK(same_list(std::get<AttributeValue::List>(materialized->at("http.retry_errors").data),
+                    string_list({"resolve", "connect", "tls_handshake", "timeout", "send", "receive"})));
+    CHECK(same_list(std::get<AttributeValue::List>(materialized->at("http.retry_statuses").data),
+                    string_list({"408", "429", "500-599"})));
+    CHECK(std::get<bool>(materialized->at("http.tls_verify").data));
     CHECK(std::get<Duration>(materialized->at("job.timeout").data) == 120s);
     CHECK(std::get<std::int64_t>(materialized->at("retry.max_attempts").data) == 1);
     CHECK(std::get<std::string>(materialized->at("retry.strategy").data) == "fixed");
@@ -291,6 +318,8 @@ TEST_CASE("Standard attributes expose the specified definitions and defaults", "
     CHECK(std::get<std::string>(materialized->at("retry.mode").data) == "reschedule");
     CHECK(std::get<double>(materialized->at("retry.multiplier").data) == 2.0);
     CHECK(std::get<std::string>(materialized->at("output.capture").data) == "on_error");
+    CHECK(std::get<std::int64_t>(materialized->at("output.http_body_limit").data) == std::int64_t{1024} * 1024);
+    CHECK(std::get<std::int64_t>(materialized->at("output.http_headers_limit").data) == std::int64_t{64} * 1024);
     CHECK(std::get<std::int64_t>(materialized->at("output.stdout_limit").data) == std::int64_t{1024} * 1024);
     CHECK(std::get<std::int64_t>(materialized->at("output.stderr_limit").data) == std::int64_t{1024} * 1024);
     CHECK(registry.validate_materialized(*materialized));
@@ -299,6 +328,9 @@ TEST_CASE("Standard attributes expose the specified definitions and defaults", "
         CHECK(definition.scopes.test(AttributeScope::DaemonDefault));
         CHECK(definition.scopes.test(AttributeScope::QueueDefault));
         CHECK(definition.scopes.test(AttributeScope::Job));
+        CHECK(registry.validate(definition.name, definition.built_in_default, AttributeScope::DaemonDefault));
+        CHECK(registry.validate(definition.name, definition.built_in_default, AttributeScope::QueueDefault));
+        CHECK(registry.validate(definition.name, definition.built_in_default, AttributeScope::Job));
     }
 }
 
@@ -308,6 +340,52 @@ TEST_CASE("Standard attributes enforce every field constraint", "[jobu][attribut
     auto                      validate = [&registry](std::string_view name, AttributeValue const& value) {
         return registry.validate(name, value, AttributeScope::Job);
     };
+
+    CHECK(validate("http.follow_redirects", {.data = true}));
+    CHECK(validate("http.idempotency_key", {.data = true}));
+    CHECK(validate("http.tls_verify", {.data = false}));
+    CHECK_FALSE(validate("http.follow_redirects", {.data = std::int64_t{1}}));
+
+    CHECK(validate("http.max_redirects", {.data = std::int64_t{0}}));
+    CHECK(validate("http.max_redirects", {.data = std::int64_t{20}}));
+    CHECK_FALSE(validate("http.max_redirects", {.data = std::int64_t{-1}}));
+    CHECK_FALSE(validate("http.max_redirects", {.data = std::int64_t{21}}));
+
+    CHECK(validate("http.retry_errors", {.data = string_list({})}));
+    CHECK(validate("http.retry_errors",
+                   {.data = string_list({"resolve",
+                                         "connect",
+                                         "tls_handshake",
+                                         "tls_verification",
+                                         "timeout",
+                                         "send",
+                                         "receive",
+                                         "redirect",
+                                         "protocol"})}));
+    CHECK_FALSE(validate("http.retry_errors", {.data = string_list({"connect", "connect"})}));
+    CHECK_FALSE(validate("http.retry_errors", {.data = string_list({"cancelled"})}));
+    CHECK_FALSE(
+        validate("http.retry_errors",
+                 {
+                     .data = AttributeValue::List{{.data = std::string{"connect"}}, {.data = std::int64_t{1}}}
+    }));
+
+    CHECK(validate("http.retry_statuses", {.data = string_list({})}));
+    CHECK(validate("http.retry_statuses", {.data = string_list({"100", "599", "200-299", "200-204"})}));
+    CHECK_FALSE(validate("http.retry_statuses", {.data = string_list({"429", "429"})}));
+    CHECK_FALSE(validate("http.retry_statuses", {.data = string_list({"99", "600", "299-200"})}));
+    CHECK_FALSE(validate("http.retry_statuses",
+                         {
+                             .data = AttributeValue::List{{.data = std::string{"429"}}, {.data = false}}
+    }));
+
+    auto maximum_statuses = AttributeValue::List{};
+    for (std::int64_t status = 100; status < 164; ++status) {
+        maximum_statuses.push_back({.data = std::to_string(status)});
+    }
+    CHECK(validate("http.retry_statuses", {.data = maximum_statuses}));
+    maximum_statuses.push_back({.data = std::string{"164"}});
+    CHECK_FALSE(validate("http.retry_statuses", {.data = maximum_statuses}));
 
     CHECK(validate("job.timeout", {.data = 1ms}));
     CHECK(validate("job.timeout", {.data = std::chrono::days{30}}));
@@ -365,6 +443,16 @@ TEST_CASE("Standard attributes enforce every field constraint", "[jobu][attribut
         CHECK_FALSE(validate(name, {.data = (std::int64_t{64} * 1024 * 1024) + 1}));
     }
 
+    CHECK(validate("output.http_body_limit", {.data = std::int64_t{0}}));
+    CHECK(validate("output.http_body_limit", {.data = std::int64_t{64} * 1024 * 1024}));
+    CHECK_FALSE(validate("output.http_body_limit", {.data = std::int64_t{-1}}));
+    CHECK_FALSE(validate("output.http_body_limit", {.data = (std::int64_t{64} * 1024 * 1024) + 1}));
+
+    CHECK(validate("output.http_headers_limit", {.data = std::int64_t{0}}));
+    CHECK(validate("output.http_headers_limit", {.data = std::int64_t{4} * 1024 * 1024}));
+    CHECK_FALSE(validate("output.http_headers_limit", {.data = std::int64_t{-1}}));
+    CHECK_FALSE(validate("output.http_headers_limit", {.data = (std::int64_t{4} * 1024 * 1024) + 1}));
+
     CHECK(validate("missing.value", {.data = true}).error().code == "jobu.attribute.unknown");
     CHECK(validate("job.timeout", {.data = std::int64_t{1}}).error().code == "jobu.attribute.invalid_type");
 }
@@ -381,6 +469,34 @@ TEST_CASE("Phase 4 retry number attributes round trip through public JSON", "[jo
     REQUIRE(encoded);
     CHECK(encoded->as_object().at("retry.jitter").as_double() == 0.25);
     CHECK(encoded->as_object().at("retry.multiplier").as_double() == 3.5);
+
+    auto decoded = attribute_set_from_json(*encoded, registry, AttributeScope::Job);
+    REQUIRE(decoded);
+    CHECK(same_set(*decoded, values));
+}
+
+TEST_CASE("Phase 5 HTTP attributes round trip through public management JSON", "[jobu][attribute][json][http]")
+{
+    StandardAttributeRegistry registry;
+    AttributeSet              values{
+        {"http.follow_redirects",     {.data = true}                                  },
+        {"http.idempotency_key",      {.data = true}                                  },
+        {"http.max_redirects",        {.data = std::int64_t{7}}                       },
+        {"http.retry_errors",         {.data = string_list({"connect", "protocol"})}  },
+        {"http.retry_statuses",       {.data = string_list({"408", "429", "500-599"})}},
+        {"http.tls_verify",           {.data = false}                                 },
+        {"output.http_body_limit",    {.data = std::int64_t{2048}}                    },
+        {"output.http_headers_limit", {.data = std::int64_t{1024}}                    },
+    };
+
+    auto encoded = attribute_set_to_json(values, registry, AttributeScope::Job);
+    REQUIRE(encoded);
+    auto const& object = encoded->as_object();
+    CHECK(object.at("http.follow_redirects").as_bool());
+    CHECK(object.at("http.max_redirects").as_int() == 7);
+    REQUIRE(object.at("http.retry_errors").as_array().size() == 2U);
+    CHECK(object.at("http.retry_errors").as_array()[0].as_string() == "connect");
+    CHECK(object.at("http.retry_statuses").as_array()[2].as_string() == "500-599");
 
     auto decoded = attribute_set_from_json(*encoded, registry, AttributeScope::Job);
     REQUIRE(decoded);
@@ -422,6 +538,83 @@ TEST_CASE("Attribute materialization applies deterministic precedence and cross-
     auto incomplete = *materialized;
     incomplete.erase("retry.mode");
     CHECK(registry.validate_materialized(incomplete).error().code == "jobu.attribute.invalid_value");
+
+    auto partial_follow = attribute_set_to_json(
+        {
+            {"http.follow_redirects", {.data = true}}
+    },
+        registry,
+        AttributeScope::QueueDefault);
+    CHECK(partial_follow);
+    auto partial_maximum = attribute_set_from_json(make_json(JsonValue::Object{
+                                                       {"http.max_redirects", make_json(std::int64_t{0})}
+    }),
+                                                   registry,
+                                                   AttributeScope::Job);
+    CHECK(partial_maximum);
+
+    auto invalid_redirects = materialize_attributes(registry,
+                                                    {
+                                                        {"http.follow_redirects", {.data = true}}
+    },
+                                                    {{"http.max_redirects", {.data = std::int64_t{0}}}},
+                                                    {});
+    REQUIRE_FALSE(invalid_redirects);
+    CHECK(invalid_redirects.error().code == "jobu.attribute.invalid_value");
+
+    auto disabled_redirects = materialize_attributes(registry,
+                                                     {
+                                                         {"http.follow_redirects", {.data = false}}
+    },
+                                                     {{"http.max_redirects", {.data = std::int64_t{0}}}},
+                                                     {});
+    REQUIRE(disabled_redirects);
+}
+
+TEST_CASE("Materialized Phase 4 snapshots acquire all Phase 5 HTTP defaults",
+          "[jobu][attribute][materialization][compatibility]")
+{
+    constexpr std::string_view phase4_snapshot = R"({
+        "values": {
+            "job.timeout": {"type": "duration_ns", "value": 120000000000},
+            "output.capture": {"type": "string", "value": "on_error"},
+            "output.stderr_limit": {"type": "integer", "value": 1048576},
+            "output.stdout_limit": {"type": "integer", "value": 1048576},
+            "retry.initial_delay": {"type": "duration_ns", "value": 0},
+            "retry.jitter": {"type": "number", "value": 0.0},
+            "retry.max_attempts": {"type": "integer", "value": 1},
+            "retry.max_delay": {"type": "duration_ns", "value": 86400000000000},
+            "retry.mode": {"type": "string", "value": "reschedule"},
+            "retry.multiplier": {"type": "number", "value": 2.0},
+            "retry.strategy": {"type": "string", "value": "fixed"}
+        },
+        "version": 1
+    })";
+
+    StandardAttributeRegistry registry;
+    auto                      document = parse_json(phase4_snapshot);
+    REQUIRE(document);
+
+    auto decoded =
+        decode_attribute_document(registry, *document, AttributeScope::Job, AttributeDocumentMode::Materialized);
+    REQUIRE(decoded);
+    REQUIRE(decoded->size() == 19U);
+    CHECK_FALSE(std::get<bool>(decoded->at("http.follow_redirects").data));
+    CHECK_FALSE(std::get<bool>(decoded->at("http.idempotency_key").data));
+    CHECK(std::get<std::int64_t>(decoded->at("http.max_redirects").data) == 5);
+    CHECK(same_list(std::get<AttributeValue::List>(decoded->at("http.retry_errors").data),
+                    string_list({"resolve", "connect", "tls_handshake", "timeout", "send", "receive"})));
+    CHECK(same_list(std::get<AttributeValue::List>(decoded->at("http.retry_statuses").data),
+                    string_list({"408", "429", "500-599"})));
+    CHECK(std::get<bool>(decoded->at("http.tls_verify").data));
+    CHECK(std::get<std::int64_t>(decoded->at("output.http_body_limit").data) == std::int64_t{1024} * 1024);
+    CHECK(std::get<std::int64_t>(decoded->at("output.http_headers_limit").data) == std::int64_t{64} * 1024);
+
+    auto partial = decode_attribute_document(registry, *document, AttributeScope::Job, AttributeDocumentMode::Partial);
+    REQUIRE(partial);
+    CHECK(partial->size() == 11U);
+    CHECK_FALSE(partial->contains("http.follow_redirects"));
+    CHECK_FALSE(partial->contains("output.http_body_limit"));
 }
 
 TEST_CASE("Public attribute JSON is registry directed and round trips natural values", "[jobu][attribute][json]")

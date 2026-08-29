@@ -1,5 +1,7 @@
 #include "attribute_registry.hpp"
 
+#include "http_job_payload_priv.hpp"
+
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -19,8 +21,11 @@ template <typename T>
 using Result = jb::core::Result<T, jb::core::Error>;
 
 constexpr std::size_t  kMaxAttributeDepth{64};
-constexpr std::int64_t kDefaultOutputLimitBytes = std::int64_t{1024} * 1024;
-constexpr std::int64_t kMaximumOutputLimitBytes = std::int64_t{64} * 1024 * 1024;
+constexpr std::int64_t kDefaultOutputLimitBytes     = std::int64_t{1024} * 1024;
+constexpr std::int64_t kMaximumOutputLimitBytes     = std::int64_t{64} * 1024 * 1024;
+constexpr std::int64_t kMaximumHttpHeaderLimitBytes = std::int64_t{4} * 1024 * 1024;
+constexpr std::size_t  kMaximumHttpRetryErrors{16};
+constexpr std::size_t  kMaximumHttpRetryStatuses{64};
 
 auto attribute_error(std::string code, std::string message) -> jb::core::Error
 {
@@ -83,7 +88,7 @@ auto validate_set(AttributeRegistry const& registry, AttributeSet const& values,
     return AttributeResult::success();
 }
 
-auto validate_standard_cross_fields(AttributeRegistry const& registry, AttributeSet const& values) -> AttributeResult
+auto validate_retry_cross_fields(AttributeRegistry const& registry, AttributeSet const& values) -> AttributeResult
 {
     auto const* initial_definition = registry.find("retry.initial_delay");
     auto const* maximum_definition = registry.find("retry.max_delay");
@@ -108,6 +113,40 @@ auto validate_standard_cross_fields(AttributeRegistry const& registry, Attribute
     return AttributeResult::success();
 }
 
+auto validate_http_cross_fields(AttributeRegistry const& registry, AttributeSet const& values) -> AttributeResult
+{
+    auto const* follow_definition    = registry.find("http.follow_redirects");
+    auto const* redirects_definition = registry.find("http.max_redirects");
+    if (follow_definition == nullptr || redirects_definition == nullptr ||
+        follow_definition->type != AttributeType::Boolean || redirects_definition->type != AttributeType::Integer) {
+        return AttributeResult::success();
+    }
+
+    // Partial layers may supply only one side; the effective relationship is
+    // enforced once materialization provides both values.
+    auto const follow    = values.find("http.follow_redirects");
+    auto const redirects = values.find("http.max_redirects");
+    if (follow == values.end() || redirects == values.end()) {
+        return AttributeResult::success();
+    }
+    auto const* enabled = std::get_if<bool>(&follow->second.data);
+    auto const* maximum = std::get_if<std::int64_t>(&redirects->second.data);
+    if (enabled != nullptr && maximum != nullptr && *enabled && *maximum < 1) {
+        return AttributeResult::failure(
+            invalid_value("http.max_redirects must be positive when http.follow_redirects is enabled"));
+    }
+    return AttributeResult::success();
+}
+
+auto validate_standard_cross_fields(AttributeRegistry const& registry, AttributeSet const& values) -> AttributeResult
+{
+    auto retry = validate_retry_cross_fields(registry, values);
+    if (!retry) {
+        return retry;
+    }
+    return validate_http_cross_fields(registry, values);
+}
+
 auto validate_complete_set(AttributeRegistry const& registry, AttributeSet const& values) -> AttributeResult
 {
     auto validated = validate_set(registry, values, AttributeScope::Job);
@@ -130,6 +169,26 @@ auto is_one_of(std::string const& value, std::initializer_list<std::string_view>
         }
     }
     return false;
+}
+
+auto validate_string_list(AttributeValue::List const& values, std::size_t maximum_size, auto&& accepts) -> bool
+{
+    if (values.size() > maximum_size) {
+        return false;
+    }
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        auto const* text = std::get_if<std::string>(&values[index].data);
+        if (text == nullptr || !accepts(*text)) {
+            return false;
+        }
+        for (std::size_t previous = 0; previous < index; ++previous) {
+            auto const* previous_text = std::get_if<std::string>(&values[previous].data);
+            if (previous_text != nullptr && *previous_text == *text) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 auto duration_to_milliseconds(jb::core::Duration value) -> Result<std::int64_t>
@@ -408,6 +467,55 @@ StandardAttributeRegistry::StandardAttributeRegistry()
     : _definitions{
           {
            {
+                  .name             = "http.follow_redirects",
+                  .type             = AttributeType::Boolean,
+                  .scopes           = standard_scopes(),
+                  .built_in_default = {.data = false},
+                  .description      = "Whether HTTP redirects are followed",
+              }, {
+                  .name             = "http.idempotency_key",
+                  .type             = AttributeType::Boolean,
+                  .scopes           = standard_scopes(),
+                  .built_in_default = {.data = false},
+                  .description      = "Whether HTTP execution injects the run identifier as an idempotency key",
+              }, {
+                  .name             = "http.max_redirects",
+                  .type             = AttributeType::Integer,
+                  .scopes           = standard_scopes(),
+                  .built_in_default = {.data = std::int64_t{5}},
+                  .description      = "Maximum number of HTTP redirects",
+              }, {
+                  .name             = "http.retry_errors",
+                  .type             = AttributeType::List,
+                  .scopes           = standard_scopes(),
+                  .built_in_default = {.data =
+                                           AttributeValue::List{
+                                               {.data = std::string{"resolve"}},
+                                               {.data = std::string{"connect"}},
+                                               {.data = std::string{"tls_handshake"}},
+                                               {.data = std::string{"timeout"}},
+                                               {.data = std::string{"send"}},
+                                               {.data = std::string{"receive"}},
+                                           }},
+                  .description      = "HTTP transport error categories eligible for retry",
+              }, {
+                  .name             = "http.retry_statuses",
+                  .type             = AttributeType::List,
+                  .scopes           = standard_scopes(),
+                  .built_in_default = {.data =
+                                           AttributeValue::List{
+                                               {.data = std::string{"408"}},
+                                               {.data = std::string{"429"}},
+                                               {.data = std::string{"500-599"}},
+                                           }},
+                  .description      = "Unexpected HTTP response statuses eligible for retry",
+              }, {
+                  .name             = "http.tls_verify",
+                  .type             = AttributeType::Boolean,
+                  .scopes           = standard_scopes(),
+                  .built_in_default = {.data = true},
+                  .description      = "Whether HTTP TLS certificates and hostnames are verified",
+              }, {
                   .name             = "job.timeout",
                   .type             = AttributeType::Duration,
                   .scopes           = standard_scopes(),
@@ -420,6 +528,18 @@ StandardAttributeRegistry::StandardAttributeRegistry()
                   .scopes           = standard_scopes(),
                   .built_in_default = {.data = std::string{"on_error"}},
                   .description      = "Runner output capture policy",
+              }, {
+                  .name             = "output.http_body_limit",
+                  .type             = AttributeType::Integer,
+                  .scopes           = standard_scopes(),
+                  .built_in_default = {.data = kDefaultOutputLimitBytes},
+                  .description      = "Maximum captured HTTP response body bytes",
+              }, {
+                  .name             = "output.http_headers_limit",
+                  .type             = AttributeType::Integer,
+                  .scopes           = standard_scopes(),
+                  .built_in_default = {.data = std::int64_t{64} * 1024},
+                  .description      = "Maximum captured raw HTTP response header bytes",
               }, {
                   .name             = "output.stderr_limit",
                   .type             = AttributeType::Integer,
@@ -505,7 +625,38 @@ auto StandardAttributeRegistry::validate(std::string_view name, AttributeValue c
     }
 
     using namespace std::chrono;
-    if (name == "job.timeout") {
+    if (name == "http.max_redirects") {
+        auto const maximum = std::get<std::int64_t>(value.data);
+        if (maximum < 0 || maximum > 20) {
+            return AttributeResult::failure(invalid_value());
+        }
+    }
+    else if (name == "http.retry_errors") {
+        auto const& errors = std::get<AttributeValue::List>(value.data);
+        if (!validate_string_list(errors, kMaximumHttpRetryErrors, [](std::string const& error) {
+                return is_one_of(error,
+                                 {"resolve",
+                                  "connect",
+                                  "tls_handshake",
+                                  "tls_verification",
+                                  "timeout",
+                                  "send",
+                                  "receive",
+                                  "redirect",
+                                  "protocol"});
+            })) {
+            return AttributeResult::failure(invalid_value());
+        }
+    }
+    else if (name == "http.retry_statuses") {
+        auto const& statuses = std::get<AttributeValue::List>(value.data);
+        if (!validate_string_list(statuses, kMaximumHttpRetryStatuses, [](std::string const& selector) {
+                return detail::parse_http_status_selector(selector).has_value();
+            })) {
+            return AttributeResult::failure(invalid_value());
+        }
+    }
+    else if (name == "job.timeout") {
         auto const duration = std::get<jb::core::Duration>(value.data);
         if (duration < duration_cast<jb::core::Duration>(milliseconds{1}) ||
             duration > duration_cast<jb::core::Duration>(days{30})) {
@@ -557,7 +708,13 @@ auto StandardAttributeRegistry::validate(std::string_view name, AttributeValue c
             return AttributeResult::failure(invalid_value());
         }
     }
-    else if (name == "output.stdout_limit" || name == "output.stderr_limit") {
+    else if (name == "output.http_headers_limit") {
+        auto const limit = std::get<std::int64_t>(value.data);
+        if (limit < 0 || limit > kMaximumHttpHeaderLimitBytes) {
+            return AttributeResult::failure(invalid_value());
+        }
+    }
+    else if (name == "output.http_body_limit" || name == "output.stdout_limit" || name == "output.stderr_limit") {
         auto const limit = std::get<std::int64_t>(value.data);
         if (limit < 0 || limit > kMaximumOutputLimitBytes) {
             return AttributeResult::failure(invalid_value());

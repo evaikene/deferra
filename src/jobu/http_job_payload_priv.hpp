@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace jb::jobu::detail {
@@ -21,6 +22,8 @@ struct HttpStatusRange {
 
     auto operator==(HttpStatusRange const&) const -> bool = default;
 };
+
+[[nodiscard]] auto parse_http_status_selector(std::string_view selector) noexcept -> std::optional<HttpStatusRange>;
 
 class HttpStatusSet final {
 public:
