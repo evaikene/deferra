@@ -96,19 +96,6 @@ auto request_not_found() -> jb::core::Error
     };
 }
 
-auto cancelled() -> jb::net::HttpCompletionResult
-{
-    auto error = jb::core::Error{
-        .category = jb::core::ErrorCategory::Cancelled,
-        .code     = "net.http.cancelled",
-        .message  = "The HTTP request was cancelled",
-    };
-    return jb::net::HttpCompletionResult::failure({
-        .kind  = jb::net::HttpErrorKind::Cancelled,
-        .error = std::move(error),
-    });
-}
-
 auto backend_completion(jb::core::Error const& error) -> jb::net::HttpCompletionResult
 {
     return jb::net::HttpCompletionResult::failure({
@@ -338,7 +325,11 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
             return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(prepared).error());
         }
 
-        auto  request_state         = std::move(prepared).value();
+        auto request_state = std::move(prepared).value();
+        auto admission     = request_state->prepare_admission(jb::core::Clock::now());
+        if (!admission) {
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(admission).error());
+        }
         auto* easy                  = request_state->easy();
         auto [request_it, inserted] = requests.emplace(request_id, std::move(request_state));
         if (!inserted) {
@@ -389,7 +380,8 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
             return VoidResult::failure(std::move(removed).error());
         }
         requests_by_easy.erase(easy);
-        queue_completion(*it->second, cancelled());
+        auto completion = it->second->cancellation_result();
+        queue_completion(*it->second, std::move(completion));
         return VoidResult::success();
     }
 

@@ -1,6 +1,9 @@
 #include "curl_request_priv.hpp"
 
+#include "curl_error_priv.hpp"
+
 #include <algorithm>
+#include <chrono>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -45,6 +48,19 @@ auto request_protocol_error(std::string_view reason) -> HttpError
                     .code     = "net.http.protocol_error",
                     .message  = "The HTTP response was not usable",
                     .detail   = std::string{reason},
+                    },
+    };
+}
+
+auto request_cancelled_error() -> HttpError
+{
+    return {
+        .kind = HttpErrorKind::Cancelled,
+        .error =
+            {
+                    .category = jb::core::ErrorCategory::Cancelled,
+                    .code     = "net.http.cancelled",
+                    .message  = "The HTTP request was cancelled",
                     },
     };
 }
@@ -177,6 +193,20 @@ auto valid_field_value(std::string_view value) noexcept -> bool
 
 } // anonymous namespace
 
+auto curl_timeout_milliseconds(jb::core::Duration remaining) -> jb::core::Result<long, jb::core::Error>
+{
+    using Result = jb::core::Result<long, jb::core::Error>;
+
+    auto milliseconds = std::chrono::ceil<std::chrono::milliseconds>(remaining).count();
+    if (milliseconds <= 0) {
+        milliseconds = 1;
+    }
+    if (!std::in_range<long>(milliseconds)) {
+        return Result::failure(request_backend_unavailable("request.timeout_conversion_failed"));
+    }
+    return Result::success(static_cast<long>(milliseconds));
+}
+
 void CurlEasyDeleter::operator()(CURL* easy) const noexcept
 {
     curl_easy_cleanup(easy);
@@ -264,10 +294,32 @@ CurlRequest::CurlRequest(HttpRequestId         id,
     , _easy{std::move(easy)}
 {}
 
+auto CurlRequest::prepare_admission(jb::core::TimePoint accepted_at) -> jb::core::Result<void, jb::core::Error>
+{
+    using Result = jb::core::Result<void, jb::core::Error>;
+
+    if (_request.timeout > jb::core::TimePoint::max() - accepted_at) {
+        return Result::failure(request_backend_unavailable("request.deadline_overflow"));
+    }
+
+    auto const deadline = accepted_at + _request.timeout;
+    auto       timeout  = curl_timeout_milliseconds(deadline - jb::core::Clock::now());
+    if (!timeout) {
+        return Result::failure(std::move(timeout).error());
+    }
+    if (!set_option(_easy.get(), CURLOPT_TIMEOUT_MS, *timeout) ||
+        !set_option(_easy.get(), CURLOPT_CONNECTTIMEOUT_MS, *timeout)) {
+        return Result::failure(request_backend_unavailable("request.timeout_configuration_failed"));
+    }
+
+    _accepted_at = accepted_at;
+    _deadline    = deadline;
+    return Result::success();
+}
+
 void CurlRequest::mark_accepted() noexcept
 {
-    _accepted_at = jb::core::Clock::now();
-    _accepted    = true;
+    _accepted = true;
 }
 
 void CurlRequest::prepare_completion(HttpCompletionResult result)
@@ -284,6 +336,13 @@ auto CurlRequest::take_handler() -> HttpCompletionHandler
 auto CurlRequest::take_result() -> HttpCompletionResult
 {
     return std::move(_result).value();
+}
+
+auto CurlRequest::cancellation_result() -> HttpCompletionResult
+{
+    auto error = request_cancelled_error();
+    populate_error_observation(error);
+    return HttpCompletionResult::failure(std::move(error));
 }
 
 auto CurlRequest::body_callback(char* data, std::size_t size, std::size_t count, void* context) noexcept -> std::size_t
@@ -506,7 +565,7 @@ auto CurlRequest::transfer_result(CURLcode result) -> HttpCompletionResult
         return HttpCompletionResult::failure(std::move(error));
     }
     if (result != CURLE_OK) {
-        auto error = request_internal_error();
+        auto error = map_curl_error(result);
         populate_error_observation(error);
         return HttpCompletionResult::failure(std::move(error));
     }

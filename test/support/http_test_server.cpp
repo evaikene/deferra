@@ -157,7 +157,10 @@ auto parse_request_headers(std::string_view block, HttpTestRequest& request, std
     return true;
 }
 
-auto read_request(int fd, std::string& pending, HttpTestRequest& request) -> bool
+auto read_request_headers(int                         fd,
+                          std::string&                pending,
+                          HttpTestRequest&            request,
+                          std::optional<std::size_t>& content_length) -> bool
 {
     auto header_end = pending.find("\r\n\r\n");
     while (header_end == std::string::npos) {
@@ -170,22 +173,25 @@ auto read_request(int fd, std::string& pending, HttpTestRequest& request) -> boo
         return false;
     }
 
-    auto content_length = std::optional<std::size_t>{};
     if (!parse_request_headers(std::string_view{pending}.substr(0, header_end), request, content_length)) {
         return false;
     }
-    auto const body_size    = content_length.value_or(0U);
-    auto const message_size = header_end + 4U + body_size;
-    while (pending.size() < message_size) {
+    pending.erase(0U, header_end + 4U);
+    return true;
+}
+
+auto read_request_body(int fd, std::string& pending, HttpTestRequest& request, std::size_t body_size) -> bool
+{
+    while (pending.size() < body_size) {
         if (!receive_more(fd, pending)) {
             return false;
         }
     }
 
-    auto const body  = std::string_view{pending}.substr(header_end + 4U, body_size);
+    auto const body  = std::string_view{pending}.substr(0U, body_size);
     auto const bytes = jb::core::as_bytes(body);
     request.body.assign(bytes.begin(), bytes.end());
-    pending.erase(0U, message_size);
+    pending.erase(0U, body_size);
     return true;
 }
 
@@ -235,7 +241,12 @@ void append_chunked_body(std::string& output, jb::core::ByteView body, std::size
     output += "0\r\n\r\n";
 }
 
-auto encode_response(HttpTestResponse const& response, bool head_request) -> std::string
+struct EncodedResponse {
+    std::string bytes;
+    std::size_t body_offset{0};
+};
+
+auto encode_response(HttpTestResponse const& response, bool head_request) -> EncodedResponse
 {
     auto output = std::string{};
     for (auto const& informational : response.informational) {
@@ -258,9 +269,10 @@ auto encode_response(HttpTestResponse const& response, bool head_request) -> std
         });
     }
     append_header_block(output, response.status_code, response.reason, headers);
+    auto const body_offset = output.size();
 
     if (head_request) {
-        return output;
+        return {.bytes = std::move(output), .body_offset = body_offset};
     }
     if (response.framing == HttpTestBodyFraming::Chunked) {
         append_chunked_body(output, response.body, response.chunk_size);
@@ -268,7 +280,7 @@ auto encode_response(HttpTestResponse const& response, bool head_request) -> std
     else {
         append_body_bytes(output, response.body);
     }
-    return output;
+    return {.bytes = std::move(output), .body_offset = body_offset};
 }
 
 auto default_response() -> HttpTestResponse
@@ -388,6 +400,44 @@ void HttpTestServer::release_responses()
     _condition.notify_all();
 }
 
+void HttpTestServer::reset_next_request_after_headers()
+{
+    std::lock_guard lock{_mutex};
+    _reset_next_request_after_headers = true;
+}
+
+auto HttpTestServer::wait_for_request_headers(std::size_t count, std::chrono::milliseconds timeout) -> bool
+{
+    std::unique_lock lock{_mutex};
+    return _condition.wait_for(lock, timeout, [this, count]() -> bool {
+        return _request_headers_observed >= count || _stopping;
+    }) && _request_headers_observed >= count;
+}
+
+auto HttpTestServer::wait_for_response_segments(std::size_t count, std::chrono::milliseconds timeout) -> bool
+{
+    std::unique_lock lock{_mutex};
+    return _condition.wait_for(lock, timeout, [this, count]() -> bool {
+        return _response_segments_waiting >= count || _stopping;
+    }) && _response_segments_waiting >= count;
+}
+
+void HttpTestServer::release_response_segment()
+{
+    {
+        std::lock_guard lock{_mutex};
+        ++_response_segments_released;
+    }
+    _condition.notify_all();
+}
+
+auto HttpTestServer::wait_for_peer_closes(std::size_t count, std::chrono::milliseconds timeout) -> bool
+{
+    std::unique_lock lock{_mutex};
+    return _condition.wait_for(lock, timeout, [this, count]() -> bool { return _peer_closes >= count || _stopping; }) &&
+           _peer_closes >= count;
+}
+
 void HttpTestServer::accept_connections(int listen_fd)
 {
     for (;;) {
@@ -419,17 +469,34 @@ void HttpTestServer::handle_connection(int connection_fd)
     static_cast<void>(::setsockopt(connection_fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe)));
 #endif
 
-    auto pending = std::string{};
+    auto pending          = std::string{};
+    auto reset_connection = false;
     for (;;) {
-        auto request = HttpTestRequest{};
-        if (!read_request(connection_fd, pending, request)) {
+        auto request        = HttpTestRequest{};
+        auto content_length = std::optional<std::size_t>{};
+        if (!read_request_headers(connection_fd, pending, request, content_length)) {
+            break;
+        }
+
+        {
+            std::lock_guard lock{_mutex};
+            ++_request_headers_observed;
+            _condition.notify_all();
+            if (_reset_next_request_after_headers) {
+                _reset_next_request_after_headers = false;
+                reset_connection                  = true;
+            }
+        }
+        if (reset_connection ||
+            !read_request_body(connection_fd, pending, request, content_length.value_or(std::size_t{0}))) {
             break;
         }
 
         auto response = HttpTestResponse{};
+        auto is_head  = false;
         {
             std::unique_lock lock{_mutex};
-            auto const       is_head = request.method == "HEAD";
+            is_head = request.method == "HEAD";
             _requests.push_back(std::move(request));
             response = _next_response < _responses.size() ? _responses[_next_response++] : default_response();
             _condition.notify_all();
@@ -437,10 +504,33 @@ void HttpTestServer::handle_connection(int connection_fd)
             if (_stopping) {
                 break;
             }
+        }
 
-            auto encoded = encode_response(response, is_head);
+        auto encoded     = encode_response(response, is_head);
+        auto prefix_size = encoded.bytes.size();
+        if (response.pause_after_response_bytes) {
+            prefix_size = std::min(prefix_size, encoded.body_offset + *response.pause_after_response_bytes);
+        }
+        if (response.close_after_response_bytes) {
+            prefix_size = std::min(prefix_size, encoded.body_offset + *response.close_after_response_bytes);
+        }
+        if (!send_all(connection_fd, encoded.bytes.data(), prefix_size)) {
+            break;
+        }
+        if (response.close_after_response_bytes) {
+            break;
+        }
+        if (response.pause_after_response_bytes && prefix_size < encoded.bytes.size()) {
+            std::unique_lock lock{_mutex};
+            auto const       segment = ++_response_segments_waiting;
+            _condition.notify_all();
+            _condition.wait(lock,
+                            [this, segment]() -> bool { return _response_segments_released >= segment || _stopping; });
+            if (_stopping) {
+                break;
+            }
             lock.unlock();
-            if (!send_all(connection_fd, encoded.data(), encoded.size())) {
+            if (!send_all(connection_fd, encoded.bytes.data() + prefix_size, encoded.bytes.size() - prefix_size)) {
                 break;
             }
         }
@@ -453,8 +543,19 @@ void HttpTestServer::handle_connection(int connection_fd)
         std::lock_guard lock{_mutex};
         _connection_fds.erase(connection_fd);
     }
-    static_cast<void>(::shutdown(connection_fd, SHUT_RDWR));
+    if (reset_connection) {
+        auto linger = ::linger{.l_onoff = 1, .l_linger = 0};
+        static_cast<void>(::setsockopt(connection_fd, SOL_SOCKET, SO_LINGER, &linger, sizeof(linger)));
+    }
+    else {
+        static_cast<void>(::shutdown(connection_fd, SHUT_RDWR));
+    }
     close_fd(connection_fd);
+    {
+        std::lock_guard lock{_mutex};
+        ++_peer_closes;
+    }
+    _condition.notify_all();
 }
 
 } // namespace jb::test
