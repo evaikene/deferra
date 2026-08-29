@@ -736,6 +736,45 @@ TEST_CASE("system HTTP client ignores ambient proxies and enforces explicit prox
     }
 }
 
+TEST_CASE("system HTTP client supports plain and verified TLS over IPv6 loopback", "[net][http]")
+{
+    auto app = jb::core::Application{0, nullptr};
+
+    SECTION("plain HTTP")
+    {
+        auto server =
+            jb::test::HttpTestServer{jb::test::HttpTestTransport::Plain, jb::test::HttpTestAddressFamily::Ipv6};
+        server.enqueue_response({.body = bytes("ipv6-plain")});
+        server.release_responses();
+        CHECK(server.url("/plain").starts_with("http://[::1]:"));
+
+        auto created = SystemHttpClient::create(*app.event_loop());
+        REQUIRE(created);
+        auto completed = complete_request(app, **created, minimal_request(server.url("/plain")));
+        REQUIRE(completed);
+        CHECK(byte_text(completed->body.bytes) == "ipv6-plain");
+        CHECK_FALSE(completed->tls_verified);
+    }
+
+    SECTION("verified TLS")
+    {
+        auto directory = jb::test::TemporaryDirectory{};
+        auto ca_path   = write_test_ca(directory, "stage-5.8-ipv6-ca.pem");
+        auto server = jb::test::HttpTestServer{jb::test::HttpTestTransport::Tls, jb::test::HttpTestAddressFamily::Ipv6};
+        server.enqueue_response({.body = bytes("ipv6-tls")});
+        server.release_responses();
+        CHECK(server.url("/tls").starts_with("https://[::1]:"));
+
+        auto created = SystemHttpClient::create(*app.event_loop(), {.ca_bundle = ca_path});
+        REQUIRE(created);
+        auto completed = complete_request(app, **created, minimal_request(server.url("/tls")));
+        REQUIRE(completed);
+        CHECK(byte_text(completed->body.bytes) == "ipv6-tls");
+        REQUIRE(completed->tls_verified);
+        CHECK(*completed->tls_verified);
+    }
+}
+
 TEST_CASE("system HTTP client reapplies TLS policy across a secure redirect", "[net][http]")
 {
     auto app       = jb::core::Application{0, nullptr};
@@ -1471,6 +1510,10 @@ TEST_CASE("system HTTP client dechunks and decompresses response bodies", "[net]
         .headers = {{.name = "Content-Encoding", .value = "deflate"}},
         .body    = hex_bytes("789c4b494dcecf2d284a2d2e4e4d51005205f979c5a90a49f92995008d610a5c"),
     });
+    server.enqueue_response({
+        .headers = {{.name = "Content-Encoding", .value = "gzip"}},
+        .body = hex_bytes("1f8b08000000000002ff4b494dcecf2d284a2d2e4e4d51005205f979c5a90a49f9299500fa57a4f31a000000"),
+    });
     server.release_responses();
 
     auto created = SystemHttpClient::create(*app.event_loop());
@@ -1484,6 +1527,14 @@ TEST_CASE("system HTTP client dechunks and decompresses response bodies", "[net]
         CHECK(completed->body.total_bytes == 26U);
         CHECK_FALSE(completed->body.truncated);
     }
+
+    auto limited_request                = minimal_request(server.url("/gzip-limited"));
+    limited_request.response_body_limit = 7U;
+    auto limited                        = complete_request(app, *client, std::move(limited_request));
+    REQUIRE(limited);
+    CHECK(byte_text(limited->body.bytes) == "decoody");
+    CHECK(limited->body.total_bytes == 26U);
+    CHECK(limited->body.truncated);
 }
 
 TEST_CASE("system HTTP client enforces the independent parsed header limit safely", "[net][http]")
@@ -1568,7 +1619,7 @@ TEST_CASE("system HTTP client completes a loopback GET strictly after start", "[
     CHECK(client->is_available());
 }
 
-TEST_CASE("system HTTP client drives two held GETs concurrently", "[net][http]")
+TEST_CASE("system HTTP client drives a held GET and POST concurrently", "[net][http]")
 {
     auto app     = jb::core::Application{0, nullptr};
     auto server  = jb::test::HttpTestServer{};
@@ -1581,16 +1632,33 @@ TEST_CASE("system HTTP client drives two held GETs concurrently", "[net][http]")
         REQUIRE(result);
         ++callback_count;
     };
-    auto first = client->start(minimal_request(server.url("/first")), completion);
+    auto first = client->start(minimal_request(server.url("/get")), completion);
     REQUIRE(first);
-    auto second = client->start(minimal_request(server.url("/second")), completion);
+    auto post_request   = minimal_request(server.url("/post"));
+    post_request.method = "POST";
+    post_request.body   = bytes("held-post-body");
+    auto second         = client->start(std::move(post_request), completion);
     REQUIRE(second);
     CHECK(*second > *first);
+    CHECK(callback_count == 0);
     CHECK(client->active_request_count() == 2U);
 
     REQUIRE(process_until(app, [&]() -> bool { return server.wait_for_requests(2U, 0ms); }));
     CHECK(callback_count == 0);
     CHECK(client->active_request_count() == 2U);
+    auto const requests = server.requests();
+    auto const get      = std::ranges::find_if(requests, [](jb::test::HttpTestRequest const& request) {
+        return request.target == "/get";
+    });
+    auto const post     = std::ranges::find_if(requests, [](jb::test::HttpTestRequest const& request) {
+        return request.target == "/post";
+    });
+    REQUIRE(get != requests.end());
+    CHECK(get->method == "GET");
+    CHECK(get->body.empty());
+    REQUIRE(post != requests.end());
+    CHECK(post->method == "POST");
+    CHECK(byte_text(post->body) == "held-post-body");
 
     server.release_responses();
     REQUIRE(process_until(app, [&]() -> bool { return callback_count == 2; }));

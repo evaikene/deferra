@@ -522,6 +522,8 @@ void CurlMultiAdapter::enter_failed(std::string_view reason)
         return;
     }
 
+    // A multi/EventLoop failure leaves every shared transfer state uncertain, so retire the complete adapter instead
+    // of attempting to continue selected easy handles on the same multi handle.
     _failure               = backend_failed(reason);
     _accept_curl_callbacks = false;
     if (_timer) {
