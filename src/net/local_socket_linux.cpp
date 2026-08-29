@@ -569,9 +569,20 @@ void LocalSocket::Private::read_available(LocalSocket& socket)
         return;
     }
 
-    if (read_any) {
-        socket.emit_ready_read();
+    if (!read_any) {
+        return;
     }
+
+    auto const read_paused = read_buffer_limit != 0 && input_buffer.size() >= read_buffer_limit;
+    if (read_paused && !update_watch(socket)) {
+        socket.emit_ready_read();
+        fail_lifecycle(socket,
+                       jb::core::IOError::ResourceError,
+                       "local socket event-loop watch registration failed",
+                       true);
+        return;
+    }
+    socket.emit_ready_read();
 }
 
 void LocalSocket::Private::write_pending(LocalSocket& socket)
