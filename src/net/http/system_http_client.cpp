@@ -104,41 +104,6 @@ auto backend_completion(jb::core::Error const& error) -> jb::net::HttpCompletion
     });
 }
 
-auto ascii_starts_with(std::string_view value, std::string_view prefix) noexcept -> bool
-{
-    if (value.size() < prefix.size()) {
-        return false;
-    }
-    for (std::size_t index = 0; index < prefix.size(); ++index) {
-        auto left  = static_cast<unsigned char>(value[index]);
-        auto right = static_cast<unsigned char>(prefix[index]);
-        if (left >= static_cast<unsigned char>('A') && left <= static_cast<unsigned char>('Z')) {
-            left = static_cast<unsigned char>(left + ('a' - 'A'));
-        }
-        if (right >= static_cast<unsigned char>('A') && right <= static_cast<unsigned char>('Z')) {
-            right = static_cast<unsigned char>(right + ('a' - 'A'));
-        }
-        if (left != right) {
-            return false;
-        }
-    }
-    return true;
-}
-
-auto validate_stage_5_6_scope(jb::net::HttpRequest const& request, SystemHttpClientOptions const& options) -> VoidResult
-{
-    if (!request.verify_tls) {
-        return VoidResult::failure(invalid_request("stage_5_6.unsafe_tls_not_supported"));
-    }
-    if (!ascii_starts_with(request.url, "http://")) {
-        return VoidResult::failure(invalid_request("stage_5_6.https_not_supported"));
-    }
-    if (options.proxy) {
-        return VoidResult::failure(invalid_request("stage_5_6.proxy_not_supported"));
-    }
-    return VoidResult::success();
-}
-
 auto validate_ca_bundle(std::filesystem::path const& path) -> VoidResult
 {
     std::error_code error;
@@ -268,6 +233,10 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
     explicit Private(jb::core::EventLoop& loop_value, SystemHttpClientOptions value)
         : loop{loop_value}
         , options{std::move(value)}
+        , transfer_policy{
+              .ca_bundle = options.ca_bundle ? std::optional<std::string>{options.ca_bundle->string()} : std::nullopt,
+              .proxy     = options.proxy,
+          }
         , callback_state{std::make_shared<CallbackState>(CallbackState{.owner = this})}
     {
         auto adapter = detail::CurlMultiAdapter::create(
@@ -370,10 +339,6 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
             return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(
                 invalid_request("completion.empty"));
         }
-        auto stage_scope = validate_stage_5_6_scope(request, options);
-        if (!stage_scope) {
-            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(stage_scope).error());
-        }
         if (!is_available()) {
             return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(unavailable());
         }
@@ -385,6 +350,7 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
         auto       prepared   = detail::CurlRequest::create(request_id,
                                                             std::move(request),
                                                             std::move(completion),
+                                                            transfer_policy,
                                                             options.maximum_parsed_response_header_bytes);
         if (!prepared) {
             return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(prepared).error());
@@ -615,10 +581,11 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
         owner->emit(owner->failed, *stored_failure);
     }
 
-    // Retain the validated snapshot so transfer admission never borrows caller-owned configuration.
     SystemHttpClient*                                                                owner{nullptr};
     jb::core::EventLoop&                                                             loop;
+    // Retain validated public options and curl-ready strings so requests never borrow caller-owned configuration.
     SystemHttpClientOptions                                                          options;
+    detail::CurlTransferPolicy                                                       transfer_policy;
     std::shared_ptr<CallbackState>                                                   callback_state;
     std::unique_ptr<detail::CurlMultiAdapter>                                        multi;
     std::optional<jb::core::Error>                                                   initialization_failure;

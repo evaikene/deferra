@@ -1,10 +1,16 @@
 #include "http_test_server.hpp"
 
+#include "http_test_certificates.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <charconv>
+// Supplies the POSIX signal-set API paired with pthread_sigmask below.
+#include <csignal> // IWYU pragma: keep
+#include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -14,7 +20,20 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <pthread.h>
+
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+
 namespace jb::test {
+
+struct HttpTestTlsContext {
+    struct Deleter {
+        void operator()(SSL_CTX* context) const noexcept { SSL_CTX_free(context); }
+    };
+
+    std::unique_ptr<SSL_CTX, Deleter> context;
+};
 
 namespace {
 
@@ -39,12 +58,90 @@ auto socket_error(std::string_view operation) -> std::system_error
     return {errno, std::generic_category(), std::string{operation}};
 }
 
-auto send_all(int fd, void const* data, std::size_t size) noexcept -> bool
+struct SslDeleter {
+    void operator()(SSL* session) const noexcept { SSL_free(session); }
+};
+
+using SslSession = std::unique_ptr<SSL, SslDeleter>;
+
+struct HttpTestStream {
+    int  fd{-1};
+    SSL* tls{nullptr};
+};
+
+auto make_tls_context(HttpTestTransport transport) -> std::unique_ptr<HttpTestTlsContext>
+{
+    if (transport == HttpTestTransport::Plain) {
+        return {};
+    }
+
+    auto result = std::make_unique<HttpTestTlsContext>();
+    result->context.reset(SSL_CTX_new(TLS_server_method()));
+    auto const cert_pem =
+        transport == HttpTestTransport::Tls ? kHttpTestServerCertificate : kHttpTestMismatchedCertificate;
+    auto const key_pem =
+        transport == HttpTestTransport::Tls ? kHttpTestServerPrivateKey : kHttpTestMismatchedPrivateKey;
+    auto cert_bio =
+        std::unique_ptr<BIO, decltype(&BIO_free)>{BIO_new_mem_buf(cert_pem.data(), static_cast<int>(cert_pem.size())),
+                                                  &BIO_free};
+    auto key_bio =
+        std::unique_ptr<BIO, decltype(&BIO_free)>{BIO_new_mem_buf(key_pem.data(), static_cast<int>(key_pem.size())),
+                                                  &BIO_free};
+    auto certificate = std::unique_ptr<X509, decltype(&X509_free)>{
+        cert_bio ? PEM_read_bio_X509(cert_bio.get(), nullptr, nullptr, nullptr) : nullptr,
+        &X509_free};
+    auto private_key = std::unique_ptr<EVP_PKEY, decltype(&EVP_PKEY_free)>{
+        key_bio ? PEM_read_bio_PrivateKey(key_bio.get(), nullptr, nullptr, nullptr) : nullptr,
+        &EVP_PKEY_free};
+
+    if (!result->context || !certificate || !private_key ||
+        SSL_CTX_set_min_proto_version(result->context.get(), TLS1_2_VERSION) != 1 ||
+        SSL_CTX_use_certificate(result->context.get(), certificate.get()) != 1 ||
+        SSL_CTX_use_PrivateKey(result->context.get(), private_key.get()) != 1 ||
+        SSL_CTX_check_private_key(result->context.get()) != 1) {
+        throw std::runtime_error{"could not initialize loopback TLS fixture"};
+    }
+    return result;
+}
+
+auto accept_tls(HttpTestTlsContext& context, int fd) -> SslSession
+{
+    auto session = SslSession{SSL_new(context.context.get())};
+    if (!session || SSL_set_fd(session.get(), fd) != 1 || SSL_accept(session.get()) != 1) {
+        return {};
+    }
+    return session;
+}
+
+void block_tls_sigpipe() noexcept
+{
+    auto signals = sigset_t{};
+    if (sigemptyset(&signals) == 0 && sigaddset(&signals, SIGPIPE) == 0) {
+        static_cast<void>(pthread_sigmask(SIG_BLOCK, &signals, nullptr));
+    }
+}
+
+auto send_all(HttpTestStream const& stream, void const* data, std::size_t size) noexcept -> bool
 {
     auto const* bytes = static_cast<char const*>(data);
     auto        sent  = std::size_t{0};
     while (sent < size) {
-        auto const count = ::send(fd, bytes + sent, size - sent, kSendFlags);
+        if (stream.tls) {
+            auto written = std::size_t{0};
+            auto result  = SSL_write_ex(stream.tls, bytes + sent, size - sent, &written);
+            if (result == 1) {
+                sent += written;
+                continue;
+            }
+            auto const error = SSL_get_error(stream.tls, result);
+            if (error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE ||
+                (error == SSL_ERROR_SYSCALL && errno == EINTR)) {
+                continue;
+            }
+            return false;
+        }
+
+        auto const count = ::send(stream.fd, bytes + sent, size - sent, kSendFlags);
         if (count > 0) {
             sent += static_cast<std::size_t>(count);
             continue;
@@ -57,11 +154,26 @@ auto send_all(int fd, void const* data, std::size_t size) noexcept -> bool
     return true;
 }
 
-auto receive_more(int fd, std::string& pending) -> bool
+auto receive_more(HttpTestStream const& stream, std::string& pending) -> bool
 {
     for (;;) {
-        auto       buffer = std::array<char, 4096>{};
-        auto const count  = ::recv(fd, buffer.data(), buffer.size(), 0);
+        auto buffer = std::array<char, 4096>{};
+        if (stream.tls) {
+            auto received = std::size_t{0};
+            auto result   = SSL_read_ex(stream.tls, buffer.data(), buffer.size(), &received);
+            if (result == 1) {
+                pending.append(buffer.data(), received);
+                return true;
+            }
+            auto const error = SSL_get_error(stream.tls, result);
+            if (error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE ||
+                (error == SSL_ERROR_SYSCALL && errno == EINTR)) {
+                continue;
+            }
+            return false;
+        }
+
+        auto const count = ::recv(stream.fd, buffer.data(), buffer.size(), 0);
         if (count > 0) {
             pending.append(buffer.data(), static_cast<std::size_t>(count));
             return true;
@@ -157,14 +269,14 @@ auto parse_request_headers(std::string_view block, HttpTestRequest& request, std
     return true;
 }
 
-auto read_request_headers(int                         fd,
+auto read_request_headers(HttpTestStream const&       stream,
                           std::string&                pending,
                           HttpTestRequest&            request,
                           std::optional<std::size_t>& content_length) -> bool
 {
     auto header_end = pending.find("\r\n\r\n");
     while (header_end == std::string::npos) {
-        if (pending.size() >= kMaximumTestRequestHeaderBytes || !receive_more(fd, pending)) {
+        if (pending.size() >= kMaximumTestRequestHeaderBytes || !receive_more(stream, pending)) {
             return false;
         }
         header_end = pending.find("\r\n\r\n");
@@ -180,10 +292,13 @@ auto read_request_headers(int                         fd,
     return true;
 }
 
-auto read_request_body(int fd, std::string& pending, HttpTestRequest& request, std::size_t body_size) -> bool
+auto read_request_body(HttpTestStream const& stream,
+                       std::string&          pending,
+                       HttpTestRequest&      request,
+                       std::size_t           body_size) -> bool
 {
     while (pending.size() < body_size) {
-        if (!receive_more(fd, pending)) {
+        if (!receive_more(stream, pending)) {
             return false;
         }
     }
@@ -293,7 +408,9 @@ auto default_response() -> HttpTestResponse
 
 } // anonymous namespace
 
-HttpTestServer::HttpTestServer()
+HttpTestServer::HttpTestServer(HttpTestTransport transport)
+    : _transport{transport}
+    , _tls_context{make_tls_context(transport)}
 {
     _listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (_listen_fd < 0) {
@@ -362,7 +479,8 @@ auto HttpTestServer::url(std::string path) const -> std::string
     if (path.empty() || path.front() != '/') {
         path.insert(path.begin(), '/');
     }
-    return "http://127.0.0.1:" + std::to_string(_port) + path;
+    auto const* const scheme = _transport == HttpTestTransport::Plain ? "http://" : "https://";
+    return std::string{scheme} + "127.0.0.1:" + std::to_string(_port) + path;
 }
 
 void HttpTestServer::enqueue_response(HttpTestResponse response)
@@ -469,12 +587,27 @@ void HttpTestServer::handle_connection(int connection_fd)
     static_cast<void>(::setsockopt(connection_fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe)));
 #endif
 
+    if (_tls_context) {
+        // OpenSSL writes do not expose MSG_NOSIGNAL, so confine SIGPIPE blocking to this fixture connection thread.
+        block_tls_sigpipe();
+    }
+    auto tls_session = _tls_context ? accept_tls(*_tls_context, connection_fd) : SslSession{};
+    if (_tls_context && !tls_session) {
+        std::lock_guard lock{_mutex};
+        _connection_fds.erase(connection_fd);
+        close_fd(connection_fd);
+        ++_peer_closes;
+        _condition.notify_all();
+        return;
+    }
+
+    auto stream           = HttpTestStream{.fd = connection_fd, .tls = tls_session.get()};
     auto pending          = std::string{};
     auto reset_connection = false;
     for (;;) {
         auto request        = HttpTestRequest{};
         auto content_length = std::optional<std::size_t>{};
-        if (!read_request_headers(connection_fd, pending, request, content_length)) {
+        if (!read_request_headers(stream, pending, request, content_length)) {
             break;
         }
 
@@ -487,8 +620,7 @@ void HttpTestServer::handle_connection(int connection_fd)
                 reset_connection                  = true;
             }
         }
-        if (reset_connection ||
-            !read_request_body(connection_fd, pending, request, content_length.value_or(std::size_t{0}))) {
+        if (reset_connection || !read_request_body(stream, pending, request, content_length.value_or(std::size_t{0}))) {
             break;
         }
 
@@ -514,7 +646,7 @@ void HttpTestServer::handle_connection(int connection_fd)
         if (response.close_after_response_bytes) {
             prefix_size = std::min(prefix_size, encoded.body_offset + *response.close_after_response_bytes);
         }
-        if (!send_all(connection_fd, encoded.bytes.data(), prefix_size)) {
+        if (!send_all(stream, encoded.bytes.data(), prefix_size)) {
             break;
         }
         if (response.close_after_response_bytes) {
@@ -530,7 +662,7 @@ void HttpTestServer::handle_connection(int connection_fd)
                 break;
             }
             lock.unlock();
-            if (!send_all(connection_fd, encoded.bytes.data() + prefix_size, encoded.bytes.size() - prefix_size)) {
+            if (!send_all(stream, encoded.bytes.data() + prefix_size, encoded.bytes.size() - prefix_size)) {
                 break;
             }
         }

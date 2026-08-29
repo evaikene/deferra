@@ -149,6 +149,12 @@ auto ascii_equal(std::string_view lhs, std::string_view rhs) noexcept -> bool
            });
 }
 
+auto url_uses_tls(std::string_view url) noexcept -> bool
+{
+    auto const separator = url.find(':');
+    return separator != std::string_view::npos && ascii_equal(url.substr(0U, separator), "https");
+}
+
 constexpr auto is_redirect_status(std::uint16_t status) noexcept -> bool
 {
     return status == 301U || status == 302U || status == 303U || status == 307U || status == 308U;
@@ -276,6 +282,7 @@ void CurlSlistDeleter::operator()(curl_slist* list) const noexcept
 auto CurlRequest::create(HttpRequestId         id,
                          HttpRequest           request,
                          HttpCompletionHandler completion,
+                         CurlTransferPolicy    policy,
                          std::size_t           maximum_parsed_response_header_bytes) -> RequestResult
 {
     auto easy = CurlEasy{curl_easy_init()};
@@ -287,6 +294,7 @@ auto CurlRequest::create(HttpRequestId         id,
         new CurlRequest{id,
                         std::move(request),
                         std::move(completion),
+                        std::move(policy),
                         maximum_parsed_response_header_bytes, std::move(easy)}
     };
     auto configured = result->configure_easy();
@@ -300,15 +308,18 @@ auto CurlRequest::create(HttpRequestId         id,
 CurlRequest::CurlRequest(HttpRequestId         id,
                          HttpRequest           request,
                          HttpCompletionHandler completion,
+                         CurlTransferPolicy    policy,
                          std::size_t           maximum_parsed_response_header_bytes,
                          CurlEasy              easy)
     : _id{id}
     , _request{std::move(request)}
     , _completion{std::move(completion)}
+    , _policy{std::move(policy)}
     , _maximum_parsed_response_header_bytes{maximum_parsed_response_header_bytes}
     , _body_capture{_request.response_body_limit}
     , _current_raw_header_capture{_request.response_header_limit}
     , _easy{std::move(easy)}
+    , _current_leg_uses_tls{url_uses_tls(_request.url)}
 {}
 
 auto CurlRequest::prepare_admission(jb::core::TimePoint accepted_at) -> jb::core::Result<void, jb::core::Error>
@@ -533,8 +544,8 @@ auto CurlRequest::configure_easy() -> jb::core::Result<void, jb::core::Error>
         return Result::failure(std::move(headers).error());
     }
 
-    // Reapply the complete leg configuration so a redirect method transition cannot retain POSTFIELDS,
-    // CUSTOMREQUEST, or NOBODY state from the detached previous leg.
+    // Reapply the complete leg configuration so redirects cannot retain method state or lose TLS/proxy policy.
+    // CurlRequest owns every string passed below until the detached easy handle is destroyed.
     curl_easy_reset(_easy.get());
     _request_headers = std::move(headers).value();
     auto configured  = set_option(_easy.get(), CURLOPT_URL, _request.url.c_str());
@@ -556,17 +567,27 @@ auto CurlRequest::configure_easy() -> jb::core::Result<void, jb::core::Error>
         configured = configured && set_option(_easy.get(), CURLOPT_CUSTOMREQUEST, _request.method.c_str());
     }
 
+    auto const* proxy              = _policy.proxy ? _policy.proxy->c_str() : "";
+    auto const  verify_origin_peer = _request.verify_tls ? 1L : 0L;
+    auto const  verify_origin_host = _request.verify_tls ? 2L : 0L;
     configured = configured && set_option(_easy.get(), CURLOPT_NOSIGNAL, 1L) &&
                  set_option(_easy.get(), CURLOPT_PROTOCOLS_STR, "http,https") &&
                  set_option(_easy.get(), CURLOPT_FOLLOWLOCATION, 0L) &&
-                 set_option(_easy.get(), CURLOPT_ACCEPT_ENCODING, "") && set_option(_easy.get(), CURLOPT_PROXY, "") &&
-                 set_option(_easy.get(), CURLOPT_NOPROXY, "") && set_option(_easy.get(), CURLOPT_SSL_VERIFYPEER, 1L) &&
-                 set_option(_easy.get(), CURLOPT_SSL_VERIFYHOST, 2L) &&
+                 set_option(_easy.get(), CURLOPT_ACCEPT_ENCODING, "") &&
+                 set_option(_easy.get(), CURLOPT_PROXY, proxy) && set_option(_easy.get(), CURLOPT_NOPROXY, "") &&
+                 set_option(_easy.get(), CURLOPT_SSL_VERIFYPEER, verify_origin_peer) &&
+                 set_option(_easy.get(), CURLOPT_SSL_VERIFYHOST, verify_origin_host) &&
+                 set_option(_easy.get(), CURLOPT_PROXY_SSL_VERIFYPEER, 1L) &&
+                 set_option(_easy.get(), CURLOPT_PROXY_SSL_VERIFYHOST, 2L) &&
                  set_option(_easy.get(), CURLOPT_HTTPHEADER, _request_headers.get()) &&
                  set_option(_easy.get(), CURLOPT_WRITEFUNCTION, &CurlRequest::body_callback) &&
                  set_option(_easy.get(), CURLOPT_WRITEDATA, this) &&
                  set_option(_easy.get(), CURLOPT_HEADERFUNCTION, &CurlRequest::header_callback) &&
                  set_option(_easy.get(), CURLOPT_HEADERDATA, this) && set_option(_easy.get(), CURLOPT_PRIVATE, this);
+    if (_policy.ca_bundle) {
+        configured = configured && set_option(_easy.get(), CURLOPT_CAINFO, _policy.ca_bundle->c_str()) &&
+                     set_option(_easy.get(), CURLOPT_PROXY_CAINFO, _policy.ca_bundle->c_str());
+    }
     if (!configured) {
         return Result::failure(request_backend_unavailable("request.easy_configuration_failed"));
     }
@@ -622,11 +643,6 @@ auto CurlRequest::prepare_redirect_leg(std::string_view location) -> jb::core::R
     if (!target) {
         return Result::failure(request_redirect_error(std::move(target).error()));
     }
-    if (target->uses_tls) {
-        // Preserve the Stage 5.6 HTTP-only admission boundary for redirect legs until Stage 5.7 records TLS metadata.
-        return Result::failure(request_redirect_error("redirect.https_not_supported"));
-    }
-
     auto const changes_to_get = ((status == 301U || status == 302U) && _request.method == "POST") ||
                                 (status == 303U && _request.method != "HEAD");
     if (changes_to_get) {
@@ -639,7 +655,8 @@ auto CurlRequest::prepare_redirect_leg(std::string_view location) -> jb::core::R
         std::erase_if(_request.headers,
                       [](HttpHeader const& header) { return header.sensitive || is_credential_header(header); });
     }
-    _request.url = std::move(target->url);
+    _request.url          = std::move(target->url);
+    _current_leg_uses_tls = target->uses_tls;
 
     auto configured = configure_easy();
     if (configured) {
@@ -787,7 +804,7 @@ auto CurlRequest::transfer_result(CURLcode result) -> std::optional<HttpCompleti
         .raw_headers    = std::move(headers.raw_headers),
         .redirect_count = _redirect_count,
         .elapsed        = elapsed(),
-        .tls_verified   = std::nullopt,
+        .tls_verified   = _current_leg_uses_tls ? std::optional<bool>{_request.verify_tls} : std::nullopt,
     });
 }
 
