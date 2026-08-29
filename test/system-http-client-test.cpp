@@ -229,6 +229,33 @@ TEST_CASE("curl timeout conversion preserves every positive remaining deadline",
     CHECK(*maximum == std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::days{30}).count());
 }
 
+TEST_CASE("curl request expires an accepted deadline before its deferred drive", "[net][http]")
+{
+    auto request    = minimal_request("http://127.0.0.1/deferred-deadline");
+    request.timeout = 5ms;
+    auto created    = jb::net::http::detail::CurlRequest::create(
+        1U,
+        std::move(request),
+        [](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void {},
+        std::size_t{64} * 1024U);
+    REQUIRE(created);
+    auto state = std::move(created).value();
+
+    auto const now         = jb::core::Clock::now();
+    auto const accepted_at = now - 10ms;
+    REQUIRE(state->prepare_admission(accepted_at));
+    state->mark_accepted();
+
+    CHECK(state->deadline() == accepted_at + 5ms);
+    REQUIRE(state->deadline_expired(now));
+    auto result = state->timeout_result();
+    REQUIRE_FALSE(result);
+    CHECK(result.error().kind == jb::net::HttpErrorKind::Timeout);
+    CHECK(result.error().error.category == jb::core::ErrorCategory::Timeout);
+    CHECK(result.error().error.code == "net.http.timeout");
+    CHECK(result.error().elapsed >= 10ms);
+}
+
 TEST_CASE("curl errors map to stable safe request-local categories", "[net][http]")
 {
     using jb::core::ErrorCategory;
@@ -271,6 +298,10 @@ TEST_CASE("curl errors map to stable safe request-local categories", "[net][http
              .kind      = HttpErrorKind::Receive,
              .category  = ErrorCategory::Io,
              .code      = "net.http.receive_failed"         },
+        Case{.curl_code = CURLE_SSL_SHUTDOWN_FAILED,
+             .kind      = HttpErrorKind::Receive,
+             .category  = ErrorCategory::Io,
+             .code      = "net.http.receive_failed"         },
         Case{.curl_code = CURLE_TOO_MANY_REDIRECTS,
              .kind      = HttpErrorKind::Redirect,
              .category  = ErrorCategory::Io,
@@ -294,11 +325,11 @@ TEST_CASE("curl errors map to stable safe request-local categories", "[net][http
         check_safe_project_error(mapped, {"secret-url", "secret-header", "secret-body", "curl diagnostic"});
     }
 
-    auto unknown = map_curl_error(static_cast<CURLcode>(999'999));
-    CHECK(unknown.kind == HttpErrorKind::Internal);
-    CHECK(unknown.error.category == ErrorCategory::Internal);
-    CHECK(unknown.error.code == "net.http.internal");
-    CHECK(unknown.error.detail.empty());
+    auto unmapped = map_curl_error(CURLE_FAILED_INIT);
+    CHECK(unmapped.kind == HttpErrorKind::Internal);
+    CHECK(unmapped.error.category == ErrorCategory::Internal);
+    CHECK(unmapped.error.code == "net.http.internal");
+    CHECK(unmapped.error.detail.empty());
 }
 
 TEST_CASE("system HTTP client factory requires the current EventLoop", "[net][http]")
@@ -1194,6 +1225,29 @@ TEST_CASE("system HTTP client leaves persistent failed-watch callbacks inert", "
     fake.backend->ready_events.push_back({.fd = watched_fd, .events = jb::core::FdEvent::Read});
     REQUIRE(fake.loop->process_events(jb::core::EventFlag::Watchers, 0) != jb::core::ProcessEventsResult::Failed);
     CHECK(callback_count == 0);
+}
+
+TEST_CASE("curl multi adapter checks absolute deadlines before the deferred initial drive", "[net][http]")
+{
+    auto fake         = jb::core::priv::make_fake_event_loop();
+    auto current_loop = jb::core::priv::ScopedCurrentEventLoop{fake.loop.get()};
+    REQUIRE(jb::net::http::detail::preflight_curl_runtime());
+
+    auto failure_count       = 0;
+    auto initial_drive_count = 0;
+    auto created             = jb::net::http::detail::CurlMultiAdapter::create(
+        *fake.loop,
+        [](auto*, auto) -> void {},
+        [&](jb::core::Error const&) -> void { ++failure_count; },
+        [&]() -> void { ++initial_drive_count; });
+    REQUIRE(created);
+    auto adapter = std::move(created).value();
+
+    REQUIRE(adapter->queue_initial_drive());
+    CHECK(initial_drive_count == 0);
+    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
+    CHECK(initial_drive_count == 1);
+    CHECK(failure_count == 0);
 }
 
 TEST_CASE("curl multi adapter defers and coalesces socket watch changes", "[net][http]")

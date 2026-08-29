@@ -276,7 +276,8 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
         auto adapter = detail::CurlMultiAdapter::create(
             loop,
             [this](CURL* easy, CURLcode result) -> void { complete(easy, result); },
-            [this](jb::core::Error error) -> void { fail(std::move(error)); });
+            [this](jb::core::Error error) -> void { fail(std::move(error)); },
+            [this]() -> void { expire_due_requests(); });
         if (!adapter) {
             initialization_failure = std::move(adapter).error();
             return;
@@ -288,6 +289,10 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
 
     void shutdown() noexcept
     {
+        for (auto const& [request_id, request] : requests) {
+            (void)request_id;
+            cancel_deadline_timer(*request);
+        }
         callback_state->owner = nullptr;
         multi.reset();
         requests.clear();
@@ -349,6 +354,21 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
             requests.erase(request_it);
             return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(added).error());
         }
+
+        auto callback       = callback_state;
+        auto deadline_timer = loop.post_at(request_it->second->deadline(), [callback = std::move(callback)]() -> void {
+            if (callback->owner) {
+                callback->owner->expire_due_requests();
+            }
+        });
+        if (!deadline_timer) {
+            multi->fail_backend("event_loop.deadline_timer_failed");
+            requests.erase(request_it);
+            return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(
+                stored_failure.value_or(unavailable()));
+        }
+        request_it->second->set_deadline_timer(deadline_timer);
+
         auto queued = multi->queue_initial_drive();
         if (!queued) {
             requests_by_easy.erase(easy);
@@ -364,6 +384,40 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
             ++next_request_id;
         }
         return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::success(request_id);
+    }
+
+    void cancel_deadline_timer(detail::CurlRequest& request) noexcept
+    {
+        auto const timer = request.take_deadline_timer();
+        if (timer) {
+            loop.cancel_timer(timer);
+        }
+    }
+
+    void expire_due_requests()
+    {
+        if (!multi || !multi->is_available()) {
+            return;
+        }
+
+        // Remove every expired easy handle before queuing its timeout completion so a delayed initial drive cannot
+        // create network effects after the accepted absolute deadline.
+        auto const now = jb::core::Clock::now();
+        for (auto const& [request_id, request] : requests) {
+            (void)request_id;
+            if (!request->accepted() || request->state() != detail::CurlRequest::State::Running ||
+                !request->deadline_expired(now)) {
+                continue;
+            }
+
+            auto* easy    = request->easy();
+            auto  removed = multi->remove(easy);
+            if (!removed) {
+                return;
+            }
+            requests_by_easy.erase(easy);
+            queue_completion(*request, request->timeout_result());
+        }
     }
 
     [[nodiscard]] auto cancel(jb::net::HttpRequestId request_id) -> VoidResult
@@ -422,6 +476,7 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
 
     void queue_completion(detail::CurlRequest& request, jb::net::HttpCompletionResult result)
     {
+        cancel_deadline_timer(request);
         request.prepare_completion(std::move(result));
         auto const request_id = request.id();
         auto       callback   = callback_state;
@@ -467,6 +522,7 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
         std::vector<jb::net::HttpRequestId> active;
         active.reserve(requests.size());
         for (auto const& [request_id, request] : requests) {
+            cancel_deadline_timer(*request);
             if (request->accepted() && request->state() == detail::CurlRequest::State::Running) {
                 active.push_back(request_id);
             }

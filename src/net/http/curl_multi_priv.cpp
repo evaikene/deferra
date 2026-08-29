@@ -129,8 +129,10 @@ void CurlMultiAdapterTestAccess::shutdown(CurlMultiAdapter& adapter) noexcept
     adapter.shutdown();
 }
 
-auto CurlMultiAdapter::create(jb::core::EventLoop& loop, CompletionHandler completion, FailureHandler failure)
-    -> AdapterResult
+auto CurlMultiAdapter::create(jb::core::EventLoop& loop,
+                              CompletionHandler    completion,
+                              FailureHandler       failure,
+                              InitialDriveHandler  initial_drive) -> AdapterResult
 {
     if (consume_failure(CurlMultiFailurePoint::Initialization)) {
         return AdapterResult::failure(backend_failed("multi.initialization_failed"));
@@ -142,7 +144,7 @@ auto CurlMultiAdapter::create(jb::core::EventLoop& loop, CompletionHandler compl
     }
 
     auto adapter = std::unique_ptr<CurlMultiAdapter>{
-        new CurlMultiAdapter{loop, multi, std::move(completion), std::move(failure)}
+        new CurlMultiAdapter{loop, multi, std::move(completion), std::move(failure), std::move(initial_drive)}
     };
     if (curl_multi_setopt(multi, CURLMOPT_SOCKETFUNCTION, &CurlMultiAdapter::socket_callback) != CURLM_OK ||
         curl_multi_setopt(multi, CURLMOPT_SOCKETDATA, adapter.get()) != CURLM_OK ||
@@ -158,11 +160,13 @@ auto CurlMultiAdapter::create(jb::core::EventLoop& loop, CompletionHandler compl
 CurlMultiAdapter::CurlMultiAdapter(jb::core::EventLoop& loop,
                                    CURLM*               multi,
                                    CompletionHandler    completion,
-                                   FailureHandler       failure)
+                                   FailureHandler       failure,
+                                   InitialDriveHandler  initial_drive)
     : _loop{loop}
     , _multi{multi}
     , _completion{std::move(completion)}
     , _failure_handler{std::move(failure)}
+    , _initial_drive{std::move(initial_drive)}
     , _callback_state{std::make_shared<CallbackState>(CallbackState{.owner = this})}
 {}
 
@@ -328,6 +332,14 @@ void CurlMultiAdapter::handle_timeout()
 
 void CurlMultiAdapter::run_initial_drive()
 {
+    if (!is_available()) {
+        return;
+    }
+    // Admission precedes this deferred drive, so let the owner retire absolute deadlines before libcurl starts its
+    // relative transfer timer.
+    if (_initial_drive) {
+        _initial_drive();
+    }
     if (!is_available() || !reconcile()) {
         return;
     }

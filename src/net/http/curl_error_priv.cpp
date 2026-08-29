@@ -69,7 +69,6 @@ auto map_curl_error(CURLcode result) -> HttpError
                    CURLE_SSL_ENGINE_INITFAILED,
                    CURLE_SSL_CACERT_BADFILE,
                    CURLE_SSL_CRL_BADFILE,
-                   CURLE_SSL_SHUTDOWN_FAILED,
                    CURLE_SSL_CLIENTCERT})) {
         return http_error(HttpErrorKind::TlsHandshake,
                           jb::core::ErrorCategory::Io,
@@ -88,7 +87,12 @@ auto map_curl_error(CURLcode result) -> HttpError
                           "net.http.send_failed",
                           "The HTTP request could not be sent");
     }
-    if (is_one_of(result, {CURLE_RECV_ERROR, CURLE_PARTIAL_FILE, CURLE_GOT_NOTHING, CURLE_BAD_CONTENT_ENCODING})) {
+    if (is_one_of(result,
+                  {CURLE_RECV_ERROR,
+                   CURLE_PARTIAL_FILE,
+                   CURLE_GOT_NOTHING,
+                   CURLE_BAD_CONTENT_ENCODING,
+                   CURLE_SSL_SHUTDOWN_FAILED})) {
         return http_error(HttpErrorKind::Receive,
                           jb::core::ErrorCategory::Io,
                           "net.http.receive_failed",

@@ -322,6 +322,13 @@ void CurlRequest::mark_accepted() noexcept
     _accepted = true;
 }
 
+auto CurlRequest::take_deadline_timer() noexcept -> jb::core::TimerHandle
+{
+    auto timer      = _deadline_timer;
+    _deadline_timer = {};
+    return timer;
+}
+
 void CurlRequest::prepare_completion(HttpCompletionResult result)
 {
     _state  = State::PendingCompletion;
@@ -341,6 +348,13 @@ auto CurlRequest::take_result() -> HttpCompletionResult
 auto CurlRequest::cancellation_result() -> HttpCompletionResult
 {
     auto error = request_cancelled_error();
+    populate_error_observation(error);
+    return HttpCompletionResult::failure(std::move(error));
+}
+
+auto CurlRequest::timeout_result() -> HttpCompletionResult
+{
+    auto error = map_curl_error(CURLE_OPERATION_TIMEDOUT);
     populate_error_observation(error);
     return HttpCompletionResult::failure(std::move(error));
 }
@@ -563,6 +577,9 @@ auto CurlRequest::transfer_result(CURLcode result) -> HttpCompletionResult
         auto error = std::move(*_callback_error);
         populate_error_observation(error);
         return HttpCompletionResult::failure(std::move(error));
+    }
+    if (deadline_expired(jb::core::Clock::now())) {
+        return timeout_result();
     }
     if (result != CURLE_OK) {
         auto error = map_curl_error(result);
