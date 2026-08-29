@@ -19,6 +19,10 @@ using namespace jb::jobu::detail;
 
 namespace {
 
+// Four worst-case executor metadata headers occupy 183 generic name/value bytes.
+constexpr std::size_t kMaximumPayloadHeaderCount{128U - 4U};
+constexpr std::size_t kMaximumPayloadHeaderBytes{(std::size_t{64} * 1024U) - 183U};
+
 auto json_string(std::string value) -> JsonValue
 {
     return JsonValue{.data = std::move(value)};
@@ -317,7 +321,7 @@ TEST_CASE("HTTP payload header entries are closed bounded and JobU owned", "[job
     check_issue(invalid_value, JobPayloadIssue::InvalidHeaders);
 
     auto too_many = JsonValue::Array{};
-    for (std::size_t index = 0; index < 129U; ++index) {
+    for (std::size_t index = 0; index < kMaximumPayloadHeaderCount + 1U; ++index) {
         too_many.push_back(header("X-" + std::to_string(index), ""));
     }
     auto maximum_count  = http_payload();
@@ -330,11 +334,11 @@ TEST_CASE("HTTP payload header entries are closed bounded and JobU owned", "[job
     check_issue(excessive_count, JobPayloadIssue::InvalidHeaders);
 
     auto exact_bytes = http_payload();
-    set_member(exact_bytes, "headers", json_array({header("X", std::string(65535U, 'a'))}));
+    set_member(exact_bytes, "headers", json_array({header("X", std::string(kMaximumPayloadHeaderBytes - 1U, 'a'))}));
     REQUIRE(decode_http_job_payload(exact_bytes));
 
     auto excessive_bytes = http_payload();
-    set_member(excessive_bytes, "headers", json_array({header("X", std::string(65536U, 'a'))}));
+    set_member(excessive_bytes, "headers", json_array({header("X", std::string(kMaximumPayloadHeaderBytes, 'a'))}));
     check_issue(excessive_bytes, JobPayloadIssue::InvalidHeaders);
 }
 

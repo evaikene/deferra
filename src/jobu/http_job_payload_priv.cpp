@@ -1,5 +1,6 @@
 #include "http_job_payload_priv.hpp"
 
+#include "attempt.hpp"
 #include "http_validation_priv.hpp"
 #include "text_validation_priv.hpp"
 
@@ -8,6 +9,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -56,6 +58,20 @@ auto forced_sensitive_header(std::string_view name) noexcept -> bool
 {
     return ascii_equal(name, "Authorization") || ascii_equal(name, "Cookie") ||
            ascii_equal(name, "Proxy-Authorization");
+}
+
+void append_maximum_metadata_headers(std::vector<jb::net::HttpHeader>& headers)
+{
+    constexpr auto uuid_text = std::string_view{"00000000-0000-0000-0000-000000000000"};
+
+    headers.reserve(headers.size() + 4U);
+    headers.push_back({.name = "X-JobU-Job-ID", .value = std::string{uuid_text}});
+    headers.push_back({.name = "X-JobU-Run-ID", .value = std::string{uuid_text}});
+    headers.push_back({
+        .name  = "X-JobU-Attempt",
+        .value = std::to_string(std::numeric_limits<AttemptNumber>::max()),
+    });
+    headers.push_back({.name = "Idempotency-Key", .value = std::string{uuid_text}});
 }
 
 auto decode_headers(jb::core::JsonValue const* value) -> DecodeResult<std::vector<jb::net::HttpHeader>>
@@ -351,12 +367,15 @@ auto decode_http_job_payload(jb::core::JsonValue const& payload) -> DecodeResult
         return DecodeResult<HttpJobPayload>::failure(statuses.error());
     }
 
-    // Keep transport-independent method, URL, header, and HEAD/body rules
-    // authoritative instead of duplicating their limits in JobU.
+    // Validate the worst-case final request so JobU's required metadata cannot
+    // push an accepted durable payload beyond the generic header limits.
+    auto const payload_header_count = request.headers.size();
+    append_maximum_metadata_headers(request.headers);
     auto generic_validation = jb::net::detail::validate_http_request(request);
     if (!generic_validation) {
         return DecodeResult<HttpJobPayload>::failure(generic_request_issue(generic_validation.error()));
     }
+    request.headers.resize(payload_header_count);
 
     return DecodeResult<HttpJobPayload>::success({
         .url               = std::move(request.url),

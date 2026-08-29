@@ -33,6 +33,15 @@ add_executable(${TARGET} http-retry-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU HTTP attempt executor and deterministic fake-client test
+set(TARGET "http-attempt-executor-test")
+add_executable(${TARGET}
+    http-attempt-executor-test.cpp
+    support/fake_http_client.cpp
+)
+target_link_libraries(${TARGET} PRIVATE jobu-http Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # JobU UTC timestamp test
 set(TARGET "utc-timestamp-test")
 add_executable(${TARGET} utc-timestamp-test.cpp)
@@ -298,6 +307,12 @@ foreach(JOBU_DOMAIN_HEADER IN ITEMS
     target_link_libraries(${TARGET} PRIVATE jobu)
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 endforeach()
+
+# JobU HTTP attempt executor public header must compile as the first include.
+set(TARGET "jobu-http-public-header-test")
+add_executable(${TARGET} jobu-http-public-header-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu-http)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # RPC public header boundary test
 set(TARGET "rpc-public-headers-test")
