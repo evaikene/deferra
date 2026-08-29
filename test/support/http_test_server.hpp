@@ -24,6 +24,11 @@ enum class HttpTestTransport : std::uint8_t {
     TlsMismatchedIdentity,
 };
 
+enum class HttpTestAddressFamily : std::uint8_t {
+    Ipv4,
+    Ipv6,
+};
+
 struct HttpTestHeader {
     std::string name;
     std::string value;
@@ -64,7 +69,8 @@ struct HttpTestResponse {
 /// Scripted loopback HTTP/1.1 server with request recording and an explicit response barrier.
 class HttpTestServer final {
 public:
-    explicit HttpTestServer(HttpTestTransport transport = HttpTestTransport::Plain);
+    explicit HttpTestServer(HttpTestTransport     transport      = HttpTestTransport::Plain,
+                            HttpTestAddressFamily address_family = HttpTestAddressFamily::Ipv4);
     ~HttpTestServer();
 
     HttpTestServer(HttpTestServer const&)                    = delete;
@@ -91,6 +97,7 @@ private:
     int                                 _listen_fd{-1};
     std::uint16_t                       _port{0};
     HttpTestTransport                   _transport{HttpTestTransport::Plain};
+    HttpTestAddressFamily               _address_family{HttpTestAddressFamily::Ipv4};
     std::unique_ptr<HttpTestTlsContext> _tls_context;
     std::jthread                        _accept_thread;
     std::vector<std::jthread>           _connection_threads;

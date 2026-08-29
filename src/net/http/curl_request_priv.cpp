@@ -598,6 +598,7 @@ auto CurlRequest::configure_remaining_timeout() -> jb::core::Result<void, jb::co
 {
     using Result = jb::core::Result<void, jb::core::Error>;
 
+    // Every redirect leg consumes the original accepted deadline instead of receiving a fresh transfer timeout.
     auto timeout = curl_timeout_milliseconds(_deadline - jb::core::Clock::now());
     if (!timeout) {
         return Result::failure(std::move(timeout).error());
@@ -634,6 +635,7 @@ auto CurlRequest::prepare_redirect_leg(std::string_view location) -> jb::core::R
 {
     using Result = jb::core::Result<void, HttpError>;
 
+    // Rebuild redirects manually so origin policy can remove credentials before libcurl sends the next request.
     auto const status = _final_header_block->status_code;
     if (_redirect_count >= _request.max_redirects) {
         return Result::failure(request_redirect_error("redirect.limit_exceeded"));

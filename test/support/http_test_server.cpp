@@ -406,13 +406,48 @@ auto default_response() -> HttpTestResponse
     return response;
 }
 
+auto bind_loopback_port(int fd, HttpTestAddressFamily address_family) -> std::optional<std::uint16_t>
+{
+    if (address_family == HttpTestAddressFamily::Ipv4) {
+        auto address            = sockaddr_in{};
+        address.sin_family      = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port        = 0;
+        if (::bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
+            return std::nullopt;
+        }
+
+        auto address_size = socklen_t{sizeof(address)};
+        if (::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &address_size) < 0) {
+            return std::nullopt;
+        }
+        return ntohs(address.sin_port);
+    }
+
+    auto address        = sockaddr_in6{};
+    address.sin6_family = AF_INET6;
+    address.sin6_addr   = in6addr_loopback;
+    address.sin6_port   = 0;
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
+        return std::nullopt;
+    }
+
+    auto address_size = socklen_t{sizeof(address)};
+    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&address), &address_size) < 0) {
+        return std::nullopt;
+    }
+    return ntohs(address.sin6_port);
+}
+
 } // anonymous namespace
 
-HttpTestServer::HttpTestServer(HttpTestTransport transport)
+HttpTestServer::HttpTestServer(HttpTestTransport transport, HttpTestAddressFamily address_family)
     : _transport{transport}
+    , _address_family{address_family}
     , _tls_context{make_tls_context(transport)}
 {
-    _listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    auto const native_family = address_family == HttpTestAddressFamily::Ipv4 ? AF_INET : AF_INET6;
+    _listen_fd               = ::socket(native_family, SOCK_STREAM, 0);
     if (_listen_fd < 0) {
         throw socket_error("socket");
     }
@@ -424,23 +459,13 @@ HttpTestServer::HttpTestServer(HttpTestTransport transport)
         throw error;
     }
 
-    auto address            = sockaddr_in{};
-    address.sin_family      = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    address.sin_port        = 0;
-    if (::bind(_listen_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 || ::listen(_listen_fd, 8) < 0) {
-        auto error = socket_error("bind/listen");
+    auto const port = bind_loopback_port(_listen_fd, address_family);
+    if (!port || ::listen(_listen_fd, 8) < 0) {
+        auto error = socket_error(port ? "listen" : "bind/getsockname");
         close_fd(std::exchange(_listen_fd, -1));
         throw error;
     }
-
-    auto address_size = socklen_t{sizeof(address)};
-    if (::getsockname(_listen_fd, reinterpret_cast<sockaddr*>(&address), &address_size) < 0) {
-        auto error = socket_error("getsockname");
-        close_fd(std::exchange(_listen_fd, -1));
-        throw error;
-    }
-    _port = ntohs(address.sin_port);
+    _port = *port;
 
     auto const listen_fd = _listen_fd;
     _accept_thread       = std::jthread{[this, listen_fd]() -> void { accept_connections(listen_fd); }};
@@ -480,7 +505,8 @@ auto HttpTestServer::url(std::string path) const -> std::string
         path.insert(path.begin(), '/');
     }
     auto const* const scheme = _transport == HttpTestTransport::Plain ? "http://" : "https://";
-    return std::string{scheme} + "127.0.0.1:" + std::to_string(_port) + path;
+    auto const* const host   = _address_family == HttpTestAddressFamily::Ipv4 ? "127.0.0.1" : "[::1]";
+    return std::string{scheme} + host + ':' + std::to_string(_port) + path;
 }
 
 void HttpTestServer::enqueue_response(HttpTestResponse response)
