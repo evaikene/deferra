@@ -29,6 +29,7 @@ using CurlString = std::unique_ptr<char, CurlStringDeleter>;
 struct HttpOrigin {
     std::string   scheme;
     std::string   host;
+    std::string   zone_id;
     std::uint16_t port{0};
 
     auto operator==(HttpOrigin const&) const -> bool = default;
@@ -66,6 +67,14 @@ auto parse_origin(CURLU* url) -> jb::core::Result<HttpOrigin, jb::core::Error>
         return Result::failure(redirect_failed("redirect.invalid_target"));
     }
 
+    // libcurl stores an IPv6 scope separately from the host; retain it so distinct interfaces cannot share credentials.
+    char*      raw_zone_id{nullptr};
+    auto const zone_result = curl_url_get(url, CURLUPART_ZONEID, &raw_zone_id, 0U);
+    auto       zone_id     = CurlString{raw_zone_id};
+    if (zone_result != CURLUE_OK && zone_result != CURLUE_NO_ZONEID) {
+        return Result::failure(redirect_failed("redirect.invalid_target"));
+    }
+
     auto const port_text   = std::string_view{port.get()};
     auto       port_number = std::uint32_t{0};
     auto       parsed      = std::from_chars(port_text.begin(), port_text.end(), port_number);
@@ -74,9 +83,10 @@ auto parse_origin(CURLU* url) -> jb::core::Result<HttpOrigin, jb::core::Error>
     }
 
     auto origin = HttpOrigin{
-        .scheme = scheme.get(),
-        .host   = host.get(),
-        .port   = static_cast<std::uint16_t>(port_number),
+        .scheme  = scheme.get(),
+        .host    = host.get(),
+        .zone_id = zone_id ? zone_id.get() : "",
+        .port    = static_cast<std::uint16_t>(port_number),
     };
     std::ranges::transform(origin.scheme, origin.scheme.begin(), [](unsigned char value) -> char {
         return static_cast<char>(value >= static_cast<unsigned char>('A') && value <= static_cast<unsigned char>('Z')

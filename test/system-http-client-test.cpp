@@ -531,6 +531,18 @@ TEST_CASE("curl redirect URL policy resolves targets and compares canonical orig
     REQUIRE(other_port);
     CHECK(other_port->cross_origin);
 
+    auto same_zone = resolve_redirect_target("http://[fe80::1%25eth0]/a", "http://[fe80::1%25eth0]/b");
+    REQUIRE(same_zone);
+    CHECK_FALSE(same_zone->cross_origin);
+
+    auto other_zone = resolve_redirect_target("http://[fe80::1%25eth0]/a", "http://[fe80::1%25eth1]/b");
+    REQUIRE(other_zone);
+    CHECK(other_zone->cross_origin);
+
+    auto removed_zone = resolve_redirect_target("http://[fe80::1%25eth0]/a", "http://[fe80::1]/b");
+    REQUIRE(removed_zone);
+    CHECK(removed_zone->cross_origin);
+
     auto upgrade = resolve_redirect_target("http://example.test/a", "https://example.test/b");
     REQUIRE(upgrade);
     CHECK(upgrade->cross_origin);
