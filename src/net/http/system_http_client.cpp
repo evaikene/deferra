@@ -4,6 +4,7 @@
 #include "curl_request_priv.hpp"
 #include "curl_runtime_priv.hpp"
 #include "http_validation_priv.hpp"
+#include "object_priv.hpp"
 
 #include <curl/curl.h>
 #include <curl/urlapi.h>
@@ -275,14 +276,13 @@ auto validate_proxy(std::string const& proxy, detail::CurlRuntimeCapabilities co
 
 } // anonymous namespace
 
-struct SystemHttpClient::Private {
+struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
     struct CallbackState {
         Private* owner;
     };
 
-    explicit Private(SystemHttpClient& owner_value, jb::core::EventLoop& loop_value, SystemHttpClientOptions value)
-        : owner{owner_value}
-        , loop{loop_value}
+    explicit Private(jb::core::EventLoop& loop_value, SystemHttpClientOptions value)
+        : loop{loop_value}
         , options{std::move(value)}
         , callback_state{std::make_shared<CallbackState>(CallbackState{.owner = this})}
     {
@@ -297,11 +297,14 @@ struct SystemHttpClient::Private {
         multi = std::move(adapter).value();
     }
 
-    ~Private()
+    ~Private() override { shutdown(); }
+
+    void shutdown() noexcept
     {
         callback_state->owner = nullptr;
         multi.reset();
         requests.clear();
+        owner = nullptr;
     }
 
     [[nodiscard]] auto start(jb::net::HttpRequest request, jb::net::HttpCompletionHandler completion)
@@ -493,15 +496,15 @@ struct SystemHttpClient::Private {
 
     void emit_failure()
     {
-        if (failure_emitted || !stored_failure) {
+        if (failure_emitted || !stored_failure || !owner) {
             return;
         }
         failure_emitted = true;
-        owner.emit(owner.failed, *stored_failure);
+        owner->emit(owner->failed, *stored_failure);
     }
 
     // Retain the validated snapshot so transfer admission never borrows caller-owned configuration.
-    SystemHttpClient&                                                                owner;
+    SystemHttpClient*                                                                owner{nullptr};
     jb::core::EventLoop&                                                             loop;
     SystemHttpClientOptions                                                          options;
     std::shared_ptr<CallbackState>                                                   callback_state;
@@ -545,42 +548,50 @@ auto SystemHttpClient::create(jb::core::EventLoop& loop, SystemHttpClientOptions
     auto client = std::unique_ptr<SystemHttpClient>{
         new SystemHttpClient{loop, std::move(options)}
     };
-    if (client->_data->initialization_failure) {
-        return ClientResult::failure(std::move(*client->_data->initialization_failure));
+    auto* data = client->d_ptr<Private>();
+    if (data->initialization_failure) {
+        return ClientResult::failure(std::move(*data->initialization_failure));
     }
     return ClientResult::success(std::move(client));
 }
 
 SystemHttpClient::SystemHttpClient(jb::core::EventLoop& loop, SystemHttpClientOptions options)
-    : _data{std::make_unique<Private>(*this, loop, std::move(options))}
-{}
+    : HttpClient(*new Private{loop, std::move(options)})
+{
+    // Complete the back-reference only after the Object and HttpClient subobjects are fully constructed.
+    d_ptr<Private>()->owner = this;
+}
 
-SystemHttpClient::~SystemHttpClient() = default;
+SystemHttpClient::~SystemHttpClient()
+{
+    // Disable backend callbacks before HttpClient destroys its signal members.
+    d_ptr<Private>()->shutdown();
+}
 
 auto SystemHttpClient::is_available() const noexcept -> bool
 {
-    return _data->is_available();
+    return d_ptr<Private const>()->is_available();
 }
 
 auto SystemHttpClient::start(jb::net::HttpRequest request, jb::net::HttpCompletionHandler completion)
     -> jb::core::Result<jb::net::HttpRequestId, jb::core::Error>
 {
-    return _data->start(std::move(request), std::move(completion));
+    return d_ptr<Private>()->start(std::move(request), std::move(completion));
 }
 
 auto SystemHttpClient::cancel(jb::net::HttpRequestId request_id) -> jb::core::Result<void, jb::core::Error>
 {
-    return _data->cancel(request_id);
+    return d_ptr<Private>()->cancel(request_id);
 }
 
 auto SystemHttpClient::active_request_count() const noexcept -> std::size_t
 {
-    return _data->active_request_count();
+    return d_ptr<Private const>()->active_request_count();
 }
 
 auto SystemHttpClient::failure() const -> std::optional<jb::core::Error>
 {
-    return _data->stored_failure;
+    return d_ptr<Private const>()->stored_failure;
 }
 
 } // namespace jb::net::http
