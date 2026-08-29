@@ -9,6 +9,7 @@
 #include "http/curl_runtime_priv.hpp"
 #include "http/http_url_priv.hpp"
 #include "support/fake_event_loop_backend.hpp"
+#include "support/http_test_certificates.hpp"
 #include "support/http_test_server.hpp"
 #include "support/temporary_directory.hpp"
 
@@ -20,6 +21,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -54,6 +56,60 @@ auto byte_text(jb::core::ByteBuffer const& value) -> std::string
     auto const view = jb::core::as_string_view(value);
     return {view.data(), view.size()};
 }
+
+auto server_origin(jb::test::HttpTestServer const& server) -> std::string
+{
+    auto result = server.url();
+    if (result.ends_with('/')) {
+        result.pop_back();
+    }
+    return result;
+}
+
+auto write_test_ca(jb::test::TemporaryDirectory const& directory, std::string_view filename) -> std::filesystem::path
+{
+    auto path   = directory.path() / filename;
+    auto output = std::ofstream{path, std::ios::binary};
+    if (!output.is_open()) {
+        throw std::runtime_error{"could not create test CA bundle"};
+    }
+    output << jb::test::kHttpTestCaCertificate;
+    output.close();
+    return path;
+}
+
+class ScopedEnvironmentVariable final {
+public:
+    ScopedEnvironmentVariable(std::string name, std::optional<std::string> value)
+        : _name{std::move(name)}
+    {
+        if (auto const* previous = std::getenv(_name.c_str())) {
+            _previous = previous;
+        }
+        if (!set(std::move(value))) {
+            throw std::runtime_error{"could not set test environment variable"};
+        }
+    }
+
+    ~ScopedEnvironmentVariable() { static_cast<void>(set(std::move(_previous))); }
+
+    ScopedEnvironmentVariable(ScopedEnvironmentVariable const&)                    = delete;
+    ScopedEnvironmentVariable(ScopedEnvironmentVariable&&)                         = delete;
+    auto operator=(ScopedEnvironmentVariable const&) -> ScopedEnvironmentVariable& = delete;
+    auto operator=(ScopedEnvironmentVariable&&) -> ScopedEnvironmentVariable&      = delete;
+
+private:
+    [[nodiscard]] auto set(std::optional<std::string> value) noexcept -> bool
+    {
+        if (value) {
+            return ::setenv(_name.c_str(), value->c_str(), 1) == 0;
+        }
+        return ::unsetenv(_name.c_str()) == 0;
+    }
+
+    std::string                _name;
+    std::optional<std::string> _previous;
+};
 
 auto redirect_response(std::uint16_t status, std::string location, std::string_view body = {})
     -> jb::test::HttpTestResponse
@@ -249,6 +305,7 @@ TEST_CASE("curl request expires an accepted deadline before its deferred drive",
         1U,
         std::move(request),
         [](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void {},
+        {},
         std::size_t{64} * 1024U);
     REQUIRE(created);
     auto state = std::move(created).value();
@@ -437,6 +494,10 @@ TEST_CASE("system HTTP runtime preflight creates a ready minimal client", "[net]
     CHECK(start.error().code == "net.http.invalid_request");
     CHECK_FALSE(callback_called);
 
+    start = client->start(minimal_request("https://127.0.0.1:1/"), {});
+    REQUIRE_FALSE(start);
+    CHECK(start.error().detail == "completion.empty");
+
     auto cancellation = client->cancel(1U);
     REQUIRE_FALSE(cancellation);
     CHECK(cancellation.error().code == "net.http.request_not_found");
@@ -478,39 +539,261 @@ TEST_CASE("system HTTP client shares one absolute deadline timer across accepted
     CHECK(callback_count == 0);
 }
 
-TEST_CASE("system HTTP client keeps later transport policy outside the Stage 5.6 scope", "[net][http]")
+TEST_CASE("system HTTP client applies verified and unsafe origin TLS policy", "[net][http]")
 {
-    auto app    = jb::core::Application{0, nullptr};
-    auto result = SystemHttpClient::create(*app.event_loop());
-    REQUIRE(result);
-    auto client = std::move(result).value();
+    auto app       = jb::core::Application{0, nullptr};
+    auto directory = jb::test::TemporaryDirectory{};
+    auto ca_path   = write_test_ca(directory, "stage-5.7-secret-ca.pem");
 
-    auto callback = [](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void {};
+    SECTION("default trust rejects the test CA")
+    {
+        auto server  = jb::test::HttpTestServer{jb::test::HttpTestTransport::Tls};
+        auto created = SystemHttpClient::create(*app.event_loop());
+        REQUIRE(created);
+        auto completed = complete_request(app, **created, minimal_request(server.url("/untrusted")));
+        REQUIRE_FALSE(completed);
+        CHECK(completed.error().kind == jb::net::HttpErrorKind::TlsVerification);
+        CHECK_FALSE(completed.error().tls_verified);
+        check_safe_project_error(completed.error(), {"stage-5.7-secret-ca", "untrusted"});
+    }
 
-    auto request = minimal_request("https://127.0.0.1:1/");
-    auto start   = client->start(std::move(request), callback);
-    REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_6.https_not_supported");
+    SECTION("explicit CA verifies trust and identity")
+    {
+        auto server = jb::test::HttpTestServer{jb::test::HttpTestTransport::Tls};
+        server.enqueue_response({.body = bytes("verified")});
+        server.release_responses();
+        auto created = SystemHttpClient::create(*app.event_loop(), {.ca_bundle = ca_path});
+        REQUIRE(created);
+        auto completed = complete_request(app, **created, minimal_request(server.url("/verified")));
+        REQUIRE(completed);
+        CHECK(byte_text(completed->body.bytes) == "verified");
+        REQUIRE(completed->tls_verified);
+        CHECK(*completed->tls_verified);
+    }
 
-    request            = minimal_request("http://127.0.0.1:1/");
-    request.verify_tls = false;
-    start              = client->start(std::move(request), callback);
-    REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_6.unsafe_tls_not_supported");
+    SECTION("trusted certificate with the wrong identity is rejected")
+    {
+        auto server  = jb::test::HttpTestServer{jb::test::HttpTestTransport::TlsMismatchedIdentity};
+        auto created = SystemHttpClient::create(*app.event_loop(), {.ca_bundle = ca_path});
+        REQUIRE(created);
+        auto completed = complete_request(app, **created, minimal_request(server.url("/wrong-identity")));
+        REQUIRE_FALSE(completed);
+        CHECK(completed.error().kind == jb::net::HttpErrorKind::TlsVerification);
+        CHECK_FALSE(completed.error().tls_verified);
+        check_safe_project_error(completed.error(), {"stage-5.7-secret-ca", "wrong-identity"});
+    }
 
-    request = minimal_request("http://127.0.0.1:1/");
-    start   = client->start(std::move(request), {});
-    REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "completion.empty");
+    SECTION("unsafe origin mode disables both checks and records false")
+    {
+        auto server = jb::test::HttpTestServer{jb::test::HttpTestTransport::TlsMismatchedIdentity};
+        server.enqueue_response({.body = bytes("unsafe")});
+        server.release_responses();
+        auto created = SystemHttpClient::create(*app.event_loop());
+        REQUIRE(created);
+        auto request       = minimal_request(server.url("/unsafe"));
+        request.verify_tls = false;
+        auto completed     = complete_request(app, **created, std::move(request));
+        REQUIRE(completed);
+        CHECK(byte_text(completed->body.bytes) == "unsafe");
+        REQUIRE(completed->tls_verified);
+        CHECK_FALSE(*completed->tls_verified);
+    }
+}
 
-    CHECK(client->is_available());
-    CHECK(client->active_request_count() == 0U);
+TEST_CASE("system HTTP client keeps CA transfer failures safe", "[net][http]")
+{
+    auto app       = jb::core::Application{0, nullptr};
+    auto directory = jb::test::TemporaryDirectory{};
+    auto ca_path   = directory.path() / "stage-5.7-invalid-ca-secret.pem";
+    auto output    = std::ofstream{ca_path, std::ios::binary};
+    REQUIRE(output.is_open());
+    output << "invalid CA contents";
+    output.close();
 
-    auto proxied = SystemHttpClient::create(*app.event_loop(), SystemHttpClientOptions{.proxy = "http://127.0.0.1:1"});
-    REQUIRE(proxied);
-    start = (*proxied)->start(minimal_request("http://127.0.0.1:1/"), callback);
-    REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_6.proxy_not_supported");
+    auto server  = jb::test::HttpTestServer{jb::test::HttpTestTransport::Tls};
+    auto created = SystemHttpClient::create(*app.event_loop(), {.ca_bundle = ca_path});
+    REQUIRE(created);
+    auto completed = complete_request(app, **created, minimal_request(server.url("/ca-secret-url")));
+    REQUIRE_FALSE(completed);
+    CHECK(completed.error().kind == jb::net::HttpErrorKind::TlsHandshake);
+    CHECK_FALSE(completed.error().tls_verified);
+    check_safe_project_error(completed.error(), {"stage-5.7-invalid-ca-secret", "ca-secret-url"});
+}
+
+TEST_CASE("system HTTP client ignores ambient proxies and enforces explicit proxy routing", "[net][http]")
+{
+    auto app = jb::core::Application{0, nullptr};
+
+    SECTION("absent option ignores every ambient proxy")
+    {
+        auto directory     = jb::test::TemporaryDirectory{};
+        auto ca_path       = write_test_ca(directory, "stage-5.7-ambient-proxy-ca.pem");
+        auto plain_origin  = jb::test::HttpTestServer{};
+        auto secure_origin = jb::test::HttpTestServer{jb::test::HttpTestTransport::Tls};
+        auto hostile_proxy = jb::test::HttpTestServer{};
+        plain_origin.enqueue_response({.body = bytes("plain-direct")});
+        plain_origin.release_responses();
+        secure_origin.enqueue_response({.body = bytes("secure-direct")});
+        secure_origin.release_responses();
+        hostile_proxy.enqueue_response({.body = bytes("ambient-proxy")});
+        hostile_proxy.release_responses();
+
+        auto const proxy       = server_origin(hostile_proxy);
+        auto       http_proxy  = ScopedEnvironmentVariable{"http_proxy", proxy};
+        auto       https_proxy = ScopedEnvironmentVariable{"https_proxy", proxy};
+        auto       all_proxy   = ScopedEnvironmentVariable{"all_proxy", proxy};
+        auto       upper_http  = ScopedEnvironmentVariable{"HTTP_PROXY", proxy};
+        auto       upper_https = ScopedEnvironmentVariable{"HTTPS_PROXY", proxy};
+        auto       upper_all   = ScopedEnvironmentVariable{"ALL_PROXY", proxy};
+        auto       no_proxy    = ScopedEnvironmentVariable{"no_proxy", std::string{}};
+        auto       upper_no    = ScopedEnvironmentVariable{"NO_PROXY", std::string{}};
+
+        auto created = SystemHttpClient::create(*app.event_loop(), {.ca_bundle = ca_path});
+        REQUIRE(created);
+
+        auto plain_completed = complete_request(app, **created, minimal_request(plain_origin.url("/plain-direct")));
+        REQUIRE(plain_completed);
+        CHECK(byte_text(plain_completed->body.bytes) == "plain-direct");
+        CHECK(plain_origin.accepted_connection_count() == 1U);
+
+        auto secure_completed = complete_request(app, **created, minimal_request(secure_origin.url("/secure-direct")));
+        REQUIRE(secure_completed);
+        CHECK(byte_text(secure_completed->body.bytes) == "secure-direct");
+        CHECK(secure_origin.accepted_connection_count() == 1U);
+        CHECK(secure_completed->tls_verified == true);
+        CHECK(hostile_proxy.accepted_connection_count() == 0U);
+    }
+
+    SECTION("explicit HTTP proxy overrides ambient no-proxy")
+    {
+        auto proxy = jb::test::HttpTestServer{};
+        proxy.enqueue_response({.body = bytes("http-proxy")});
+        proxy.release_responses();
+        auto no_proxy = ScopedEnvironmentVariable{"no_proxy", std::string{"*"}};
+        auto upper_no = ScopedEnvironmentVariable{"NO_PROXY", std::string{"*"}};
+
+        auto created = SystemHttpClient::create(*app.event_loop(), {.proxy = server_origin(proxy)});
+        REQUIRE(created);
+        auto const target    = std::string{"http://stage57-target.example.test/proxied?value=1"};
+        auto       completed = complete_request(app, **created, minimal_request(target));
+        REQUIRE(completed);
+        CHECK(byte_text(completed->body.bytes) == "http-proxy");
+        REQUIRE(proxy.wait_for_requests(1U, 0ms));
+        CHECK(proxy.requests().front().target == target);
+        CHECK(proxy.accepted_connection_count() == 1U);
+        CHECK_FALSE(completed->tls_verified);
+    }
+
+    SECTION("explicit HTTPS proxy keeps proxy verification enabled")
+    {
+        auto capabilities = jb::net::http::detail::preflight_curl_runtime();
+        REQUIRE(capabilities);
+        if (!capabilities->supports_https_proxy) {
+            auto unavailable = SystemHttpClient::create(*app.event_loop(), {.proxy = "https://127.0.0.1:1"});
+            REQUIRE_FALSE(unavailable);
+            CHECK(unavailable.error().code == "net.http.runtime_unavailable");
+            CHECK(unavailable.error().detail == "runtime.https_proxy_unavailable");
+        }
+        else {
+            auto directory = jb::test::TemporaryDirectory{};
+            auto ca_path   = write_test_ca(directory, "stage-5.7-proxy-ca.pem");
+            auto proxy     = jb::test::HttpTestServer{jb::test::HttpTestTransport::Tls};
+            proxy.enqueue_response({.body = bytes("https-proxy")});
+            proxy.release_responses();
+
+            auto created =
+                SystemHttpClient::create(*app.event_loop(), {.ca_bundle = ca_path, .proxy = server_origin(proxy)});
+            REQUIRE(created);
+            auto const target    = std::string{"http://stage57-secure-proxy-target.example.test/resource"};
+            auto       completed = complete_request(app, **created, minimal_request(target));
+            REQUIRE(completed);
+            CHECK(byte_text(completed->body.bytes) == "https-proxy");
+            REQUIRE(proxy.wait_for_requests(1U, 0ms));
+            CHECK(proxy.requests().front().target == target);
+            CHECK_FALSE(completed->tls_verified);
+
+            auto unsafe_created = SystemHttpClient::create(*app.event_loop(), {.proxy = server_origin(proxy)});
+            REQUIRE(unsafe_created);
+            auto unsafe_request       = minimal_request(target);
+            unsafe_request.verify_tls = false;
+            auto unsafe_completed     = complete_request(app, **unsafe_created, std::move(unsafe_request));
+            REQUIRE_FALSE(unsafe_completed);
+            CHECK(unsafe_completed.error().kind == jb::net::HttpErrorKind::TlsVerification);
+            CHECK_FALSE(unsafe_completed.error().tls_verified);
+        }
+    }
+
+    SECTION("proxy connection errors omit proxy and request values")
+    {
+        auto const proxy   = std::string{"http://127.0.0.1:1/stage-5.7-proxy-secret"};
+        auto       created = SystemHttpClient::create(*app.event_loop(), {.proxy = proxy});
+        REQUIRE(created);
+        auto completed =
+            complete_request(app, **created, minimal_request("http://stage57-request-secret.example.test/resource"));
+        REQUIRE_FALSE(completed);
+        CHECK(completed.error().kind == jb::net::HttpErrorKind::Connect);
+        check_safe_project_error(completed.error(), {"stage-5.7-proxy-secret", "stage57-request-secret"});
+    }
+}
+
+TEST_CASE("system HTTP client reapplies TLS policy across a secure redirect", "[net][http]")
+{
+    auto app       = jb::core::Application{0, nullptr};
+    auto directory = jb::test::TemporaryDirectory{};
+    auto ca_path   = write_test_ca(directory, "stage-5.7-redirect-ca.pem");
+    auto first     = jb::test::HttpTestServer{};
+    auto final     = jb::test::HttpTestServer{jb::test::HttpTestTransport::Tls};
+    first.enqueue_response(redirect_response(302U, final.url("/secure-final")));
+    final.enqueue_response({.body = bytes("secure-final")});
+    first.release_responses();
+    final.release_responses();
+
+    auto created = SystemHttpClient::create(*app.event_loop(), {.ca_bundle = ca_path});
+    REQUIRE(created);
+    auto request    = minimal_request(first.url("/start"));
+    request.headers = {
+        {.name = "Authorization", .value = "stage-5.7-credential"},
+        {.name = "X-Sensitive", .value = "stage-5.7-sensitive", .sensitive = true},
+        {.name = "X-Retained", .value = "retained"},
+    };
+    request.follow_redirects = true;
+    auto completed           = complete_request(app, **created, std::move(request));
+    REQUIRE(completed);
+    CHECK(byte_text(completed->body.bytes) == "secure-final");
+    CHECK(completed->redirect_count == 1U);
+    REQUIRE(completed->tls_verified);
+    CHECK(*completed->tls_verified);
+
+    REQUIRE(final.wait_for_requests(1U, 0ms));
+    auto const  final_requests = final.requests();
+    auto const& final_headers  = final_requests.front().headers;
+    CHECK_FALSE(header_value(final_headers, "Authorization"));
+    CHECK_FALSE(header_value(final_headers, "X-Sensitive"));
+    CHECK(header_value(final_headers, "X-Retained") == "retained");
+}
+
+TEST_CASE("system HTTP client rejects a verified HTTPS downgrade before the next connection", "[net][http]")
+{
+    auto app       = jb::core::Application{0, nullptr};
+    auto directory = jb::test::TemporaryDirectory{};
+    auto ca_path   = write_test_ca(directory, "stage-5.7-downgrade-ca.pem");
+    auto secure    = jb::test::HttpTestServer{jb::test::HttpTestTransport::Tls};
+    auto plain     = jb::test::HttpTestServer{};
+    secure.enqueue_response(redirect_response(302U, plain.url("/forbidden")));
+    secure.release_responses();
+
+    auto created = SystemHttpClient::create(*app.event_loop(), {.ca_bundle = ca_path});
+    REQUIRE(created);
+    auto request             = minimal_request(secure.url("/start"));
+    request.follow_redirects = true;
+    auto completed           = complete_request(app, **created, std::move(request));
+    REQUIRE_FALSE(completed);
+    CHECK(completed.error().kind == jb::net::HttpErrorKind::Redirect);
+    CHECK(completed.error().error.detail == "redirect.https_downgrade");
+    CHECK(completed.error().status_code == 302U);
+    CHECK(completed.error().redirect_count == 0U);
+    CHECK_FALSE(completed.error().tls_verified);
+    CHECK(plain.accepted_connection_count() == 0U);
 }
 
 TEST_CASE("curl redirect URL policy resolves targets and compares canonical origins", "[net][http]")
@@ -760,9 +1043,6 @@ TEST_CASE("system HTTP client returns safe redirect policy failures", "[net][htt
              .headers = {{.name = "Location", .value = "/first-secret"},
                          {.name = "lOcAtIoN", .value = "/second-secret"}},
              .reason  = "redirect.invalid_location"                                                                                    },
-        Case{.name    = "HTTPS target",
-             .headers = {{.name = "Location", .value = "https://redirect-secret.example/path"}},
-             .reason  = "redirect.https_not_supported"                                                                                 },
         Case{.name    = "non-HTTP target",
              .headers = {{.name = "Location", .value = "ftp://redirect-secret.example/path"}},
              .reason  = "redirect.invalid_target"                                                                                      },
@@ -854,25 +1134,29 @@ TEST_CASE("system HTTP redirect chains keep one deadline and asynchronous cancel
 {
     SECTION("whole-request timeout")
     {
-        auto app     = jb::core::Application{0, nullptr};
-        auto server  = jb::test::HttpTestServer{};
-        auto created = SystemHttpClient::create(*app.event_loop());
+        auto app       = jb::core::Application{0, nullptr};
+        auto directory = jb::test::TemporaryDirectory{};
+        auto ca_path   = write_test_ca(directory, "stage-5.7-deadline-ca.pem");
+        auto first     = jb::test::HttpTestServer{};
+        auto final     = jb::test::HttpTestServer{jb::test::HttpTestTransport::Tls};
+        auto created   = SystemHttpClient::create(*app.event_loop(), {.ca_bundle = ca_path});
         REQUIRE(created);
         auto client = std::move(created).value();
 
-        server.enqueue_response(redirect_response(302U, "/held-timeout"));
+        first.enqueue_response(redirect_response(302U, final.url("/held-timeout")));
         auto held    = jb::test::HttpTestResponse{};
         held.headers = {
             {.name = "X-Observed", .value = "second-leg"}
         };
         held.body                       = bytes("held-body");
         held.pause_after_response_bytes = 0U;
-        server.enqueue_response(std::move(held));
-        server.release_responses();
+        final.enqueue_response(std::move(held));
+        first.release_responses();
+        final.release_responses();
 
         auto callback_count      = 0;
         auto completion          = std::optional<jb::net::HttpCompletionResult>{};
-        auto request             = minimal_request(server.url("/start-timeout"));
+        auto request             = minimal_request(first.url("/start-timeout"));
         request.follow_redirects = true;
         request.timeout          = 100ms;
         auto started = client->start(std::move(request),
@@ -881,14 +1165,15 @@ TEST_CASE("system HTTP redirect chains keep one deadline and asynchronous cancel
                                          completion = std::move(result);
                                      });
         REQUIRE(started);
-        REQUIRE(process_until(app, [&server]() -> bool { return server.wait_for_response_segments(1U, 0ms); }));
+        REQUIRE(process_until(app, [&final]() -> bool { return final.wait_for_response_segments(1U, 0ms); }));
         REQUIRE(process_until(app, [&completion]() -> bool { return completion.has_value(); }));
         REQUIRE_FALSE(*completion);
         CHECK(completion->error().kind == jb::net::HttpErrorKind::Timeout);
         CHECK(completion->error().redirect_count == 1U);
         CHECK(completion->error().status_code == 200U);
+        CHECK_FALSE(completion->error().tls_verified);
         CHECK(callback_count == 1);
-        server.release_response_segment();
+        final.release_response_segment();
         drain_fake_loop(*app.event_loop());
         CHECK(callback_count == 1);
     }

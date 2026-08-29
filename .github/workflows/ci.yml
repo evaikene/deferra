@@ -27,6 +27,7 @@ jobs:
             g++ \
             libcurl4-openssl-dev \
             libfmt-dev \
+            libssl-dev \
             libsqlite3-dev \
             ninja-build \
             nlohmann-json3-dev
@@ -58,6 +59,7 @@ jobs:
             gcompat \
             git \
             nlohmann-json \
+            openssl-dev \
             samurai \
             sqlite-dev \
             tzdata

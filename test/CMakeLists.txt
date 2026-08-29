@@ -1,4 +1,5 @@
 find_package(Catch2 CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 enable_testing()
 
@@ -514,7 +515,7 @@ add_executable(${TARGET}
     support/http_test_server.cpp
     support/temporary_directory.cpp
 )
-target_link_libraries(${TARGET} PRIVATE net-http Catch2::Catch2WithMain)
+target_link_libraries(${TARGET} PRIVATE net-http OpenSSL::SSL OpenSSL::Crypto Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")

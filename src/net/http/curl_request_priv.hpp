@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -32,6 +33,12 @@ struct CurlSlistDeleter {
 
 using CurlSlist = std::unique_ptr<curl_slist, CurlSlistDeleter>;
 
+/// Owns client-level string options that every transfer leg lends to libcurl.
+struct CurlTransferPolicy {
+    std::optional<std::string> ca_bundle;
+    std::optional<std::string> proxy;
+};
+
 /// Owns one redirect-chain easy handle, all pointer targets, response state, and completion obligation.
 class CurlRequest final {
 public:
@@ -43,6 +50,7 @@ public:
     [[nodiscard]] static auto create(HttpRequestId         id,
                                      HttpRequest           request,
                                      HttpCompletionHandler completion,
+                                     CurlTransferPolicy    policy,
                                      std::size_t           maximum_parsed_response_header_bytes)
         -> jb::core::Result<std::unique_ptr<CurlRequest>, jb::core::Error>;
 
@@ -92,6 +100,7 @@ private:
     CurlRequest(HttpRequestId         id,
                 HttpRequest           request,
                 HttpCompletionHandler completion,
+                CurlTransferPolicy    policy,
                 std::size_t           maximum_parsed_response_header_bytes,
                 CurlEasy              easy);
 
@@ -118,6 +127,7 @@ private:
     HttpRequestId                       _id;
     HttpRequest                         _request;
     HttpCompletionHandler               _completion;
+    CurlTransferPolicy                  _policy;
     std::size_t                         _maximum_parsed_response_header_bytes{0};
     std::uint64_t                       _parsed_response_header_bytes{0};
     jb::net::detail::CaptureBuffer      _body_capture;
@@ -135,6 +145,7 @@ private:
     State                               _state{State::Running};
     HeaderState                         _header_state{HeaderState::AwaitingStatus};
     bool                                _accepted{false};
+    bool                                _current_leg_uses_tls{false};
     bool                                _callback_failed_without_error{false};
     std::optional<HttpCompletionResult> _result;
 };

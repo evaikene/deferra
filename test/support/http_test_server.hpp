@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -14,6 +15,14 @@
 #include <vector>
 
 namespace jb::test {
+
+struct HttpTestTlsContext;
+
+enum class HttpTestTransport : std::uint8_t {
+    Plain,
+    Tls,
+    TlsMismatchedIdentity,
+};
 
 struct HttpTestHeader {
     std::string name;
@@ -55,7 +64,7 @@ struct HttpTestResponse {
 /// Scripted loopback HTTP/1.1 server with request recording and an explicit response barrier.
 class HttpTestServer final {
 public:
-    HttpTestServer();
+    explicit HttpTestServer(HttpTestTransport transport = HttpTestTransport::Plain);
     ~HttpTestServer();
 
     HttpTestServer(HttpTestServer const&)                    = delete;
@@ -79,24 +88,26 @@ private:
     void accept_connections(int listen_fd);
     void handle_connection(int connection_fd);
 
-    int                           _listen_fd{-1};
-    std::uint16_t                 _port{0};
-    std::jthread                  _accept_thread;
-    std::vector<std::jthread>     _connection_threads;
-    mutable std::mutex            _mutex;
-    std::condition_variable       _condition;
-    std::vector<HttpTestRequest>  _requests;
-    std::vector<HttpTestResponse> _responses;
-    std::unordered_set<int>       _connection_fds;
-    std::size_t                   _next_response{0};
-    std::size_t                   _accepted_connections{0};
-    std::size_t                   _request_headers_observed{0};
-    std::size_t                   _response_segments_waiting{0};
-    std::size_t                   _response_segments_released{0};
-    std::size_t                   _peer_closes{0};
-    bool                          _responses_released{false};
-    bool                          _reset_next_request_after_headers{false};
-    bool                          _stopping{false};
+    int                                 _listen_fd{-1};
+    std::uint16_t                       _port{0};
+    HttpTestTransport                   _transport{HttpTestTransport::Plain};
+    std::unique_ptr<HttpTestTlsContext> _tls_context;
+    std::jthread                        _accept_thread;
+    std::vector<std::jthread>           _connection_threads;
+    mutable std::mutex                  _mutex;
+    std::condition_variable             _condition;
+    std::vector<HttpTestRequest>        _requests;
+    std::vector<HttpTestResponse>       _responses;
+    std::unordered_set<int>             _connection_fds;
+    std::size_t                         _next_response{0};
+    std::size_t                         _accepted_connections{0};
+    std::size_t                         _request_headers_observed{0};
+    std::size_t                         _response_segments_waiting{0};
+    std::size_t                         _response_segments_released{0};
+    std::size_t                         _peer_closes{0};
+    bool                                _responses_released{false};
+    bool                                _reset_next_request_after_headers{false};
+    bool                                _stopping{false};
 };
 
 } // namespace jb::test
