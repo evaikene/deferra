@@ -7,7 +7,13 @@ using ExecutorResult = jb::core::Result<void, jb::core::Error>;
 static_assert(std::is_same_v<std::underlying_type_t<jb::jobu::FailureDisposition>, std::uint8_t>);
 static_assert(std::is_copy_constructible_v<jb::jobu::AttemptKey>);
 static_assert(std::is_move_constructible_v<jb::jobu::AttemptStartRequest>);
+static_assert(std::is_move_constructible_v<jb::jobu::AttemptOutputChannel>);
+static_assert(std::is_move_constructible_v<jb::jobu::AttemptOutput>);
 static_assert(std::is_move_constructible_v<jb::jobu::AttemptCompletion>);
+static_assert(std::is_same_v<decltype(jb::jobu::AttemptOutputChannel::bytes), jb::core::ByteBuffer>);
+static_assert(
+    std::is_same_v<decltype(jb::jobu::AttemptOutput::primary), std::optional<jb::jobu::AttemptOutputChannel>>);
+static_assert(std::is_same_v<decltype(jb::jobu::AttemptCompletion::output), std::optional<jb::jobu::AttemptOutput>>);
 static_assert(std::is_invocable_r_v<void, jb::jobu::AttemptCompletionHandler, jb::jobu::AttemptCompletion>);
 
 static_assert(std::is_abstract_v<jb::jobu::AttemptExecutor>);

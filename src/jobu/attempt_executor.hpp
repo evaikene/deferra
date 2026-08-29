@@ -4,6 +4,7 @@
 #pragma once
 
 #include "attempt.hpp"
+#include "byte_buffer.hpp"
 #include "error.hpp"
 #include "job.hpp"
 #include "json.hpp"
@@ -59,12 +60,44 @@ struct AttemptStartRequest {
     jb::core::UtcTimePoint started_at;
 };
 
+/** Owns one bounded runner-output channel and its complete observed size.
+ *
+ * `bytes` contains the retained data selected by the runner. `total_bytes` counts the complete observed stream and
+ * must be at least `bytes.size()`. `truncated` must be true exactly when the total exceeds the retained size. The
+ * scheduler accepts at most 64 MiB in a primary channel and 4 MiB in a diagnostic channel during Phase 5.
+ */
+struct AttemptOutputChannel {
+    /// Owning retained bytes; an empty buffer remains distinct from an absent channel.
+    jb::core::ByteBuffer bytes;
+    /// Total stream bytes observed before retention limits were applied.
+    std::uint64_t        total_bytes{0};
+    /// True exactly when some observed bytes are not present in `bytes`.
+    bool                 truncated{false};
+};
+
+/** Owns optional runner-neutral output channels for one attempt completion.
+ *
+ * `primary` represents an HTTP response body in Phase 5 and stdout for the future CLI runner. `diagnostic` represents
+ * raw HTTP response headers in Phase 5 and future stderr. An absent channel means no bytes or metadata were available;
+ * a present empty channel records an observed empty stream. `capture_lost` may accompany absent or partial channels
+ * when the runner could not retain all requested capture evidence.
+ */
+struct AttemptOutput {
+    /// Optional primary output channel.
+    std::optional<AttemptOutputChannel> primary;
+    /// Optional diagnostic output channel.
+    std::optional<AttemptOutputChannel> diagnostic;
+    /// True when requested output capture was lost independently of configured truncation.
+    bool                                capture_lost{false};
+};
+
 /** Owning terminal observation returned by an attempt executor.
  *
  * `Succeeded` and `Cancelled` forbid a failure disposition and retry deadline. `Failed` requires a failure disposition,
  * and permits `retry_not_before` only with `Retryable`. `Interrupted` is reserved for recovery and must not be emitted
  * by normal Phase 4 executors. `result` must be a user-safe JSON object whose deterministic serialized form is at most
- * 256 KiB.
+ * 256 KiB. `output` is optional and, when present, must satisfy the channel invariants and the immutable run's capture
+ * policy. Output bytes remain separate from result metadata and are committed atomically with completion state.
  */
 struct AttemptCompletion {
     /// Identity supplied in the matching start request; executors must not alter it.
@@ -77,6 +110,8 @@ struct AttemptCompletion {
     std::optional<jb::core::UtcTimePoint> retry_not_before;
     /// User-safe owning result metadata encoded as a bounded JSON object.
     jb::core::JsonValue                   result;
+    /// Optional bounded owning runner output to persist with this completion.
+    std::optional<AttemptOutput>          output;
 };
 
 /** Owning callback retained by an executor until one asynchronous completion.

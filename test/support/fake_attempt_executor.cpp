@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -12,7 +13,9 @@ namespace jb::test {
 
 namespace {
 
-constexpr std::size_t kMaximumResultBytes = std::size_t{256} * 1024U;
+constexpr std::size_t kMaximumResultBytes           = std::size_t{256} * 1024U;
+constexpr std::size_t kMaximumPrimaryOutputBytes    = std::size_t{64} * 1024U * 1024U;
+constexpr std::size_t kMaximumDiagnosticOutputBytes = std::size_t{4} * 1024U * 1024U;
 
 auto test_error(core::ErrorCategory category, std::string code, std::string message, std::string detail = {})
     -> core::Error
@@ -31,6 +34,25 @@ auto invalid_completion(std::string_view reason) -> core::Error
                       "test.executor.invalid_completion",
                       "The fake executor completion violates the attempt contract",
                       std::string{reason});
+}
+
+auto validate_output_channel(jobu::AttemptOutputChannel const& channel,
+                             std::size_t                       maximum_retained_bytes,
+                             std::string_view                  name) -> core::Result<void, core::Error>
+{
+    using Result = core::Result<void, core::Error>;
+
+    if (channel.bytes.size() > maximum_retained_bytes) {
+        return Result::failure(invalid_completion(std::string{name} + "_too_large"));
+    }
+    auto const retained_bytes = static_cast<std::uint64_t>(channel.bytes.size());
+    if (channel.total_bytes < retained_bytes) {
+        return Result::failure(invalid_completion(std::string{name} + "_total_below_retained"));
+    }
+    if (channel.truncated != (channel.total_bytes > retained_bytes)) {
+        return Result::failure(invalid_completion(std::string{name} + "_truncation_mismatch"));
+    }
+    return Result::success();
 }
 
 auto validate_completion(jobu::AttemptCompletion const& completion) -> core::Result<void, core::Error>
@@ -75,6 +97,22 @@ auto validate_completion(jobu::AttemptCompletion const& completion) -> core::Res
     }
     if (serialized->size() > kMaximumResultBytes) {
         return Result::failure(invalid_completion("result_too_large"));
+    }
+    if (completion.output) {
+        if (completion.output->primary) {
+            auto validated =
+                validate_output_channel(*completion.output->primary, kMaximumPrimaryOutputBytes, "primary");
+            if (!validated) {
+                return validated;
+            }
+        }
+        if (completion.output->diagnostic) {
+            auto validated =
+                validate_output_channel(*completion.output->diagnostic, kMaximumDiagnosticOutputBytes, "diagnostic");
+            if (!validated) {
+                return validated;
+            }
+        }
     }
     return Result::success();
 }
