@@ -32,6 +32,24 @@ auto inactive_request(net::HttpRequestId request_id, std::vector<net::HttpReques
                                 : "The fake HTTP request is not active");
 }
 
+auto cancellation_pending() -> core::Error
+{
+    return fake_error(core::ErrorCategory::Conflict,
+                      "test.http.cancellation_pending",
+                      "The fake HTTP request requires a cancelled completion");
+}
+
+auto cancelled_completion(net::HttpError partial = {}) -> net::HttpCompletionResult
+{
+    partial.kind  = net::HttpErrorKind::Cancelled;
+    partial.error = {
+        .category = core::ErrorCategory::Cancelled,
+        .code     = "net.http.cancelled",
+        .message  = "HTTP request was cancelled",
+    };
+    return net::HttpCompletionResult::failure(std::move(partial));
+}
+
 } // anonymous namespace
 
 void FakeHttpClient::set_available(bool available) noexcept
@@ -97,13 +115,7 @@ auto FakeHttpClient::complete_cancelled(net::HttpRequestId request_id, net::Http
                                                 "test.http.cancellation_not_requested",
                                                 "The fake HTTP request is not cancellation-pending"));
     }
-    partial.kind  = net::HttpErrorKind::Cancelled;
-    partial.error = {
-        .category = core::ErrorCategory::Cancelled,
-        .code     = "net.http.cancelled",
-        .message  = "HTTP request was cancelled",
-    };
-    return complete(request_id, net::HttpCompletionResult::failure(std::move(partial)), std::nullopt);
+    return complete(request_id, cancelled_completion(std::move(partial)), std::nullopt);
 }
 
 auto FakeHttpClient::inject_shared_failure(core::Error failure_value) -> FakeResult<>
@@ -119,11 +131,12 @@ auto FakeHttpClient::inject_shared_failure(core::Error failure_value) -> FakeRes
     auto pending = std::exchange(_pending, {});
     for (auto& entry : pending) {
         _completed_ids.push_back(entry.id);
-        entry.completion(entry.id,
-                         net::HttpCompletionResult::failure({
-                             .kind  = net::HttpErrorKind::Internal,
-                             .error = *_failure,
-                         }));
+        auto completion = entry.cancellation_requested ? cancelled_completion()
+                                                       : net::HttpCompletionResult::failure({
+                                                             .kind  = net::HttpErrorKind::Internal,
+                                                             .error = *_failure,
+                                                         });
+        entry.completion(entry.id, std::move(completion));
     }
     emit(failed, *_failure);
     return FakeResult<>::success();
@@ -204,6 +217,9 @@ auto FakeHttpClient::complete(net::HttpRequestId                request_id,
         std::ranges::find_if(_pending, [request_id](PendingRequest const& entry) { return entry.id == request_id; });
     if (pending == _pending.end()) {
         return FakeResult<>::failure(inactive_request(request_id, _completed_ids));
+    }
+    if (pending->cancellation_requested && (result || result.error().kind != net::HttpErrorKind::Cancelled)) {
+        return FakeResult<>::failure(cancellation_pending());
     }
 
     auto handler = std::move(pending->completion);

@@ -16,7 +16,8 @@ namespace jb::test {
 /** Test-only HttpClient with explicit owner-thread completion controls.
  *
  * Successful starts retain their handlers without invoking them. Tests complete requests explicitly, and active state
- * is retired before callback delivery. Accepted cancellation remains pending until complete_cancelled() is called.
+ * is retired before callback delivery. Accepted cancellation remains pending until complete_cancelled() is called or
+ * shared failure injection preserves it as a cancelled completion.
  */
 class FakeHttpClient final : public net::HttpClient {
 public:
@@ -50,7 +51,8 @@ public:
      * @param request_id Active identifier to retire.
      * @param response Owning response delivered to the handler.
      * @param reported_id Optional deliberately substituted callback identity for protocol tests.
-     * @return Success after delivery, or a stable `test.http.*` selection error.
+     * @return Success after delivery, or a stable `test.http.*` selection error. A cancellation-pending request returns
+     * `test.http.cancellation_pending` without retiring state or invoking the handler.
      */
     [[nodiscard]] auto complete_success(net::HttpRequestId                request_id,
                                         net::HttpResponse                 response,
@@ -61,7 +63,8 @@ public:
      * @param request_id Active identifier to retire.
      * @param error Owning error observation delivered to the handler.
      * @param reported_id Optional deliberately substituted callback identity for protocol tests.
-     * @return Success after delivery, or a stable `test.http.*` selection error.
+     * @return Success after delivery, or a stable `test.http.*` selection error. A cancellation-pending request rejects
+     * every non-cancelled @p error as `test.http.cancellation_pending` without delivery.
      */
     [[nodiscard]] auto complete_error(net::HttpRequestId                request_id,
                                       net::HttpError                    error,
@@ -76,8 +79,9 @@ public:
     [[nodiscard]] auto complete_cancelled(net::HttpRequestId request_id, net::HttpError partial = {})
         -> core::Result<void, core::Error>;
 
-    /** Makes the fake permanently unavailable and completes every active request with one shared failure.
+    /** Makes the fake permanently unavailable and completes active requests without overriding accepted cancellation.
      * @param failure Safe `net.http.backend_failed`-style error copied to active observations and the failed signal.
+     * Cancellation-pending requests instead receive the required normalized cancelled result.
      * @return Success on the first transition, or `test.http.shared_failure_already_set` thereafter.
      */
     [[nodiscard]] auto inject_shared_failure(core::Error failure) -> core::Result<void, core::Error>;

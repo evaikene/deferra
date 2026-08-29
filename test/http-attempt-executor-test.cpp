@@ -592,6 +592,15 @@ TEST_CASE("HTTP attempt executor preserves callback obligation through cancellat
     REQUIRE_FALSE(repeated);
     CHECK(repeated.error().code == "jobu.http.cancel_failed");
 
+    auto unexpected_success = client.complete_success(request_id, response());
+    REQUIRE_FALSE(unexpected_success);
+    CHECK(unexpected_success.error().code == "test.http.cancellation_pending");
+    auto unexpected_error = client.complete_error(request_id, transport_error());
+    REQUIRE_FALSE(unexpected_error);
+    CHECK(unexpected_error.error().code == "test.http.cancellation_pending");
+    CHECK(client.active_request_count() == 1U);
+    CHECK(completions.empty());
+
     auto partial = transport_error(HttpErrorKind::Cancelled);
     REQUIRE(client.complete_cancelled(request_id, std::move(partial)));
     REQUIRE(completions.size() == 1U);
@@ -616,10 +625,13 @@ TEST_CASE("HTTP attempt executor handles shared client failure and permanent una
     auto                failed_count = std::size_t{0};
     client.failed.connect([&](Error const&) { ++failed_count; });
 
-    REQUIRE(executor.start(start_request(1),
+    auto       cancellation_request = start_request(1);
+    auto const cancellation_key     = cancellation_request.key;
+    REQUIRE(executor.start(std::move(cancellation_request),
                            [&](AttemptCompletion completion) { completions.push_back(std::move(completion)); }));
     REQUIRE(executor.start(start_request(2),
                            [&](AttemptCompletion completion) { completions.push_back(std::move(completion)); }));
+    REQUIRE(executor.cancel(cancellation_key));
     REQUIRE(client.inject_shared_failure({
         .category = ErrorCategory::Internal,
         .code     = "net.http.backend_failed",
@@ -630,11 +642,12 @@ TEST_CASE("HTTP attempt executor handles shared client failure and permanent una
     CHECK_FALSE(executor.is_available(JobType::Http));
     CHECK(client.active_request_count() == 0U);
     REQUIRE(completions.size() == 2U);
-    for (auto const& completion : completions) {
-        CHECK(completion.outcome == AttemptOutcome::Failed);
-        CHECK(completion.failure_disposition == FailureDisposition::Terminal);
-        CHECK(result_string(completion.result, "error_code") == "net.http.backend_failed");
-    }
+    CHECK(completions[0].key == cancellation_key);
+    CHECK(completions[0].outcome == AttemptOutcome::Cancelled);
+    CHECK_FALSE(completions[0].failure_disposition);
+    CHECK(completions[1].outcome == AttemptOutcome::Failed);
+    CHECK(completions[1].failure_disposition == FailureDisposition::Terminal);
+    CHECK(result_string(completions[1].result, "error_code") == "net.http.backend_failed");
 
     auto callback_count = std::size_t{0};
     auto rejected       = executor.start(start_request(3), [&](AttemptCompletion const&) { ++callback_count; });
