@@ -27,6 +27,12 @@ add_executable(${TARGET} retry-policy-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU HTTP retry classification and safe result policy test
+set(TARGET "http-retry-test")
+add_executable(${TARGET} http-retry-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # JobU UTC timestamp test
 set(TARGET "utc-timestamp-test")
 add_executable(${TARGET} utc-timestamp-test.cpp)

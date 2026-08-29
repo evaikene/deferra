@@ -26,6 +26,8 @@ target_sources(${TARGET}
         domain_storage_priv.hpp
         http_job_payload_priv.cpp
         http_job_payload_priv.hpp
+        http_retry_priv.cpp
+        http_retry_priv.hpp
         idempotency_codec_priv.cpp
         idempotency_codec_priv.hpp
         idempotency_repository_priv.cpp
