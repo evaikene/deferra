@@ -6,6 +6,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -65,6 +67,16 @@ auto attempt_completion(jb::jobu::AttemptKey     key,
         .failure_disposition = std::nullopt,
         .retry_not_before    = std::nullopt,
         .result              = object_with_text("result"),
+    };
+}
+
+auto output_channel(std::size_t retained_bytes, std::uint64_t total_bytes, bool truncated)
+    -> jb::jobu::AttemptOutputChannel
+{
+    return {
+        .bytes       = ByteBuffer(retained_bytes, std::byte{0x41}),
+        .total_bytes = total_bytes,
+        .truncated   = truncated,
     };
 }
 
@@ -327,6 +339,14 @@ TEST_CASE("FakeAttemptExecutor accepts every valid completion shape", "[test][at
 
     completions.push_back(attempt_completion(key, jb::jobu::AttemptOutcome::Cancelled));
 
+    auto captured   = attempt_completion(key);
+    captured.output = jb::jobu::AttemptOutput{
+        .primary      = output_channel(0, 0, false),
+        .diagnostic   = output_channel(2, 3, true),
+        .capture_lost = true,
+    };
+    completions.push_back(std::move(captured));
+
     auto empty_serialized = jb::core::serialize_json(object_with_text(""));
     REQUIRE(empty_serialized);
     REQUIRE(empty_serialized->size() < kMaximumResultBytes);
@@ -391,6 +411,30 @@ TEST_CASE("FakeAttemptExecutor rejects inconsistent or unsafe completion shapes"
     oversized_result.result = object_with_text(std::string(kMaximumResultBytes, 'x'));
     completions.emplace_back("result_too_large", std::move(oversized_result));
 
+    auto primary_total   = attempt_completion(key);
+    primary_total.output = jb::jobu::AttemptOutput{
+        .primary = output_channel(2, 1, false),
+    };
+    completions.emplace_back("primary_total_below_retained", std::move(primary_total));
+
+    auto primary_truncation   = attempt_completion(key);
+    primary_truncation.output = jb::jobu::AttemptOutput{
+        .primary = output_channel(1, 2, false),
+    };
+    completions.emplace_back("primary_truncation_mismatch", std::move(primary_truncation));
+
+    auto diagnostic_total   = attempt_completion(key);
+    diagnostic_total.output = jb::jobu::AttemptOutput{
+        .diagnostic = output_channel(2, 1, false),
+    };
+    completions.emplace_back("diagnostic_total_below_retained", std::move(diagnostic_total));
+
+    auto diagnostic_truncation   = attempt_completion(key);
+    diagnostic_truncation.output = jb::jobu::AttemptOutput{
+        .diagnostic = output_channel(1, 1, true),
+    };
+    completions.emplace_back("diagnostic_truncation_mismatch", std::move(diagnostic_truncation));
+
     for (auto& [reason, completion] : completions) {
         jb::test::FakeAttemptExecutor executor;
         auto                          callback_count = std::size_t{0};
@@ -404,6 +448,59 @@ TEST_CASE("FakeAttemptExecutor rejects inconsistent or unsafe completion shapes"
         CHECK(result.error().detail == reason);
         CHECK(executor.pending_keys() == std::vector<jb::jobu::AttemptKey>{key});
         CHECK(callback_count == 0);
+    }
+}
+
+TEST_CASE("FakeAttemptExecutor enforces retained output limits", "[test][attempt-executor][output]")
+{
+    constexpr auto maximum_primary    = std::size_t{64} * 1024U * 1024U;
+    constexpr auto maximum_diagnostic = std::size_t{4} * 1024U * 1024U;
+    auto const     key                = attempt_key("00000000-0000-0000-0000-000000000009");
+
+    auto verify = [&](std::optional<jb::jobu::AttemptOutputChannel> primary,
+                      std::optional<jb::jobu::AttemptOutputChannel> diagnostic,
+                      std::optional<std::string_view>               expected_error) {
+        jb::test::FakeAttemptExecutor executor;
+        auto                          callback_count = std::size_t{0};
+        executor.set_available(jb::jobu::JobType::Cli, true);
+        REQUIRE(executor.start(start_request(key), [&](auto const&) { ++callback_count; }));
+
+        auto completion   = attempt_completion(key);
+        completion.output = jb::jobu::AttemptOutput{
+            .primary    = std::move(primary),
+            .diagnostic = std::move(diagnostic),
+        };
+        auto completed = executor.complete(key, std::move(completion));
+        if (expected_error) {
+            REQUIRE_FALSE(completed);
+            CHECK(completed.error().detail == *expected_error);
+            CHECK(executor.pending_keys() == std::vector<jb::jobu::AttemptKey>{key});
+            CHECK(callback_count == 0);
+        }
+        else {
+            REQUIRE(completed);
+            CHECK(executor.pending_keys().empty());
+            CHECK(callback_count == 1);
+        }
+    };
+
+    SECTION("exact primary limit")
+    {
+        verify(output_channel(maximum_primary, maximum_primary, false), std::nullopt, std::nullopt);
+    }
+    SECTION("primary over limit")
+    {
+        verify(output_channel(maximum_primary + 1U, maximum_primary + 1U, false), std::nullopt, "primary_too_large");
+    }
+    SECTION("exact diagnostic limit")
+    {
+        verify(std::nullopt, output_channel(maximum_diagnostic, maximum_diagnostic, false), std::nullopt);
+    }
+    SECTION("diagnostic over limit")
+    {
+        verify(std::nullopt,
+               output_channel(maximum_diagnostic + 1U, maximum_diagnostic + 1U, false),
+               "diagnostic_too_large");
     }
 }
 

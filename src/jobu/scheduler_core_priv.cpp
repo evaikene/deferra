@@ -1,6 +1,7 @@
 #include "scheduler_core_priv.hpp"
 
 #include "attempt_executor.hpp"
+#include "attempt_repository_priv.hpp"
 #include "cron.hpp"
 #include "job_repository_priv.hpp"
 #include "json.hpp"
@@ -12,6 +13,7 @@
 #include "transaction.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <iterator>
@@ -34,6 +36,8 @@ using CoreResult = jb::core::Result<T, jb::core::Error>;
 
 constexpr std::size_t      kMaximumRepositoryPageRows    = 1000U;
 constexpr std::size_t      kMaximumCompletionResultBytes = std::size_t{256} * 1024U;
+constexpr std::size_t      kMaximumPrimaryOutputBytes    = std::size_t{64} * 1024U * 1024U;
+constexpr std::size_t      kMaximumDiagnosticOutputBytes = std::size_t{4} * 1024U * 1024U;
 constexpr std::string_view kCancellationResultJson       = R"({"reason":"cancelled"})";
 
 struct CapacityState {
@@ -413,6 +417,79 @@ auto next_blocking_retry(CapacityState const&            capacity,
     return candidate == found->second.end() ? nullptr : &*candidate;
 }
 
+auto validate_output_channel(jb::jobu::AttemptOutputChannel const& channel,
+                             std::size_t                           maximum_retained_bytes,
+                             std::string_view                      name) -> CoreResult<void>
+{
+    if (channel.bytes.size() > maximum_retained_bytes) {
+        return CoreResult<void>::failure(invalid_completion(std::string{name} + "_too_large"));
+    }
+    auto const retained_bytes = static_cast<std::uint64_t>(channel.bytes.size());
+    if (channel.total_bytes < retained_bytes) {
+        return CoreResult<void>::failure(invalid_completion(std::string{name} + "_total_below_retained"));
+    }
+    if (channel.truncated != (channel.total_bytes > retained_bytes)) {
+        return CoreResult<void>::failure(invalid_completion(std::string{name} + "_truncation_mismatch"));
+    }
+    return CoreResult<void>::success();
+}
+
+auto validate_output(AttemptCompletion const& completion) -> CoreResult<void>
+{
+    if (!completion.output) {
+        return CoreResult<void>::success();
+    }
+    if (completion.output->primary) {
+        auto validated = validate_output_channel(*completion.output->primary, kMaximumPrimaryOutputBytes, "primary");
+        if (!validated) {
+            return validated;
+        }
+    }
+    if (completion.output->diagnostic) {
+        auto validated =
+            validate_output_channel(*completion.output->diagnostic, kMaximumDiagnosticOutputBytes, "diagnostic");
+        if (!validated) {
+            return validated;
+        }
+    }
+    return CoreResult<void>::success();
+}
+
+auto validate_output_capture(AttemptCompletion const& completion, AttributeSet const& attributes) -> CoreResult<void>
+{
+    if (!completion.output) {
+        return CoreResult<void>::success();
+    }
+    auto const capture = attributes.find("output.capture");
+    if (capture == attributes.end()) {
+        return CoreResult<void>::failure(invalid_completion("missing_output_capture"));
+    }
+    auto const* mode = std::get_if<std::string>(&capture->second.data);
+    if (mode == nullptr) {
+        return CoreResult<void>::failure(invalid_completion("invalid_output_capture"));
+    }
+    if (*mode == "none") {
+        return CoreResult<void>::failure(invalid_completion("output_capture_disabled"));
+    }
+    if (*mode != "on_error" && *mode != "always") {
+        return CoreResult<void>::failure(invalid_completion("unknown_output_capture"));
+    }
+    return CoreResult<void>::success();
+}
+
+auto to_storage_output(jb::jobu::AttemptOutput const& output) -> AttemptOutput
+{
+    // Schema v1 predates runner-neutral output names: primary and diagnostic intentionally reuse its stdout/stderr
+    // columns, while complete byte counts remain in runner result metadata because no durable total columns exist.
+    return {
+        .stdout_bytes     = output.primary ? std::optional{output.primary->bytes} : std::nullopt,
+        .stderr_bytes     = output.diagnostic ? std::optional{output.diagnostic->bytes} : std::nullopt,
+        .stdout_truncated = output.primary && output.primary->truncated,
+        .stderr_truncated = output.diagnostic && output.diagnostic->truncated,
+        .capture_lost     = output.capture_lost,
+    };
+}
+
 auto validate_completion(AttemptCompletion const& completion) -> CoreResult<std::string>
 {
     switch (completion.outcome) {
@@ -449,6 +526,10 @@ auto validate_completion(AttemptCompletion const& completion) -> CoreResult<std:
     }
     if (serialized->size() > kMaximumCompletionResultBytes) {
         return CoreResult<std::string>::failure(invalid_completion("result_too_large"));
+    }
+    auto output = validate_output(completion);
+    if (!output) {
+        return CoreResult<std::string>::failure(std::move(output).error());
     }
     return CoreResult<std::string>::success(std::move(serialized).value());
 }
@@ -517,6 +598,10 @@ auto process_completion(jb::db::Database&                        database,
     if (!context) {
         return CoreResult<CompletionEffect>::failure(std::move(context).error());
     }
+    auto output_capture = validate_output_capture(completion, context->run.attributes);
+    if (!output_capture) {
+        return CoreResult<CompletionEffect>::failure(std::move(output_capture).error());
+    }
     auto decision = retry_decision(
         context->run.attributes,
         {
@@ -538,6 +623,17 @@ auto process_completion(jb::db::Database&                        database,
                                                          *serialized);
     if (!attempt_completed) {
         return CoreResult<CompletionEffect>::failure(std::move(attempt_completed).error());
+    }
+    if (completion.output) {
+        // Output must precede the run transition so capture and completion either commit together or leave the
+        // attempt durably running for the recovery phase.
+        AttemptRepository attempts{database};
+        auto              output_persisted = attempts.insert_or_replace_output(completion.key.run_id,
+                                                                               completion.key.attempt_number,
+                                                                               to_storage_output(*completion.output));
+        if (!output_persisted) {
+            return CoreResult<CompletionEffect>::failure(std::move(output_persisted).error());
+        }
     }
 
     auto effect = CompletionEffect{};

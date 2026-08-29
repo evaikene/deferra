@@ -39,7 +39,8 @@ public:
     /** Completes one selected pending attempt synchronously on the calling test thread.
      *
      * The helper validates selection/key consistency, exact-once completion, outcome fields, the result-object shape,
-     * deterministic JSON serialization, and the 256 KiB result limit before invoking the retained handler.
+     * deterministic JSON serialization, the 256 KiB result limit, and structural output limits and invariants before
+     * invoking the retained handler.
      *
      * @param key Pending attempt selected by the test.
      * @param completion Owning completion whose key must equal `key`.
