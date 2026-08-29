@@ -19,7 +19,12 @@ enum class JobPayloadIssue : std::uint8_t {
     MissingCommand,
     InvalidArguments,
     MissingUrl,
+    InvalidUrl,
     InvalidMethod,
+    InvalidHeaders,
+    InvalidBody,
+    InvalidExpectedStatuses,
+    InvalidHttpRequest,
     InvalidJson,
     TooLarge,
 };

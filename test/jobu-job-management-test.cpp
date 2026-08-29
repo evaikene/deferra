@@ -133,6 +133,11 @@ auto json_object(jb::core::JsonValue::Object value) -> jb::core::JsonValue
     return json;
 }
 
+auto& object(jb::core::JsonValue& value)
+{
+    return std::get<jb::core::JsonValue::Object>(value.data);
+}
+
 auto cli_payload(std::string command, std::vector<std::string> arguments = {}) -> jb::core::JsonValue
 {
     auto argument_values = jb::core::JsonValue::Array{};
@@ -157,6 +162,33 @@ auto http_payload(std::string url, std::optional<std::string> method = std::null
         object.emplace("method", json_string(std::move(*method)));
     }
     return json_object(std::move(object));
+}
+
+auto complete_http_payload(std::string url, std::string method = "POST") -> jb::core::JsonValue
+{
+    return json_object({
+        {"body",
+         json_object({
+             {"data", json_string("AAH/")},
+             {"encoding", json_string("base64")},
+         })                                                                           },
+        {"expected_statuses", json_array({json_string("200-299"), json_string("304")})},
+        {"future",            json_bool(true)                                         },
+        {"headers",
+         json_array({
+             json_object({
+                 {"name", json_string("Authorization")},
+                 {"sensitive", json_bool(false)},
+                 {"value", json_string("literal")},
+             }),
+             json_object({
+                 {"name", json_string("X-Trace")},
+                 {"value", json_string("trace")},
+             }),
+         })                                                                           },
+        {"method",            json_string(std::move(method))                          },
+        {"url",               json_string(std::move(url))                             },
+    });
 }
 
 auto max_attempts(std::int64_t value) -> AttributeSet
@@ -367,7 +399,7 @@ TEST_CASE("Job management creates durable one-time definitions and immutable run
         .type     = JobType::Http,
         .schedule = once_at(UtcTimePoint{20s}),
         .priority = 9,
-        .payload  = http_payload("https://example.test/path"),
+        .payload  = complete_http_payload("https://example.test/path"),
     });
     REQUIRE(http);
     CHECK(http->id == http_id);
@@ -398,11 +430,11 @@ TEST_CASE("Job create idempotency is queue-scoped and replays the original defin
     auto request = CreateJobRequest{
         .queue           = first_queue->id,
         .name            = "replay",
-        .type            = JobType::Cli,
+        .type            = JobType::Http,
         .schedule        = once_at(UtcTimePoint{20s}),
         .priority        = 0,
         .attributes      = {},
-        .payload         = cli_payload("true"),
+        .payload         = complete_http_payload("https://idempotency.test/hooks"),
         .idempotency_key = "job-key",
     };
     auto original = service.create_job(request);
@@ -636,6 +668,24 @@ TEST_CASE("Job management rejects invalid requests before durable creation", "[j
     }),
                   ErrorCategory::InvalidArgument,
                   "jobu.job.invalid_payload");
+    auto unsafe_payload = http_payload("https://url-secret.example/has space?token=url-secret");
+    object(unsafe_payload)
+        .emplace("headers",
+                 json_array({
+                     json_object({
+                                  {"name", json_string("X-Secret")},
+                                  {"value", json_string("header-secret-value")},
+                                  }
+                     )
+    }));
+    auto unsafe_error = require_error(
+        service.create_job(
+            {.queue = queue_id, .type = JobType::Http, .schedule = schedule, .payload = std::move(unsafe_payload)}),
+        ErrorCategory::InvalidArgument,
+        "jobu.job.invalid_payload");
+    CHECK(unsafe_error.detail == "reason=invalid_url");
+    CHECK(unsafe_error.detail.find("url-secret") == std::string::npos);
+    CHECK(unsafe_error.detail.find("header-secret") == std::string::npos);
     require_error(service.create_job({
                       .queue    = queue_id,
                       .type     = JobType::Http,
@@ -771,7 +821,7 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
     REQUIRE(service.update_queue({.queue = queue_id, .defaults = max_attempts(8)}));
     fixture.time.advance(1s);
 
-    auto const replacement_payload = http_payload("https://updated.test/path", "PATCH");
+    auto const replacement_payload = complete_http_payload("https://updated.test/path", "PATCH");
     auto       request             = UpdateJobRequest{
         .job_id            = job_id,
         .expected_revision = 1,
@@ -1383,11 +1433,16 @@ TEST_CASE("Job management rejects malformed persisted definitions", "[jobu][job]
     REQUIRE(
         service.create_job({.queue = queue_id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("true")}));
 
-    execute(fixture.database, "UPDATE jobu_jobs SET payload_json = '{}' WHERE id IS NOT NULL");
-    require_error(service.get_job(job_id), ErrorCategory::Internal, "jobu.storage.invariant");
+    execute(
+        fixture.database,
+        R"(UPDATE jobu_jobs SET type = 'http', payload_json = '{"headers":[{"name":"Idempotency-Key","value":"stored-secret"}],"url":"https://stored.test"}' WHERE id IS NOT NULL)");
+    auto stored_error = require_error(service.get_job(job_id), ErrorCategory::Internal, "jobu.storage.invariant");
+    CHECK(stored_error.detail == "reason=invalid_headers");
+    CHECK(stored_error.detail.find("stored-secret") == std::string::npos);
     require_error(service.list_jobs({}), ErrorCategory::Internal, "jobu.storage.invariant");
 
-    execute(fixture.database, R"(UPDATE jobu_jobs SET payload_json = '{"command":"true"}', name = char(1))");
+    execute(fixture.database,
+            R"(UPDATE jobu_jobs SET type = 'cli', payload_json = '{"command":"true"}', name = char(1))");
     require_error(service.get_job(job_id), ErrorCategory::Internal, "jobu.storage.invariant");
 }
 
