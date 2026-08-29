@@ -140,6 +140,7 @@ auto resolve_redirect_target(std::string_view current_url, std::string_view loca
     return Result::success({
         .url          = resolved.get(),
         .cross_origin = *current_origin != *target_origin,
+        .uses_tls     = target_origin->scheme == "https",
     });
 }
 

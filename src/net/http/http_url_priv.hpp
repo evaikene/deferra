@@ -11,6 +11,7 @@ namespace jb::net::http::detail {
 struct RedirectTarget {
     std::string url;
     bool        cross_origin{false};
+    bool        uses_tls{false};
 };
 
 /// Resolves and validates one redirect target while applying origin and downgrade policy.

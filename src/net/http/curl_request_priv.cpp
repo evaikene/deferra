@@ -599,7 +599,7 @@ auto CurlRequest::redirect_location(std::vector<HttpHeader> const& headers) cons
             continue;
         }
         if (location) {
-            return Result::failure(request_redirect_error("redirect.multiple_locations"));
+            return Result::failure(request_redirect_error("redirect.invalid_location"));
         }
         location = header.value;
     }
@@ -621,6 +621,10 @@ auto CurlRequest::prepare_redirect_leg(std::string_view location) -> jb::core::R
     auto target = resolve_redirect_target(_request.url, location);
     if (!target) {
         return Result::failure(request_redirect_error(std::move(target).error()));
+    }
+    if (target->uses_tls) {
+        // Preserve the Stage 5.6 HTTP-only admission boundary for redirect legs until Stage 5.7 records TLS metadata.
+        return Result::failure(request_redirect_error("redirect.https_not_supported"));
     }
 
     auto const changes_to_get = ((status == 301U || status == 302U) && _request.method == "POST") ||
@@ -724,7 +728,7 @@ auto CurlRequest::transfer_result(CURLcode result) -> std::optional<HttpCompleti
     auto location = std::optional<std::string_view>{};
     if (_current_status_code && _request.follow_redirects && is_redirect_status(*_current_status_code) &&
         redirect_location_count(_current_headers) > 1U) {
-        auto error = request_redirect_error("redirect.multiple_locations");
+        auto error = request_redirect_error("redirect.invalid_location");
         populate_error_observation(error);
         return HttpCompletionResult::failure(std::move(error));
     }

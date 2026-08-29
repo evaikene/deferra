@@ -520,6 +520,7 @@ TEST_CASE("curl redirect URL policy resolves targets and compares canonical orig
     auto relative = resolve_redirect_target("http://Example.TEST:80/a/b", "../next?value=1");
     REQUIRE(relative);
     CHECK_FALSE(relative->cross_origin);
+    CHECK_FALSE(relative->uses_tls);
     CHECK(relative->url.ends_with("/next?value=1"));
 
     auto implicit_port = resolve_redirect_target("http://example.test:80/a", "http://EXAMPLE.test/b");
@@ -533,6 +534,7 @@ TEST_CASE("curl redirect URL policy resolves targets and compares canonical orig
     auto upgrade = resolve_redirect_target("http://example.test/a", "https://example.test/b");
     REQUIRE(upgrade);
     CHECK(upgrade->cross_origin);
+    CHECK(upgrade->uses_tls);
 
     auto downgrade = resolve_redirect_target("https://example.test/a", "http://example.test/b");
     REQUIRE_FALSE(downgrade);
@@ -746,6 +748,9 @@ TEST_CASE("system HTTP client returns safe redirect policy failures", "[net][htt
              .headers = {{.name = "Location", .value = "/first-secret"},
                          {.name = "lOcAtIoN", .value = "/second-secret"}},
              .reason  = "redirect.invalid_location"                                                                                    },
+        Case{.name    = "HTTPS target",
+             .headers = {{.name = "Location", .value = "https://redirect-secret.example/path"}},
+             .reason  = "redirect.https_not_supported"                                                                                 },
         Case{.name    = "non-HTTP target",
              .headers = {{.name = "Location", .value = "ftp://redirect-secret.example/path"}},
              .reason  = "redirect.invalid_target"                                                                                      },
