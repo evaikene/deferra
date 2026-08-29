@@ -129,7 +129,12 @@ auto FakeHttpClient::inject_shared_failure(core::Error failure_value) -> FakeRes
     _available   = false;
     _failure     = std::move(failure_value);
     auto pending = std::exchange(_pending, {});
+
+    // Shared failure makes every outstanding request non-cancellable immediately, while undelivered handlers remain
+    // active until each callback begins.
+    _shared_failure_completion_count = pending.size();
     for (auto& entry : pending) {
+        --_shared_failure_completion_count;
         _completed_ids.push_back(entry.id);
         auto completion = entry.cancellation_requested ? cancelled_completion()
                                                        : net::HttpCompletionResult::failure({
@@ -201,7 +206,7 @@ auto FakeHttpClient::cancel(net::HttpRequestId request_id) -> FakeResult<>
 
 auto FakeHttpClient::active_request_count() const noexcept -> std::size_t
 {
-    return _pending.size();
+    return _pending.size() + _shared_failure_completion_count;
 }
 
 auto FakeHttpClient::failure() const -> std::optional<core::Error>

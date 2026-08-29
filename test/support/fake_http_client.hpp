@@ -15,9 +15,10 @@ namespace jb::test {
 
 /** Test-only HttpClient with explicit owner-thread completion controls.
  *
- * Successful starts retain their handlers without invoking them. Tests complete requests explicitly, and active state
- * is retired before callback delivery. Accepted cancellation remains pending until complete_cancelled() is called or
- * shared failure injection preserves it as a cancelled completion.
+ * Successful starts retain their handlers without invoking them. Ordinary completion retires active state before
+ * callback delivery. Shared failure makes every request non-cancellable immediately while keeping undelivered handlers
+ * countable, then retires each obligation before its callback. Accepted cancellation remains pending until
+ * complete_cancelled() is called or shared failure injection preserves it as a cancelled completion.
  */
 class FakeHttpClient final : public net::HttpClient {
 public:
@@ -44,7 +45,7 @@ public:
     /// Returns every cancellation call in observation order, including rejected calls.
     [[nodiscard]] auto cancel_calls() const noexcept -> std::vector<net::HttpRequestId> const&;
 
-    /// Returns active identifiers in start order.
+    /// Returns identifiers still under explicit test completion control in start order.
     [[nodiscard]] auto pending_request_ids() const -> std::vector<net::HttpRequestId>;
 
     /** Completes one active request successfully and invokes its handler.
@@ -82,6 +83,7 @@ public:
     /** Makes the fake permanently unavailable and completes active requests without overriding accepted cancellation.
      * @param failure Safe `net.http.backend_failed`-style error copied to active observations and the failed signal.
      * Cancellation-pending requests instead receive the required normalized cancelled result.
+     * Undelivered handlers remain included in active_request_count() but cannot be cancelled.
      * @return Success on the first transition, or `test.http.shared_failure_already_set` thereafter.
      */
     [[nodiscard]] auto inject_shared_failure(core::Error failure) -> core::Result<void, core::Error>;
@@ -111,6 +113,7 @@ private:
     std::optional<core::Error>      _failure;
     std::vector<StartRecord>        _start_records;
     std::vector<PendingRequest>     _pending;
+    std::size_t                     _shared_failure_completion_count{0};
     std::vector<net::HttpRequestId> _completed_ids;
     std::vector<net::HttpRequestId> _cancel_calls;
 };

@@ -302,7 +302,8 @@ struct HttpAttemptExecutor::Private {
                               executor_error(jb::core::ErrorCategory::Internal,
                                              "jobu.http.callback_identity_mismatch",
                                              "The HTTP client completion identity did not match the accepted request"));
-        auto policy = mapped ? std::move(mapped).value() : internal_completion_policy();
+        auto const mapping_succeeded = static_cast<bool>(mapped);
+        auto       policy            = mapped ? std::move(mapped).value() : internal_completion_policy();
 
         auto completion = AttemptCompletion{
             .key                 = active->key,
@@ -311,7 +312,8 @@ struct HttpAttemptExecutor::Private {
             .retry_not_before    = policy.retry_not_before,
             .result              = std::move(policy.result),
         };
-        if (should_capture(active->capture, completion.outcome)) {
+        // Captured bytes are attributable only after callback identity and completion mapping both succeed.
+        if (mapping_succeeded && should_capture(active->capture, completion.outcome)) {
             completion.output = captured_output(transfer);
         }
 

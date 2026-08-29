@@ -621,16 +621,23 @@ TEST_CASE("HTTP attempt executor handles shared client failure and permanent una
     FakeHttpClient      client;
     FakeTimeSource      time;
     HttpAttemptExecutor executor{client, time};
-    auto                completions  = std::vector<AttemptCompletion>{};
-    auto                failed_count = std::size_t{0};
+    auto                completions      = std::vector<AttemptCompletion>{};
+    auto                active_counts    = std::vector<std::size_t>{};
+    auto                reentrant_cancel = std::optional<Result<void, Error>>{};
+    auto                failed_count     = std::size_t{0};
     client.failed.connect([&](Error const&) { ++failed_count; });
 
     auto       cancellation_request = start_request(1);
     auto const cancellation_key     = cancellation_request.key;
-    REQUIRE(executor.start(std::move(cancellation_request),
-                           [&](AttemptCompletion completion) { completions.push_back(std::move(completion)); }));
-    REQUIRE(executor.start(start_request(2),
-                           [&](AttemptCompletion completion) { completions.push_back(std::move(completion)); }));
+    REQUIRE(executor.start(std::move(cancellation_request), [&](AttemptCompletion completion) {
+        reentrant_cancel.emplace(client.cancel(client.start_records().back().id));
+        active_counts.push_back(client.active_request_count());
+        completions.push_back(std::move(completion));
+    }));
+    REQUIRE(executor.start(start_request(2), [&](AttemptCompletion completion) {
+        active_counts.push_back(client.active_request_count());
+        completions.push_back(std::move(completion));
+    }));
     REQUIRE(executor.cancel(cancellation_key));
     REQUIRE(client.inject_shared_failure({
         .category = ErrorCategory::Internal,
@@ -641,6 +648,12 @@ TEST_CASE("HTTP attempt executor handles shared client failure and permanent una
     CHECK(failed_count == 1U);
     CHECK_FALSE(executor.is_available(JobType::Http));
     CHECK(client.active_request_count() == 0U);
+    REQUIRE(reentrant_cancel);
+    REQUIRE_FALSE(*reentrant_cancel);
+    CHECK(reentrant_cancel->error().code == "net.http.request_not_found");
+    REQUIRE(active_counts.size() == 2U);
+    CHECK(active_counts[0] == 1U);
+    CHECK(active_counts[1] == 0U);
     REQUIRE(completions.size() == 2U);
     CHECK(completions[0].key == cancellation_key);
     CHECK(completions[0].outcome == AttemptOutcome::Cancelled);
@@ -696,6 +709,7 @@ TEST_CASE("HTTP attempt executor converts callback identity mismatch to one safe
     CHECK(completions[0].outcome == AttemptOutcome::Failed);
     CHECK(completions[0].failure_disposition == FailureDisposition::Terminal);
     CHECK(result_string(completions[0].result, "error_code") == "jobu.http.completion_failed");
+    CHECK_FALSE(completions[0].output);
 
     REQUIRE(executor.start(start_request(),
                            [&](AttemptCompletion completion) { completions.push_back(std::move(completion)); }));
