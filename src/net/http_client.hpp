@@ -195,6 +195,13 @@ public:
     /// Emitted exactly once after a shared backend failure has made the client unavailable and updated active state.
     /// Signal subscription is thread-safe; the safe error excludes request and backend-provided data.
     jb::core::Signal<jb::core::Error> failed;
+
+protected:
+    /// Constructs a client whose subclass supplies its private data.
+    /// @param[in] dd Reference to a heap-allocated struct derived from jb::core::priv::ObjectPrivate. HttpClient takes
+    /// ownership; do not delete @p dd elsewhere.
+    /// @param[in] parent Optional same-thread Object parent that owns this client.
+    explicit HttpClient(jb::core::priv::ObjectPrivate& dd, jb::core::Object* parent = nullptr);
 };
 
 } // namespace jb::net

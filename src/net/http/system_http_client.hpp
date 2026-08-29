@@ -122,7 +122,6 @@ private:
     explicit SystemHttpClient(jb::core::EventLoop& loop, SystemHttpClientOptions options);
 
     struct Private;
-    std::unique_ptr<Private> _data;
 };
 
 } // namespace jb::net::http
