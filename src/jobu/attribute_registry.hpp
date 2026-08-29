@@ -58,7 +58,7 @@ public:
         -> jb::core::Result<void, jb::core::Error>;
 
 private:
-    std::array<AttributeDefinition, 11> _definitions;
+    std::array<AttributeDefinition, 19> _definitions;
 };
 
 /** Materializes the effective attributes for one job.
@@ -84,8 +84,8 @@ private:
  * Durations use exact signed integer milliseconds and bytes use lower-case hexadecimal. List and map values use
  * natural JSON recursively; nested durations and bytes are rejected because the public format has no element schema
  * with which to decode them. Applicable standard cross-field constraints are also validated; for example,
- * `retry.max_delay`
- * must not be below `retry.initial_delay` when both attributes are supplied.
+ * `retry.max_delay` must not be below `retry.initial_delay`, and enabled HTTP redirects require a positive
+ * `http.max_redirects`, when both attributes in each relationship are supplied.
  *
  * @param values Partial or complete attribute set to encode without retaining it.
  * @param registry Registry defining every top-level attribute.
@@ -99,9 +99,10 @@ attribute_set_to_json(AttributeSet const& values, AttributeRegistry const& regis
 /** Decodes the public definition-directed JSON object into an attribute set.
  *
  * The conversion validates every name and value at @p scope, together with applicable standard cross-field
- * constraints; for example, `retry.max_delay` must not be below `retry.initial_delay` when both attributes are
- * supplied. It does not materialize omitted definitions or retain references to @p value. List and map members decode
- * only the natural JSON alternatives because the public format has no nested duration or byte element schema.
+ * constraints; for example, `retry.max_delay` must not be below `retry.initial_delay`, and enabled HTTP redirects
+ * require a positive `http.max_redirects`, when both attributes in each relationship are supplied. It does not
+ * materialize omitted definitions or retain references to @p value. List and map members decode only the natural JSON
+ * alternatives because the public format has no nested duration or byte element schema.
  *
  * @param value JSON object to decode without retaining it.
  * @param registry Registry defining every top-level attribute.

@@ -148,6 +148,16 @@ auto attribute_document(StandardAttributeRegistry const& registry,
     if (legacy) {
         REQUIRE(attributes->erase("retry.jitter") == 1U);
         REQUIRE(attributes->erase("retry.multiplier") == 1U);
+        for (auto const* name : {"http.follow_redirects",
+                                 "http.idempotency_key",
+                                 "http.max_redirects",
+                                 "http.retry_errors",
+                                 "http.retry_statuses",
+                                 "http.tls_verify",
+                                 "output.http_body_limit",
+                                 "output.http_headers_limit"}) {
+            REQUIRE(attributes->erase(name) == 1U);
+        }
         REQUIRE(attributes->size() == 9U);
         mode = AttributeDocumentMode::Partial;
     }

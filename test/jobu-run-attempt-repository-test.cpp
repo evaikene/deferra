@@ -278,7 +278,7 @@ TEST_CASE("Run repository inserts one manual snapshot and exposes Run Now precon
     CHECK(error.detail == "reason=manual_run_relationship");
 }
 
-TEST_CASE("Run repository upgrades Phase 3 retry snapshots with Phase 4 defaults", "[jobu][run][sqlite]")
+TEST_CASE("Run repository upgrades Phase 3 snapshots with later defaults", "[jobu][run][sqlite]")
 {
     RepositoryFixture fixture;
     auto const        queue_id = id(6);
@@ -294,6 +294,16 @@ TEST_CASE("Run repository upgrades Phase 3 retry snapshots with Phase 4 defaults
     auto legacy_attributes = run.attributes;
     REQUIRE(legacy_attributes.erase("retry.jitter") == 1U);
     REQUIRE(legacy_attributes.erase("retry.multiplier") == 1U);
+    for (auto const* name : {"http.follow_redirects",
+                             "http.idempotency_key",
+                             "http.max_redirects",
+                             "http.retry_errors",
+                             "http.retry_statuses",
+                             "http.tls_verify",
+                             "output.http_body_limit",
+                             "output.http_headers_limit"}) {
+        REQUIRE(legacy_attributes.erase(name) == 1U);
+    }
     REQUIRE(legacy_attributes.size() == 9U);
     auto legacy_document = encode_and_serialize_attribute_document(fixture.registry,
                                                                    legacy_attributes,
@@ -314,6 +324,7 @@ TEST_CASE("Run repository upgrades Phase 3 retry snapshots with Phase 4 defaults
     CHECK(std::get<std::int64_t>((*found)->attributes.at("retry.max_attempts").data) == 4);
     CHECK(std::get<double>((*found)->attributes.at("retry.jitter").data) == 0.0);
     CHECK(std::get<double>((*found)->attributes.at("retry.multiplier").data) == 2.0);
+    CHECK(std::get<std::int64_t>((*found)->attributes.at("http.max_redirects").data) == 5);
 }
 
 TEST_CASE("Run repository enforces execution start lifecycle invariants", "[jobu][run][sqlite]")

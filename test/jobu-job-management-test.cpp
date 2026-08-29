@@ -198,6 +198,35 @@ auto max_attempts(std::int64_t value) -> AttributeSet
     };
 }
 
+auto http_creation_attributes() -> AttributeSet
+{
+    return {
+        {"http.follow_redirects",  {.data = true}                                                           },
+        {"http.max_redirects",     {.data = std::int64_t{2}}                                                },
+        {"http.retry_errors",
+         {.data = AttributeValue::List{{.data = std::string{"connect"}}, {.data = std::string{"protocol"}}}}},
+        {"output.http_body_limit", {.data = std::int64_t{2048}}                                             },
+    };
+}
+
+auto http_update_attributes() -> AttributeSet
+{
+    return {
+        {"http.retry_statuses",
+         {.data = AttributeValue::List{{.data = std::string{"409"}}, {.data = std::string{"500-504"}}}}},
+        {"http.tls_verify",     {.data = false}                                                        },
+        {"job.timeout",         {.data = 30s}                                                          },
+    };
+}
+
+auto updated_queue_defaults() -> AttributeSet
+{
+    return {
+        {"http.max_redirects", {.data = std::int64_t{12}}},
+        {"retry.max_attempts", {.data = std::int64_t{8}} },
+    };
+}
+
 auto once_at(UtcTimePoint time) -> JobSchedule
 {
     return OnceSchedule{.planned_at = time};
@@ -394,22 +423,32 @@ TEST_CASE("Job management creates durable one-time definitions and immutable run
 
     fixture.time.advance(1s);
     auto http = service.create_job({
-        .queue    = queue_id,
-        .name     = "http-job",
-        .type     = JobType::Http,
-        .schedule = once_at(UtcTimePoint{20s}),
-        .priority = 9,
-        .payload  = complete_http_payload("https://example.test/path"),
+        .queue      = queue_id,
+        .name       = "http-job",
+        .type       = JobType::Http,
+        .schedule   = once_at(UtcTimePoint{20s}),
+        .priority   = 9,
+        .attributes = http_creation_attributes(),
+        .payload    = complete_http_payload("https://example.test/path"),
     });
     REQUIRE(http);
     CHECK(http->id == http_id);
     CHECK(http->created_at == UtcTimePoint{11s});
     CHECK(std::get<std::int64_t>(http->attributes.at("retry.max_attempts").data) == 3);
+    CHECK(std::get<bool>(http->attributes.at("http.follow_redirects").data));
+    CHECK(std::get<std::int64_t>(http->attributes.at("http.max_redirects").data) == 2);
+    CHECK(std::get<std::int64_t>(http->attributes.at("output.http_body_limit").data) == 2048);
+    auto const& retry_errors = std::get<AttributeValue::List>(http->attributes.at("http.retry_errors").data);
+    REQUIRE(retry_errors.size() == 2U);
+    CHECK(std::get<std::string>(retry_errors[0].data) == "connect");
+    CHECK(std::get<std::string>(retry_errors[1].data) == "protocol");
 
     auto http_stored_run = runs.find_schedule_owned(http_id);
     REQUIRE(http_stored_run);
     REQUIRE(http_stored_run->has_value());
     CHECK((**http_stored_run).id == http_run);
+    CHECK(attributes_json((**http_stored_run).attributes, fixture.registry) ==
+          attributes_json(http->attributes, fixture.registry));
     CHECK((**http_stored_run).payload == http->payload);
     CHECK(count_rows(fixture.database, "jobu_jobs") == 2);
     CHECK(count_rows(fixture.database, "jobu_runs") == 2);
@@ -818,7 +857,7 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
         .payload    = cli_payload("before"),
     });
     REQUIRE(created);
-    REQUIRE(service.update_queue({.queue = queue_id, .defaults = max_attempts(8)}));
+    REQUIRE(service.update_queue({.queue = queue_id, .defaults = updated_queue_defaults()}));
     fixture.time.advance(1s);
 
     auto const replacement_payload = complete_http_payload("https://updated.test/path", "PATCH");
@@ -830,7 +869,7 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
         .schedule          = once_at(UtcTimePoint{20s}
                        ),
         .priority          = 9,
-        .attribute_changes = {{"job.timeout", {.data = 30s}}},
+        .attribute_changes = http_update_attributes(),
         .payload           = replacement_payload,
     };
     auto updated = service.update_job(request);
@@ -847,6 +886,12 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
     CHECK(updated->priority == 9);
     CHECK(std::get<Duration>(updated->attributes.at("job.timeout").data) == 30s);
     CHECK(std::get<std::int64_t>(updated->attributes.at("retry.max_attempts").data) == 4);
+    CHECK(std::get<std::int64_t>(updated->attributes.at("http.max_redirects").data) == 5);
+    CHECK_FALSE(std::get<bool>(updated->attributes.at("http.tls_verify").data));
+    auto const& retry_statuses = std::get<AttributeValue::List>(updated->attributes.at("http.retry_statuses").data);
+    REQUIRE(retry_statuses.size() == 2U);
+    CHECK(std::get<std::string>(retry_statuses[0].data) == "409");
+    CHECK(std::get<std::string>(retry_statuses[1].data) == "500-504");
     CHECK(updated->payload == replacement_payload);
     CHECK(updated->created_at == UtcTimePoint{10s});
     CHECK(updated->updated_at == UtcTimePoint{11s});
