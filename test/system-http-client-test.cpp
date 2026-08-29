@@ -626,10 +626,15 @@ TEST_CASE("system HTTP client ignores ambient proxies and enforces explicit prox
 
     SECTION("absent option ignores every ambient proxy")
     {
-        auto origin        = jb::test::HttpTestServer{};
+        auto directory     = jb::test::TemporaryDirectory{};
+        auto ca_path       = write_test_ca(directory, "stage-5.7-ambient-proxy-ca.pem");
+        auto plain_origin  = jb::test::HttpTestServer{};
+        auto secure_origin = jb::test::HttpTestServer{jb::test::HttpTestTransport::Tls};
         auto hostile_proxy = jb::test::HttpTestServer{};
-        origin.enqueue_response({.body = bytes("direct")});
-        origin.release_responses();
+        plain_origin.enqueue_response({.body = bytes("plain-direct")});
+        plain_origin.release_responses();
+        secure_origin.enqueue_response({.body = bytes("secure-direct")});
+        secure_origin.release_responses();
         hostile_proxy.enqueue_response({.body = bytes("ambient-proxy")});
         hostile_proxy.release_responses();
 
@@ -643,12 +648,19 @@ TEST_CASE("system HTTP client ignores ambient proxies and enforces explicit prox
         auto       no_proxy    = ScopedEnvironmentVariable{"no_proxy", std::string{}};
         auto       upper_no    = ScopedEnvironmentVariable{"NO_PROXY", std::string{}};
 
-        auto created = SystemHttpClient::create(*app.event_loop());
+        auto created = SystemHttpClient::create(*app.event_loop(), {.ca_bundle = ca_path});
         REQUIRE(created);
-        auto completed = complete_request(app, **created, minimal_request(origin.url("/direct")));
-        REQUIRE(completed);
-        CHECK(byte_text(completed->body.bytes) == "direct");
-        CHECK(origin.accepted_connection_count() == 1U);
+
+        auto plain_completed = complete_request(app, **created, minimal_request(plain_origin.url("/plain-direct")));
+        REQUIRE(plain_completed);
+        CHECK(byte_text(plain_completed->body.bytes) == "plain-direct");
+        CHECK(plain_origin.accepted_connection_count() == 1U);
+
+        auto secure_completed = complete_request(app, **created, minimal_request(secure_origin.url("/secure-direct")));
+        REQUIRE(secure_completed);
+        CHECK(byte_text(secure_completed->body.bytes) == "secure-direct");
+        CHECK(secure_origin.accepted_connection_count() == 1U);
+        CHECK(secure_completed->tls_verified == true);
         CHECK(hostile_proxy.accepted_connection_count() == 0U);
     }
 
@@ -674,31 +686,41 @@ TEST_CASE("system HTTP client ignores ambient proxies and enforces explicit prox
 
     SECTION("explicit HTTPS proxy keeps proxy verification enabled")
     {
-        auto directory = jb::test::TemporaryDirectory{};
-        auto ca_path   = write_test_ca(directory, "stage-5.7-proxy-ca.pem");
-        auto proxy     = jb::test::HttpTestServer{jb::test::HttpTestTransport::Tls};
-        proxy.enqueue_response({.body = bytes("https-proxy")});
-        proxy.release_responses();
+        auto capabilities = jb::net::http::detail::preflight_curl_runtime();
+        REQUIRE(capabilities);
+        if (!capabilities->supports_https_proxy) {
+            auto unavailable = SystemHttpClient::create(*app.event_loop(), {.proxy = "https://127.0.0.1:1"});
+            REQUIRE_FALSE(unavailable);
+            CHECK(unavailable.error().code == "net.http.runtime_unavailable");
+            CHECK(unavailable.error().detail == "runtime.https_proxy_unavailable");
+        }
+        else {
+            auto directory = jb::test::TemporaryDirectory{};
+            auto ca_path   = write_test_ca(directory, "stage-5.7-proxy-ca.pem");
+            auto proxy     = jb::test::HttpTestServer{jb::test::HttpTestTransport::Tls};
+            proxy.enqueue_response({.body = bytes("https-proxy")});
+            proxy.release_responses();
 
-        auto created =
-            SystemHttpClient::create(*app.event_loop(), {.ca_bundle = ca_path, .proxy = server_origin(proxy)});
-        REQUIRE(created);
-        auto const target    = std::string{"http://stage57-secure-proxy-target.example.test/resource"};
-        auto       completed = complete_request(app, **created, minimal_request(target));
-        REQUIRE(completed);
-        CHECK(byte_text(completed->body.bytes) == "https-proxy");
-        REQUIRE(proxy.wait_for_requests(1U, 0ms));
-        CHECK(proxy.requests().front().target == target);
-        CHECK_FALSE(completed->tls_verified);
+            auto created =
+                SystemHttpClient::create(*app.event_loop(), {.ca_bundle = ca_path, .proxy = server_origin(proxy)});
+            REQUIRE(created);
+            auto const target    = std::string{"http://stage57-secure-proxy-target.example.test/resource"};
+            auto       completed = complete_request(app, **created, minimal_request(target));
+            REQUIRE(completed);
+            CHECK(byte_text(completed->body.bytes) == "https-proxy");
+            REQUIRE(proxy.wait_for_requests(1U, 0ms));
+            CHECK(proxy.requests().front().target == target);
+            CHECK_FALSE(completed->tls_verified);
 
-        auto unsafe_created = SystemHttpClient::create(*app.event_loop(), {.proxy = server_origin(proxy)});
-        REQUIRE(unsafe_created);
-        auto unsafe_request       = minimal_request(target);
-        unsafe_request.verify_tls = false;
-        auto unsafe_completed     = complete_request(app, **unsafe_created, std::move(unsafe_request));
-        REQUIRE_FALSE(unsafe_completed);
-        CHECK(unsafe_completed.error().kind == jb::net::HttpErrorKind::TlsVerification);
-        CHECK_FALSE(unsafe_completed.error().tls_verified);
+            auto unsafe_created = SystemHttpClient::create(*app.event_loop(), {.proxy = server_origin(proxy)});
+            REQUIRE(unsafe_created);
+            auto unsafe_request       = minimal_request(target);
+            unsafe_request.verify_tls = false;
+            auto unsafe_completed     = complete_request(app, **unsafe_created, std::move(unsafe_request));
+            REQUIRE_FALSE(unsafe_completed);
+            CHECK(unsafe_completed.error().kind == jb::net::HttpErrorKind::TlsVerification);
+            CHECK_FALSE(unsafe_completed.error().tls_verified);
+        }
     }
 
     SECTION("proxy connection errors omit proxy and request values")
