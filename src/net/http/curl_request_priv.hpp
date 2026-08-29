@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 namespace jb::net::http::detail {
@@ -31,7 +32,7 @@ struct CurlSlistDeleter {
 
 using CurlSlist = std::unique_ptr<curl_slist, CurlSlistDeleter>;
 
-/// Owns one non-redirect easy handle, all pointer targets, response state, and completion obligation.
+/// Owns one redirect-chain easy handle, all pointer targets, response state, and completion obligation.
 class CurlRequest final {
 public:
     enum class State : std::uint8_t {
@@ -72,7 +73,8 @@ public:
     [[nodiscard]] auto take_result() -> HttpCompletionResult;
     [[nodiscard]] auto cancellation_result() -> HttpCompletionResult;
     [[nodiscard]] auto timeout_result() -> HttpCompletionResult;
-    [[nodiscard]] auto transfer_result(CURLcode result) -> HttpCompletionResult;
+    /// Returns a terminal result, or no value after preparing the detached easy handle for the next redirect leg.
+    [[nodiscard]] auto transfer_result(CURLcode result) -> std::optional<HttpCompletionResult>;
 
 private:
     enum class HeaderState : std::uint8_t {
@@ -103,6 +105,12 @@ private:
     [[nodiscard]] auto append_header(char const* data, std::size_t size, std::size_t count)
         -> jb::core::Result<std::size_t, HttpError>;
     [[nodiscard]] auto complete_header_block() -> jb::core::Result<void, HttpError>;
+    [[nodiscard]] auto configure_easy() -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto configure_remaining_timeout() -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto redirect_location(std::vector<HttpHeader> const& headers) const
+        -> jb::core::Result<std::string_view, HttpError>;
+    [[nodiscard]] auto prepare_redirect_leg(std::string_view location) -> jb::core::Result<void, HttpError>;
+    void               reset_response_state();
     void               record_callback_error(HttpError error) noexcept;
     [[nodiscard]] auto elapsed() const noexcept -> jb::core::Duration;
     void               populate_error_observation(HttpError& error);
@@ -123,6 +131,7 @@ private:
     CurlEasy                            _easy;
     jb::core::TimePoint                 _accepted_at;
     jb::core::TimePoint                 _deadline;
+    std::uint32_t                       _redirect_count{0};
     State                               _state{State::Running};
     HeaderState                         _header_state{HeaderState::AwaitingStatus};
     bool                                _accepted{false};

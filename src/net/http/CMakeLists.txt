@@ -17,6 +17,8 @@ target_sources(${TARGET}
         curl_request_priv.hpp
         curl_runtime_priv.cpp
         curl_runtime_priv.hpp
+        http_url_priv.cpp
+        http_url_priv.hpp
         system_http_client.cpp
     PUBLIC
         system_http_client.hpp

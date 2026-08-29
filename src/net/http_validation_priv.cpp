@@ -249,13 +249,22 @@ auto representable_backend_size(std::size_t value) noexcept -> bool
 
 } // anonymous namespace
 
+auto validate_http_url(std::string_view url) -> jb::core::Result<void, jb::core::Error>
+{
+    if (auto const reason = validate_url(url); !reason.empty()) {
+        return invalid_request(reason);
+    }
+    return jb::core::Result<void, jb::core::Error>::success();
+}
+
 auto validate_http_request(HttpRequest const& request) -> jb::core::Result<void, jb::core::Error>
 {
     if (auto const reason = validate_method(request.method); !reason.empty()) {
         return invalid_request(reason);
     }
-    if (auto const reason = validate_url(request.url); !reason.empty()) {
-        return invalid_request(reason);
+    auto url = validate_http_url(request.url);
+    if (!url) {
+        return url;
     }
     if (auto const reason = validate_headers(request.headers); !reason.empty()) {
         return invalid_request(reason);

@@ -1,9 +1,11 @@
 #include "curl_request_priv.hpp"
 
 #include "curl_error_priv.hpp"
+#include "http_url_priv.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -65,6 +67,28 @@ auto request_cancelled_error() -> HttpError
     };
 }
 
+auto request_redirect_error(std::string_view reason) -> HttpError
+{
+    return {
+        .kind = HttpErrorKind::Redirect,
+        .error =
+            {
+                    .category = jb::core::ErrorCategory::Io,
+                    .code     = "net.http.redirect_failed",
+                    .message  = "The HTTP redirect could not be followed safely",
+                    .detail   = std::string{reason},
+                    },
+    };
+}
+
+auto request_redirect_error(jb::core::Error error) -> HttpError
+{
+    return {
+        .kind  = HttpErrorKind::Redirect,
+        .error = std::move(error),
+    };
+}
+
 auto capture_error(jb::core::Error error) -> HttpError
 {
     return {
@@ -108,6 +132,38 @@ auto make_request_headers(HttpRequest const& request) -> jb::core::Result<CurlSl
         return Result::failure(request_backend_unavailable("request.header_allocation_failed"));
     }
     return Result::success(std::move(list));
+}
+
+constexpr auto ascii_lower(unsigned char value) noexcept -> unsigned char
+{
+    if (value >= static_cast<unsigned char>('A') && value <= static_cast<unsigned char>('Z')) {
+        return static_cast<unsigned char>(value + ('a' - 'A'));
+    }
+    return value;
+}
+
+auto ascii_equal(std::string_view lhs, std::string_view rhs) noexcept -> bool
+{
+    return lhs.size() == rhs.size() && std::ranges::equal(lhs, rhs, [](char left, char right) {
+               return ascii_lower(static_cast<unsigned char>(left)) == ascii_lower(static_cast<unsigned char>(right));
+           });
+}
+
+constexpr auto is_redirect_status(std::uint16_t status) noexcept -> bool
+{
+    return status == 301U || status == 302U || status == 303U || status == 307U || status == 308U;
+}
+
+auto is_credential_header(HttpHeader const& header) noexcept -> bool
+{
+    return ascii_equal(header.name, "Authorization") || ascii_equal(header.name, "Cookie") ||
+           ascii_equal(header.name, "Proxy-Authorization");
+}
+
+auto redirect_location_count(std::vector<HttpHeader> const& headers) noexcept -> std::size_t
+{
+    return static_cast<std::size_t>(
+        std::ranges::count_if(headers, [](HttpHeader const& header) { return ascii_equal(header.name, "Location"); }));
 }
 
 constexpr auto is_token_character(unsigned char value) noexcept -> bool
@@ -233,48 +289,9 @@ auto CurlRequest::create(HttpRequestId         id,
                         std::move(completion),
                         maximum_parsed_response_header_bytes, std::move(easy)}
     };
-    auto headers = make_request_headers(result->_request);
-    if (!headers) {
-        return RequestResult::failure(std::move(headers).error());
-    }
-    result->_request_headers = std::move(headers).value();
-
-    auto* handle     = result->easy();
-    auto  configured = set_option(handle, CURLOPT_URL, result->_request.url.c_str());
-    // Select a no-body transfer only for exact HEAD and preserve body absence separately from a present empty body for
-    // every other method. CUSTOMREQUEST changes the wire method without surrendering libcurl-owned body framing.
-    if (result->_request.method == "HEAD") {
-        configured = configured && set_option(handle, CURLOPT_NOBODY, 1L);
-    }
-    else if (result->_request.method == "GET" && !result->_request.body) {
-        configured = configured && set_option(handle, CURLOPT_HTTPGET, 1L);
-    }
-    else {
-        if (result->_request.body) {
-            auto* body = result->_request.body->empty() ? reinterpret_cast<char*>(&result->_empty_body_storage)
-                                                        : reinterpret_cast<char*>(result->_request.body->data());
-            configured = configured &&
-                         set_option(handle,
-                                    CURLOPT_POSTFIELDSIZE_LARGE,
-                                    static_cast<curl_off_t>(result->_request.body->size())) &&
-                         set_option(handle, CURLOPT_POSTFIELDS, body);
-        }
-        configured = configured && set_option(handle, CURLOPT_CUSTOMREQUEST, result->_request.method.c_str());
-    }
-
-    configured = configured && set_option(handle, CURLOPT_NOSIGNAL, 1L) &&
-                 set_option(handle, CURLOPT_PROTOCOLS_STR, "http,https") &&
-                 set_option(handle, CURLOPT_FOLLOWLOCATION, 0L) && set_option(handle, CURLOPT_ACCEPT_ENCODING, "") &&
-                 set_option(handle, CURLOPT_PROXY, "") && set_option(handle, CURLOPT_NOPROXY, "") &&
-                 set_option(handle, CURLOPT_SSL_VERIFYPEER, 1L) && set_option(handle, CURLOPT_SSL_VERIFYHOST, 2L) &&
-                 set_option(handle, CURLOPT_HTTPHEADER, result->_request_headers.get()) &&
-                 set_option(handle, CURLOPT_WRITEFUNCTION, &CurlRequest::body_callback) &&
-                 set_option(handle, CURLOPT_WRITEDATA, result.get()) &&
-                 set_option(handle, CURLOPT_HEADERFUNCTION, &CurlRequest::header_callback) &&
-                 set_option(handle, CURLOPT_HEADERDATA, result.get()) &&
-                 set_option(handle, CURLOPT_PRIVATE, result.get());
+    auto configured = result->configure_easy();
     if (!configured) {
-        return RequestResult::failure(request_backend_unavailable("request.easy_configuration_failed"));
+        return RequestResult::failure(std::move(configured).error());
     }
 
     return RequestResult::success(std::move(result));
@@ -302,19 +319,9 @@ auto CurlRequest::prepare_admission(jb::core::TimePoint accepted_at) -> jb::core
         return Result::failure(request_backend_unavailable("request.deadline_overflow"));
     }
 
-    auto const deadline = accepted_at + _request.timeout;
-    auto       timeout  = curl_timeout_milliseconds(deadline - jb::core::Clock::now());
-    if (!timeout) {
-        return Result::failure(std::move(timeout).error());
-    }
-    if (!set_option(_easy.get(), CURLOPT_TIMEOUT_MS, *timeout) ||
-        !set_option(_easy.get(), CURLOPT_CONNECTTIMEOUT_MS, *timeout)) {
-        return Result::failure(request_backend_unavailable("request.timeout_configuration_failed"));
-    }
-
     _accepted_at = accepted_at;
-    _deadline    = deadline;
-    return Result::success();
+    _deadline    = accepted_at + _request.timeout;
+    return configure_remaining_timeout();
 }
 
 void CurlRequest::mark_accepted() noexcept
@@ -517,6 +524,145 @@ auto CurlRequest::complete_header_block() -> jb::core::Result<void, HttpError>
     return Result::success();
 }
 
+auto CurlRequest::configure_easy() -> jb::core::Result<void, jb::core::Error>
+{
+    using Result = jb::core::Result<void, jb::core::Error>;
+
+    auto headers = make_request_headers(_request);
+    if (!headers) {
+        return Result::failure(std::move(headers).error());
+    }
+
+    // Reapply the complete leg configuration so a redirect method transition cannot retain POSTFIELDS,
+    // CUSTOMREQUEST, or NOBODY state from the detached previous leg.
+    curl_easy_reset(_easy.get());
+    _request_headers = std::move(headers).value();
+    auto configured  = set_option(_easy.get(), CURLOPT_URL, _request.url.c_str());
+    if (_request.method == "HEAD") {
+        configured = configured && set_option(_easy.get(), CURLOPT_NOBODY, 1L);
+    }
+    else if (_request.method == "GET" && !_request.body) {
+        configured = configured && set_option(_easy.get(), CURLOPT_HTTPGET, 1L);
+    }
+    else {
+        if (_request.body) {
+            auto* body = _request.body->empty() ? reinterpret_cast<char*>(&_empty_body_storage)
+                                                : reinterpret_cast<char*>(_request.body->data());
+            configured =
+                configured &&
+                set_option(_easy.get(), CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(_request.body->size())) &&
+                set_option(_easy.get(), CURLOPT_POSTFIELDS, body);
+        }
+        configured = configured && set_option(_easy.get(), CURLOPT_CUSTOMREQUEST, _request.method.c_str());
+    }
+
+    configured = configured && set_option(_easy.get(), CURLOPT_NOSIGNAL, 1L) &&
+                 set_option(_easy.get(), CURLOPT_PROTOCOLS_STR, "http,https") &&
+                 set_option(_easy.get(), CURLOPT_FOLLOWLOCATION, 0L) &&
+                 set_option(_easy.get(), CURLOPT_ACCEPT_ENCODING, "") && set_option(_easy.get(), CURLOPT_PROXY, "") &&
+                 set_option(_easy.get(), CURLOPT_NOPROXY, "") && set_option(_easy.get(), CURLOPT_SSL_VERIFYPEER, 1L) &&
+                 set_option(_easy.get(), CURLOPT_SSL_VERIFYHOST, 2L) &&
+                 set_option(_easy.get(), CURLOPT_HTTPHEADER, _request_headers.get()) &&
+                 set_option(_easy.get(), CURLOPT_WRITEFUNCTION, &CurlRequest::body_callback) &&
+                 set_option(_easy.get(), CURLOPT_WRITEDATA, this) &&
+                 set_option(_easy.get(), CURLOPT_HEADERFUNCTION, &CurlRequest::header_callback) &&
+                 set_option(_easy.get(), CURLOPT_HEADERDATA, this) && set_option(_easy.get(), CURLOPT_PRIVATE, this);
+    if (!configured) {
+        return Result::failure(request_backend_unavailable("request.easy_configuration_failed"));
+    }
+    return Result::success();
+}
+
+auto CurlRequest::configure_remaining_timeout() -> jb::core::Result<void, jb::core::Error>
+{
+    using Result = jb::core::Result<void, jb::core::Error>;
+
+    auto timeout = curl_timeout_milliseconds(_deadline - jb::core::Clock::now());
+    if (!timeout) {
+        return Result::failure(std::move(timeout).error());
+    }
+    if (!set_option(_easy.get(), CURLOPT_TIMEOUT_MS, *timeout) ||
+        !set_option(_easy.get(), CURLOPT_CONNECTTIMEOUT_MS, *timeout)) {
+        return Result::failure(request_backend_unavailable("request.timeout_configuration_failed"));
+    }
+    return Result::success();
+}
+
+auto CurlRequest::redirect_location(std::vector<HttpHeader> const& headers) const
+    -> jb::core::Result<std::string_view, HttpError>
+{
+    using Result = jb::core::Result<std::string_view, HttpError>;
+
+    auto location = std::optional<std::string_view>{};
+    for (auto const& header : headers) {
+        if (!ascii_equal(header.name, "Location")) {
+            continue;
+        }
+        if (location) {
+            return Result::failure(request_redirect_error("redirect.multiple_locations"));
+        }
+        location = header.value;
+    }
+    if (!location) {
+        return Result::failure(request_redirect_error("redirect.missing_location"));
+    }
+    return Result::success(*location);
+}
+
+auto CurlRequest::prepare_redirect_leg(std::string_view location) -> jb::core::Result<void, HttpError>
+{
+    using Result = jb::core::Result<void, HttpError>;
+
+    auto const status = _final_header_block->status_code;
+    if (_redirect_count >= _request.max_redirects) {
+        return Result::failure(request_redirect_error("redirect.limit_exceeded"));
+    }
+
+    auto target = resolve_redirect_target(_request.url, location);
+    if (!target) {
+        return Result::failure(request_redirect_error(std::move(target).error()));
+    }
+
+    auto const changes_to_get = ((status == 301U || status == 302U) && _request.method == "POST") ||
+                                (status == 303U && _request.method != "HEAD");
+    if (changes_to_get) {
+        _request.method = "GET";
+        _request.body.reset();
+    }
+
+    if (target->cross_origin) {
+        // Once a credential crosses an origin boundary it remains absent from every later leg, including a return hop.
+        std::erase_if(_request.headers,
+                      [](HttpHeader const& header) { return header.sensitive || is_credential_header(header); });
+    }
+    _request.url = std::move(target->url);
+
+    auto configured = configure_easy();
+    if (configured) {
+        configured = configure_remaining_timeout();
+    }
+    if (!configured) {
+        return Result::failure(request_internal_error("request.redirect_configuration_failed"));
+    }
+
+    ++_redirect_count;
+    reset_response_state();
+    return Result::success();
+}
+
+void CurlRequest::reset_response_state()
+{
+    _parsed_response_header_bytes = 0U;
+    static_cast<void>(_body_capture.take());
+    static_cast<void>(_current_raw_header_capture.take());
+    _current_status_code.reset();
+    _current_headers.clear();
+    _final_header_block.reset();
+    _callback_error.reset();
+    _callback_failed_without_error = false;
+    _header_state                  = HeaderState::AwaitingStatus;
+}
+
 void CurlRequest::record_callback_error(HttpError error) noexcept
 {
     if (_callback_error) {
@@ -542,7 +688,7 @@ auto CurlRequest::elapsed() const noexcept -> jb::core::Duration
 void CurlRequest::populate_error_observation(HttpError& error)
 {
     error.body           = _body_capture.take();
-    error.redirect_count = 0U;
+    error.redirect_count = _redirect_count;
     error.elapsed        = elapsed();
     error.tls_verified.reset();
 
@@ -559,7 +705,7 @@ void CurlRequest::populate_error_observation(HttpError& error)
     }
 }
 
-auto CurlRequest::transfer_result(CURLcode result) -> HttpCompletionResult
+auto CurlRequest::transfer_result(CURLcode result) -> std::optional<HttpCompletionResult>
 {
     if (_callback_failed_without_error) {
         auto error = request_internal_error("response.callback_failed");
@@ -573,6 +719,32 @@ auto CurlRequest::transfer_result(CURLcode result) -> HttpCompletionResult
     }
     if (deadline_expired(jb::core::Clock::now())) {
         return timeout_result();
+    }
+
+    auto location = std::optional<std::string_view>{};
+    if (_current_status_code && _request.follow_redirects && is_redirect_status(*_current_status_code) &&
+        redirect_location_count(_current_headers) > 1U) {
+        auto error = request_redirect_error("redirect.multiple_locations");
+        populate_error_observation(error);
+        return HttpCompletionResult::failure(std::move(error));
+    }
+    if (_current_status_code && _request.follow_redirects && is_redirect_status(*_current_status_code) &&
+        result == CURLE_WEIRD_SERVER_REPLY) {
+        // Some libcurl builds reject duplicate or otherwise ambiguous Location fields before completing the header
+        // block. Once a redirect status is observed, retain that as a redirect-policy failure rather than exposing a
+        // backend-specific protocol classification.
+        auto error = request_redirect_error("redirect.invalid_location");
+        populate_error_observation(error);
+        return HttpCompletionResult::failure(std::move(error));
+    }
+    if (_final_header_block && _request.follow_redirects && is_redirect_status(_final_header_block->status_code)) {
+        auto candidate = redirect_location(_final_header_block->headers);
+        if (!candidate) {
+            auto error = std::move(candidate).error();
+            populate_error_observation(error);
+            return HttpCompletionResult::failure(std::move(error));
+        }
+        location = *candidate;
     }
     if (result != CURLE_OK) {
         auto error = map_curl_error(result);
@@ -593,13 +765,23 @@ auto CurlRequest::transfer_result(CURLcode result) -> HttpCompletionResult
         return HttpCompletionResult::failure(std::move(error));
     }
 
+    if (location) {
+        auto redirected = prepare_redirect_leg(*location);
+        if (!redirected) {
+            auto error = std::move(redirected).error();
+            populate_error_observation(error);
+            return HttpCompletionResult::failure(std::move(error));
+        }
+        return std::nullopt;
+    }
+
     auto headers = std::move(*_final_header_block);
     return HttpCompletionResult::success({
         .status_code    = headers.status_code,
         .headers        = std::move(headers.headers),
         .body           = _body_capture.take(),
         .raw_headers    = std::move(headers.raw_headers),
-        .redirect_count = 0U,
+        .redirect_count = _redirect_count,
         .elapsed        = elapsed(),
         .tls_verified   = std::nullopt,
     });

@@ -125,19 +125,16 @@ auto ascii_starts_with(std::string_view value, std::string_view prefix) noexcept
     return true;
 }
 
-auto validate_stage_5_4_scope(jb::net::HttpRequest const& request, SystemHttpClientOptions const& options) -> VoidResult
+auto validate_stage_5_6_scope(jb::net::HttpRequest const& request, SystemHttpClientOptions const& options) -> VoidResult
 {
-    if (request.follow_redirects) {
-        return VoidResult::failure(invalid_request("stage_5_4.redirects_not_supported"));
-    }
     if (!request.verify_tls) {
-        return VoidResult::failure(invalid_request("stage_5_4.unsafe_tls_not_supported"));
+        return VoidResult::failure(invalid_request("stage_5_6.unsafe_tls_not_supported"));
     }
     if (!ascii_starts_with(request.url, "http://")) {
-        return VoidResult::failure(invalid_request("stage_5_4.https_not_supported"));
+        return VoidResult::failure(invalid_request("stage_5_6.https_not_supported"));
     }
     if (options.proxy) {
-        return VoidResult::failure(invalid_request("stage_5_4.proxy_not_supported"));
+        return VoidResult::failure(invalid_request("stage_5_6.proxy_not_supported"));
     }
     return VoidResult::success();
 }
@@ -373,7 +370,7 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
             return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(
                 invalid_request("completion.empty"));
         }
-        auto stage_scope = validate_stage_5_4_scope(request, options);
+        auto stage_scope = validate_stage_5_6_scope(request, options);
         if (!stage_scope) {
             return jb::core::Result<jb::net::HttpRequestId, jb::core::Error>::failure(std::move(stage_scope).error());
         }
@@ -521,9 +518,24 @@ struct SystemHttpClient::Private : jb::core::priv::ObjectPrivate {
             return;
         }
 
-        requests_by_easy.erase(easy_it);
         auto completion = request_it->second->transfer_result(result);
-        queue_completion(*request_it->second, std::move(completion));
+        if (!completion) {
+            // The adapter detached the completed leg before this callback. Re-add the reconfigured handle without an
+            // owner-loop interleaving point where cancellation could observe Running state outside the multi handle.
+            auto added = multi->add(easy);
+            if (!added) {
+                return;
+            }
+            auto queued = multi->queue_initial_drive();
+            if (!queued) {
+                return;
+            }
+            refresh_deadline_timer_or_fail();
+            return;
+        }
+
+        requests_by_easy.erase(easy_it);
+        queue_completion(*request_it->second, std::move(*completion));
         refresh_deadline_timer_or_fail();
     }
 

@@ -7,6 +7,7 @@
 #include "http/curl_multi_test_priv.hpp"
 #include "http/curl_request_priv.hpp"
 #include "http/curl_runtime_priv.hpp"
+#include "http/http_url_priv.hpp"
 #include "support/fake_event_loop_backend.hpp"
 #include "support/http_test_server.hpp"
 #include "support/temporary_directory.hpp"
@@ -52,6 +53,17 @@ auto byte_text(jb::core::ByteBuffer const& value) -> std::string
 {
     auto const view = jb::core::as_string_view(value);
     return {view.data(), view.size()};
+}
+
+auto redirect_response(std::uint16_t status, std::string location, std::string_view body = {})
+    -> jb::test::HttpTestResponse
+{
+    return {
+        .status_code = status,
+        .reason      = "Redirect",
+        .headers     = {{.name = "Location", .value = std::move(location)}},
+        .body        = bytes(body),
+    };
 }
 
 constexpr auto hex_nibble(char character) -> std::uint8_t
@@ -466,7 +478,7 @@ TEST_CASE("system HTTP client shares one absolute deadline timer across accepted
     CHECK(callback_count == 0);
 }
 
-TEST_CASE("system HTTP client keeps later transport policy outside the Stage 5.4 scope", "[net][http]")
+TEST_CASE("system HTTP client keeps later transport policy outside the Stage 5.6 scope", "[net][http]")
 {
     auto app    = jb::core::Application{0, nullptr};
     auto result = SystemHttpClient::create(*app.event_loop());
@@ -475,22 +487,16 @@ TEST_CASE("system HTTP client keeps later transport policy outside the Stage 5.4
 
     auto callback = [](jb::net::HttpRequestId, jb::net::HttpCompletionResult const&) -> void {};
 
-    auto request             = minimal_request("http://127.0.0.1:1/");
-    request.follow_redirects = true;
-    auto start               = client->start(std::move(request), callback);
+    auto request = minimal_request("https://127.0.0.1:1/");
+    auto start   = client->start(std::move(request), callback);
     REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_4.redirects_not_supported");
-
-    request = minimal_request("https://127.0.0.1:1/");
-    start   = client->start(std::move(request), callback);
-    REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_4.https_not_supported");
+    CHECK(start.error().detail == "stage_5_6.https_not_supported");
 
     request            = minimal_request("http://127.0.0.1:1/");
     request.verify_tls = false;
     start              = client->start(std::move(request), callback);
     REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_4.unsafe_tls_not_supported");
+    CHECK(start.error().detail == "stage_5_6.unsafe_tls_not_supported");
 
     request = minimal_request("http://127.0.0.1:1/");
     start   = client->start(std::move(request), {});
@@ -504,7 +510,441 @@ TEST_CASE("system HTTP client keeps later transport policy outside the Stage 5.4
     REQUIRE(proxied);
     start = (*proxied)->start(minimal_request("http://127.0.0.1:1/"), callback);
     REQUIRE_FALSE(start);
-    CHECK(start.error().detail == "stage_5_4.proxy_not_supported");
+    CHECK(start.error().detail == "stage_5_6.proxy_not_supported");
+}
+
+TEST_CASE("curl redirect URL policy resolves targets and compares canonical origins", "[net][http]")
+{
+    using jb::net::http::detail::resolve_redirect_target;
+
+    auto relative = resolve_redirect_target("http://Example.TEST:80/a/b", "../next?value=1");
+    REQUIRE(relative);
+    CHECK_FALSE(relative->cross_origin);
+    CHECK(relative->url.ends_with("/next?value=1"));
+
+    auto implicit_port = resolve_redirect_target("http://example.test:80/a", "http://EXAMPLE.test/b");
+    REQUIRE(implicit_port);
+    CHECK_FALSE(implicit_port->cross_origin);
+
+    auto other_port = resolve_redirect_target("http://example.test/a", "http://example.test:81/b");
+    REQUIRE(other_port);
+    CHECK(other_port->cross_origin);
+
+    auto upgrade = resolve_redirect_target("http://example.test/a", "https://example.test/b");
+    REQUIRE(upgrade);
+    CHECK(upgrade->cross_origin);
+
+    auto downgrade = resolve_redirect_target("https://example.test/a", "http://example.test/b");
+    REQUIRE_FALSE(downgrade);
+    CHECK(downgrade.error().code == "net.http.redirect_failed");
+    CHECK(downgrade.error().detail == "redirect.https_downgrade");
+
+    auto const invalid_targets = std::array{
+        std::string_view{""},
+        std::string_view{"ftp://redirect-secret.example/path"},
+        std::string_view{"http://redirect-secret@example.test/path"},
+        std::string_view{"/next#redirect-secret-fragment"},
+        std::string_view{"/%0G-redirect-secret-escape"},
+    };
+    for (auto target : invalid_targets) {
+        auto resolved = resolve_redirect_target("http://example.test/start", target);
+        REQUIRE_FALSE(resolved);
+        CHECK(resolved.error().code == "net.http.redirect_failed");
+        CHECK(resolved.error().message.find("redirect-secret") == std::string::npos);
+        CHECK(resolved.error().detail.find("redirect-secret") == std::string::npos);
+    }
+}
+
+TEST_CASE("system HTTP client returns redirect responses when following is disabled", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto server  = jb::test::HttpTestServer{};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    server.enqueue_response(redirect_response(302U, "/not-followed", "intermediate-body"));
+    server.release_responses();
+
+    auto completed = complete_request(app, *client, minimal_request(server.url("/start")));
+    REQUIRE(completed);
+    CHECK(completed->status_code == 302U);
+    CHECK(completed->redirect_count == 0U);
+    CHECK(byte_text(completed->body.bytes) == "intermediate-body");
+    REQUIRE(server.wait_for_requests(1U, 0ms));
+    CHECK(server.requests().size() == 1U);
+}
+
+TEST_CASE("system HTTP client applies every manual redirect method transition", "[net][http]")
+{
+    struct Case {
+        std::uint16_t                   status;
+        std::string_view                method;
+        std::optional<std::string_view> body;
+        std::string_view                expected_method;
+        std::string_view                expected_body;
+        std::optional<std::string_view> expected_content_length;
+    };
+
+    auto const cases = std::array{
+        Case{.status = 301U, .method = "POST", .body = "post-301", .expected_method = "GET", .expected_body = ""},
+        Case{.status = 302U, .method = "POST", .body = "post-302", .expected_method = "GET", .expected_body = ""},
+        Case{.status                  = 301U,
+             .method                  = "PUT",
+             .body                    = "put-301",
+             .expected_method         = "PUT",
+             .expected_body           = "put-301",
+             .expected_content_length = "7"},
+        Case{.status = 303U, .method = "POST", .body = "post-303", .expected_method = "GET", .expected_body = ""},
+        Case{.status = 303U, .method = "HEAD", .body = std::nullopt, .expected_method = "HEAD", .expected_body = ""},
+        Case{.status                  = 307U,
+             .method                  = "POST",
+             .body                    = "post-307",
+             .expected_method         = "POST",
+             .expected_body           = "post-307",
+             .expected_content_length = "8"},
+        Case{.status                  = 308U,
+             .method                  = "PATCH",
+             .body                    = "patch-308",
+             .expected_method         = "PATCH",
+             .expected_body           = "patch-308",
+             .expected_content_length = "9"},
+        Case{.status                  = 307U,
+             .method                  = "PUT",
+             .body                    = "",
+             .expected_method         = "PUT",
+             .expected_body           = "",
+             .expected_content_length = "0"},
+        Case{.status          = 308U,
+             .method          = "DELETE",
+             .body            = std::nullopt,
+             .expected_method = "DELETE",
+             .expected_body   = ""},
+    };
+
+    auto app     = jb::core::Application{0, nullptr};
+    auto server  = jb::test::HttpTestServer{};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    for (std::size_t index = 0; index < cases.size(); ++index) {
+        auto const& test       = cases[index];
+        auto const  target     = "/redirect-target-" + std::to_string(index);
+        auto const  final_body = "final-body-" + std::to_string(index);
+        auto        final      = jb::test::HttpTestResponse{};
+        final.headers.push_back({.name = "X-Final-Leg", .value = std::to_string(index)});
+        final.body = bytes(final_body);
+        server.enqueue_response(redirect_response(test.status, target, "discarded-intermediate-body"));
+        server.enqueue_response(std::move(final));
+    }
+    server.release_responses();
+
+    for (std::size_t index = 0; index < cases.size(); ++index) {
+        auto const& test    = cases[index];
+        auto        request = minimal_request(server.url("/redirect-start-" + std::to_string(index)));
+        request.method      = test.method;
+        if (test.body) {
+            request.body = bytes(*test.body);
+        }
+        request.headers = {
+            {.name = "X-Marked-Same-Origin", .value = "retained", .sensitive = true}
+        };
+        request.follow_redirects = true;
+
+        auto completed = complete_request(app, *client, std::move(request));
+        REQUIRE(completed);
+        CHECK(completed->status_code == 200U);
+        CHECK(completed->redirect_count == 1U);
+        auto const expected_final_body =
+            test.expected_method == "HEAD" ? std::string{} : "final-body-" + std::to_string(index);
+        CHECK(byte_text(completed->body.bytes) == expected_final_body);
+        CHECK(byte_text(completed->raw_headers.bytes).find("Location:") == std::string::npos);
+    }
+
+    auto const requests = server.requests();
+    REQUIRE(requests.size() == cases.size() * 2U);
+    for (std::size_t index = 0; index < cases.size(); ++index) {
+        auto const& followed = requests[(index * 2U) + 1U];
+        CHECK(followed.method == cases[index].expected_method);
+        CHECK(byte_text(followed.body) == cases[index].expected_body);
+        CHECK(followed.target == "/redirect-target-" + std::to_string(index));
+        CHECK(header_value(followed.headers, "X-Marked-Same-Origin") == "retained");
+        CHECK(header_value(followed.headers, "Content-Length") == cases[index].expected_content_length);
+    }
+}
+
+TEST_CASE("system HTTP client strips credentials permanently across redirect origins", "[net][http]")
+{
+    auto app          = jb::core::Application{0, nullptr};
+    auto first_origin = jb::test::HttpTestServer{};
+    auto next_origin  = jb::test::HttpTestServer{};
+    auto created      = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    first_origin.enqueue_response(
+        redirect_response(302U, next_origin.url("/cross-origin"), "first-intermediate-secret"));
+    auto final = jb::test::HttpTestResponse{};
+    final.headers.push_back({.name = "X-Final-Leg", .value = "final-only"});
+    final.body = bytes("final-only-body");
+    first_origin.enqueue_response(std::move(final));
+    next_origin.enqueue_response(
+        redirect_response(307U, first_origin.url("/return-origin"), "second-intermediate-secret"));
+    first_origin.release_responses();
+    next_origin.release_responses();
+
+    auto request    = minimal_request(first_origin.url("/initial"));
+    request.headers = {
+        {.name = "Authorization", .value = "authorization-secret"},
+        {.name = "cOoKiE", .value = "cookie-secret"},
+        {.name = "Proxy-Authorization", .value = "proxy-secret"},
+        {.name = "X-Marked", .value = "marked-secret", .sensitive = true},
+        {.name = "X-Ordinary", .value = "ordinary-value"},
+        {.name = "X-JobU-Run-ID", .value = "run-metadata"},
+    };
+    request.follow_redirects = true;
+
+    auto completed = complete_request(app, *client, std::move(request));
+    REQUIRE(completed);
+    CHECK(completed->redirect_count == 2U);
+    CHECK(byte_text(completed->body.bytes) == "final-only-body");
+    CHECK(byte_text(completed->raw_headers.bytes).find("X-Final-Leg: final-only") != std::string::npos);
+    CHECK(byte_text(completed->raw_headers.bytes).find("intermediate-secret") == std::string::npos);
+
+    auto const first_requests = first_origin.requests();
+    auto const next_requests  = next_origin.requests();
+    REQUIRE(first_requests.size() == 2U);
+    REQUIRE(next_requests.size() == 1U);
+
+    CHECK(header_value(first_requests[0].headers, "Authorization") == "authorization-secret");
+    CHECK(header_value(first_requests[0].headers, "Cookie") == "cookie-secret");
+    CHECK(header_value(first_requests[0].headers, "Proxy-Authorization") == "proxy-secret");
+    CHECK(header_value(first_requests[0].headers, "X-Marked") == "marked-secret");
+
+    for (auto const* followed : {next_requests.data(), first_requests.data() + 1U}) {
+        CHECK_FALSE(header_value(followed->headers, "Authorization"));
+        CHECK_FALSE(header_value(followed->headers, "Cookie"));
+        CHECK_FALSE(header_value(followed->headers, "Proxy-Authorization"));
+        CHECK_FALSE(header_value(followed->headers, "X-Marked"));
+        CHECK(header_value(followed->headers, "X-Ordinary") == "ordinary-value");
+        CHECK(header_value(followed->headers, "X-JobU-Run-ID") == "run-metadata");
+    }
+}
+
+TEST_CASE("system HTTP client returns safe redirect policy failures", "[net][http]")
+{
+    struct Case {
+        std::string_view                      name;
+        std::vector<jb::test::HttpTestHeader> headers;
+        std::string_view                      reason;
+    };
+
+    auto const cases = std::array{
+        Case{.name = "missing Location",     .headers = {},                                       .reason = "redirect.missing_location"},
+        Case{.name    = "multiple Location",
+             .headers = {{.name = "Location", .value = "/first-secret"},
+                         {.name = "lOcAtIoN", .value = "/second-secret"}},
+             .reason  = "redirect.invalid_location"                                                                                    },
+        Case{.name    = "non-HTTP target",
+             .headers = {{.name = "Location", .value = "ftp://redirect-secret.example/path"}},
+             .reason  = "redirect.invalid_target"                                                                                      },
+        Case{.name    = "fragment target",
+             .headers = {{.name = "Location", .value = "/next#redirect-secret-fragment"}},
+             .reason  = "redirect.invalid_target"                                                                                      },
+        Case{.name    = "userinfo target",
+             .headers = {{.name = "Location", .value = "http://redirect-secret@127.0.0.1/path"}},
+             .reason  = "redirect.invalid_target"                                                                                      },
+    };
+
+    for (auto const& test : cases) {
+        DYNAMIC_SECTION(test.name)
+        {
+            auto app     = jb::core::Application{0, nullptr};
+            auto server  = jb::test::HttpTestServer{};
+            auto created = SystemHttpClient::create(*app.event_loop());
+            REQUIRE(created);
+            auto client = std::move(created).value();
+
+            auto response        = jb::test::HttpTestResponse{};
+            response.status_code = 302U;
+            response.reason      = "Redirect";
+            response.headers     = test.headers;
+            response.body        = bytes("redirect-secret-body");
+            server.enqueue_response(std::move(response));
+            server.release_responses();
+
+            auto callback_count = 0;
+            auto completion     = std::optional<jb::net::HttpCompletionResult>{};
+            auto request        = minimal_request(server.url("/redirect-secret-url"));
+            request.headers     = {
+                {.name = "X-Secret", .value = "redirect-secret-header"}
+            };
+            request.follow_redirects = true;
+            auto started = client->start(std::move(request),
+                                         [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+                                             ++callback_count;
+                                             completion = std::move(result);
+                                         });
+            REQUIRE(started);
+            REQUIRE(process_until(app, [&completion]() -> bool { return completion.has_value(); }));
+            REQUIRE_FALSE(*completion);
+            CHECK(completion->error().kind == jb::net::HttpErrorKind::Redirect);
+            CHECK(completion->error().error.code == "net.http.redirect_failed");
+            CHECK(completion->error().error.detail == test.reason);
+            CHECK(completion->error().status_code == 302U);
+            CHECK(completion->error().redirect_count == 0U);
+            check_safe_project_error(completion->error(),
+                                     {"redirect-secret-url",
+                                      "redirect-secret-header",
+                                      "redirect-secret-body",
+                                      "first-secret",
+                                      "second-secret",
+                                      "redirect-secret.example"});
+            CHECK(callback_count == 1);
+            drain_fake_loop(*app.event_loop());
+            CHECK(callback_count == 1);
+        }
+    }
+}
+
+TEST_CASE("system HTTP client terminates redirect loops at the request-wide limit", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto server  = jb::test::HttpTestServer{};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    server.enqueue_response(redirect_response(302U, "/loop", "first-loop-body"));
+    server.enqueue_response(redirect_response(302U, "/loop", "second-loop-body"));
+    server.release_responses();
+
+    auto request             = minimal_request(server.url("/loop"));
+    request.follow_redirects = true;
+    request.max_redirects    = 1U;
+    auto completed           = complete_request(app, *client, std::move(request));
+    REQUIRE_FALSE(completed);
+    CHECK(completed.error().kind == jb::net::HttpErrorKind::Redirect);
+    CHECK(completed.error().error.detail == "redirect.limit_exceeded");
+    CHECK(completed.error().status_code == 302U);
+    CHECK(completed.error().redirect_count == 1U);
+    REQUIRE(server.wait_for_requests(2U, 0ms));
+    CHECK(server.requests().size() == 2U);
+}
+
+TEST_CASE("system HTTP redirect chains keep one deadline and asynchronous cancellation", "[net][http]")
+{
+    SECTION("whole-request timeout")
+    {
+        auto app     = jb::core::Application{0, nullptr};
+        auto server  = jb::test::HttpTestServer{};
+        auto created = SystemHttpClient::create(*app.event_loop());
+        REQUIRE(created);
+        auto client = std::move(created).value();
+
+        server.enqueue_response(redirect_response(302U, "/held-timeout"));
+        auto held    = jb::test::HttpTestResponse{};
+        held.headers = {
+            {.name = "X-Observed", .value = "second-leg"}
+        };
+        held.body                       = bytes("held-body");
+        held.pause_after_response_bytes = 0U;
+        server.enqueue_response(std::move(held));
+        server.release_responses();
+
+        auto callback_count      = 0;
+        auto completion          = std::optional<jb::net::HttpCompletionResult>{};
+        auto request             = minimal_request(server.url("/start-timeout"));
+        request.follow_redirects = true;
+        request.timeout          = 100ms;
+        auto started = client->start(std::move(request),
+                                     [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+                                         ++callback_count;
+                                         completion = std::move(result);
+                                     });
+        REQUIRE(started);
+        REQUIRE(process_until(app, [&server]() -> bool { return server.wait_for_response_segments(1U, 0ms); }));
+        REQUIRE(process_until(app, [&completion]() -> bool { return completion.has_value(); }));
+        REQUIRE_FALSE(*completion);
+        CHECK(completion->error().kind == jb::net::HttpErrorKind::Timeout);
+        CHECK(completion->error().redirect_count == 1U);
+        CHECK(completion->error().status_code == 200U);
+        CHECK(callback_count == 1);
+        server.release_response_segment();
+        drain_fake_loop(*app.event_loop());
+        CHECK(callback_count == 1);
+    }
+
+    SECTION("cancellation during the final leg")
+    {
+        auto app     = jb::core::Application{0, nullptr};
+        auto server  = jb::test::HttpTestServer{};
+        auto created = SystemHttpClient::create(*app.event_loop());
+        REQUIRE(created);
+        auto client = std::move(created).value();
+
+        server.enqueue_response(redirect_response(307U, "/held-cancellation"));
+        auto held    = jb::test::HttpTestResponse{};
+        held.headers = {
+            {.name = "X-Observed", .value = "second-leg"}
+        };
+        held.body                       = bytes("held-body");
+        held.pause_after_response_bytes = 0U;
+        server.enqueue_response(std::move(held));
+        server.release_responses();
+
+        auto callback_count      = 0;
+        auto completion          = std::optional<jb::net::HttpCompletionResult>{};
+        auto request             = minimal_request(server.url("/start-cancellation"));
+        request.follow_redirects = true;
+        auto started = client->start(std::move(request),
+                                     [&](jb::net::HttpRequestId, jb::net::HttpCompletionResult result) -> void {
+                                         ++callback_count;
+                                         completion = std::move(result);
+                                     });
+        REQUIRE(started);
+        REQUIRE(process_until(app, [&server]() -> bool { return server.wait_for_response_segments(1U, 0ms); }));
+        REQUIRE(client->cancel(*started));
+        CHECK_FALSE(completion);
+        REQUIRE(process_until(app, [&completion]() -> bool { return completion.has_value(); }));
+        REQUIRE_FALSE(*completion);
+        CHECK(completion->error().kind == jb::net::HttpErrorKind::Cancelled);
+        CHECK(completion->error().redirect_count == 1U);
+        CHECK(callback_count == 1);
+        server.release_response_segment();
+        drain_fake_loop(*app.event_loop());
+        CHECK(callback_count == 1);
+    }
+}
+
+TEST_CASE("system HTTP redirect chains retain the hop count on final-leg transport failure", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto server  = jb::test::HttpTestServer{};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    server.enqueue_response(redirect_response(308U, "/truncated-final"));
+    auto truncated    = jb::test::HttpTestResponse{};
+    truncated.headers = {
+        {.name = "X-Observed", .value = "final-leg"}
+    };
+    truncated.body                       = bytes("partial-response");
+    truncated.close_after_response_bytes = 3U;
+    server.enqueue_response(std::move(truncated));
+    server.release_responses();
+
+    auto request             = minimal_request(server.url("/start"));
+    request.follow_redirects = true;
+    auto completed           = complete_request(app, *client, std::move(request));
+    REQUIRE_FALSE(completed);
+    CHECK(completed.error().kind == jb::net::HttpErrorKind::Receive);
+    CHECK(completed.error().error.code == "net.http.receive_failed");
+    CHECK(completed.error().redirect_count == 1U);
+    CHECK(completed.error().status_code == 200U);
+    CHECK(byte_text(completed.error().body.bytes) == "par");
 }
 
 TEST_CASE("system HTTP client preserves methods headers and optional binary bodies", "[net][http]")
