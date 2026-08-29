@@ -1,5 +1,6 @@
 #include "job_validation_priv.hpp"
 
+#include "http_job_payload_priv.hpp"
 #include "json.hpp"
 #include "text_validation_priv.hpp"
 
@@ -39,19 +40,6 @@ auto structurally_valid_cli(jb::core::JsonValue::Object const& object) -> JobPay
     return JobPayloadIssue::None;
 }
 
-auto structurally_valid_http(jb::core::JsonValue::Object const& object) -> JobPayloadIssue
-{
-    auto const* url = member(object, "url");
-    if (url == nullptr || !url->is_string() || url->as_string().empty()) {
-        return JobPayloadIssue::MissingUrl;
-    }
-    auto const* method = member(object, "method");
-    if (method != nullptr && (!method->is_string() || method->as_string().empty())) {
-        return JobPayloadIssue::InvalidMethod;
-    }
-    return JobPayloadIssue::None;
-}
-
 } // anonymous namespace
 
 auto is_valid_job_name(std::string_view name) noexcept -> bool
@@ -72,8 +60,10 @@ auto job_payload_structure_issue(JobType type, jb::core::JsonValue const& payloa
     switch (type) {
         case JobType::Cli:
             return structurally_valid_cli(payload.as_object());
-        case JobType::Http:
-            return structurally_valid_http(payload.as_object());
+        case JobType::Http: {
+            auto decoded = decode_http_job_payload(payload);
+            return decoded ? JobPayloadIssue::None : decoded.error();
+        }
     }
     return JobPayloadIssue::UnknownType;
 }
@@ -83,17 +73,17 @@ auto validate_and_serialize_job_payload(JobType type, jb::core::JsonValue const&
 {
     using ValidationResult = jb::core::Result<ValidatedJobPayload, JobPayloadIssue>;
 
-    auto const issue = job_payload_structure_issue(type, payload);
-    if (issue != JobPayloadIssue::None) {
-        return ValidationResult::failure(issue);
-    }
-
+    // Bound the original document before decoding owning body/header values.
     auto serialized = jb::core::serialize_json(payload);
     if (!serialized) {
         return ValidationResult::failure(JobPayloadIssue::InvalidJson);
     }
     if (serialized->size() > maximum_job_document_bytes) {
         return ValidationResult::failure(JobPayloadIssue::TooLarge);
+    }
+    auto const issue = job_payload_structure_issue(type, payload);
+    if (issue != JobPayloadIssue::None) {
+        return ValidationResult::failure(issue);
     }
     return ValidationResult::success(ValidatedJobPayload{std::move(serialized).value()});
 }
@@ -113,8 +103,18 @@ auto job_payload_issue_text(JobPayloadIssue issue) noexcept -> std::string_view
             return "invalid_arguments";
         case JobPayloadIssue::MissingUrl:
             return "missing_url";
+        case JobPayloadIssue::InvalidUrl:
+            return "invalid_url";
         case JobPayloadIssue::InvalidMethod:
             return "invalid_method";
+        case JobPayloadIssue::InvalidHeaders:
+            return "invalid_headers";
+        case JobPayloadIssue::InvalidBody:
+            return "invalid_body";
+        case JobPayloadIssue::InvalidExpectedStatuses:
+            return "invalid_expected_statuses";
+        case JobPayloadIssue::InvalidHttpRequest:
+            return "invalid_http_request";
         case JobPayloadIssue::InvalidJson:
             return "invalid_json";
         case JobPayloadIssue::TooLarge:
