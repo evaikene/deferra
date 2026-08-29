@@ -1,5 +1,7 @@
 #include "fake_http_client.hpp"
 
+#include "http_validation_priv.hpp"
+
 #include <algorithm>
 #include <limits>
 #include <string>
@@ -135,6 +137,10 @@ auto FakeHttpClient::is_available() const noexcept -> bool
 auto FakeHttpClient::start(net::HttpRequest request, net::HttpCompletionHandler completion)
     -> FakeResult<net::HttpRequestId>
 {
+    auto validation = net::detail::validate_http_request(request);
+    if (!validation) {
+        return FakeResult<net::HttpRequestId>::failure(std::move(validation).error());
+    }
     if (_failure || !_available) {
         return FakeResult<net::HttpRequestId>::failure(
             _failure.value_or(fake_error(core::ErrorCategory::Unavailable,

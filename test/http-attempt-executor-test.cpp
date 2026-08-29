@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -100,6 +101,31 @@ auto http_payload() -> JsonValue
          })})                                                                       },
         {"method",  json_string("POST")                                             },
         {"url",     json_string("https://sensitive.example/path?token=secret-query")},
+    });
+}
+
+auto maximum_header_payload() -> JsonValue
+{
+    // Four worst-case executor metadata headers occupy 183 generic name/value bytes.
+    constexpr std::size_t maximum_count{128U - 4U};
+    constexpr std::size_t maximum_bytes{(std::size_t{64} * 1024U) - 183U};
+
+    auto name_bytes = std::size_t{0};
+    for (std::size_t index = 0; index < maximum_count; ++index) {
+        name_bytes += ("X-" + std::to_string(index)).size();
+    }
+
+    auto headers = JsonValue::Array{};
+    headers.reserve(maximum_count);
+    for (std::size_t index = 0; index < maximum_count; ++index) {
+        headers.push_back(json_object({
+            {"name", json_string("X-" + std::to_string(index))},
+            {"value", json_string(index == 0U ? std::string(maximum_bytes - name_bytes, 'a') : "")},
+        }));
+    }
+    return json_object({
+        {"headers", json_array(std::move(headers))              },
+        {"url",     json_string("https://example.test/boundary")},
     });
 }
 
@@ -297,6 +323,36 @@ TEST_CASE("HTTP attempt executor builds owning requests and stable retry metadat
     REQUIRE(client.complete_success(retry.id, response()));
     REQUIRE(completions.size() == 2U);
     CHECK(completions[1].key.attempt_number == 2U);
+}
+
+TEST_CASE("HTTP attempt executor preserves generic limits after metadata injection", "[jobu][http][executor]")
+{
+    FakeHttpClient      client;
+    FakeTimeSource      time;
+    HttpAttemptExecutor executor{client, time};
+
+    auto request     = start_request(std::numeric_limits<AttemptNumber>::max(),
+                                     {
+                                         {"http.idempotency_key", {.data = true}}
+    });
+    request.payload  = maximum_header_payload();
+    auto completions = std::size_t{0};
+    REQUIRE(executor.start(std::move(request), [&](AttemptCompletion const&) { ++completions; }));
+    REQUIRE(client.start_records().size() == 1U);
+
+    auto const& accepted = client.start_records().front();
+    CHECK(accepted.request.headers.size() == 128U);
+    auto header_bytes = std::size_t{0};
+    for (auto const& header : accepted.request.headers) {
+        header_bytes += header.name.size() + header.value.size();
+    }
+    CHECK(header_bytes == std::size_t{64} * 1024U);
+    CHECK(header_value(accepted.request, "X-JobU-Attempt") ==
+          std::to_string(std::numeric_limits<AttemptNumber>::max()));
+    CHECK(header_value(accepted.request, "Idempotency-Key") == run_id().to_string());
+
+    REQUIRE(client.complete_success(accepted.id, response()));
+    CHECK(completions == 1U);
 }
 
 TEST_CASE("HTTP attempt executor rejects invalid starts without retaining callbacks", "[jobu][http][executor]")
