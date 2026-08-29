@@ -5,6 +5,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <cerrno>
+#include <fcntl.h>
 #include <memory>
 #include <thread>
 #include <unistd.h>
@@ -27,6 +29,81 @@ auto make_fake_loop() -> FakeLoop
     auto* ptr     = backend.get();
     return {.loop = jb::core::priv::EventLoopTestAccess::make_event_loop(std::move(backend)), .backend = ptr};
 }
+
+class NonblockingPipe final {
+public:
+
+    NonblockingPipe()
+    {
+        int fds[2];
+        if (::pipe(fds) != 0) {
+            return;
+        }
+        _read_fd  = fds[0];
+        _write_fd = fds[1];
+
+        auto const flags = ::fcntl(_read_fd, F_GETFL);
+        if (flags < 0 || ::fcntl(_read_fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+            close_descriptors();
+        }
+    }
+
+    ~NonblockingPipe() { close_descriptors(); }
+
+    NonblockingPipe(NonblockingPipe const&)                    = delete;
+    auto operator=(NonblockingPipe const&) -> NonblockingPipe& = delete;
+
+    [[nodiscard]] explicit operator bool() const noexcept { return _read_fd >= 0 && _write_fd >= 0; }
+
+    [[nodiscard]] auto read_fd() const noexcept -> int { return _read_fd; }
+
+    [[nodiscard]] auto write_byte() const noexcept -> bool
+    {
+        for (;;) {
+            char const byte{'x'};
+            auto const count = ::write(_write_fd, &byte, 1);
+            if (count == 1) {
+                return true;
+            }
+            if (count < 0 && errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+    }
+
+    [[nodiscard]] auto drain_read_end() const noexcept -> bool
+    {
+        for (;;) {
+            char       buffer[64];
+            auto const count = ::read(_read_fd, buffer, sizeof(buffer));
+            if (count > 0) {
+                continue;
+            }
+            if (count < 0 && errno == EINTR) {
+                continue;
+            }
+            return count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK);
+        }
+    }
+
+private:
+
+    int _read_fd{-1};
+    int _write_fd{-1};
+
+    void close_descriptors() noexcept
+    {
+        if (_read_fd >= 0) {
+            static_cast<void>(::close(_read_fd));
+            _read_fd = -1;
+        }
+        if (_write_fd >= 0) {
+            static_cast<void>(::close(_write_fd));
+            _write_fd = -1;
+        }
+    }
+};
 
 } // anonymous namespace
 
@@ -86,35 +163,162 @@ TEST_CASE("EventLoop validates watches before backend registration", "[core][eve
 {
     auto fake = make_fake_loop();
 
-    CHECK_FALSE(fake.loop->watch_fd(-1, FdEvent::Read, [](int, FdEvents) -> void {}));
-    CHECK_FALSE(fake.loop->watch_fd(10, {}, [](int, FdEvents) -> void {}));
-    CHECK_FALSE(fake.loop->watch_fd(10, FdEvent::Read, {}));
+    CHECK_FALSE(fake.loop->watch_fd(-1, FdEvent::Read, FdTriggerMode::Edge, [](int, FdEvents) -> void {}));
+    CHECK_FALSE(fake.loop->watch_fd(10, {}, FdTriggerMode::Edge, [](int, FdEvents) -> void {}));
+    CHECK_FALSE(fake.loop->watch_fd(10, FdEvent::Read, FdTriggerMode::Edge, {}));
     CHECK(fake.backend->add_fd_calls == 0);
 
     fake.backend->add_fd_result = false;
-    CHECK_FALSE(fake.loop->watch_fd(10, FdEvent::Read, [](int, FdEvents) -> void {}));
+    CHECK_FALSE(fake.loop->watch_fd(10, FdEvent::Read, FdTriggerMode::Level, [](int, FdEvents) -> void {}));
     CHECK(fake.backend->add_fd_calls == 1);
+    CHECK(fake.backend->last_added_fd == 10);
+    CHECK(fake.backend->last_added_events.bits() == FdEvents{FdEvent::Read}.bits());
+    CHECK(fake.backend->last_added_trigger_mode == FdTriggerMode::Level);
 }
 
-TEST_CASE("EventLoop preserves an existing watch when replacement fails", "[core][event_loop]")
+TEST_CASE("EventLoop propagates fd trigger modes to the backend", "[core][event_loop]")
+{
+    auto fake = make_fake_loop();
+
+    auto const edge  = fake.loop->watch_fd(40, FdEvent::Read, FdTriggerMode::Edge, [](int, FdEvents) -> void {});
+    auto const level = fake.loop->watch_fd(41, FdEvent::Write, FdTriggerMode::Level, [](int, FdEvents) -> void {});
+
+    REQUIRE(edge);
+    REQUIRE(level);
+    REQUIRE(fake.backend->add_fd_history.size() == 2);
+    CHECK(fake.backend->add_fd_history[0].trigger_mode == FdTriggerMode::Edge);
+    CHECK(fake.backend->add_fd_history[1].trigger_mode == FdTriggerMode::Level);
+}
+
+TEST_CASE("EventLoop callback-only replacement does not update the backend", "[core][event_loop]")
+{
+    auto fake = make_fake_loop();
+
+    for (auto const trigger_mode : {FdTriggerMode::Edge, FdTriggerMode::Level}) {
+        auto const fd = trigger_mode == FdTriggerMode::Edge ? 42 : 43;
+        int        original_calls{0};
+        int        replacement_calls{0};
+
+        auto const original =
+            fake.loop->watch_fd(fd, FdEvent::Read, trigger_mode, [&original_calls](int, FdEvents) -> void {
+                ++original_calls;
+            });
+        REQUIRE(original);
+        auto const add_calls = fake.backend->add_fd_calls;
+
+        auto const replacement =
+            fake.loop->watch_fd(fd, FdEvent::Read, trigger_mode, [&replacement_calls](int, FdEvents) -> void {
+                ++replacement_calls;
+            });
+        REQUIRE(replacement);
+        CHECK(replacement.fd == original.fd);
+        CHECK(fake.backend->add_fd_calls == add_calls);
+
+        fake.backend->ready_events.push_back({.fd = fd, .events = FdEvent::Read});
+        CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+        CHECK(original_calls == 0);
+        CHECK(replacement_calls == 1);
+    }
+}
+
+TEST_CASE("EventLoop trigger-mode replacement updates the backend", "[core][event_loop]")
+{
+    auto fake = make_fake_loop();
+
+    REQUIRE(fake.loop->watch_fd(42, FdEvent::Read, FdTriggerMode::Edge, [](int, FdEvents) -> void {}));
+    REQUIRE(fake.loop->watch_fd(42, FdEvent::Read, FdTriggerMode::Level, [](int, FdEvents) -> void {}));
+    REQUIRE(fake.loop->watch_fd(42, FdEvent::Read, FdTriggerMode::Edge, [](int, FdEvents) -> void {}));
+
+    REQUIRE(fake.backend->add_fd_history.size() == 3);
+    CHECK(fake.backend->add_fd_history[0].trigger_mode == FdTriggerMode::Edge);
+    CHECK(fake.backend->add_fd_history[1].trigger_mode == FdTriggerMode::Level);
+    CHECK(fake.backend->add_fd_history[2].trigger_mode == FdTriggerMode::Edge);
+}
+
+TEST_CASE("EventLoop event-mask replacement updates the backend", "[core][event_loop]")
+{
+    auto fake = make_fake_loop();
+
+    REQUIRE(fake.loop->watch_fd(42, FdEvent::Read, FdTriggerMode::Edge, [](int, FdEvents) -> void {}));
+    REQUIRE(fake.loop->watch_fd(42, FdEvent::Write, FdTriggerMode::Edge, [](int, FdEvents) -> void {}));
+
+    REQUIRE(fake.backend->add_fd_history.size() == 2);
+    CHECK(fake.backend->add_fd_history[0].events.bits() == FdEvents{FdEvent::Read}.bits());
+    CHECK(fake.backend->add_fd_history[1].events.bits() == FdEvents{FdEvent::Write}.bits());
+}
+
+TEST_CASE("EventLoop preserves an existing watch when event and trigger replacement fails", "[core][event_loop]")
 {
     auto fake = make_fake_loop();
     int  original_calls{0};
     int  replacement_calls{0};
 
     auto const original =
-        fake.loop->watch_fd(42, FdEvent::Read, [&original_calls](int, FdEvents) -> void { ++original_calls; });
+        fake.loop->watch_fd(42, FdEvent::Read, FdTriggerMode::Edge, [&original_calls](int, FdEvents) -> void {
+            ++original_calls;
+        });
     REQUIRE(original);
 
     fake.backend->add_fd_result = false;
     auto const replacement =
-        fake.loop->watch_fd(42, FdEvent::Write, [&replacement_calls](int, FdEvents) -> void { ++replacement_calls; });
+        fake.loop->watch_fd(42, FdEvent::Write, FdTriggerMode::Level, [&replacement_calls](int, FdEvents) -> void {
+            ++replacement_calls;
+        });
     CHECK_FALSE(replacement);
+
+    auto const registration = jb::core::priv::EventLoopTestAccess::fd_registration(*fake.loop, 42);
+    REQUIRE(registration);
+    CHECK(registration->events.bits() == FdEvents{FdEvent::Read}.bits());
+    CHECK(registration->trigger_mode == FdTriggerMode::Edge);
 
     fake.backend->ready_events.push_back({.fd = 42, .events = FdEvent::Read});
     CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
     CHECK(original_calls == 1);
     CHECK(replacement_calls == 0);
+}
+
+TEST_CASE("EventLoop preserves an existing watch when trigger-only replacement fails", "[core][event_loop]")
+{
+    auto fake = make_fake_loop();
+    int  original_calls{0};
+    int  replacement_calls{0};
+
+    auto const original =
+        fake.loop->watch_fd(42, FdEvent::Read, FdTriggerMode::Edge, [&original_calls](int, FdEvents) -> void {
+            ++original_calls;
+        });
+    REQUIRE(original);
+
+    fake.backend->add_fd_result = false;
+    auto const replacement =
+        fake.loop->watch_fd(42, FdEvent::Read, FdTriggerMode::Level, [&replacement_calls](int, FdEvents) -> void {
+            ++replacement_calls;
+        });
+    CHECK_FALSE(replacement);
+
+    auto const registration = jb::core::priv::EventLoopTestAccess::fd_registration(*fake.loop, 42);
+    REQUIRE(registration);
+    CHECK(registration->events.bits() == FdEvents{FdEvent::Read}.bits());
+    CHECK(registration->trigger_mode == FdTriggerMode::Edge);
+
+    fake.backend->ready_events.push_back({.fd = 42, .events = FdEvent::Read});
+    CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(original_calls == 1);
+    CHECK(replacement_calls == 0);
+}
+
+TEST_CASE("EventLoop replaces fd events and trigger mode together", "[core][event_loop]")
+{
+    auto fake = make_fake_loop();
+
+    REQUIRE(fake.loop->watch_fd(42, FdEvent::Read, FdTriggerMode::Edge, [](int, FdEvents) -> void {}));
+    REQUIRE(fake.loop->watch_fd(42, FdEvent::Write, FdTriggerMode::Level, [](int, FdEvents) -> void {}));
+
+    auto const registration = jb::core::priv::EventLoopTestAccess::fd_registration(*fake.loop, 42);
+    REQUIRE(registration);
+    CHECK(registration->events.bits() == FdEvents{FdEvent::Write}.bits());
+    CHECK(registration->trigger_mode == FdTriggerMode::Level);
+    CHECK(fake.backend->add_fd_calls == 2);
 }
 
 TEST_CASE("EventLoop retains a watch after failed removal", "[core][event_loop]")
@@ -123,7 +327,9 @@ TEST_CASE("EventLoop retains a watch after failed removal", "[core][event_loop]"
     int  callback_calls{0};
 
     auto const watch =
-        fake.loop->watch_fd(42, FdEvent::Read, [&callback_calls](int, FdEvents) -> void { ++callback_calls; });
+        fake.loop->watch_fd(42, FdEvent::Read, FdTriggerMode::Edge, [&callback_calls](int, FdEvents) -> void {
+            ++callback_calls;
+        });
     REQUIRE(watch);
 
     fake.backend->remove_fd_result = false;
@@ -347,7 +553,7 @@ TEST_CASE("EventLoop watch_fd returns a valid handle", "[core][event_loop]")
     int       fds[2];
     CHECK(pipe(fds) == 0);
 
-    auto h = loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, [](int, FdEvents) -> void {});
+    auto h = loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, FdTriggerMode::Edge, [](int, FdEvents) -> void {});
     CHECK(h);
     CHECK(h.fd == fds[0]);
 
@@ -364,7 +570,9 @@ TEST_CASE("EventLoop watch_fd callback fires when fd is readable", "[core][event
 
     bool       fired = false;
     auto const watch =
-        loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, [&fired](int, FdEvents) -> void { fired = true; });
+        loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, FdTriggerMode::Edge, [&fired](int, FdEvents) -> void {
+            fired = true;
+        });
     REQUIRE(watch);
 
     char byte = 'x';
@@ -386,10 +594,11 @@ TEST_CASE("EventLoop watch_fd callback receives correct fd and events", "[core][
     int      received_fd = -1;
     FdEvents received_events{};
 
-    auto const watch = loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, [&](int fd, FdEvents events) -> void {
-        received_fd     = fd;
-        received_events = events;
-    });
+    auto const watch =
+        loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, FdTriggerMode::Edge, [&](int fd, FdEvents events) -> void {
+            received_fd     = fd;
+            received_events = events;
+        });
     REQUIRE(watch);
 
     char byte = 'x';
@@ -410,7 +619,9 @@ TEST_CASE("EventLoop unwatch_fd prevents callback from firing", "[core][event_lo
     CHECK(pipe(fds) == 0);
 
     int  count = 0;
-    auto h     = loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, [&count](int, FdEvents) -> void { ++count; });
+    auto h     = loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, FdTriggerMode::Edge, [&count](int, FdEvents) -> void {
+        ++count;
+    });
     REQUIRE(h);
     CHECK(loop.unwatch_fd(h));
 
@@ -430,7 +641,9 @@ TEST_CASE("EventLoop unwatch_fd stops a repeating watch", "[core][event_loop]")
     CHECK(pipe(fds) == 0);
 
     int  count = 0;
-    auto h     = loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, [&count](int, FdEvents) -> void { ++count; });
+    auto h     = loop.watch_fd(fds[0], FdEvents{FdEvent::Read}, FdTriggerMode::Edge, [&count](int, FdEvents) -> void {
+        ++count;
+    });
     REQUIRE(h);
 
     char byte = 'x';
@@ -460,8 +673,14 @@ TEST_CASE("EventLoop watch_fd multiple fds fire independently", "[core][event_lo
 
     int        count0 = 0;
     int        count1 = 0;
-    auto const watch0 = loop.watch_fd(fds0[0], FdEvents{FdEvent::Read}, [&count0](int, FdEvents) -> void { ++count0; });
-    auto const watch1 = loop.watch_fd(fds1[0], FdEvents{FdEvent::Read}, [&count1](int, FdEvents) -> void { ++count1; });
+    auto const watch0 =
+        loop.watch_fd(fds0[0], FdEvents{FdEvent::Read}, FdTriggerMode::Edge, [&count0](int, FdEvents) -> void {
+            ++count0;
+        });
+    auto const watch1 =
+        loop.watch_fd(fds1[0], FdEvents{FdEvent::Read}, FdTriggerMode::Edge, [&count1](int, FdEvents) -> void {
+            ++count1;
+        });
     REQUIRE(watch0);
     REQUIRE(watch1);
 
@@ -477,6 +696,96 @@ TEST_CASE("EventLoop watch_fd multiple fds fire independently", "[core][event_lo
     close(fds1[1]);
     CHECK(count0 >= 1);
     CHECK(count1 == 0);
+}
+
+TEST_CASE("EventLoop edge watch repeats only after a new readiness transition", "[core][event_loop]")
+{
+    EventLoop       loop;
+    NonblockingPipe descriptor;
+    int             callback_count{0};
+    REQUIRE(descriptor);
+
+    auto const watch = loop.watch_fd(descriptor.read_fd(),
+                                     FdEvent::Read,
+                                     FdTriggerMode::Edge,
+                                     [&callback_count](int, FdEvents) -> void { ++callback_count; });
+    REQUIRE(watch);
+
+    REQUIRE(descriptor.write_byte());
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(callback_count == 1);
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(callback_count == 1);
+
+    REQUIRE(descriptor.drain_read_end());
+    REQUIRE(descriptor.write_byte());
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(callback_count == 2);
+    CHECK(loop.unwatch_fd(watch));
+}
+
+TEST_CASE("EventLoop level watch repeats while the descriptor remains ready", "[core][event_loop]")
+{
+    EventLoop       loop;
+    NonblockingPipe descriptor;
+    int             callback_count{0};
+    REQUIRE(descriptor);
+
+    auto const watch = loop.watch_fd(descriptor.read_fd(),
+                                     FdEvent::Read,
+                                     FdTriggerMode::Level,
+                                     [&callback_count](int, FdEvents) -> void { ++callback_count; });
+    REQUIRE(watch);
+
+    REQUIRE(descriptor.write_byte());
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(callback_count == 1);
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(callback_count == 2);
+
+    REQUIRE(descriptor.drain_read_end());
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(callback_count == 2);
+    CHECK(loop.unwatch_fd(watch));
+}
+
+TEST_CASE("EventLoop changes native fd trigger mode at runtime", "[core][event_loop]")
+{
+    EventLoop       loop;
+    NonblockingPipe descriptor;
+    int             callback_count{0};
+    REQUIRE(descriptor);
+
+    auto callback = [&callback_count](int, FdEvents) -> void { ++callback_count; };
+    auto watch    = loop.watch_fd(descriptor.read_fd(), FdEvent::Read, FdTriggerMode::Level, callback);
+    REQUIRE(watch);
+
+    REQUIRE(descriptor.write_byte());
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(callback_count == 2);
+    REQUIRE(descriptor.drain_read_end());
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(callback_count == 2);
+
+    watch = loop.watch_fd(descriptor.read_fd(), FdEvent::Read, FdTriggerMode::Edge, callback);
+    REQUIRE(watch);
+    REQUIRE(descriptor.write_byte());
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(callback_count == 3);
+    REQUIRE(descriptor.drain_read_end());
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(callback_count == 3);
+
+    watch = loop.watch_fd(descriptor.read_fd(), FdEvent::Read, FdTriggerMode::Level, callback);
+    REQUIRE(watch);
+    REQUIRE(descriptor.write_byte());
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(loop.process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(callback_count == 5);
+    REQUIRE(descriptor.drain_read_end());
+    CHECK(loop.unwatch_fd(watch));
 }
 
 TEST_CASE("EventLoop post is thread-safe under concurrent posters", "[core][event_loop][thread]")

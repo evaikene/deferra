@@ -131,17 +131,30 @@ void EventLoop::cancel_timer(TimerHandle h)
     _timers.cancel(h);
 }
 
-auto EventLoop::watch_fd(int fd, FdEvents events, FdCallback callback) -> FdWatch
+auto EventLoop::watch_fd(int fd, FdEvents events, FdTriggerMode trigger_mode, FdCallback callback) -> FdWatch
 {
     if (!assert_on_loop_thread() || !_backend || fd < 0 || events.none() || !callback) {
         return {};
     }
 
-    if (!_backend->add_fd(fd, events)) {
+    auto const existing = _watchers.find(fd);
+    if (existing != _watchers.end() && existing->second.events.bits() == events.bits() &&
+        existing->second.trigger_mode == trigger_mode) {
+        // An unchanged native registration replaces only the callback and has
+        // no backend-specific rearm or readiness-refresh side effect.
+        existing->second.callback = std::move(callback);
+        return {fd};
+    }
+
+    if (!_backend->add_fd(fd, events, trigger_mode)) {
         return {};
     }
 
-    _watchers[fd] = {.callback = std::move(callback), .events = events};
+    _watchers[fd] = {
+        .callback     = std::move(callback),
+        .events       = events,
+        .trigger_mode = trigger_mode,
+    };
     return {fd};
 }
 

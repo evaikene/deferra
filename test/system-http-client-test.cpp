@@ -31,6 +31,8 @@ using jb::net::http::SystemHttpClient;
 using jb::net::http::SystemHttpClientOptions;
 using namespace std::chrono_literals;
 
+constexpr std::size_t kSustainedTransferSize{(std::size_t{1024} * 1024U) + 1U};
+
 auto minimal_request(std::string url) -> jb::net::HttpRequest
 {
     return {.url = std::move(url)};
@@ -382,7 +384,7 @@ TEST_CASE("system HTTP client preserves methods headers and optional binary bodi
 
     auto large_request   = minimal_request(server.url("/large-body"));
     large_request.method = "POST";
-    large_request.body   = jb::core::ByteBuffer((std::size_t{1024} * 1024U) + 1U, std::byte{0x5a});
+    large_request.body   = jb::core::ByteBuffer(kSustainedTransferSize, std::byte{0x5a});
     REQUIRE(complete_request(app, *client, std::move(large_request)));
 
     auto get_body   = minimal_request(server.url("/get-body"));
@@ -423,7 +425,7 @@ TEST_CASE("system HTTP client preserves methods headers and optional binary bodi
     CHECK_FALSE(header_value(headers, "Expect"));
 
     auto const& large = recorded[methods.size() + 4U];
-    CHECK(large.body.size() == (std::size_t{1024} * 1024U) + 1U);
+    CHECK(large.body.size() == kSustainedTransferSize);
     CHECK_FALSE(header_value(large.headers, "Expect"));
 
     auto const& recorded_get_body = recorded[methods.size() + 5U];
@@ -492,11 +494,11 @@ TEST_CASE("system HTTP client retains only the parsed and raw final response blo
     CHECK_FALSE(value.tls_verified);
 }
 
-TEST_CASE("system HTTP client captures first and last bytes while draining complete streams", "[net][http]")
+TEST_CASE("system HTTP client drains a sustained response while capturing first and last bytes", "[net][http]")
 {
     auto app    = jb::core::Application{0, nullptr};
     auto server = jb::test::HttpTestServer{};
-    auto body   = std::string(std::size_t{128} * 1024U, 'm');
+    auto body   = std::string(kSustainedTransferSize, 'm');
     body.replace(0U, 4U, "abcd");
     body.replace(body.size() - 3U, 3U, "nop");
     auto response = jb::test::HttpTestResponse{
@@ -523,8 +525,8 @@ TEST_CASE("system HTTP client captures first and last bytes while draining compl
 
     auto const full_headers     = std::string{"HTTP/1.1 200 OK\r\n"
                                               "X-Test: value\r\n"
-                                              "Content-Length: 131072\r\n"
-                                              "Connection: close\r\n\r\n"};
+                                              "Content-Length: "} +
+                                  std::to_string(kSustainedTransferSize) + "\r\nConnection: close\r\n\r\n";
     auto const expected_headers = full_headers.substr(0U, 7U) + full_headers.substr(full_headers.size() - 6U);
     CHECK(byte_text(value.raw_headers.bytes) == expected_headers);
     CHECK(value.raw_headers.total_bytes == full_headers.size());
@@ -912,6 +914,7 @@ TEST_CASE("curl multi adapter defers and coalesces socket watch changes", "[net]
     CHECK(fake.backend->last_added_fd == 42);
     CHECK_FALSE(fake.backend->last_added_events.test(jb::core::FdEvent::Read));
     CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Write));
+    CHECK(fake.backend->last_added_trigger_mode == jb::core::FdTriggerMode::Level);
     auto superseded_callback = jb::core::priv::EventLoopTestAccess::fd_callback(*fake.loop, 42);
     REQUIRE(superseded_callback);
 
@@ -923,22 +926,7 @@ TEST_CASE("curl multi adapter defers and coalesces socket watch changes", "[net]
     CHECK(fake.backend->remove_fd_calls == initial_remove_calls);
     CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Read));
     CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Write));
-
-    auto const refresh_wakeup_calls = fake.backend->wakeup_calls;
-    REQUIRE(CurlMultiAdapterTestAccess::refresh_socket_watch_after_readiness(*adapter, 42));
-    REQUIRE(CurlMultiAdapterTestAccess::refresh_socket_watch_after_readiness(*adapter, 42));
-    state = CurlMultiAdapterTestAccess::state(*adapter);
-    CHECK(state.pending_watch_update_count == 1U);
-    CHECK(state.reconcile_queued);
-    CHECK(fake.backend->add_fd_calls == initial_add_calls + 2);
-    CHECK(fake.backend->wakeup_calls == refresh_wakeup_calls + 1);
-    REQUIRE(fake.loop->process_events(jb::core::EventFlag::Tasks, 0) != jb::core::ProcessEventsResult::Failed);
-    state = CurlMultiAdapterTestAccess::state(*adapter);
-    CHECK(state.pending_watch_update_count == 0U);
-    CHECK_FALSE(state.reconcile_queued);
-    CHECK(fake.backend->add_fd_calls == initial_add_calls + 3);
-    CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Read));
-    CHECK(fake.backend->last_added_events.test(jb::core::FdEvent::Write));
+    CHECK(fake.backend->last_added_trigger_mode == jb::core::FdTriggerMode::Level);
 
     jb::net::http::detail::fail_next_curl_multi_operation_for_testing(
         jb::net::http::detail::CurlMultiFailurePoint::SocketAction);

@@ -38,7 +38,7 @@ struct ObjectLifetime;
 /// * To schedule a timer or watch an fd from another thread, wrap the call
 ///   in post():
 ///     loop.post([&loop, fd] {
-///         loop.watch_fd(fd, FdEvent::Read, ...);
+///         loop.watch_fd(fd, FdEvent::Read, FdTriggerMode::Edge, ...);
 ///     });
 class EventLoop {
 public:
@@ -103,20 +103,35 @@ public:
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
     void cancel_timer(TimerHandle handle);
 
-    /// Add a file descriptor to be monitored for the specified events. The callback
-    /// will be called when the events are ready.
+    /// Add a file descriptor to be monitored for the specified events and
+    /// readiness trigger mode. The callback will be called when the events are
+    /// ready.
     /// @param[in] fd File descriptor to monitor
     /// @param[in] events Events to monitor (read/write)
+    /// @param[in] trigger_mode Readiness notification mode for the native registration
     /// @param[in] callback Callback to call when the events are ready
     /// @return Watch handle that can be used to remove the watch later, or an
     ///         invalid handle when validation or backend registration fails
     ///
     /// The descriptor must be non-negative, @p events and @p callback must be
-    /// nonempty, and replacing an existing watch changes its callback only after
-    /// the backend registration succeeds.
+    /// nonempty, and @p trigger_mode is part of the native registration.
+    ///
+    /// An edge-triggered consumer must use a nonblocking descriptor and consume
+    /// each indicated native operation until it would block before depending on
+    /// another callback. A level-triggered callback may run again on a later poll
+    /// while the requested condition remains ready. Such a consumer must make
+    /// progress, change or remove its watch, or tolerate repeated callbacks.
+    /// EventLoop does not suppress repeated level-triggered callbacks.
+    ///
+    /// Replacing an existing watch replaces its callback, events, and trigger
+    /// mode. When changing the events or trigger mode requires a backend update,
+    /// failure leaves the previous watch active. If the events and trigger mode
+    /// are unchanged, only the callback is replaced and no native registration
+    /// operation is performed. Callback-only replacement is not a rearm
+    /// mechanism.
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
-    auto watch_fd(int fd, FdEvents events, FdCallback callback) -> FdWatch;
+    auto watch_fd(int fd, FdEvents events, FdTriggerMode trigger_mode, FdCallback callback) -> FdWatch;
 
     /// Removes a file descriptor watch by its handle.
     /// @param[in] handle Watch handle to remove
@@ -197,8 +212,9 @@ private:
     explicit EventLoop(std::unique_ptr<priv::Backend> backend);
 
     struct WatchEntry {
-        FdCallback callback;
-        FdEvents   events;
+        FdCallback    callback;
+        FdEvents      events;
+        FdTriggerMode trigger_mode;
     };
 
     struct EventEntry {

@@ -14,15 +14,27 @@
 
 namespace jb::core::priv {
 
+struct FakeFdRegistration {
+    int           fd;
+    FdEvents      events;
+    FdTriggerMode trigger_mode;
+};
+
 /// Deterministic event-loop backend used by direct EventLoop tests.
 class FakeEventLoopBackend final : public Backend {
 public:
 
-    auto add_fd(int fd, FdEvents events) -> bool override
+    auto add_fd(int fd, FdEvents events, FdTriggerMode trigger_mode) -> bool override
     {
         ++add_fd_calls;
-        last_added_fd     = fd;
-        last_added_events = events;
+        last_added_fd           = fd;
+        last_added_events       = events;
+        last_added_trigger_mode = trigger_mode;
+        add_fd_history.push_back({
+            .fd           = fd,
+            .events       = events,
+            .trigger_mode = trigger_mode,
+        });
         if (!add_fd_results.empty()) {
             auto const result = add_fd_results.front();
             add_fd_results.pop_front();
@@ -64,22 +76,29 @@ public:
         return wakeup_result;
     }
 
-    bool                    add_fd_result{true};
-    bool                    remove_fd_result{true};
-    bool                    wakeup_result{true};
-    std::deque<bool>        add_fd_results;
-    std::deque<bool>        remove_fd_results;
-    std::optional<int>      poll_result;
-    std::vector<ReadyEvent> ready_events;
+    bool                            add_fd_result{true};
+    bool                            remove_fd_result{true};
+    bool                            wakeup_result{true};
+    std::deque<bool>                add_fd_results;
+    std::deque<bool>                remove_fd_results;
+    std::optional<int>              poll_result;
+    std::vector<ReadyEvent>         ready_events;
+    std::vector<FakeFdRegistration> add_fd_history;
 
-    int      add_fd_calls{0};
-    int      remove_fd_calls{0};
-    int      poll_calls{0};
-    int      wakeup_calls{0};
-    int      last_added_fd{-1};
-    FdEvents last_added_events;
-    int      last_removed_fd{-1};
-    int      last_timeout_ms{0};
+    int           add_fd_calls{0};
+    int           remove_fd_calls{0};
+    int           poll_calls{0};
+    int           wakeup_calls{0};
+    int           last_added_fd{-1};
+    FdEvents      last_added_events;
+    FdTriggerMode last_added_trigger_mode{FdTriggerMode::Edge};
+    int           last_removed_fd{-1};
+    int           last_timeout_ms{0};
+};
+
+struct EventLoopFdRegistration {
+    FdEvents      events;
+    FdTriggerMode trigger_mode;
 };
 
 /// Private constructor access for EventLoop backend-injection tests.
@@ -93,6 +112,18 @@ struct EventLoopTestAccess {
     {
         auto const watch = loop._watchers.find(fd);
         return watch == loop._watchers.end() ? FdCallback{} : watch->second.callback;
+    }
+
+    static auto fd_registration(EventLoop const& loop, int fd) -> std::optional<EventLoopFdRegistration>
+    {
+        auto const watch = loop._watchers.find(fd);
+        if (watch == loop._watchers.end()) {
+            return std::nullopt;
+        }
+        return EventLoopFdRegistration{
+            .events       = watch->second.events,
+            .trigger_mode = watch->second.trigger_mode,
+        };
     }
 };
 

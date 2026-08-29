@@ -472,7 +472,7 @@ auto LocalServer::listen(std::filesystem::path const& path, LocalServerOptions o
         }
     };
 
-    d->watch = loop->watch_fd(d->fd, jb::core::FdEvent::Read, d->accept_callback);
+    d->watch = loop->watch_fd(d->fd, jb::core::FdEvent::Read, jb::core::FdTriggerMode::Edge, d->accept_callback);
     if (!d->watch) {
         d->listening = false;
         ++d->generation;
@@ -547,7 +547,8 @@ auto LocalServer::take_next_connection() -> std::unique_ptr<LocalSocket>
     if (was_paused) {
         auto* loop = event_loop();
         if (loop) {
-            d->watch = loop->watch_fd(d->fd, jb::core::FdEvent::Read, d->accept_callback);
+            d->watch =
+                loop->watch_fd(d->fd, jb::core::FdEvent::Read, jb::core::FdTriggerMode::Edge, d->accept_callback);
         }
         if (!loop || !d->watch) {
             store_error(*d, jb::core::IOError::ResourceError, "local server event-loop watch rearm failed");

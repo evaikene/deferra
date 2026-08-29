@@ -298,6 +298,12 @@ add_executable(${TARGET} core-json-public-header-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# EventLoop public header must compile as the first include.
+set(TARGET "core-event-loop-public-header-test")
+add_executable(${TARGET} core-event-loop-public-header-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Net public header boundary test
 set(TARGET "net-public-headers-test")
 add_executable(${TARGET} net-public-headers-test.cpp)
