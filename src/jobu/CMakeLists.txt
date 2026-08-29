@@ -94,6 +94,8 @@ target_link_libraries(${TARGET}
         rpc
 )
 
+add_subdirectory(http)
+
 if(TARGET db-sqlite)
     add_subdirectory(sqlite)
 endif()
