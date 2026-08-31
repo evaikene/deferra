@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -67,6 +68,62 @@ auto make_database(std::filesystem::path database_file) -> Database
     })};
 }
 
+class TestAttributeRegistry final : public AttributeRegistry {
+public:
+    [[nodiscard]] auto find(std::string_view name) const noexcept -> AttributeDefinition const* override
+    {
+        return _registry.find(name);
+    }
+
+    [[nodiscard]] auto validate(std::string_view name, AttributeValue const& value, AttributeScope scope) const
+        -> Result<void, Error> override
+    {
+        if (_fail_validation) {
+            return Result<void, Error>::failure({
+                .category = ErrorCategory::Internal,
+                .code     = "test.attribute.validation_failed",
+                .message  = "Injected attribute validation failure",
+            });
+        }
+        return _registry.validate(name, value, scope);
+    }
+
+    [[nodiscard]] auto definitions() const -> std::span<AttributeDefinition const> override
+    {
+        return _registry.definitions();
+    }
+
+    void set_validation_failure(bool fail) noexcept { _fail_validation = fail; }
+
+private:
+    StandardAttributeRegistry _registry;
+    bool                      _fail_validation{false};
+};
+
+class FakeRescanTarget final {
+public:
+    void request_rescan() noexcept
+    {
+        ++_request_count;
+        _pending = true;
+    }
+
+    [[nodiscard]] auto request_count() const noexcept -> std::size_t { return _request_count; }
+
+    [[nodiscard]] auto pending() const noexcept -> bool { return _pending; }
+
+    void clear_pending() noexcept { _pending = false; }
+
+private:
+    std::size_t _request_count{0};
+    bool        _pending{false};
+};
+
+auto mutation_handler(FakeRescanTarget& rescans) -> ManagementMutationHandler
+{
+    return [&rescans]() -> void { rescans.request_rescan(); };
+}
+
 struct ServiceFixture {
     explicit ServiceFixture(std::vector<Uuid> ids)
         : generator{std::move(ids)}
@@ -76,13 +133,13 @@ struct ServiceFixture {
         time.set_utc(UtcTimePoint{1s});
     }
 
-    TemporaryDirectory        directory;
-    std::filesystem::path     database_file{directory.path() / "jobu.sqlite"};
-    Database                  database{make_database(database_file)};
-    StandardAttributeRegistry registry;
-    FakeCronEngine            cron;
-    SequenceUuidGenerator     generator;
-    FakeTimeSource            time;
+    TemporaryDirectory    directory;
+    std::filesystem::path database_file{directory.path() / "jobu.sqlite"};
+    Database              database{make_database(database_file)};
+    TestAttributeRegistry registry;
+    FakeCronEngine        cron;
+    SequenceUuidGenerator generator;
+    FakeTimeSource        time;
 };
 
 auto encode_frame(JsonValue const& value) -> std::string
@@ -149,10 +206,10 @@ void require_application_error(ResponseEnvelope const& response, std::string_vie
 
 class RpcEndpoint {
 public:
-    explicit RpcEndpoint(ServiceFixture& fixture)
+    explicit RpcEndpoint(ServiceFixture& fixture, ManagementMutationHandler mutation_committed = {})
         : _service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time}
     {
-        REQUIRE(register_management_methods(_server, _service, fixture.registry));
+        REQUIRE(register_management_methods(_server, _service, fixture.registry, std::move(mutation_committed)));
 
         auto device = std::make_unique<MemoryIODevice>();
         _device     = device.get();
@@ -243,6 +300,7 @@ TEST_CASE("Management RPC registration is exact and reports duplicate failure", 
     ServiceFixture    fixture{{sequence_id(1)}};
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     Server            server;
+    FakeRescanTarget  rescans;
 
     constexpr std::array<std::string_view, 15> expected_methods{
         "queue.create",
@@ -264,7 +322,8 @@ TEST_CASE("Management RPC registration is exact and reports duplicate failure", 
 
     auto const methods = management_rpc_method_names();
     REQUIRE(methods.size() == expected_methods.size());
-    REQUIRE(register_management_methods(server, service, fixture.registry));
+    REQUIRE(register_management_methods(server, service, fixture.registry, mutation_handler(rescans)));
+    CHECK(rescans.request_count() == 0U);
     for (auto index = std::size_t{0}; index < expected_methods.size(); ++index) {
         CHECK(methods[index] == expected_methods[index]);
         CHECK(server.has_method(expected_methods[index]));
@@ -281,7 +340,8 @@ TEST_CASE("Management RPC registration is exact and reports duplicate failure", 
     REQUIRE(duplicate.register_method("job.update", [](auto const&, auto const&) {
         return MethodResult::success(make_json(JsonNull{}));
     }));
-    CHECK_FALSE(register_management_methods(duplicate, service, fixture.registry));
+    CHECK_FALSE(register_management_methods(duplicate, service, fixture.registry, mutation_handler(rescans)));
+    CHECK(rescans.request_count() == 0U);
     CHECK(duplicate.has_method("queue.create"));
     CHECK(duplicate.has_method("queue.get"));
     CHECK(duplicate.has_method("queue.list"));
@@ -296,6 +356,37 @@ TEST_CASE("Management RPC registration is exact and reports duplicate failure", 
     CHECK_FALSE(duplicate.has_method("job.suspend"));
 }
 
+TEST_CASE("Management RPC notifies a committed mutation before response encoding", "[jobu][management-rpc][sqlite]")
+{
+    Application      app{0, nullptr};
+    auto const       queue_id = sequence_id(1);
+    ServiceFixture   fixture{{queue_id}};
+    FakeRescanTarget rescans;
+    auto             mutation_committed = ManagementMutationHandler{[&fixture, &rescans]() -> void {
+        rescans.request_rescan();
+        fixture.registry.set_validation_failure(true);
+    }};
+    RpcEndpoint      endpoint{fixture, mutation_committed};
+    mutation_committed = {};
+
+    auto const params = encode_create(
+        CreateQueueRequest{
+            .name     = "encoding-failure",
+            .defaults = max_attempts(4),
+        },
+        fixture.registry);
+    require_standard_error(endpoint.call("queue.create", params), ErrorCode::InternalError);
+    CHECK(rescans.request_count() == 1U);
+    CHECK(rescans.pending());
+
+    fixture.registry.set_validation_failure(false);
+    auto persisted = decode_queue(endpoint.call("queue.get", encode_selector(queue_id)), fixture.registry);
+    CHECK(persisted.id == queue_id);
+    CHECK(persisted.name == "encoding-failure");
+    CHECK(std::get<std::int64_t>(persisted.defaults.at("retry.max_attempts").data) == 4);
+    CHECK(rescans.request_count() == 1U);
+}
+
 TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "[jobu][management-rpc][sqlite]")
 {
     Application    app{0, nullptr};
@@ -304,6 +395,7 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
     ServiceFixture fixture{
         {first_id, second_id}
     };
+    FakeRescanTarget rescans;
 
     auto const create_request = CreateQueueRequest{
         .name                  = "alpha",
@@ -318,7 +410,7 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
     auto const create_params = encode_create(create_request, fixture.registry);
 
     {
-        RpcEndpoint endpoint{fixture};
+        RpcEndpoint endpoint{fixture, mutation_handler(rescans)};
 
         auto created = decode_queue(endpoint.call("queue.create", create_params), fixture.registry);
         CHECK(created.id == first_id);
@@ -329,6 +421,9 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         CHECK(created.history_retention == 0s);
         CHECK(created.runnable_wait_warning == 25ms);
         CHECK(std::get<std::int64_t>(created.defaults.at("retry.max_attempts").data) == 4);
+        CHECK(rescans.request_count() == 1U);
+        CHECK(rescans.pending());
+        rescans.clear_pending();
 
         auto replayed = decode_queue(endpoint.call("queue.create", create_params), fixture.registry);
         CHECK(replayed.id == first_id);
@@ -336,10 +431,13 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         CHECK(replayed.weight == created.weight);
         CHECK(replayed.created_at == created.created_at);
         CHECK(replayed.updated_at == created.updated_at);
+        CHECK(rescans.request_count() == 2U);
+        CHECK(rescans.pending());
 
         auto by_name =
             decode_queue(endpoint.call("queue.get", encode_selector(std::string{"alpha"})), fixture.registry);
         CHECK(by_name.id == first_id);
+        CHECK(rescans.request_count() == 2U);
 
         auto list_params = queue_list_request_to_json({.page = {.limit = 1}});
         REQUIRE(list_params);
@@ -349,6 +447,7 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         REQUIRE(page->items.size() == 1U);
         CHECK(page->items.front().id == first_id);
         CHECK_FALSE(page->next_after_id);
+        CHECK(rescans.request_count() == 2U);
 
         auto update_params = update_queue_request_to_json(
             {
@@ -361,16 +460,21 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         auto updated = decode_queue(endpoint.call("queue.update", std::move(update_params).value()), fixture.registry);
         CHECK(updated.weight == 5U);
         CHECK(std::get<std::int64_t>(updated.defaults.at("retry.max_attempts").data) == 6);
+        CHECK(rescans.request_count() == 3U);
 
         auto selector  = encode_selector(first_id);
         auto suspended = decode_queue(endpoint.call("queue.suspend", selector), fixture.registry);
         CHECK(suspended.state == QueueState::Suspended);
+        CHECK(rescans.request_count() == 4U);
         auto resumed = decode_queue(endpoint.call("queue.resume", selector), fixture.registry);
         CHECK(resumed.state == QueueState::Active);
+        CHECK(rescans.request_count() == 5U);
         suspended = decode_queue(endpoint.call("queue.suspend", selector), fixture.registry);
         CHECK(suspended.state == QueueState::Suspended);
+        CHECK(rescans.request_count() == 6U);
 
         CHECK(require_result(endpoint.call("queue.delete", selector)).is_null());
+        CHECK(rescans.request_count() == 7U);
 
         auto replacement_request = CreateQueueRequest{.name = "alpha"};
         auto replacement_create  = encode_create(replacement_request, fixture.registry);
@@ -378,10 +482,11 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         CHECK(replacement.id == second_id);
         CHECK(replacement.name == "alpha");
         CHECK(replacement.state == QueueState::Active);
+        CHECK(rescans.request_count() == 8U);
     }
 
     {
-        RpcEndpoint endpoint{fixture};
+        RpcEndpoint endpoint{fixture, mutation_handler(rescans)};
         auto        list_params = queue_list_request_to_json({
             .include_deleted = true,
             .page            = {.limit = 10},
@@ -397,6 +502,7 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         CHECK(page->items[1].id == second_id);
         CHECK(page->items[1].name == "alpha");
         CHECK(page->items[1].state == QueueState::Active);
+        CHECK(rescans.request_count() == 8U);
     }
 }
 
@@ -461,6 +567,7 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
     ServiceFixture fixture{
         {source_queue_id, target_queue_id, job_id, sequence_id(4)}
     };
+    FakeRescanTarget rescans;
 
     auto const create_request = CreateJobRequest{
         .queue           = source_queue_id,
@@ -475,16 +582,18 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
     auto const create_params = encode_create(create_request, fixture.registry);
 
     {
-        RpcEndpoint endpoint{fixture};
+        RpcEndpoint endpoint{fixture, mutation_handler(rescans)};
 
         auto source = decode_queue(
             endpoint.call("queue.create", encode_create(CreateQueueRequest{.name = "source"}, fixture.registry)),
             fixture.registry);
         CHECK(source.id == source_queue_id);
+        CHECK(rescans.request_count() == 1U);
         auto target = decode_queue(
             endpoint.call("queue.create", encode_create(CreateQueueRequest{.name = "target"}, fixture.registry)),
             fixture.registry);
         CHECK(target.id == target_queue_id);
+        CHECK(rescans.request_count() == 2U);
 
         auto created = decode_job(endpoint.call("job.create", create_params), fixture.registry);
         CHECK(created.id == job_id);
@@ -495,10 +604,12 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
         CHECK(created.priority == 1);
         CHECK(std::get<std::int64_t>(created.attributes.at("retry.max_attempts").data) == 4);
         CHECK(created.payload == create_request.payload);
+        CHECK(rescans.request_count() == 3U);
 
         auto fetched = decode_job(endpoint.call("job.get", encode_job_id(job_id)), fixture.registry);
         CHECK(fetched.id == created.id);
         CHECK(fetched.revision == created.revision);
+        CHECK(rescans.request_count() == 3U);
 
         auto list_params = job_list_request_to_json({
             .queue = source_queue_id,
@@ -511,6 +622,7 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
         REQUIRE(page->items.size() == 1U);
         CHECK(page->items.front().id == job_id);
         CHECK_FALSE(page->next_after_id);
+        CHECK(rescans.request_count() == 3U);
 
         auto update_params = update_job_request_to_json(
             {
@@ -525,20 +637,25 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
         CHECK(updated.revision == 2);
         CHECK(updated.priority == 7);
         CHECK(std::get<std::int64_t>(updated.attributes.at("retry.max_attempts").data) == 6);
+        CHECK(rescans.request_count() == 4U);
 
         require_application_error(endpoint.call("job.update", update_params.value()),
                                   "conflict",
                                   "jobu.job.revision_conflict");
+        CHECK(rescans.request_count() == 4U);
 
         auto suspended = decode_job(endpoint.call("job.suspend", encode_job_id(job_id)), fixture.registry);
         CHECK(suspended.state == JobState::Suspended);
         CHECK(suspended.revision == 4);
+        CHECK(rescans.request_count() == 5U);
         auto resumed = decode_job(endpoint.call("job.resume", encode_job_id(job_id)), fixture.registry);
         CHECK(resumed.state == JobState::Active);
         CHECK(resumed.revision == 5);
+        CHECK(rescans.request_count() == 6U);
         suspended = decode_job(endpoint.call("job.suspend", encode_job_id(job_id)), fixture.registry);
         CHECK(suspended.state == JobState::Suspended);
         CHECK(suspended.revision == 7);
+        CHECK(rescans.request_count() == 7U);
 
         auto move_params = move_job_request_to_json({
             .job_id            = job_id,
@@ -550,6 +667,7 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
         CHECK(moved.queue_id == target_queue_id);
         CHECK(moved.revision == 8);
         CHECK(moved.state == JobState::Suspended);
+        CHECK(rescans.request_count() == 8U);
     }
 
     REQUIRE(fixture.database.close());
@@ -559,25 +677,29 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
     CHECK_FALSE(schema->created);
 
     {
-        RpcEndpoint endpoint{fixture};
+        RpcEndpoint endpoint{fixture, mutation_handler(rescans)};
 
         auto replayed = decode_job(endpoint.call("job.create", create_params), fixture.registry);
         CHECK(replayed.id == job_id);
         CHECK(replayed.queue_id == source_queue_id);
         CHECK(replayed.revision == 1);
         CHECK(replayed.priority == 1);
+        CHECK(rescans.request_count() == 9U);
 
         auto persisted = decode_job(endpoint.call("job.get", encode_job_id(job_id)), fixture.registry);
         CHECK(persisted.queue_id == target_queue_id);
         CHECK(persisted.revision == 8);
         CHECK(persisted.state == JobState::Suspended);
+        CHECK(rescans.request_count() == 9U);
 
         auto resumed = decode_job(endpoint.call("job.resume", encode_job_id(job_id)), fixture.registry);
         CHECK(resumed.state == JobState::Active);
         CHECK(resumed.revision == 9);
+        CHECK(rescans.request_count() == 10U);
         auto suspended = decode_job(endpoint.call("job.suspend", encode_job_id(job_id)), fixture.registry);
         CHECK(suspended.state == JobState::Suspended);
         CHECK(suspended.revision == 11);
+        CHECK(rescans.request_count() == 11U);
 
         auto delete_params = delete_job_request_to_json({
             .job_id            = job_id,
@@ -585,6 +707,7 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
         });
         REQUIRE(delete_params);
         CHECK(require_result(endpoint.call("job.delete", std::move(delete_params).value())).is_null());
+        CHECK(rescans.request_count() == 12U);
 
         auto list_params = job_list_request_to_json({
             .queue           = target_queue_id,
@@ -600,6 +723,7 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
         CHECK(page->items.front().queue_id == target_queue_id);
         CHECK(page->items.front().state == JobState::Deleted);
         CHECK(page->items.front().revision == 12);
+        CHECK(rescans.request_count() == 12U);
     }
 }
 
@@ -610,12 +734,14 @@ TEST_CASE("Management RPC separates invalid params from safe application errors"
     ServiceFixture fixture{
         {queue_id, sequence_id(2), sequence_id(3)}
     };
-    RpcEndpoint endpoint{fixture};
+    FakeRescanTarget rescans;
+    RpcEndpoint      endpoint{fixture, mutation_handler(rescans)};
 
     for (auto const method : management_rpc_method_names()) {
         CAPTURE(method);
         require_standard_error(endpoint.call(method), ErrorCode::InvalidParams);
     }
+    CHECK(rescans.request_count() == 0U);
 
     require_standard_error(endpoint.call("queue.create",
                                          make_json(JsonValue::Object{
@@ -636,9 +762,11 @@ TEST_CASE("Management RPC separates invalid params from safe application errors"
 
     auto created = endpoint.call("queue.create", encode_create(CreateQueueRequest{.name = "active"}, fixture.registry));
     REQUIRE(require_result(created).is_object());
+    CHECK(rescans.request_count() == 1U);
     require_application_error(endpoint.call("queue.delete", encode_selector(queue_id)),
                               "conflict",
                               "jobu.queue.not_suspended");
+    CHECK(rescans.request_count() == 1U);
 
     require_standard_error(endpoint.call("queue.update",
                                          make_json(JsonValue::Object{
@@ -677,4 +805,5 @@ TEST_CASE("Management RPC separates invalid params from safe application errors"
                                              {"job_id", make_json(missing_id.to_string())},
     })),
                            ErrorCode::InvalidParams);
+    CHECK(rescans.request_count() == 1U);
 }
