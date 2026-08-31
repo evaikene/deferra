@@ -155,9 +155,15 @@ struct RealSchedulerFixture {
 
     ~RealSchedulerFixture()
     {
-        // Keep the server and owner loop alive while accepted work drains, then destroy borrowers in callback-safe
-        // order.
+        // Stop admission before draining so a completion cannot dispatch more work during teardown.
+        if (scheduler) {
+            scheduler->stop();
+        }
+
+        // Release both server barriers so assertion unwinding cannot strand a paused transfer, then keep the owner loop
+        // alive while accepted work drains.
         server.release_responses();
+        server.release_response_segment();
         if (client) {
             auto const deadline = std::chrono::steady_clock::now() + 5s;
             while (client->active_request_count() != 0U && std::chrono::steady_clock::now() < deadline) {
@@ -170,9 +176,6 @@ struct RealSchedulerFixture {
                     break;
                 }
             }
-        }
-        if (scheduler) {
-            scheduler->stop();
         }
         scheduler.reset();
         management.reset();
