@@ -235,6 +235,24 @@ if(TARGET jobu-sqlite)
     target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+    # JobU SQLite-backed real HTTP scheduler integration test
+    set(TARGET "http-scheduler-integration-test")
+    add_executable(${TARGET}
+        http-scheduler-integration-test.cpp
+        support/http_test_server.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET}
+        PRIVATE
+            jobu-sqlite
+            jobu-http
+            net-http
+            OpenSSL::SSL
+            OpenSSL::Crypto
+            Catch2::Catch2WithMain
+    )
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
     # JobU SQLite-backed queue management service test
     set(TARGET "jobu-queue-management-test")
     add_executable(${TARGET}
