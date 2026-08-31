@@ -9,10 +9,9 @@ SQLite provides persistence.
 
 > [!IMPORTANT]
 > JobU is under active development and is not ready for production use. The
-> repository currently provides the foundational libraries, SQLite support,
-> local IPC and JSON-RPC, and deterministic scheduling tested with a fake
-> executor. Real command-line and HTTP execution are not yet available, and
-> the scheduler is not yet wired into `jobud`.
+> repository currently provides SQLite persistence, local IPC and JSON-RPC,
+> deterministic scheduling, and real asynchronous HTTP execution through the
+> scheduler composed in `jobud`. Command-line job execution is still planned.
 
 ## Components
 
@@ -29,17 +28,17 @@ The current source tree is built and tested on:
 - Alpine Linux 3.22
 - macOS with Apple Clang and Homebrew dependencies
 
-Linux is the primary development platform. Linux and macOS both support the
-current local IPC, JSON-RPC, daemon, and control-client functionality. Windows
-is not a v1 runtime target.
+Linux is the primary development platform and supports the current HTTP
+scheduler, local IPC, JSON-RPC, daemon, and control-client functionality. macOS
+supports the existing local service functionality, while complete HTTP and
+daemon verification remains planned. Windows is not a v1 runtime target.
 
 ## Requirements
 
 The build requires CMake 3.20 or newer, a C++20 compiler, fmt, SQLite, libcurl
 7.85 or newer, nlohmann/json, Catch2 3.x and OpenSSL for tests, and Ninja or
 another CMake-supported build tool. The private system HTTP backend verifies its
-linked libcurl runtime before construction; real HTTP job execution is not yet
-available.
+linked libcurl runtime before `jobud` enters its event loop.
 
 ### Ubuntu 24.04
 
@@ -101,6 +100,25 @@ cmake -S . -B .bld -G Ninja \
     -DJB_BUILD_SQLITE_DRIVER=OFF
 cmake --build .bld
 ```
+
+## Run the daemon
+
+Start `jobud` with its required local socket and SQLite database paths:
+
+```sh
+.bld/src/jobud/jobud --socket /tmp/jobud.sock --database ./jobu.sqlite
+```
+
+HTTP scheduling accepts these optional daemon settings:
+
+- `--http-concurrency N` sets the positive global HTTP concurrency limit and
+  defaults to 16.
+- `--http-proxy URL` configures one explicit HTTP or HTTPS proxy. When omitted,
+  JobU ignores proxy environment variables.
+- `--http-ca-bundle PATH` selects an explicit certificate-authority bundle.
+
+HTTP jobs verify certificate trust and host identity by default. CLI job
+definitions can be managed, but their execution remains planned.
 
 ## AI-supported development experiment
 
