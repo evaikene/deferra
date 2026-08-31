@@ -5,11 +5,14 @@
 #include "command_line_parser.hpp"
 #include "cron.hpp"
 #include "database.hpp"
+#include "http/http_attempt_executor.hpp"
+#include "http/system_http_client.hpp"
 #include "local_server.hpp"
 #include "logging.hpp"
 #include "management.hpp"
 #include "management_rpc.hpp"
 #include "protocol.hpp"
+#include "scheduler.hpp"
 #include "server.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
@@ -21,6 +24,8 @@
 #include <fmt/format.h>
 
 #include <array>
+#include <charconv>
+#include <cstdint>
 #include <cstdio> // IWYU pragma: keep for stderr and stdout
 #include <cstdlib>
 #include <filesystem>
@@ -34,37 +39,64 @@
 namespace {
 
 struct StartupOptions {
-    std::filesystem::path socket_path;
-    std::filesystem::path database_path;
+    std::filesystem::path                socket_path;
+    std::filesystem::path                database_path;
+    std::uint32_t                        http_concurrency{16};
+    std::optional<std::string>           http_proxy;
+    std::optional<std::filesystem::path> http_ca_bundle;
 };
+
+auto parse_positive_uint32(std::string_view value) -> std::optional<std::uint32_t>
+{
+    auto parsed = std::uint32_t{};
+    auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || parsed == 0U) {
+        return std::nullopt;
+    }
+    return parsed;
+}
 
 auto parse_startup_options(int argc, char* argv[]) -> std::optional<StartupOptions>
 {
     using namespace jb::core;
 
     constexpr std::array options{
-        CommandLineOption{.long_name = "socket",   .value_mode = CommandLineValueMode::Required},
-        CommandLineOption{.long_name = "database", .value_mode = CommandLineValueMode::Required},
+        CommandLineOption{.long_name = "socket",           .value_mode = CommandLineValueMode::Required},
+        CommandLineOption{.long_name = "database",         .value_mode = CommandLineValueMode::Required},
+        CommandLineOption{.long_name = "http-concurrency", .value_mode = CommandLineValueMode::Required},
+        CommandLineOption{.long_name = "http-proxy",       .value_mode = CommandLineValueMode::Required},
+        CommandLineOption{.long_name = "http-ca-bundle",   .value_mode = CommandLineValueMode::Required},
     };
     CommandLineParser parser{argc, argv, options};
-    if (parser.arguments().size() != options.size()) {
-        return std::nullopt;
-    }
 
-    auto socket_path   = std::optional<std::filesystem::path>{};
-    auto database_path = std::optional<std::filesystem::path>{};
+    auto socket_path      = std::optional<std::filesystem::path>{};
+    auto database_path    = std::optional<std::filesystem::path>{};
+    auto http_concurrency = std::optional<std::uint32_t>{};
+    auto http_proxy       = std::optional<std::string>{};
+    auto http_ca_bundle   = std::optional<std::filesystem::path>{};
     for (auto const& argument : parser) {
         if (argument.kind() != CommandLineArgumentKind::Option || !argument.known() || argument.missing_value() ||
             !argument.value() || argument.value()->empty()) {
             return std::nullopt;
         }
 
-        auto path = std::filesystem::path{std::string{*argument.value()}};
         if (argument.name() == "socket" && !socket_path) {
-            socket_path = std::move(path);
+            socket_path = std::filesystem::path{std::string{*argument.value()}};
         }
         else if (argument.name() == "database" && !database_path) {
-            database_path = std::move(path);
+            database_path = std::filesystem::path{std::string{*argument.value()}};
+        }
+        else if (argument.name() == "http-concurrency" && !http_concurrency) {
+            http_concurrency = parse_positive_uint32(*argument.value());
+            if (!http_concurrency) {
+                return std::nullopt;
+            }
+        }
+        else if (argument.name() == "http-proxy" && !http_proxy) {
+            http_proxy = std::string{*argument.value()};
+        }
+        else if (argument.name() == "http-ca-bundle" && !http_ca_bundle) {
+            http_ca_bundle = std::filesystem::path{std::string{*argument.value()}};
         }
         else {
             return std::nullopt;
@@ -74,12 +106,21 @@ auto parse_startup_options(int argc, char* argv[]) -> std::optional<StartupOptio
     if (!socket_path || !database_path) {
         return std::nullopt;
     }
-    return StartupOptions{.socket_path = std::move(*socket_path), .database_path = std::move(*database_path)};
+    return StartupOptions{
+        .socket_path      = std::move(*socket_path),
+        .database_path    = std::move(*database_path),
+        .http_concurrency = http_concurrency.value_or(16U),
+        .http_proxy       = std::move(http_proxy),
+        .http_ca_bundle   = std::move(http_ca_bundle),
+    };
 }
 
 void print_usage()
 {
-    fmt::print(stderr, "Usage: jobud --socket <filesystem-path> --database <sqlite-file>\n");
+    fmt::print(stderr,
+               "Usage: jobud --socket <filesystem-path> --database <sqlite-file> "
+               "[--http-concurrency <positive-integer>] [--http-proxy <http-or-https-url>] "
+               "[--http-ca-bundle <filesystem-path>]\n");
 }
 
 } // anonymous namespace
@@ -122,9 +163,37 @@ auto main(int argc, char* argv[]) -> int
     UuidV7Generator           uuid_generator{time_source};
     StandardAttributeRegistry attribute_registry;
     SystemCronEngine          cron;
-    ManagementService         management_service{database, attribute_registry, cron, uuid_generator, time_source};
-    LocalServer               local_server;
-    Server                    rpc_server;
+
+    auto created_http_client = jb::net::http::SystemHttpClient::create(*app.event_loop(),
+                                                                       {
+                                                                           .ca_bundle = startup->http_ca_bundle,
+                                                                           .proxy     = startup->http_proxy,
+                                                                       });
+    if (!created_http_client) {
+        log_error("Unable to initialize the JobU HTTP client: {} ({})",
+                  created_http_client.error().message,
+                  created_http_client.error().code);
+        return EXIT_FAILURE;
+    }
+
+    // Declaration order keeps every callback owner alive until its consumers are destroyed in reverse order.
+    auto                                http_client = std::move(created_http_client).value();
+    jb::jobu::http::HttpAttemptExecutor http_executor{*http_client, time_source};
+    Scheduler                           scheduler{database,
+                                                  attribute_registry,
+                                                  cron,
+                                                  uuid_generator,
+                                                  time_source,
+                                                  http_executor,
+                                                  {.http_concurrency = startup->http_concurrency}};
+    ManagementService management_service{database, attribute_registry, cron, uuid_generator, time_source};
+    LocalServer       local_server;
+    Server            rpc_server;
+
+    http_client->failed.connect(
+        [](Error const& error) -> void { log_error("System HTTP client failed: {} ({})", error.message, error.code); });
+    scheduler.failed.connect(
+        [](Error const& error) -> void { log_error("Scheduler failed: {} ({})", error.message, error.code); });
 
     auto capabilities = std::vector<std::string>{std::string{system_info_rpc_method_name()}};
     capabilities.reserve(capabilities.size() + management_rpc_method_names().size());
@@ -141,7 +210,9 @@ auto main(int argc, char* argv[]) -> int
         log_fatal("Unable to register the jobud system.info handler");
         return EXIT_FAILURE;
     }
-    if (!register_management_methods(rpc_server, management_service, attribute_registry)) {
+    if (!register_management_methods(rpc_server, management_service, attribute_registry, [&scheduler]() -> void {
+            scheduler.request_rescan();
+        })) {
         log_fatal("Unable to register the jobud management handlers");
         return EXIT_FAILURE;
     }
@@ -168,6 +239,12 @@ auto main(int argc, char* argv[]) -> int
 
     if (!local_server.listen(startup->socket_path)) {
         log_error("Unable to listen on the local socket: {}", local_server.error_string());
+        return EXIT_FAILURE;
+    }
+
+    auto started = scheduler.start();
+    if (!started) {
+        log_error("Unable to start the JobU scheduler: {} ({})", started.error().message, started.error().code);
         return EXIT_FAILURE;
     }
 

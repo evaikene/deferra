@@ -590,6 +590,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
     if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
         set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
     endif()
+
 endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
@@ -609,6 +610,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
     if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
         set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
     endif()
+
 endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
@@ -660,5 +662,31 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
     set_tests_properties(${TARGET} PROPERTIES TIMEOUT 90)
     if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
         set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+    endif()
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Linux daemon HTTP scheduling, management wakeup, and durable output integration test
+        find_package(SQLite3 REQUIRED)
+        if(NOT TARGET SQLite3::SQLite3)
+            add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
+        endif()
+        set(TARGET "jobud-http-integration-test")
+        add_executable(${TARGET}
+            jobud-http-integration-test.cpp
+            support/http_test_server.cpp
+            support/temporary_directory.cpp
+        )
+        target_link_libraries(${TARGET}
+            PRIVATE
+                core
+                SQLite3::SQLite3
+                OpenSSL::SSL
+                OpenSSL::Crypto
+        )
+        add_dependencies(${TARGET} jobud jobuctl)
+        add_test(NAME ${TARGET}
+            COMMAND $<TARGET_FILE:${TARGET}> $<TARGET_FILE:jobud> $<TARGET_FILE:jobuctl>
+        )
+        set_tests_properties(${TARGET} PROPERTIES TIMEOUT 60)
     endif()
 endif()
