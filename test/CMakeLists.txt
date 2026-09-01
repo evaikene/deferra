@@ -664,8 +664,8 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
         set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
     endif()
 
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        # Linux daemon HTTP scheduling, management wakeup, and durable output integration test
+    if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
+        # Platform daemon HTTP scheduling, management wakeup, and durable output integration test
         find_package(SQLite3 REQUIRED)
         if(NOT TARGET SQLite3::SQLite3)
             add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
@@ -688,5 +688,8 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
             COMMAND $<TARGET_FILE:${TARGET}> $<TARGET_FILE:jobud> $<TARGET_FILE:jobuctl>
         )
         set_tests_properties(${TARGET} PROPERTIES TIMEOUT 60)
+        if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+            set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+        endif()
     endif()
 endif()
