@@ -14,6 +14,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#if defined(__APPLE__)
+#  include <crt_externs.h>
+#endif
 #include <fcntl.h>
 #include <filesystem>
 #include <initializer_list>
@@ -31,6 +34,16 @@
 namespace {
 
 using namespace std::chrono_literals;
+
+auto process_environment() noexcept -> char**
+{
+#if defined(__APPLE__)
+    // macOS exposes the process environment through this accessor instead of declaring environ in unistd.h.
+    return *_NSGetEnviron();
+#else
+    return environ;
+#endif
+}
 
 class ChildProcess {
 public:
@@ -166,9 +179,10 @@ auto run_command(std::filesystem::path const& executable, std::vector<std::strin
                                ::posix_spawn_file_actions_adddup2(&actions, output_pipe[1], STDERR_FILENO) == 0 &&
                                ::posix_spawn_file_actions_addclose(&actions, output_pipe[1]) == 0;
     auto       pid           = pid_t{};
-    auto       spawned = actions_ready
-                           ? ::posix_spawn(&pid, executable.c_str(), &actions, nullptr, exec_arguments.data(), environ)
-                           : EINVAL;
+    auto       spawned =
+        actions_ready
+            ? ::posix_spawn(&pid, executable.c_str(), &actions, nullptr, exec_arguments.data(), process_environment())
+            : EINVAL;
     static_cast<void>(::posix_spawn_file_actions_destroy(&actions));
     if (spawned != 0) {
         static_cast<void>(::close(output_pipe[0]));
@@ -257,8 +271,9 @@ auto spawn_jobud(std::filesystem::path const& executable,
     }
     exec_arguments.push_back(nullptr);
 
-    auto pid     = pid_t{};
-    auto spawned = ::posix_spawn(&pid, executable.c_str(), nullptr, nullptr, exec_arguments.data(), environ);
+    auto pid = pid_t{};
+    auto spawned =
+        ::posix_spawn(&pid, executable.c_str(), nullptr, nullptr, exec_arguments.data(), process_environment());
     if (spawned != 0) {
         return std::nullopt;
     }
