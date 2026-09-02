@@ -2,6 +2,7 @@
 
 #include "client.hpp"
 #include "connection.hpp"
+#include "object_priv.hpp"
 #include "protocol_priv.hpp"
 
 #include <cstdint>
@@ -13,8 +14,10 @@
 
 namespace jb::rpc {
 
-struct Client::Private {
-    explicit Private(Client& client, jb::core::IODevice& client_device, ClientOptions client_options);
+struct Client::Private : jb::core::priv::ObjectPrivate {
+    explicit Private(jb::core::IODevice& client_device, ClientOptions client_options);
+
+    void bind_owner(Client& client);
 
     [[nodiscard]] auto validate_request(std::string_view method, std::optional<jb::core::JsonValue> const& params) const
         -> std::optional<jb::core::Error>;
@@ -27,14 +30,14 @@ struct Client::Private {
     void               process_body(std::string const& body);
     [[nodiscard]] auto preflight_responses(detail::ResponseDocument const& document) const
         -> jb::core::Result<std::vector<std::uint64_t>, jb::core::Error>;
-    void deliver_response(detail::ResponseEnvelope const& response, std::uint64_t id);
+    void deliver_response(detail::ResponseEnvelope const& response, std::uint64_t id) const;
 
     void acknowledge_output(std::size_t bytes) noexcept;
     void handle_device_error(jb::core::IOError error);
     void terminate(jb::core::Error error, bool emit_protocol_error);
     void disconnect_device() noexcept;
 
-    Client&                        owner;
+    Client*                        owner{nullptr};
     jb::core::IODevice*            device;
     ClientOptions const            options;
     StreamFramer                   framer;

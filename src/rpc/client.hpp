@@ -13,7 +13,6 @@
 #include "signal.hpp"
 
 #include <cstddef>
-#include <memory>
 #include <optional>
 #include <string_view>
 
@@ -137,7 +136,6 @@ public:
 private:
     /// Owns correlation and stream state without exposing private envelopes or a concrete transport.
     struct Private;
-    std::unique_ptr<Private> _data;
 };
 
 } // namespace jb::rpc
