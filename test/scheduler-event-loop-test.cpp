@@ -284,6 +284,21 @@ TEST_CASE("Scheduler arms only the earliest available-type wake and caps wall-cl
     }
 }
 
+TEST_CASE("Scheduler destruction disarms an armed wake", "[jobu][scheduler][event-loop][wake][lifetime][sqlite]")
+{
+    SchedulerFixture fixture;
+    auto const       baseline = jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop);
+    auto const       queue    = fixture.create_queue();
+    fixture.create_job(queue, JobType::Cli, at_seconds(200));
+    fixture.executor.set_available(JobType::Cli, true);
+
+    REQUIRE(fixture.scheduler->start());
+    REQUIRE(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop) == baseline + 1U);
+
+    fixture.scheduler.reset();
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop) == baseline);
+}
+
 TEST_CASE("Scheduler coalesces rescans onto the event loop and replaces a later wake",
           "[jobu][scheduler][event-loop][rescan][sqlite]")
 {

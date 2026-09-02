@@ -2,6 +2,7 @@
 
 #include "database.hpp"
 #include "event_loop.hpp"
+#include "object_priv.hpp"
 #include "scheduler_core_priv.hpp"
 #include "scheduler_repository_priv.hpp"
 #include "thread_context.hpp"
@@ -65,19 +66,17 @@ auto valid_options(SchedulerOptions const& options) noexcept -> bool
 
 } // anonymous namespace
 
-struct Scheduler::Private {
-    Private(Scheduler&               owner_value,
-            jb::db::Database&        database_value,
+struct Scheduler::Private : jb::core::priv::ObjectPrivate {
+    Private(jb::db::Database&        database_value,
             AttributeRegistry const& attributes_value,
             CronEngine const&        cron,
             jb::core::UuidGenerator& uuid_generator,
             jb::core::TimeSource&    time_source,
             AttemptExecutor&         executor,
             SchedulerOptions         options_value)
-        : owner{
-              owner_value
+        : database{
+              database_value
     }
-        , database{database_value}
         , attributes{attributes_value}
         , options{options_value}
         , core{database_value,
@@ -95,10 +94,16 @@ struct Scheduler::Private {
         if (!valid_options(options)) {
             initialization_error = invalid_options();
         }
-        wake_timer.timeout.connect([this]() -> void { process_wake(); });
     }
 
-    Scheduler&                     owner;
+    void bind_owner(Scheduler& value)
+    {
+        owner = &value;
+        // Receiver tracking prevents the stored wake slot from outliving the Scheduler it drives.
+        wake_timer.timeout.connect(&value, [this]() -> void { process_wake(); });
+    }
+
+    Scheduler*                     owner{nullptr};
     jb::db::Database&              database;
     AttributeRegistry const&       attributes;
     SchedulerOptions               options;
@@ -121,7 +126,7 @@ struct Scheduler::Private {
         }
 
         // Object and Timer capture affinity independently, so both must still identify this owner-thread loop.
-        auto* loop = owner.event_loop();
+        auto* loop = owner->event_loop();
         if (!loop || !loop->is_valid() || loop->thread_ctx() != jb::core::ThreadCtx::current() ||
             wake_timer.event_loop() != loop) {
             return SchedulerResult<>::failure(event_loop_unavailable());
@@ -221,7 +226,7 @@ struct Scheduler::Private {
         wake_timer.stop();
         state          = SchedulerState::Failed;
         stored_failure = std::move(error);
-        owner.emit(owner.failed, *stored_failure);
+        owner->emit(owner->failed, *stored_failure);
     }
 };
 
@@ -233,55 +238,58 @@ Scheduler::Scheduler(jb::db::Database&        database,
                      AttemptExecutor&         executor,
                      SchedulerOptions         options,
                      jb::core::Object*        parent)
-    : Object(parent)
-    , _data{
-          std::make_unique<Private>(*this, database, attributes, cron, uuid_generator, time_source, executor, options)}
-{}
+    : Object(*new Private{database, attributes, cron, uuid_generator, time_source, executor, options}, parent)
+{
+    // Complete the owner back-reference only after the Object base owns the private block and tracks its lifetime.
+    d_ptr<Private>()->bind_owner(*this);
+}
 
 Scheduler::~Scheduler()
 {
-    _data->stop();
+    // Stop external wake activity before Scheduler's signal members are destroyed.
+    d_ptr<Private>()->stop();
 }
 
 auto Scheduler::start() -> jb::core::Result<void, jb::core::Error>
 {
-    return _data->start();
+    return d_ptr<Private>()->start();
 }
 
 void Scheduler::stop()
 {
-    _data->stop();
+    d_ptr<Private>()->stop();
 }
 
 void Scheduler::request_rescan()
 {
-    _data->request_rescan();
+    d_ptr<Private>()->request_rescan();
 }
 
 auto Scheduler::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result<CancelRunResult, jb::core::Error>
 {
-    if (_data->state == SchedulerState::Failed) {
-        return SchedulerResult<CancelRunResult>::failure(*_data->stored_failure);
+    auto* data = d_ptr<Private>();
+    if (data->state == SchedulerState::Failed) {
+        return SchedulerResult<CancelRunResult>::failure(*data->stored_failure);
     }
-    if (_data->state != SchedulerState::Running) {
+    if (data->state != SchedulerState::Running) {
         return SchedulerResult<CancelRunResult>::failure(invalid_state());
     }
 
-    auto cancelled = _data->core.cancel_run(run_id);
+    auto cancelled = data->core.cancel_run(run_id);
     if (cancelled && cancelled->disposition == CancelDisposition::Completed) {
-        _data->request_rescan();
+        data->request_rescan();
     }
     return cancelled;
 }
 
 auto Scheduler::state() const noexcept -> SchedulerState
 {
-    return _data->state;
+    return d_ptr<Private const>()->state;
 }
 
 auto Scheduler::failure() const -> std::optional<jb::core::Error>
 {
-    return _data->stored_failure;
+    return d_ptr<Private const>()->stored_failure;
 }
 
 } // namespace jb::jobu

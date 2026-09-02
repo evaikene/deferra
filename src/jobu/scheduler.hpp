@@ -16,7 +16,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <optional>
 
 namespace jb::db {
@@ -180,7 +179,6 @@ public:
 
 private:
     struct Private;
-    std::unique_ptr<Private> _data;
 };
 
 } // namespace jb::jobu
