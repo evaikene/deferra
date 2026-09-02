@@ -18,6 +18,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -1531,4 +1532,69 @@ TEST_CASE("Job methods report invalid daemon defaults consistently", "[jobu][job
         invalid_service.delete_job({.job_id = uuid("00000000-0000-7000-8000-000000000099"), .expected_revision = 1}),
         ErrorCategory::InvalidArgument,
         "jobu.attribute.unknown");
+}
+
+TEST_CASE("Job mutations signal fresh replayed and lifecycle success", "[jobu][job][signal][sqlite]")
+{
+    auto const     source_queue = sequence_id(211);
+    auto const     target_queue = sequence_id(212);
+    auto const     job_id       = sequence_id(213);
+    ServiceFixture fixture{
+        {source_queue, target_queue, job_id, sequence_id(214)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "signal-source"}));
+    REQUIRE(service.create_queue({.name = "signal-target"}));
+
+    auto emissions = std::size_t{0};
+    service.mutation_committed.connect([&emissions]() -> void { ++emissions; });
+    auto const request = CreateJobRequest{
+        .queue           = source_queue,
+        .schedule        = once_at(UtcTimePoint{20s}),
+        .payload         = cli_payload("signal"),
+        .idempotency_key = "signal-key",
+    };
+
+    auto created = service.create_job(request);
+    REQUIRE(created);
+    CHECK(emissions == 1);
+    REQUIRE(service.create_job(request));
+    CHECK(emissions == 2);
+    REQUIRE(service.get_job(job_id));
+    REQUIRE(service.list_jobs({}));
+    CHECK(emissions == 2);
+
+    auto updated = service.update_job({.job_id = job_id, .expected_revision = created->revision, .priority = 2});
+    REQUIRE(updated);
+    CHECK(emissions == 3);
+    require_error(service.update_job({.job_id = job_id}),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.job.invalid_configuration");
+    CHECK(emissions == 3);
+
+    auto suspended = service.suspend_job(job_id);
+    REQUIRE(suspended);
+    CHECK(emissions == 4);
+    REQUIRE(service.suspend_job(job_id));
+    CHECK(emissions == 5);
+    REQUIRE(service.resume_job(job_id));
+    CHECK(emissions == 6);
+    REQUIRE(service.resume_job(job_id));
+    CHECK(emissions == 7);
+    suspended = service.suspend_job(job_id);
+    REQUIRE(suspended);
+    CHECK(emissions == 8);
+
+    auto moved =
+        service.move_job({.job_id = job_id, .expected_revision = suspended->revision, .target_queue = target_queue});
+    REQUIRE(moved);
+    CHECK(emissions == 9);
+    REQUIRE(service.delete_job({.job_id = job_id, .expected_revision = moved->revision}));
+    CHECK(emissions == 10);
+
+    REQUIRE(service.get_job(job_id, true));
+    REQUIRE(service.list_jobs({.include_deleted = true}));
+    require_error(service.suspend_job(sequence_id(250)), ErrorCategory::NotFound, "jobu.job.not_found");
+    require_error(service.resume_job(job_id), ErrorCategory::Conflict, "jobu.job.deleted");
+    CHECK(emissions == 10);
 }

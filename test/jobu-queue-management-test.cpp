@@ -17,6 +17,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -905,4 +906,72 @@ TEST_CASE("Queue management rejects malformed persisted attribute documents", "[
 
     execute(fixture.database, "UPDATE jobu_queues SET weight = 1, name = char(1) WHERE id IS NOT NULL");
     require_error(service.get_queue(id), ErrorCategory::Internal, "jobu.storage.invalid_queue");
+}
+
+TEST_CASE("Queue mutations signal only after successful commit", "[jobu][queue][signal][sqlite]")
+{
+    ServiceFixture fixture{
+        {sequence_id(201), sequence_id(202), sequence_id(203), sequence_id(204), sequence_id(205)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              emissions = std::size_t{0};
+    service.mutation_committed.connect([&emissions]() -> void { ++emissions; });
+
+    auto const request = CreateQueueRequest{.name = "signal-queue", .idempotency_key = "signal-key"};
+    auto       created = service.create_queue(request);
+    REQUIRE(created);
+    CHECK(emissions == 1);
+
+    REQUIRE(service.create_queue(request));
+    CHECK(emissions == 2);
+    REQUIRE(service.get_queue(created->id));
+    REQUIRE(service.list_queues({}));
+    CHECK(emissions == 2);
+
+    auto updated = service.update_queue({.queue = created->id, .weight = 2});
+    REQUIRE(updated);
+    CHECK(emissions == 3);
+    require_error(service.create_queue({.name = "signal-queue"}), ErrorCategory::Conflict, "jobu.queue.name_conflict");
+    CHECK(emissions == 3);
+
+    REQUIRE(service.suspend_queue(created->id));
+    CHECK(emissions == 4);
+    REQUIRE(service.suspend_queue(created->id));
+    CHECK(emissions == 5);
+    REQUIRE(service.resume_queue(created->id));
+    CHECK(emissions == 6);
+    REQUIRE(service.resume_queue(created->id));
+    CHECK(emissions == 7);
+    REQUIRE(service.suspend_queue(created->id));
+    CHECK(emissions == 8);
+    REQUIRE(service.delete_queue(created->id));
+    CHECK(emissions == 9);
+
+    require_error(service.create_queue({.name = ""}), ErrorCategory::InvalidArgument, "jobu.queue.invalid_name");
+    require_error(service.suspend_queue(sequence_id(250)), ErrorCategory::NotFound, "jobu.queue.not_found");
+    CHECK(emissions == 9);
+
+    execute(fixture.database,
+            "CREATE TRIGGER fail_queue_repository BEFORE INSERT ON jobu_queues "
+            "WHEN NEW.name = 'repository-failure' BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
+    REQUIRE_FALSE(service.create_queue({.name = "repository-failure"}));
+    CHECK(emissions == 9);
+
+    execute(fixture.database,
+            "CREATE TRIGGER fail_queue_commit AFTER INSERT ON jobu_queues "
+            "WHEN NEW.name = 'commit-failure' BEGIN "
+            "INSERT INTO jobu_secret_refs(secret_name, job_id, field_path) "
+            "VALUES ('missing-secret', NEW.id, 'test'); END");
+    // Defer the injected foreign-key violation so the repository succeeds and commit itself fails.
+    execute(fixture.database, "PRAGMA defer_foreign_keys = ON");
+    REQUIRE_FALSE(service.create_queue({.name = "commit-failure"}));
+    CHECK(emissions == 9);
+
+    auto receiver_emissions = std::size_t{0};
+    auto receiver           = std::make_unique<Object>();
+    service.mutation_committed.connect(receiver.get(), [&receiver_emissions]() -> void { ++receiver_emissions; });
+    receiver.reset();
+    REQUIRE(service.create_queue({.name = "after-receiver-destruction"}));
+    CHECK(emissions == 10);
+    CHECK(receiver_emissions == 0);
 }

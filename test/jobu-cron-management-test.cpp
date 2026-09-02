@@ -15,6 +15,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -948,4 +949,38 @@ TEST_CASE("Run Now accepts future one-time jobs and scopes idempotency by job",
     CHECK(second->id == second_manual);
     CHECK(count_rows(fixture.database, "jobu_runs") == 4);
     CHECK(count_rows(fixture.database, "jobu_idempotency") == 2);
+}
+
+TEST_CASE("Run Now signals fresh and replayed durable success", "[jobu][management][run-now][signal][sqlite]")
+{
+    auto const     queue_id = sequence_id(221);
+    auto const     job_id   = sequence_id(222);
+    auto const     schedule = cron_schedule();
+    ServiceFixture fixture{
+        {queue_id, job_id, sequence_id(223), sequence_id(224), sequence_id(225)}
+    };
+    fixture.cron.set_occurrences(schedule, {UtcTimePoint{60s}});
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "signal-run-now"}));
+    REQUIRE(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("signal")}));
+
+    auto emissions = std::size_t{0};
+    service.mutation_committed.connect([&emissions]() -> void { ++emissions; });
+    execute(fixture.database,
+            "CREATE TRIGGER fail_signal_run_now BEFORE INSERT ON jobu_idempotency "
+            "WHEN NEW.method = 'job.run_now' AND NEW.key = 'fail' "
+            "BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
+    REQUIRE_FALSE(service.run_now({.job_id = job_id, .idempotency_key = "fail"}));
+    CHECK(emissions == 0);
+    execute(fixture.database, "DROP TRIGGER fail_signal_run_now");
+
+    auto const request = RunNowRequest{.job_id = job_id, .idempotency_key = "signal-key"};
+    REQUIRE(service.run_now(request));
+    CHECK(emissions == 1);
+    REQUIRE(service.run_now(request));
+    CHECK(emissions == 2);
+
+    require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+    require_error(service.run_now({.job_id = sequence_id(250)}), ErrorCategory::NotFound, "jobu.job.not_found");
+    CHECK(emissions == 2);
 }

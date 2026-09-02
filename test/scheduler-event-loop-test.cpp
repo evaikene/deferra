@@ -320,6 +320,26 @@ TEST_CASE("Scheduler coalesces rescans onto the event loop and replaces a later 
     CHECK(fixture.executor.start_requests().size() == 1U);
 }
 
+TEST_CASE("Management mutations request one later scheduler rescan",
+          "[jobu][scheduler][management][signal][rescan][sqlite]")
+{
+    SchedulerFixture fixture;
+    fixture.executor.set_available(JobType::Cli, true);
+    REQUIRE(fixture.scheduler->start());
+    auto* scheduler = fixture.scheduler.get();
+    // The receiver-aware connection deactivates the Object-capturing slot with the scheduler's lifetime.
+    fixture.management->mutation_committed.connect(scheduler, [scheduler]() -> void { scheduler->request_rescan(); });
+
+    auto const queue = fixture.create_queue();
+    fixture.create_job(queue, JobType::Cli, at_seconds(90));
+    CHECK(fixture.executor.start_requests().empty());
+
+    CHECK(fixture.event_loop.loop->process_events(EventFlag::Timers) == ProcessEventsResult::Stopped);
+    REQUIRE(fixture.executor.start_requests().size() == 1U);
+    CHECK(fixture.event_loop.loop->process_events(EventFlag::Timers) == ProcessEventsResult::Stopped);
+    CHECK(fixture.executor.start_requests().size() == 1U);
+}
+
 TEST_CASE("Scheduler stop retains completion persistence without restarting dispatch",
           "[jobu][scheduler][event-loop][stop][completion][sqlite]")
 {
