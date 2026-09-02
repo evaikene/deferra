@@ -6,6 +6,10 @@
 
 namespace jb::core {
 
+namespace priv {
+struct TimerPrivate; // defined in timer_priv.hpp
+} // namespace priv
+
 /// Timer class that can be used to schedule a callback to be called after a certain
 /// amount of time has passed.
 ///
@@ -30,13 +34,13 @@ public:
 
     /// Returns the timer handle
     /// @return Timer handle if the timer is active, or an invalid handle if the timer is not active.
-    auto handle() const -> TimerHandle { return _handle; }
+    auto handle() const -> TimerHandle;
 
     /// Returns true if the timer is active
-    auto is_active() const -> bool { return static_cast<bool>(_handle); }
+    auto is_active() const -> bool;
 
     /// Returns true if the timer is repeating
-    auto is_repeating() const -> bool { return _repeating; }
+    auto is_repeating() const -> bool;
 
     /// Sets the timer interval
     /// @param[in] interval Timer interval.
@@ -52,7 +56,7 @@ public:
     ///
     /// Interval must be set to a value greater than zero for the repeating setting
     /// to have any effect.
-    void set_repeating(bool repeating) { _repeating = repeating; }
+    void set_repeating(bool repeating);
 
     /// Starts the timer using the current interval and repeating settings.
     /// If the timer is already active, it will be restarted with the current settings.
@@ -74,16 +78,14 @@ public:
     /// Timer timeout signal
     Signal<> timeout;
 
-private:
+protected:
 
-    /// Timer handle
-    TimerHandle _handle;
-
-    /// Current interval
-    Duration _interval{0};
-
-    /// Flag indicating whether the timer is repeating
-    bool _repeating{false};
+    /// Constructor for subclasses that supply their own private data.
+    /// @param[in] dd Reference to a heap-allocated struct that inherits directly
+    ///               or transitively from priv::TimerPrivate. Timer takes ownership;
+    ///               do NOT delete @p dd elsewhere.
+    /// @param[in] parent Optional parent object.
+    explicit Timer(priv::TimerPrivate& dd, Object* parent = nullptr);
 };
 
 } // namespace jb::core
