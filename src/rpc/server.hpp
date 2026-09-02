@@ -133,7 +133,6 @@ public:
 private:
     /// Owns implementation state without exposing protocol envelopes or concrete transports in this public header.
     struct Private;
-    std::unique_ptr<Private> _data;
 };
 
 } // namespace jb::rpc

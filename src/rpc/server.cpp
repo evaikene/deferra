@@ -109,10 +109,14 @@ Server::Private::ConnectionState::ConnectionState(ConnectionId         connectio
     , framer(framing_limits)
 {}
 
-Server::Private::Private(Server& server, ServerOptions server_options)
-    : owner(server)
-    , options(server_options)
+Server::Private::Private(ServerOptions server_options)
+    : options(server_options)
 {}
+
+void Server::Private::bind_owner(Server& server)
+{
+    owner = &server;
+}
 
 auto Server::Private::allocate_connection_id() -> jb::core::Result<ConnectionId, jb::core::Error>
 {
@@ -378,7 +382,7 @@ void Server::Private::fail_connection(ConnectionId id, jb::core::Error const& er
     }
 
     iterator->second.error_reported = true;
-    owner.emit(owner.connection_error, id, error);
+    owner->emit(owner->connection_error, id, error);
 
     iterator = connections.find(id);
     if (iterator != connections.end() && !iterator->second.closing) {
@@ -411,17 +415,20 @@ void Server::Private::retire_connection(ConnectionId id)
     iterator->second.closed_connection.disconnect();
     connections.erase(iterator);
 
-    owner.emit(owner.connection_closed, id);
+    owner->emit(owner->connection_closed, id);
     device->delete_later();
 }
 
 Server::Server(ServerOptions options, jb::core::Object* parent)
-    : Object(parent)
-    , _data(std::make_unique<Private>(*this, options))
-{}
+    : Object(*new Private{options}, parent)
+{
+    // Bind only after Object is fully constructed so Private never receives a partially constructed Server.
+    d_ptr<Private>()->bind_owner(*this);
+}
 
 Server::~Server()
 {
+    // Disconnect device activity before Server's signal members are destroyed.
     close();
 }
 
@@ -430,22 +437,23 @@ auto Server::register_method(std::string name, MethodHandler handler) -> bool
     if (name.empty() || !handler || detail::is_reserved_method(name)) {
         return false;
     }
-    return _data->methods.emplace(std::move(name), std::move(handler)).second;
+    return d_ptr<Private>()->methods.emplace(std::move(name), std::move(handler)).second;
 }
 
 auto Server::unregister_method(std::string_view name) -> bool
 {
-    auto const iterator = _data->methods.find(name);
-    if (iterator == _data->methods.end()) {
+    auto*      data     = d_ptr<Private>();
+    auto const iterator = data->methods.find(name);
+    if (iterator == data->methods.end()) {
         return false;
     }
-    _data->methods.erase(iterator);
+    data->methods.erase(iterator);
     return true;
 }
 
 auto Server::has_method(std::string_view name) const noexcept -> bool
 {
-    return _data->methods.contains(name);
+    return d_ptr<Private const>()->methods.contains(name);
 }
 
 auto Server::add_connection(std::unique_ptr<jb::core::IODevice> device, OperationContext operation)
@@ -453,14 +461,15 @@ auto Server::add_connection(std::unique_ptr<jb::core::IODevice> device, Operatio
 {
     using Result = jb::core::Result<ConnectionId, jb::core::Error>;
 
+    auto* data = d_ptr<Private>();
     if (!device || !device->is_open() || !event_loop() || device->event_loop() != event_loop()) {
         return Result::failure(invalid_connection_error());
     }
-    if (_data->connections.size() >= _data->options.max_connections) {
+    if (data->connections.size() >= data->options.max_connections) {
         return Result::failure(connection_limit_error());
     }
 
-    auto allocated = _data->allocate_connection_id();
+    auto allocated = data->allocate_connection_id();
     if (!allocated) {
         return Result::failure(std::move(allocated).error());
     }
@@ -469,64 +478,64 @@ auto Server::add_connection(std::unique_ptr<jb::core::IODevice> device, Operatio
 
     auto connection_operation = std::move(operation);
     auto [iterator, inserted] =
-        _data->connections.try_emplace(id, id, raw, std::move(connection_operation), _data->options.framing);
+        data->connections.try_emplace(id, id, raw, std::move(connection_operation), data->options.framing);
     if (!inserted) {
         return Result::failure(connection_limit_error());
     }
 
-    auto* private_data = _data.get();
+    // Receiver tracking prevents device activity from reaching the private block after Server destruction begins.
     iterator->second.ready_read_connection =
-        raw->ready_read.connect(this, [private_data, id]() -> void { private_data->process_readable(id); });
-    iterator->second.bytes_written_connection =
-        raw->bytes_written.connect(this, [private_data, id](std::size_t bytes) -> void {
-            private_data->acknowledge_output(id, bytes);
-        });
+        raw->ready_read.connect(this, [data, id]() -> void { data->process_readable(id); });
+    iterator->second.bytes_written_connection = raw->bytes_written.connect(this, [data, id](std::size_t bytes) -> void {
+        data->acknowledge_output(id, bytes);
+    });
     iterator->second.error_connection =
-        raw->error_occurred.connect(this, [private_data, id](jb::core::IOError error, std::string const&) -> void {
-            private_data->handle_device_error(id, error);
+        raw->error_occurred.connect(this, [data, id](jb::core::IOError error, std::string const&) -> void {
+            data->handle_device_error(id, error);
         });
     iterator->second.closed_connection =
-        raw->closed.connect(this, [private_data, id]() -> void { private_data->retire_connection(id); });
+        raw->closed.connect(this, [data, id]() -> void { data->retire_connection(id); });
 
     if (!raw->set_parent(this)) {
         iterator->second.ready_read_connection.disconnect();
         iterator->second.bytes_written_connection.disconnect();
         iterator->second.error_connection.disconnect();
         iterator->second.closed_connection.disconnect();
-        _data->connections.erase(iterator);
+        data->connections.erase(iterator);
         return Result::failure(invalid_connection_error());
     }
     [[maybe_unused]] auto* released_device = device.release();
 
     emit(connection_opened, id);
-    auto const current = _data->connections.find(id);
-    if (current != _data->connections.end() && !current->second.closing) {
-        _data->process_readable(id);
+    auto const current = data->connections.find(id);
+    if (current != data->connections.end() && !current->second.closing) {
+        data->process_readable(id);
     }
     return Result::success(id);
 }
 
 void Server::close_connection(ConnectionId id)
 {
-    _data->close_connection(id);
+    d_ptr<Private>()->close_connection(id);
 }
 
 void Server::close()
 {
-    auto ids = std::vector<ConnectionId>{};
-    ids.reserve(_data->connections.size());
-    for (auto const& [id, connection] : _data->connections) {
+    auto* data = d_ptr<Private>();
+    auto  ids  = std::vector<ConnectionId>{};
+    ids.reserve(data->connections.size());
+    for (auto const& [id, connection] : data->connections) {
         static_cast<void>(connection);
         ids.push_back(id);
     }
     for (auto const id : ids) {
-        _data->close_connection(id);
+        data->close_connection(id);
     }
 }
 
 auto Server::connection_count() const noexcept -> std::size_t
 {
-    return _data->connections.size();
+    return d_ptr<Private const>()->connections.size();
 }
 
 } // namespace jb::rpc
