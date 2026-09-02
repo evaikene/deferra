@@ -11,6 +11,10 @@ namespace jb::core {
 class Event;
 class EventThread;
 
+namespace priv {
+struct ApplicationPrivate; // defined in application_priv.hpp
+} // namespace priv
+
 /// Main application class.
 ///
 /// This class is responsible for initializing the application and running the
@@ -53,7 +57,7 @@ public:
     static void post_event(Object* receiver, std::unique_ptr<Event> event);
 
     /// Returns the event thread this application is running on
-    auto thread() const -> EventThread* { return _event_loop.get(); }
+    auto thread() const -> EventThread*;
 
     /// Runs the application event loop until quit is signaled to quit
     /// @return the requested exit code after an ordinary stop, or `EXIT_FAILURE`
@@ -91,7 +95,7 @@ public:
 
     /// Returns the exit code of the application after it has finished executing
     /// @return Exit code of the application
-    auto exit_code() const -> int { return _exit_code; }
+    auto exit_code() const -> int;
 
     //--- SIGNALS ---
 
@@ -101,14 +105,18 @@ public:
     /// Signal emitted when the application is about to quit.
     Signal<> about_to_quit;
 
+protected:
+
+    /// Constructor for subclasses that supply their own private data.
+    /// @param[in] dd Reference to a heap-allocated struct that inherits directly
+    ///               or transitively from priv::ApplicationPrivate. Application
+    ///               takes ownership; do NOT delete @p dd elsewhere.
+    /// @param[in] argc Argument count from the main function
+    /// @param[in] argv Argument vector from the main function
+    Application(priv::ApplicationPrivate& dd, int argc, char const* argv[]);
+
 private:
-
     static Application* s_instance;
-
-    int                          _argc      = 0;
-    char const**                 _argv      = nullptr;
-    int                          _exit_code = 0;
-    std::unique_ptr<EventThread> _event_loop;
 };
 
 } // namespace jb::core
