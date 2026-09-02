@@ -1,6 +1,7 @@
 #pragma once
 
 #include "connection.hpp"
+#include "object_priv.hpp"
 #include "protocol_priv.hpp"
 #include "server.hpp"
 
@@ -9,7 +10,7 @@
 
 namespace jb::rpc {
 
-struct Server::Private {
+struct Server::Private : jb::core::priv::ObjectPrivate {
     struct ConnectionState {
         ConnectionState(ConnectionId         connection_id,
                         jb::core::IODevice*  connection_device,
@@ -33,7 +34,9 @@ struct Server::Private {
         bool error_reported{false};
     };
 
-    explicit Private(Server& server, ServerOptions server_options);
+    explicit Private(ServerOptions server_options);
+
+    void bind_owner(Server& server);
 
     [[nodiscard]] auto allocate_connection_id() -> jb::core::Result<ConnectionId, jb::core::Error>;
     void               process_readable(ConnectionId id);
@@ -49,7 +52,7 @@ struct Server::Private {
     void               close_connection(ConnectionId id);
     void               retire_connection(ConnectionId id);
 
-    Server&                                           owner;
+    Server*                                           owner{nullptr};
     ServerOptions const                               options;
     std::map<std::string, MethodHandler, std::less<>> methods;
     std::map<ConnectionId, ConnectionState>           connections;
