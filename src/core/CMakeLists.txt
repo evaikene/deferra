@@ -43,6 +43,7 @@ set(PRIV_HDRS
     signal_priv.hpp
     thread_context.hpp
     timer_heap.hpp
+    timer_priv.hpp
 )
 
 # Library source files
