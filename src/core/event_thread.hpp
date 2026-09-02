@@ -3,19 +3,20 @@
 #include "object.hpp"
 #include "signal.hpp"
 
-#include <atomic>
-#include <memory>
-#include <thread>
-
 namespace jb::core {
 
 class EventLoop;
+
+namespace priv {
+struct EventThreadPrivate; // defined in event_thread_priv.hpp
+} // namespace priv
 
 /// Event loop class running in a separate thread
 class EventThread : public Object {
 public:
 
     /// Constructor
+    /// @param[in] parent Optional parent object.
     explicit EventThread(Object* parent = nullptr);
 
     /// Destructor
@@ -48,7 +49,7 @@ public:
     auto is_running() const -> bool;
 
     /// Returns the event loop this thread is running
-    auto as_event_loop() const -> EventLoop* { return _event_loop.get(); }
+    auto as_event_loop() const -> EventLoop*;
 
     /// Signals the thread to quit
     /// @param[in] exit_code Exit code to quit with (default: 0)
@@ -82,7 +83,7 @@ public:
     /// This method should be called after the thread has finished executing
     /// (i.e., after calling `wait()`) to retrieve the exit code that the thread
     /// returned upon quitting. Backend failure produces `EXIT_FAILURE`.
-    auto exit_code() const -> int { return _exit_code.load(std::memory_order_relaxed); }
+    auto exit_code() const -> int;
 
     //--- SIGNALS ---
 
@@ -92,13 +93,14 @@ public:
     /// Signal emitted when the thread is about to quit.
     Signal<> about_to_quit;
 
-private:
+protected:
 
-    std::unique_ptr<EventLoop>   _event_loop;
-    std::unique_ptr<std::thread> _thread;
-    std::atomic_bool             _started{false};
-    std::atomic_bool             _finished{false};
-    std::atomic<int>             _exit_code{0};
+    /// Constructor for subclasses that supply their own private data.
+    /// @param[in] dd Reference to a heap-allocated struct that inherits directly
+    ///               or transitively from priv::EventThreadPrivate. EventThread takes
+    ///               ownership; do NOT delete @p dd elsewhere.
+    /// @param[in] parent Optional parent object.
+    explicit EventThread(priv::EventThreadPrivate& dd, Object* parent = nullptr);
 };
 
 } // namespace jb::core

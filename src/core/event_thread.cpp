@@ -1,6 +1,7 @@
 #include "event_thread.hpp"
 
 #include "event_loop.hpp"
+#include "event_thread_priv.hpp"
 #include "thread_context.hpp"
 
 #include <cstdlib>
@@ -8,14 +9,20 @@
 namespace jb::core {
 
 EventThread::EventThread(Object* parent)
-    : Object(parent)
-    , _event_loop(std::make_unique<EventLoop>())
+    : EventThread(*new priv::EventThreadPrivate, parent)
+{}
+
+EventThread::EventThread(priv::EventThreadPrivate& dd, Object* parent)
+    : Object(dd, parent)
 {
+    // Object owns the private block before EventLoop allocation can throw.
+    d_ptr<priv::EventThreadPrivate>()->event_loop = std::make_unique<EventLoop>();
     move_to_thread(this);
 }
 
 EventThread::~EventThread()
 {
+    // Finish the worker while EventThread's signals and private data still exist.
     quit();
     wait();
 }
@@ -27,15 +34,17 @@ auto EventThread::exec(bool event_loop_running) -> bool
         return false;
     }
 
+    auto* data = d_ptr<priv::EventThreadPrivate>();
+
     // wait for the thread or the event loop to start running
     if (event_loop_running) {
-        while (!_event_loop->is_running() && !_finished.load(std::memory_order_acquire)) {
+        while (!data->event_loop->is_running() && !data->finished.load(std::memory_order_acquire)) {
             std::this_thread::yield();
         }
-        return _event_loop->is_running();
+        return data->event_loop->is_running();
     }
 
-    while (!_started.load(std::memory_order_acquire)) {
+    while (!data->started.load(std::memory_order_acquire)) {
         std::this_thread::yield();
     }
     return true;
@@ -43,28 +52,32 @@ auto EventThread::exec(bool event_loop_running) -> bool
 
 auto EventThread::start() -> bool
 {
+    auto* data = d_ptr<priv::EventThreadPrivate>();
+
     // ensure the thread is not already running
-    if (_thread || _started.load(std::memory_order_acquire)) {
+    if (data->thread || data->started.load(std::memory_order_acquire)) {
         log_fatal("Event thread is already running");
         return false;
     }
-    if (!_event_loop->is_valid()) {
+    if (!data->event_loop->is_valid()) {
         return false;
     }
 
-    _thread = std::make_unique<std::thread>([this]() -> void {
+    data->thread = std::make_unique<std::thread>([this]() -> void {
+        auto* data = d_ptr<priv::EventThreadPrivate>();
+
         // signal that the thread has started running
-        _started.store(true, std::memory_order_release);
+        data->started.store(true, std::memory_order_release);
 
         // initialize the thread context
         auto* ctx = ThreadCtx::current();
-        ctx->set_event_loop(_event_loop.get());
+        ctx->set_event_loop(data->event_loop.get());
 
         emit(about_to_start);
 
         // run the event loop until quit is signaled
-        if (!_event_loop->run()) {
-            _exit_code.store(EXIT_FAILURE, std::memory_order_relaxed);
+        if (!data->event_loop->run()) {
+            data->exit_code.store(EXIT_FAILURE, std::memory_order_relaxed);
         }
 
         // signal that the thread has finished running
@@ -72,7 +85,7 @@ auto EventThread::start() -> bool
 
         // cleanup
         ctx->set_event_loop(nullptr);
-        _finished.store(true, std::memory_order_release);
+        data->finished.store(true, std::memory_order_release);
     });
 
     return true;
@@ -80,22 +93,34 @@ auto EventThread::start() -> bool
 
 auto EventThread::is_running() const -> bool
 {
-    return _event_loop->is_running();
+    return d_ptr<priv::EventThreadPrivate const>()->event_loop->is_running();
+}
+
+auto EventThread::as_event_loop() const -> EventLoop*
+{
+    return d_ptr<priv::EventThreadPrivate const>()->event_loop.get();
 }
 
 auto EventThread::quit(int exit_code) -> bool
 {
-    _exit_code.store(exit_code, std::memory_order_relaxed);
-    return _event_loop->quit();
+    auto* data = d_ptr<priv::EventThreadPrivate>();
+    data->exit_code.store(exit_code, std::memory_order_relaxed);
+    return data->event_loop->quit();
 }
 
 void EventThread::wait()
 {
-    if (!_thread || !_thread->joinable()) {
+    auto* data = d_ptr<priv::EventThreadPrivate>();
+    if (!data->thread || !data->thread->joinable()) {
         return;
     }
-    _thread->join();
-    _thread.reset();
+    data->thread->join();
+    data->thread.reset();
+}
+
+auto EventThread::exit_code() const -> int
+{
+    return d_ptr<priv::EventThreadPrivate const>()->exit_code.load(std::memory_order_relaxed);
 }
 
 } // namespace jb::core
