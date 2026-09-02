@@ -143,27 +143,32 @@ auto device_error(jb::core::IOError error) -> Error
 
 } // anonymous namespace
 
-Client::Private::Private(Client& client, jb::core::IODevice& client_device, ClientOptions client_options)
-    : owner(client)
-    , device(&client_device)
+Client::Private::Private(jb::core::IODevice& client_device, ClientOptions client_options)
+    : device(&client_device)
     , options(client_options)
     , framer(options.framing)
 {
     assert(device->is_open());
-    assert(owner.event_loop() != nullptr);
-    assert(device->event_loop() == owner.event_loop());
+}
+
+void Client::Private::bind_owner(Client& client)
+{
+    owner = &client;
+    assert(owner->event_loop() != nullptr);
+    assert(device->event_loop() == owner->event_loop());
 
     auto* private_data = this;
+    // Receiver tracking prevents device activity from reaching the private block after Client destruction begins.
     ready_read_connection =
-        device->ready_read.connect(&owner, [private_data]() -> void { private_data->process_readable(); });
-    bytes_written_connection = device->bytes_written.connect(&owner, [private_data](std::size_t bytes) -> void {
+        device->ready_read.connect(owner, [private_data]() -> void { private_data->process_readable(); });
+    bytes_written_connection = device->bytes_written.connect(owner, [private_data](std::size_t bytes) -> void {
         private_data->acknowledge_output(bytes);
     });
     error_connection =
-        device->error_occurred.connect(&owner, [private_data](jb::core::IOError error, std::string const&) -> void {
+        device->error_occurred.connect(owner, [private_data](jb::core::IOError error, std::string const&) -> void {
             private_data->handle_device_error(error);
         });
-    closed_connection = device->closed.connect(&owner, [private_data]() -> void {
+    closed_connection = device->closed.connect(owner, [private_data]() -> void {
         private_data->terminate(device_closed_error(), false);
     });
 }
@@ -347,14 +352,14 @@ auto Client::Private::preflight_responses(detail::ResponseDocument const& docume
     return Result::success(std::move(ids));
 }
 
-void Client::Private::deliver_response(detail::ResponseEnvelope const& response, std::uint64_t id)
+void Client::Private::deliver_response(detail::ResponseEnvelope const& response, std::uint64_t id) const
 {
     auto request_id = RequestId{id};
     if (std::holds_alternative<JsonValue>(response.payload)) {
-        owner.emit(owner.result_received, request_id, std::get<JsonValue>(response.payload));
+        owner->emit(owner->result_received, request_id, std::get<JsonValue>(response.payload));
         return;
     }
-    owner.emit(owner.error_received, request_id, std::get<RpcError>(response.payload));
+    owner->emit(owner->error_received, request_id, std::get<RpcError>(response.payload));
 }
 
 void Client::Private::acknowledge_output(std::size_t bytes) noexcept
@@ -392,10 +397,10 @@ void Client::Private::terminate(Error error, bool emit_protocol_error)
 
     auto const& terminal = *terminal_error;
     if (emit_protocol_error) {
-        owner.emit(owner.protocol_error, terminal);
+        owner->emit(owner->protocol_error, terminal);
     }
     for (auto const id : failed_ids) {
-        owner.emit(owner.request_failed, RequestId{id}, terminal);
+        owner->emit(owner->request_failed, RequestId{id}, terminal);
     }
 }
 
@@ -408,12 +413,15 @@ void Client::Private::disconnect_device() noexcept
 }
 
 Client::Client(jb::core::IODevice& device, ClientOptions options, jb::core::Object* parent)
-    : Object(parent)
-    , _data(std::make_unique<Private>(*this, device, options))
-{}
+    : Object(*new Private{device, options}, parent)
+{
+    // Complete the owner back-reference only after the Object base owns the private block and tracks its lifetime.
+    d_ptr<Private>()->bind_owner(*this);
+}
 
 Client::~Client()
 {
+    // Disconnect device activity before Client's signal members are destroyed.
     close();
 }
 
@@ -422,17 +430,18 @@ auto Client::call(std::string_view method, std::optional<JsonValue> params)
 {
     using Result = jb::core::Result<RequestId, jb::core::Error>;
 
-    if (_data->closed) {
+    auto* data = d_ptr<Private>();
+    if (data->closed) {
         return Result::failure(closed_operation_error());
     }
-    if (_data->write_in_progress) {
+    if (data->write_in_progress) {
         return Result::failure(reentrant_write_error());
     }
-    if (auto error = _data->validate_request(method, params)) {
+    if (auto error = data->validate_request(method, params)) {
         return Result::failure(std::move(*error));
     }
 
-    auto allocated = _data->allocate_request_id();
+    auto allocated = data->allocate_request_id();
     if (!allocated) {
         return Result::failure(std::move(allocated).error());
     }
@@ -442,15 +451,15 @@ auto Client::call(std::string_view method, std::optional<JsonValue> params)
     if (!serialized) {
         return Result::failure(std::move(serialized).error());
     }
-    auto framed = frame_message(serialized.value(), _data->options.framing);
+    auto framed = frame_message(serialized.value(), data->options.framing);
     if (!framed) {
         return Result::failure(std::move(framed).error());
     }
-    if (_data->pending_ids.size() >= _data->options.max_pending_requests) {
+    if (data->pending_ids.size() >= data->options.max_pending_requests) {
         return Result::failure(pending_limit_error());
     }
 
-    auto written = _data->write_frame(framed.value(), id);
+    auto written = data->write_frame(framed.value(), id);
     if (!written) {
         return Result::failure(std::move(written).error());
     }
@@ -461,13 +470,14 @@ auto Client::notify(std::string_view method, std::optional<JsonValue> params) ->
 {
     using Result = jb::core::Result<void, jb::core::Error>;
 
-    if (_data->closed) {
+    auto* data = d_ptr<Private>();
+    if (data->closed) {
         return Result::failure(closed_operation_error());
     }
-    if (_data->write_in_progress) {
+    if (data->write_in_progress) {
         return Result::failure(reentrant_write_error());
     }
-    if (auto error = _data->validate_request(method, params)) {
+    if (auto error = data->validate_request(method, params)) {
         return Result::failure(std::move(*error));
     }
 
@@ -475,31 +485,32 @@ auto Client::notify(std::string_view method, std::optional<JsonValue> params) ->
     if (!serialized) {
         return Result::failure(std::move(serialized).error());
     }
-    auto framed = frame_message(serialized.value(), _data->options.framing);
+    auto framed = frame_message(serialized.value(), data->options.framing);
     if (!framed) {
         return Result::failure(std::move(framed).error());
     }
-    return _data->write_frame(framed.value(), std::nullopt);
+    return data->write_frame(framed.value(), std::nullopt);
 }
 
 void Client::cancel(RequestId const& id)
 {
-    if (_data->closed) {
+    auto* data = d_ptr<Private>();
+    if (data->closed) {
         return;
     }
     if (auto const* unsigned_id = std::get_if<std::uint64_t>(&id)) {
-        _data->pending_ids.erase(*unsigned_id);
+        data->pending_ids.erase(*unsigned_id);
     }
 }
 
 void Client::close()
 {
-    _data->terminate(explicit_close_error(), false);
+    d_ptr<Private>()->terminate(explicit_close_error(), false);
 }
 
 auto Client::pending_request_count() const noexcept -> std::size_t
 {
-    return _data->pending_ids.size();
+    return d_ptr<Private const>()->pending_ids.size();
 }
 
 } // namespace jb::rpc
