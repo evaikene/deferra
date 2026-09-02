@@ -7,6 +7,7 @@
 #include "error.hpp"
 #include "job.hpp"
 #include "json.hpp"
+#include "object.hpp"
 #include "queue.hpp"
 #include "result.hpp"
 #include "run.hpp"
@@ -16,7 +17,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <optional>
 #include <string>
 #include <variant>
@@ -207,11 +207,13 @@ struct RunNowRequest {
     std::optional<std::string> idempotency_key;
 };
 
-/** Synchronous owner-thread service for durable JobU management operations.
+/** Synchronous owner-thread Object for durable JobU management operations.
  *
  * The service borrows an already-open Database, AttributeRegistry, CronEngine, UuidGenerator, and TimeSource; each
- * collaborator must outlive the service. All calls must run on the Database owner thread. The daemon-default attribute
- * layer is validated and copied during construction; a validation failure is returned by subsequent operations.
+ * collaborator must outlive the service. Construct the service and perform every operation on the shared Object and
+ * Database owner thread. Passing a parent transfers normal `jb::core::Object` lifetime ownership but does not transfer
+ * ownership of any borrowed collaborator. The daemon-default attribute layer is validated and copied during
+ * construction; a validation failure is returned by subsequent operations.
  *
  * Queue/job gets and lists use bounded repository reads without an explicit transaction. Creates, updates, lifecycle
  * changes, moves, and deletions use one immediate transaction and return only after commit. Errors include stable
@@ -220,7 +222,7 @@ struct RunNowRequest {
  * perform no event-loop processing. A fresh recurring create or an update that validates or evaluates a recurring
  * schedule may synchronously load timezone data through CronEngine.
  */
-class ManagementService final {
+class ManagementService final : public jb::core::Object {
 public:
     /** Constructs a management service by borrowing its collaborators.
      * @param database Already-open sole JobU database connection.
@@ -229,16 +231,19 @@ public:
      * @param uuid_generator Generator used for new durable identities.
      * @param time_source Source used for durable UTC timestamps.
      * @param daemon_defaults Partial daemon-default attribute layer to validate and copy.
+     * @param parent Optional Object that owns this service and supplies its event-loop affinity.
+     * @warning Every argument and the constructor call itself belong to the Database owner thread.
      */
     ManagementService(jb::db::Database&        database,
                       AttributeRegistry const& attributes,
                       CronEngine const&        cron,
                       jb::core::UuidGenerator& uuid_generator,
                       jb::core::TimeSource&    time_source,
-                      AttributeSet             daemon_defaults = {});
+                      AttributeSet             daemon_defaults = {},
+                      jb::core::Object*        parent          = nullptr);
 
     /// Destroys private repositories without changing the borrowed Database state.
-    ~ManagementService();
+    ~ManagementService() override;
 
     /// Prevents copying borrowed collaborators and repository state.
     ManagementService(ManagementService const&)                    = delete;
@@ -386,7 +391,6 @@ public:
 
 private:
     struct Private;
-    std::unique_ptr<Private> _data;
 };
 
 } // namespace jb::jobu

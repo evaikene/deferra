@@ -180,6 +180,31 @@ private:
 
 } // anonymous namespace
 
+TEST_CASE("Management service supports Object parent ownership", "[jobu][management][lifetime][sqlite]")
+{
+    ServiceFixture fixture{std::vector<Uuid>{}};
+    auto           destroyed = false;
+
+    {
+        Object parent;
+        // Parent-owned Objects must be heap allocated because the parent deletes them during destruction.
+        auto*  service = new ManagementService{fixture.database,
+                                               fixture.registry,
+                                               fixture.cron,
+                                               fixture.generator,
+                                               fixture.time,
+                                               {},
+                                               &parent};
+        service->destroyed.connect([&destroyed]() -> void { destroyed = true; });
+
+        CHECK(service->parent() == &parent);
+        REQUIRE(parent.children().size() == 1);
+        CHECK(parent.children().front() == service);
+    }
+
+    CHECK(destroyed);
+}
+
 TEST_CASE("Queue management creates gets lists and updates durable queues", "[jobu][queue][sqlite]")
 {
     auto const     first_id  = uuid("00000000-0000-7000-8000-000000000001");
