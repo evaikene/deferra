@@ -1,5 +1,6 @@
 #include "application.hpp"
 
+#include "application_priv.hpp"
 #include "event.hpp"
 #include "event_loop.hpp"
 #include "event_thread.hpp"
@@ -13,10 +14,19 @@ namespace jb::core {
 Application* Application::s_instance = nullptr;
 
 Application::Application(int argc, char const* argv[])
-    : _argc(argc)
-    , _argv(argv)
-    , _event_loop(std::make_unique<EventThread>())
+    : Application(*new priv::ApplicationPrivate, argc, argv)
+{}
+
+Application::Application(priv::ApplicationPrivate& dd, int argc, char const* argv[])
+    : Object(dd)
 {
+    auto* data = d_ptr<priv::ApplicationPrivate>();
+    data->argc = argc;
+    data->argv = argv;
+
+    // Object owns the private block before EventThread allocation can throw.
+    data->event_thread = std::make_unique<EventThread>();
+
     // enforce singleton
     if (s_instance) {
         log_fatal("Application instance already exists");
@@ -24,8 +34,8 @@ Application::Application(int argc, char const* argv[])
     }
 
     s_instance = this;
-    ThreadCtx::current()->set_event_loop(_event_loop->as_event_loop());
-    move_to_thread(_event_loop.get());
+    ThreadCtx::current()->set_event_loop(data->event_thread->as_event_loop());
+    move_to_thread(data->event_thread.get());
 }
 
 Application::~Application()
@@ -36,8 +46,14 @@ Application::~Application()
         return;
     }
 
+    // Clear process-global references before Object deletes the private EventThread.
     ThreadCtx::current()->set_event_loop(nullptr);
     s_instance = nullptr;
+}
+
+auto Application::thread() const -> EventThread*
+{
+    return d_ptr<priv::ApplicationPrivate const>()->event_thread.get();
 }
 
 auto Application::send_event(Object* receiver, Event& event) -> bool
@@ -78,29 +94,37 @@ void Application::post_event(Object* receiver, std::unique_ptr<Event> event)
 
 auto Application::exec() -> int
 {
+    auto* data = d_ptr<priv::ApplicationPrivate>();
+
     emit(about_to_start);
-    if (!_event_loop->as_event_loop()->run()) {
-        _exit_code = EXIT_FAILURE;
+    if (!data->event_thread->as_event_loop()->run()) {
+        data->exit_code = EXIT_FAILURE;
     }
     emit(about_to_quit);
 
-    return _exit_code;
+    return data->exit_code;
 }
 
 auto Application::process_events(EventFlags flags) -> ProcessEventsResult
 {
-    return _event_loop->as_event_loop()->process_events(flags);
+    return d_ptr<priv::ApplicationPrivate>()->event_thread->as_event_loop()->process_events(flags);
 }
 
 auto Application::process_events(EventFlags flags, int ms) -> ProcessEventsResult
 {
-    return _event_loop->as_event_loop()->process_events(flags, ms);
+    return d_ptr<priv::ApplicationPrivate>()->event_thread->as_event_loop()->process_events(flags, ms);
 }
 
 auto Application::quit(int exit_code) -> bool
 {
-    _exit_code = exit_code;
-    return _event_loop->quit();
+    auto* data      = d_ptr<priv::ApplicationPrivate>();
+    data->exit_code = exit_code;
+    return data->event_thread->quit();
+}
+
+auto Application::exit_code() const -> int
+{
+    return d_ptr<priv::ApplicationPrivate const>()->exit_code;
 }
 
 } // namespace jb::core

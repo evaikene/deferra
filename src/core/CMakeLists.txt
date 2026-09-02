@@ -35,6 +35,7 @@ set(HDRS
 
 # Private headers not exposed to library users
 set(PRIV_HDRS
+    application_priv.hpp
     event_loop_backend.hpp
     event_loop_backend_kqueue_priv.hpp
     event_thread_priv.hpp
