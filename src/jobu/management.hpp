@@ -11,6 +11,7 @@
 #include "queue.hpp"
 #include "result.hpp"
 #include "run.hpp"
+#include "signal.hpp"
 #include "time_source.hpp"
 #include "uuid.hpp"
 
@@ -218,9 +219,10 @@ struct RunNowRequest {
  * Queue/job gets and lists use bounded repository reads without an explicit transaction. Creates, updates, lifecycle
  * changes, moves, and deletions use one immediate transaction and return only after commit. Errors include stable
  * `jobu.queue.*`, `jobu.job.*`, `jobu.run.*`, `jobu.schedule.*`, `jobu.attribute.*`, and `jobu.idempotency.*` codes
- * plus unchanged database errors when no domain mapping applies. Methods invoke no callbacks, start no threads, and
- * perform no event-loop processing. A fresh recurring create or an update that validates or evaluates a recurring
- * schedule may synchronously load timezone data through CronEngine.
+ * plus unchanged database errors when no domain mapping applies. Successful mutations synchronously emit
+ * mutation_committed after commit without starting threads, external work, or event-loop processing. A fresh recurring
+ * create or an update that validates or evaluates a recurring schedule may synchronously load timezone data through
+ * CronEngine.
  */
 class ManagementService final : public jb::core::Object {
 public:
@@ -327,7 +329,8 @@ public:
      * retry-waiting recurring occurrence keeps its old snapshot; supplied definition fields update only the durable
      * definition and apply to its future successor. Conversion to a one-time schedule and snapshot refresh require the
      * current occurrence to be scheduled with no attempt; even a pending attempt prevents them. One-time definitions
-     * remain immutable after execution starts. No attempt, callback, or external work starts.
+     * remain immutable after execution starts. No attempt or external work starts; a successful mutation emits
+     * mutation_committed after commit.
      */
     [[nodiscard]] auto update_job(UpdateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
 
@@ -338,7 +341,8 @@ public:
      * or database Error. A fresh operation requires one future scheduled schedule-owned occurrence, no running or
      * retry-waiting run, and no other non-terminal manual run. Job suspension is permitted; queue suspension prevents
      * later scheduler dispatch but not creation. The returned run snapshots the current definition and sets both
-     * planned_at and runnable_at to the transaction's single sampled current time. No callback or execution starts.
+     * planned_at and runnable_at to the transaction's single sampled current time. No external work or execution
+     * starts; a successful mutation emits mutation_committed after commit.
      */
     [[nodiscard]] auto run_now(RunNowRequest request) -> jb::core::Result<JobRun, jb::core::Error>;
 
@@ -389,8 +393,23 @@ public:
      */
     [[nodiscard]] auto list_jobs(JobListRequest const& request) -> jb::core::Result<JobPage, jb::core::Error>;
 
+    /** Emitted synchronously once after a management mutation has committed successfully.
+     *
+     * Emission occurs on the service and Database owner thread. The transaction has committed and the successful state
+     * returned by the method is durable before any slot runs. Reads and failed operations do not emit. Successful
+     * idempotency replays and successful suspend/resume no-ops emit to match existing RPC rescan behavior, as does
+     * run_now(), even though its public RPC method remains deferred.
+     *
+     * A direct slot may request coalesced later work, but it must not block, start nested event processing, re-enter
+     * ManagementService, or use the same Database during delivery. Slots must not destroy the service before signal
+     * delivery returns.
+     */
+    jb::core::Signal<> mutation_committed;
+
 private:
     struct Private;
+
+    void emit_mutation_committed();
 };
 
 } // namespace jb::jobu

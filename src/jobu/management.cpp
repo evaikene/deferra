@@ -425,6 +425,12 @@ ManagementService::ManagementService(jb::db::Database&        database,
 
 ManagementService::~ManagementService() = default;
 
+void ManagementService::emit_mutation_committed()
+{
+    // Notify only after durable commit and before an RPC adapter can begin encoding the successful response.
+    emit(mutation_committed);
+}
+
 auto ManagementService::create_queue(CreateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
@@ -492,6 +498,7 @@ auto ManagementService::create_queue(CreateQueueRequest request) -> jb::core::Re
             if (!committed) {
                 return ServiceResult<Queue>::failure(std::move(committed).error());
             }
+            emit_mutation_committed();
             return ServiceResult<Queue>::success(std::move(replay).value());
         }
     }
@@ -557,6 +564,7 @@ auto ManagementService::create_queue(CreateQueueRequest request) -> jb::core::Re
     if (!committed) {
         return ServiceResult<Queue>::failure(std::move(committed).error());
     }
+    emit_mutation_committed();
     return ServiceResult<Queue>::success(std::move(queue));
 }
 
@@ -709,6 +717,7 @@ auto ManagementService::update_queue(UpdateQueueRequest request) -> jb::core::Re
     if (!committed) {
         return ServiceResult<Queue>::failure(std::move(committed).error());
     }
+    emit_mutation_committed();
     return ServiceResult<Queue>::success(std::move(replacement));
 }
 
@@ -746,6 +755,7 @@ auto ManagementService::suspend_queue(QueueSelector const& selector) -> jb::core
         if (!committed) {
             return ServiceResult<Queue>::failure(std::move(committed).error());
         }
+        emit_mutation_committed();
         return ServiceResult<Queue>::success(std::move(queue));
     }
     if (queue.state == QueueState::Active) {
@@ -782,6 +792,7 @@ auto ManagementService::suspend_queue(QueueSelector const& selector) -> jb::core
     if (!committed) {
         return ServiceResult<Queue>::failure(std::move(committed).error());
     }
+    emit_mutation_committed();
     return ServiceResult<Queue>::success(std::move(queue));
 }
 
@@ -831,6 +842,7 @@ auto ManagementService::resume_queue(QueueSelector const& selector) -> jb::core:
     if (!committed) {
         return ServiceResult<Queue>::failure(std::move(committed).error());
     }
+    emit_mutation_committed();
     return ServiceResult<Queue>::success(std::move(queue));
 }
 
@@ -918,6 +930,7 @@ auto ManagementService::delete_queue(QueueSelector const& selector) -> jb::core:
     if (!committed) {
         return ServiceResult<void>::failure(std::move(committed).error());
     }
+    emit_mutation_committed();
     return ServiceResult<void>::success();
 }
 
@@ -1024,6 +1037,7 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
             if (!committed) {
                 return ServiceResult<JobDefinition>::failure(std::move(committed).error());
             }
+            emit_mutation_committed();
             return ServiceResult<JobDefinition>::success(std::move(replay).value());
         }
 
@@ -1127,6 +1141,7 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
     }
+    emit_mutation_committed();
     return ServiceResult<JobDefinition>::success(std::move(job));
 }
 
@@ -1187,6 +1202,7 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
             if (!committed) {
                 return ServiceResult<JobRun>::failure(std::move(committed).error());
             }
+            emit_mutation_committed();
             return ServiceResult<JobRun>::success(std::move(replay).value());
         }
     }
@@ -1299,6 +1315,7 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
     if (!committed) {
         return ServiceResult<JobRun>::failure(std::move(committed).error());
     }
+    emit_mutation_committed();
     return ServiceResult<JobRun>::success(std::move(run));
 }
 
@@ -1488,6 +1505,7 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
     }
+    emit_mutation_committed();
     return ServiceResult<JobDefinition>::success(std::move(replacement));
 }
 
@@ -1521,6 +1539,7 @@ auto ManagementService::suspend_job(jb::core::Uuid const& id) -> jb::core::Resul
         if (!committed) {
             return ServiceResult<JobDefinition>::failure(std::move(committed).error());
         }
+        emit_mutation_committed();
         return ServiceResult<JobDefinition>::success(std::move(job));
     }
     if (job.state == JobState::Active) {
@@ -1575,6 +1594,7 @@ auto ManagementService::suspend_job(jb::core::Uuid const& id) -> jb::core::Resul
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
     }
+    emit_mutation_committed();
     return ServiceResult<JobDefinition>::success(std::move(job));
 }
 
@@ -1627,6 +1647,7 @@ auto ManagementService::resume_job(jb::core::Uuid const& id) -> jb::core::Result
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
     }
+    emit_mutation_committed();
     return ServiceResult<JobDefinition>::success(std::move(job));
 }
 
@@ -1722,6 +1743,7 @@ auto ManagementService::move_job(MoveJobRequest const& request) -> jb::core::Res
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
     }
+    emit_mutation_committed();
     return ServiceResult<JobDefinition>::success(std::move(job));
 }
 
@@ -1807,6 +1829,7 @@ auto ManagementService::delete_job(DeleteJobRequest const& request) -> jb::core:
     if (!committed) {
         return ServiceResult<void>::failure(std::move(committed).error());
     }
+    emit_mutation_committed();
     return ServiceResult<void>::success();
 }
 
