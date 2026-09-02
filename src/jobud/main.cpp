@@ -176,7 +176,7 @@ auto main(int argc, char* argv[]) -> int
         return EXIT_FAILURE;
     }
 
-    // Declaration order keeps every callback owner alive until its consumers are destroyed in reverse order.
+    // Declaration order keeps borrowed collaborators alive until their consumers are destroyed in reverse order.
     auto                                http_client = std::move(created_http_client).value();
     jb::jobu::http::HttpAttemptExecutor http_executor{*http_client, time_source};
     Scheduler                           scheduler{database,
@@ -210,14 +210,15 @@ auto main(int argc, char* argv[]) -> int
         log_fatal("Unable to register the jobud system.info handler");
         return EXIT_FAILURE;
     }
-    if (!register_management_methods(rpc_server, management_service, attribute_registry, [&scheduler]() -> void {
-            scheduler.request_rescan();
-        })) {
+    // Receiver tracking deactivates this Object-capturing slot if the scheduler is destroyed before the service.
+    management_service.mutation_committed.connect(&scheduler, [&scheduler]() -> void { scheduler.request_rescan(); });
+    if (!register_management_methods(rpc_server, management_service, attribute_registry)) {
         log_fatal("Unable to register the jobud management handlers");
         return EXIT_FAILURE;
     }
 
-    local_server.new_connection.connect([&local_server, &rpc_server]() -> void {
+    // rpc_server is destroyed before local_server, so receiver tracking deactivates its admission slot first.
+    local_server.new_connection.connect(&rpc_server, [&local_server, &rpc_server]() -> void {
         while (auto socket = local_server.take_next_connection()) {
             auto const credentials    = socket->peer_credentials();
             auto       operation      = OperationContext{};

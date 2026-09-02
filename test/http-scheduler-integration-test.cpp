@@ -346,8 +346,8 @@ TEST_CASE("real HTTP scheduling commits attempts before network observation and 
     http_jobs.push_back(fixture.create_http_job(wide, "/wide-3"));
     auto const cli = fixture.create_cli_job(narrow, "remains-pending");
 
-    // Management commits do not notify until Stage 5.15; process only the explicit scheduler timer so curl drive tasks
-    // remain pending while the durable running boundary is inspected.
+    // This direct-service fixture does not connect the management signal to the scheduler; process only the explicit
+    // scheduler timer so curl drive tasks remain pending while the durable running boundary is inspected.
     fixture.scheduler->request_rescan();
     REQUIRE(fixture.app.process_events(EventFlag::Timers, 0) != ProcessEventsResult::Failed);
     CHECK(fixture.server.requests().empty());

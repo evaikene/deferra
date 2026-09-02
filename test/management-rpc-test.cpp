@@ -119,9 +119,9 @@ private:
     bool        _pending{false};
 };
 
-auto mutation_handler(FakeRescanTarget& rescans) -> ManagementMutationHandler
+void connect_rescan_signal(ManagementService& service, FakeRescanTarget& rescans)
 {
-    return [&rescans]() -> void { rescans.request_rescan(); };
+    service.mutation_committed.connect([&rescans]() -> void { rescans.request_rescan(); });
 }
 
 struct ServiceFixture {
@@ -206,10 +206,10 @@ void require_application_error(ResponseEnvelope const& response, std::string_vie
 
 class RpcEndpoint {
 public:
-    explicit RpcEndpoint(ServiceFixture& fixture, ManagementMutationHandler mutation_committed = {})
+    explicit RpcEndpoint(ServiceFixture& fixture)
         : _service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time}
     {
-        REQUIRE(register_management_methods(_server, _service, fixture.registry, std::move(mutation_committed)));
+        REQUIRE(register_management_methods(_server, _service, fixture.registry));
 
         auto device = std::make_unique<MemoryIODevice>();
         _device     = device.get();
@@ -223,6 +223,8 @@ public:
         _device->inject_input(request_frame(_next_id++, method, params));
         return take_response(*_device);
     }
+
+    [[nodiscard]] auto service() noexcept -> ManagementService& { return _service; }
 
 private:
     ManagementService _service;
@@ -300,7 +302,6 @@ TEST_CASE("Management RPC registration is exact and reports duplicate failure", 
     ServiceFixture    fixture{{sequence_id(1)}};
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     Server            server;
-    FakeRescanTarget  rescans;
 
     constexpr std::array<std::string_view, 15> expected_methods{
         "queue.create",
@@ -322,8 +323,7 @@ TEST_CASE("Management RPC registration is exact and reports duplicate failure", 
 
     auto const methods = management_rpc_method_names();
     REQUIRE(methods.size() == expected_methods.size());
-    REQUIRE(register_management_methods(server, service, fixture.registry, mutation_handler(rescans)));
-    CHECK(rescans.request_count() == 0U);
+    REQUIRE(register_management_methods(server, service, fixture.registry));
     for (auto index = std::size_t{0}; index < expected_methods.size(); ++index) {
         CHECK(methods[index] == expected_methods[index]);
         CHECK(server.has_method(expected_methods[index]));
@@ -340,8 +340,7 @@ TEST_CASE("Management RPC registration is exact and reports duplicate failure", 
     REQUIRE(duplicate.register_method("job.update", [](auto const&, auto const&) {
         return MethodResult::success(make_json(JsonNull{}));
     }));
-    CHECK_FALSE(register_management_methods(duplicate, service, fixture.registry, mutation_handler(rescans)));
-    CHECK(rescans.request_count() == 0U);
+    CHECK_FALSE(register_management_methods(duplicate, service, fixture.registry));
     CHECK(duplicate.has_method("queue.create"));
     CHECK(duplicate.has_method("queue.get"));
     CHECK(duplicate.has_method("queue.list"));
@@ -362,12 +361,11 @@ TEST_CASE("Management RPC notifies a committed mutation before response encoding
     auto const       queue_id = sequence_id(1);
     ServiceFixture   fixture{{queue_id}};
     FakeRescanTarget rescans;
-    auto             mutation_committed = ManagementMutationHandler{[&fixture, &rescans]() -> void {
+    RpcEndpoint      endpoint{fixture};
+    endpoint.service().mutation_committed.connect([&fixture, &rescans]() -> void {
         rescans.request_rescan();
         fixture.registry.set_validation_failure(true);
-    }};
-    RpcEndpoint      endpoint{fixture, mutation_committed};
-    mutation_committed = {};
+    });
 
     auto const params = encode_create(
         CreateQueueRequest{
@@ -410,7 +408,8 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
     auto const create_params = encode_create(create_request, fixture.registry);
 
     {
-        RpcEndpoint endpoint{fixture, mutation_handler(rescans)};
+        RpcEndpoint endpoint{fixture};
+        connect_rescan_signal(endpoint.service(), rescans);
 
         auto created = decode_queue(endpoint.call("queue.create", create_params), fixture.registry);
         CHECK(created.id == first_id);
@@ -486,8 +485,9 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
     }
 
     {
-        RpcEndpoint endpoint{fixture, mutation_handler(rescans)};
-        auto        list_params = queue_list_request_to_json({
+        RpcEndpoint endpoint{fixture};
+        connect_rescan_signal(endpoint.service(), rescans);
+        auto list_params = queue_list_request_to_json({
             .include_deleted = true,
             .page            = {.limit = 10},
         });
@@ -582,7 +582,8 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
     auto const create_params = encode_create(create_request, fixture.registry);
 
     {
-        RpcEndpoint endpoint{fixture, mutation_handler(rescans)};
+        RpcEndpoint endpoint{fixture};
+        connect_rescan_signal(endpoint.service(), rescans);
 
         auto source = decode_queue(
             endpoint.call("queue.create", encode_create(CreateQueueRequest{.name = "source"}, fixture.registry)),
@@ -677,7 +678,8 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
     CHECK_FALSE(schema->created);
 
     {
-        RpcEndpoint endpoint{fixture, mutation_handler(rescans)};
+        RpcEndpoint endpoint{fixture};
+        connect_rescan_signal(endpoint.service(), rescans);
 
         auto replayed = decode_job(endpoint.call("job.create", create_params), fixture.registry);
         CHECK(replayed.id == job_id);
@@ -735,7 +737,8 @@ TEST_CASE("Management RPC separates invalid params from safe application errors"
         {queue_id, sequence_id(2), sequence_id(3)}
     };
     FakeRescanTarget rescans;
-    RpcEndpoint      endpoint{fixture, mutation_handler(rescans)};
+    RpcEndpoint      endpoint{fixture};
+    connect_rescan_signal(endpoint.service(), rescans);
 
     for (auto const method : management_rpc_method_names()) {
         CAPTURE(method);
