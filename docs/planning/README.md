@@ -12,6 +12,7 @@ repository root README and current source tree for implemented functionality.
 | --- | --- |
 | [JobU v1 technical plan](jobu-v1-technical-plan.md) | Defines v1 product scope, architecture, invariants, phased delivery, acceptance criteria, and explicitly deferred work. |
 | [JobU Phase 5 code-level design](jobu-phase5-code-design.md) | Defines the detailed HTTP implementation design, stage boundaries, verification requirements, and Phase 6/7 entry boundaries. |
+| [JobU Phase 5 closure code-level design](jobu-phase5-closure-code-design.md) | Defines the Object private-data and signal/callback architecture, closure stages, and Phase 6 entry boundary. |
 
 ## Authority
 
