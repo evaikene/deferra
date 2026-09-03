@@ -1,0 +1,1690 @@
+# JobU Phase 6 Code-Level Design
+
+Status: implementation-ready design  
+Baseline: `main` at `11bf10c1c5378af790c55842210091eb53f14e4b`  
+Prepared: 2026-09-03
+
+## 1. Purpose
+
+Phase 6 adds asynchronous local command execution without weakening the durable scheduler boundary completed in
+Phases 4 and 5. It introduces a project-owned, event-loop-driven `jb::core::Process`, a JobU CLI payload and result
+policy, a CLI-capable `AttemptExecutor`, and daemon composition that allows HTTP and CLI jobs to run concurrently.
+
+The Linux exit condition is concrete: `jobud` can execute multiple CLI attempts through the real `Scheduler`, drain
+stdout and stderr without blocking, preserve bounded first/last output, classify exit and termination outcomes, and
+terminate the complete process group on cancellation or timeout. Every target process still begins only after the
+attempt's durable running transition commits.
+
+Linux is implemented and verified first. The later macOS stages are optional approval boundaries and must not be
+started until Linux delivery is complete. Phase 7 remains responsible for startup recovery, daemon signal handling,
+and coordinated service shutdown.
+
+## 2. Baseline and repository evidence
+
+This design is based on GitHub `main` at commit `11bf10c`, together with the Stage 5.32 closure handoff:
+
+- the clean Linux build completed 315 build steps and all 98 registered tests passed;
+- the SQLite-disabled configuration completed 244 build steps and is intentionally compile-only;
+- the same source passed all 98 tests on macOS with the kqueue EventLoop backend;
+- all 14 existing production `Object` subclasses use one `Object`-owned private-data block;
+- `ManagementService::mutation_committed` is the reusable post-commit signal and daemon connections that capture an
+  `Object` use receiver-aware slots;
+- HTTP request and attempt completions remain exact-operation callbacks by design;
+- `AttemptExecutor` already guarantees durable-before-start ordering and one asynchronous completion after each
+  accepted start;
+- `Scheduler` already accounts for CLI and HTTP concurrency independently, but its only real executor currently
+  supports HTTP;
+- `AttemptOutput` already maps runner-neutral `primary` and `diagnostic` channels to the existing stdout/stderr schema;
+- output, attempt completion, retry or terminal run state, and recurrence are already committed atomically;
+- the standard attributes already include `job.timeout`, `output.capture`, `output.stdout_limit`, and
+  `output.stderr_limit`;
+- CLI job documents currently accept `command` plus an optional string `arguments` array but are not executed;
+- schema version 1, the 15-method management RPC set, and API version 1.1 are current; and
+- no process abstraction, process watch, process group, or production CLI executor exists.
+
+The current `main` revision remains the source of truth. If any implementation stage finds a material mismatch, stop
+that stage, record the exact evidence, and revise this design before changing the architecture.
+
+## 3. Scope
+
+### 3.1 In scope
+
+- A platform-neutral public `jb::core::Process` contract.
+- A Linux process-exit watch integrated into the existing epoll EventLoop without a waiter thread.
+- A private macOS `EVFILT_PROC` implementation in later optional stages.
+- Explicit executable and argument arrays; no implicit shell parsing.
+- Completely explicit process environment and deterministic `PATH` lookup.
+- An absolute working directory, with `/` as the CLI default.
+- A dedicated process group for every attempt.
+- Nonblocking stdout and stderr pipes, always drained to EOF.
+- Exit-code, signal, start-failure, timeout, cancellation, and interruption distinctions.
+- `SIGTERM` followed by configurable `SIGKILL` escalation.
+- Forced cleanup of descendants that remain in the attempt's process group after its leader exits.
+- Linux `PR_SET_NO_NEW_PRIVS` before target `execve()`.
+- Descriptor, signal-disposition, and signal-mask hygiene in the child.
+- Complete CLI payload decoding and management-time structural validation.
+- Expected and retryable exit-code policy.
+- Bounded first/last CLI output capture using the existing runner-neutral persistence contract.
+- A CLI `AttemptExecutor` and an owned executor group that routes both CLI and HTTP attempts.
+- Root-execution denial by default, with an explicit unsafe daemon override and a second check immediately before
+  spawning.
+- `jobud` and current `jobuctl job create` integration for the new CLI fields.
+- API minor version 1.2 while preserving the existing 15 RPC methods.
+- Linux unit, process, scheduler, and daemon integration tests with no external service dependency.
+- Useful Doxygen for every new or changed public declaration.
+- Concise implementation comments around non-obvious process, lifetime, security, ordering, and capture logic.
+
+### 3.2 Explicitly out of scope
+
+- Startup recovery of durable `running` attempts (Phase 7).
+- `SIGTERM`/`SIGINT` daemon control, coordinated listener shutdown, or scheduler fatal-shutdown orchestration (Phase 7).
+- Rewriting durable running attempts during ordinary process/executor destruction.
+- Per-job operating-system users, namespaces, chroot, containers, seccomp, cgroups, rlimits, or resource accounting.
+- Daemon privilege-drop configuration and service installation. The v1 deployment may run `jobud` as a dedicated
+  account, but full privilege-drop startup belongs to a later deployment/configuration phase.
+- Windows process execution. Unsupported platforms continue to fail clearly at configuration time.
+- A shell command-string parser. Shell use is explicit as `command: "/bin/sh"` and `arguments: ["-c", "..."]`.
+- Interactive stdin, PTYs, terminal emulation, merged output channels, or streaming output over RPC.
+- Secret resolution or protected environment values (Phase 8). Phase 6 environment strings remain ordinary job data
+  visible through the existing management API.
+- Public Run Now, cancel, history, attempt-output, statistics, or secret RPC methods (Phase 8).
+- General daemon configuration-file loading or environment inheritance.
+- A database schema change or migration.
+- Changes to HTTP payload, retry, redirect, TLS, capture, or result behavior.
+- A second scheduler thread, a waiter thread per child, or polling `waitpid()` on a repeating timer.
+
+## 4. Non-negotiable decisions
+
+| Decision | Required result |
+|---|---|
+| Durable ordering | `Scheduler` commits the attempt/run running transition before the target can execute. |
+| Process ownership | `Process` derives from `Object` and extends the single `ObjectPrivate` allocation; it has no second pimpl pointer or direct implementation-state member. |
+| CLI executor ownership | `CliAttemptExecutor` derives from `Object` and `AttemptExecutor`, extends the same private block, and owns active `Process` children through the Object tree. |
+| Notifications | Process lifecycle and output are signals; the one accepted attempt's completion remains `AttemptCompletionHandler`. |
+| Receiver safety | Every Process signal slot that captures `CliAttemptExecutor` uses the executor as its receiver. |
+| Event-loop model | Spawn, pipe I/O, process exit, timeout, cancellation, and completion run on one owner EventLoop thread. |
+| Child monitoring | Linux uses pidfds registered with epoll; macOS uses `EVFILT_PROC` in the existing kqueue backend. No global `SIGCHLD` handler or waiter thread is added. |
+| Reaping ownership | JobU retains the default, waitable `SIGCHLD` disposition and is the only code that may reap Process-owned child PIDs. |
+| Spawn mechanism | Use a carefully bounded `fork()`/`execve()` path because portable `posix_spawn()` cannot perform Linux `no_new_privs` between creation and target execution. |
+| Start gate | The child cannot execute the target until parent-side pipe and process watches are registered successfully. |
+| Child safety | All allocation, JSON/path parsing, vectors, and `char*` arrays are prepared before `fork()`; the child branch uses only fixed data and syscall-safe operations. |
+| Environment | Target environment starts empty. Job-supplied entries and JobU metadata are the only entries. |
+| PATH | Bare names require an explicit `PATH`; entries must be nonempty absolute directories and are searched in order. |
+| Standard input | File descriptor 0 reads EOF from `/dev/null`; JobU never writes input in v1. |
+| Output | stdout and stderr stay separate, are always drained, and never become process backpressure after capture limits. |
+| Completion barrier | `finished` is emitted only after the direct child is reaped and both output pipes reached EOF or an explicit capture-loss condition. |
+| Descendants | Every child is a process-group leader; stop signals target the group, and remaining same-group descendants are killed when the leader exits. |
+| Timeout/cancel | Send `SIGTERM`, retain capacity, then send `SIGKILL` after `cli.termination_grace` if the group remains. |
+| Root policy | CLI execution is unavailable at effective UID 0 unless the explicit unsafe daemon override is set; recheck immediately before every spawn. |
+| Linux hardening | A Linux CLI child must successfully set `PR_SET_NO_NEW_PRIVS=1` before `execve()` or complete as a terminal start failure. |
+| Executor routing | A generic owned executor group routes by `JobType` and outlives/destroys child executors safely. Scheduler still borrows one `AttemptExecutor`. |
+| Capture persistence | Existing `AttemptOutput` and schema-v1 stdout/stderr columns are reused unchanged. |
+| Compatibility | Unknown additive CLI payload members remain preserved and ignored; old minimal `{command, arguments}` payloads acquire the new defaults. |
+| Error safety | Errors, results, and logs never contain command, arguments, paths, environment names/values, or output bytes. |
+| Documentation | Every new/changed public declaration receives Doxygen and standalone first-include coverage in the same stage. |
+| Code comments | Non-obvious implementation blocks explain why the ordering or mechanism exists, not merely restate the code. |
+| `[[nodiscard]]` | Use it for fallible operations and meaningful value queries; do not force checks for routine cleanup or signal-like notification methods. |
+| SQLite-disabled build | Configure and build it to prove target boundaries; do not run a duplicate no-SQLite CTest suite. |
+
+## 5. Architecture and dependencies
+
+```mermaid
+flowchart TD
+    Core["core: Process contract and POSIX backend"] --> Jobu["jobu: payload, exit policy, executor group"]
+    Jobu --> JobuCli["jobu-cli: CLI attempt executor"]
+    Jobu --> JobuHttp["jobu-http: existing HTTP executor"]
+    JobuCli --> Daemon["jobud"]
+    JobuHttp --> Daemon
+    JobuSqlite["jobu-sqlite"] --> Daemon
+```
+
+Runtime ownership is:
+
+```mermaid
+flowchart TD
+    App["Application / EventLoop"] --> HttpClient["SystemHttpClient"]
+    HttpClient --> Group["AttemptExecutorGroup"]
+    Group --> HttpExecutor["HttpAttemptExecutor"]
+    Group --> CliExecutor["CliAttemptExecutor"]
+    CliExecutor --> Processes["Process children"]
+    Group --> Scheduler["Scheduler borrows group"]
+```
+
+The ownership arrows mean “must outlive” except that `AttemptExecutorGroup` owns both concrete executors and
+`CliAttemptExecutor` owns its Process objects. `jobud` declares the HTTP client before the group and the scheduler after
+the group. Destruction therefore stops the scheduler first, then destroys concrete executors while the group's routing
+state still exists, and finally destroys the HTTP client.
+
+The scheduler continues to receive exactly one `AttemptExecutor&`. No runner-specific include or switch is added to
+the scheduler or persistence layer.
+
+## 6. Target and source layout
+
+### 6.1 `core` additions
+
+Add:
+
+```text
+src/core/process.hpp                         public Process contract
+src/core/process.cpp                         Object construction and public forwarding
+src/core/process_priv.hpp                    ProcessPrivate : ObjectPrivate
+src/core/process_request_priv.hpp/.cpp       validation and pre-fork argv/env/PATH preparation
+src/core/process_posix_priv.hpp/.cpp         common fork, pipes, gate, exec error, reaping, group stop
+src/core/process_linux_priv.cpp              pidfd and no_new_privs operations
+src/core/process_macos_priv.cpp              optional macOS platform operations
+```
+
+Update the private EventLoop backend contract and implementations:
+
+```text
+src/core/event_loop.hpp/.cpp
+src/core/event_loop_backend.hpp
+src/core/event_loop_backend_epoll.cpp
+src/core/event_loop_backend_kqueue.cpp
+```
+
+`process.hpp` includes only project/standard headers. No `pid_t`, `siginfo_t`, epoll, kqueue, `wait*`, or `prctl` type
+appears publicly.
+
+### 6.2 Generic `jobu` additions
+
+Add:
+
+```text
+src/jobu/attempt_executor_group.hpp/.cpp     owned routing AttemptExecutor
+src/jobu/cli_job_payload_priv.hpp/.cpp       CLI decoder and structural policy
+src/jobu/cli_exit_policy_priv.hpp/.cpp       exit selector and result mapping
+src/jobu/cli_capture_priv.hpp/.cpp           bounded first/last stream retention
+```
+
+Update:
+
+```text
+src/jobu/job_validation_priv.hpp/.cpp
+src/jobu/attribute_registry.hpp/.cpp
+```
+
+Management-time CLI validation belongs in generic `jobu` so invalid definitions are rejected without constructing a
+platform Process or linking a concrete runner.
+
+### 6.3 New `jobu-cli` target
+
+Add:
+
+```text
+src/jobu/cli/CMakeLists.txt
+src/jobu/cli/cli_attempt_executor.hpp         public
+src/jobu/cli/cli_attempt_executor.cpp         Object-owned private implementation
+```
+
+The target links `jobu` only. It has no database, SQLite, curl, or platform library in its public interface. Platform
+system calls remain inside `core`.
+
+### 6.4 Daemon, client, and tests
+
+Update `src/jobud/CMakeLists.txt` to link `jobu-cli`; keep `jobu-http`, `net-http`, and `jobu-sqlite` unchanged.
+
+Add focused test support and tests:
+
+```text
+test/process-public-header-test.cpp
+test/process-request-test.cpp
+test/event-loop-process-watch-test.cpp
+test/process-test.cpp
+test/process-test-helper.cpp
+test/attempt-executor-group-test.cpp
+test/cli-job-payload-test.cpp
+test/cli-exit-policy-test.cpp
+test/cli-capture-test.cpp
+test/cli-attempt-executor-test.cpp
+test/cli-scheduler-integration-test.cpp
+test/jobud-cli-integration-test.cpp
+test/jobu-cli-public-header-test.cpp
+```
+
+Extend `test/support/fake_event_loop_backend.hpp` with process-watch operations and ready-process injection. Reuse the
+existing temporary-directory, fake executor, scheduler, database, and durable-probe support where practical.
+
+## 7. Public `jb::core::Process` contract
+
+The final public shape is equivalent to the following. Exact formatting may follow repository conventions, but names,
+ownership, and behavior are fixed by this design.
+
+```cpp
+namespace jb::core {
+
+using ProcessEnvironment = std::map<std::string, std::string, std::less<>>;
+
+enum class ProcessState : std::uint8_t {
+    NotRunning,
+    Starting,
+    Running,
+    Stopping,
+};
+
+enum class ProcessExitKind : std::uint8_t {
+    Exited,
+    Signaled,
+    TimedOut,
+    Cancelled,
+    Interrupted,
+    StartFailed,
+};
+
+enum class ProcessStopReason : std::uint8_t {
+    Cancelled,
+    Interrupted,
+};
+
+struct ProcessStartInfo {
+    std::string                     executable;
+    std::vector<std::string>        arguments;
+    ProcessEnvironment              environment;
+    std::filesystem::path           working_directory{"/"};
+    std::optional<Duration>         timeout;
+    Duration                        termination_grace{std::chrono::seconds{5}};
+    bool                            prevent_privilege_gain{false};
+};
+
+struct ProcessExit {
+    ProcessExitKind                 kind{ProcessExitKind::StartFailed};
+    std::optional<int>              exit_code;
+    std::optional<int>              signal_number;
+    std::optional<Error>            start_error;
+    bool                            stdout_lost{false};
+    bool                            stderr_lost{false};
+};
+
+class Process final : public Object {
+public:
+    explicit Process(Object* parent = nullptr);
+    ~Process() override;
+
+    Process(Process const&) = delete;
+    Process(Process&&) = delete;
+    auto operator=(Process const&) -> Process& = delete;
+    auto operator=(Process&&) -> Process& = delete;
+
+    [[nodiscard]] auto start(ProcessStartInfo start_info) -> Result<void, Error>;
+    [[nodiscard]] auto stop(ProcessStopReason reason = ProcessStopReason::Cancelled)
+        -> Result<void, Error>;
+
+    [[nodiscard]] auto state() const noexcept -> ProcessState;
+    [[nodiscard]] auto process_id() const noexcept -> std::optional<std::int64_t>;
+
+    Signal<>            started;
+    Signal<ByteBuffer>  standard_output;
+    Signal<ByteBuffer>  standard_error;
+    Signal<ProcessExit> finished;
+
+private:
+    struct Private;
+};
+
+} // namespace jb::core
+```
+
+All declarations, enum values, fields, signals, ownership constraints, timing, thread-affinity rules, and reentrancy
+rules receive useful Doxygen in the actual header. The sketch omits comments only to keep this section readable.
+
+### 7.1 State and call rules
+
+- Construct and use a Process on one Object/EventLoop owner thread.
+- The hosting process must not set `SIGCHLD` to `SIG_IGN` or use `SA_NOCLDWAIT`, and outside code must not call a
+  wait function for a PID owned by Process.
+- `start()` requires `NotRunning`, a valid current owner EventLoop, and a valid request.
+- After successful acceptance, `state()` is `Starting`; no signal is emitted from inside `start()`.
+- `started` is emitted once after target `execve()` succeeds and before any output signal is delivered.
+- `state()` is `Running` before `started` emission.
+- `stop()` is valid in `Starting` or `Running`, sends `SIGTERM` to the process group, enters `Stopping`, and arms the
+  request's `termination_grace` timer.
+- Repeating `stop()` with the same reason succeeds idempotently. A different reason returns
+  `core.process.stop_conflict` and does not replace the first terminal cause.
+- The request's `timeout`, when present, is monotonic and internally starts the same TERM-to-KILL path with
+  `ProcessExitKind::TimedOut`.
+- `finished` is emitted exactly once for every successful `start()` acceptance, including asynchronous start failure.
+- `state()` is `NotRunning` and `process_id()` is empty before `finished` emission. A direct slot may therefore schedule
+  another start, but must not synchronously delete the sender; use `delete_later()`.
+- A rejected `start()` emits no signal and leaves `NotRunning`.
+- The destructor suppresses signals, sends immediate `SIGKILL` to an active group, closes watches/pipes, and reaps its
+  direct child. It never calls user code.
+
+### 7.2 Exit invariants
+
+| Kind | `exit_code` | `signal_number` | `start_error` |
+|---|---:|---:|---:|
+| `Exited` | present | absent | absent |
+| `Signaled` | absent | present | absent |
+| `TimedOut` | exactly one of `exit_code` and `signal_number` is present | exactly one of `exit_code` and `signal_number` is present | absent |
+| `Cancelled` | exactly one of `exit_code` and `signal_number` is present | exactly one of `exit_code` and `signal_number` is present | absent |
+| `Interrupted` | exactly one of `exit_code` and `signal_number` is present | exactly one of `exit_code` and `signal_number` is present | absent |
+| `StartFailed` | absent | absent | present |
+
+For a stop reason, the semantic kind does not change if the target handles `SIGTERM` and exits normally. The observed
+exit code or signal remains available as diagnostic metadata. `stdout_lost` and `stderr_lost` are independent flags and
+do not change the leader's exit classification.
+
+`[[nodiscard]]` applies to `start()`, `stop()`, `state()`, and `process_id()`. Signals and destructor cleanup do not
+return forced-to-check results.
+
+## 8. Process request validation and preparation
+
+All potentially allocating work occurs before `fork()`:
+
+1. validate strings, environment, durations, and owner-loop state;
+2. build executable candidates;
+3. build stable owning argv/environment string storage;
+4. build null-terminated `char*` arrays whose pointers cannot be invalidated;
+5. open `/dev/null` and create all internal/output pipes;
+6. cache the descriptor-close upper bound needed by the child fallback path.
+
+### 8.1 Generic request rules
+
+- `executable` is nonempty, contains no NUL, and is at most 4096 bytes.
+- An absolute executable path is used as the only `execve()` candidate.
+- A non-absolute executable must be a bare name containing no `/`.
+- Every argument contains no NUL. At most 1024 arguments are accepted.
+- Environment names match `[A-Za-z_][A-Za-z0-9_]*`, contain no `=`, and are unique by the map type.
+- Environment values contain no NUL.
+- The working directory is absolute, contains no NUL, and is at most 4096 bytes. Existence and directory access are
+  checked authoritatively by child `chdir()` to avoid a time-of-check/time-of-use claim.
+- `timeout`, when present, is positive. `termination_grace` is nonnegative and at most five minutes.
+- The parent `SIGCHLD` disposition must retain waitable children; an ignored/no-wait disposition is rejected rather
+  than overwritten process-globally.
+- The aggregate bytes for argv and environment strings, including NUL terminators and pointer-array allowance, are at
+  most 256 KiB and must also fit the runtime `_SC_ARG_MAX` safety margin.
+- Invalid values return `InvalidArgument/core.process.invalid_request` with a fixed reason token in `detail`.
+
+### 8.2 Deterministic PATH lookup
+
+For a bare executable name:
+
+- `PATH` must exist in the supplied `ProcessEnvironment`;
+- split it only on `:`;
+- every entry must be nonempty and absolute;
+- do not interpret an empty entry as the working directory;
+- prebuild one `directory/name` candidate per entry in parent memory;
+- the child tries candidates in order with `execve()`;
+- `ENOENT` and `ENOTDIR` advance to the next candidate;
+- remember `EACCES` and return it if no later candidate succeeds;
+- another error terminates the search immediately.
+
+No ambient `getenv("PATH")`, `execvp()`, shell lookup, tilde expansion, variable interpolation, or current-directory
+search is allowed.
+
+## 9. EventLoop process-watch extension
+
+The Process public API does not expose a process-watcher type. `EventLoop` privately gains a friend-only child watch
+used by Process:
+
+```cpp
+namespace jb::core::priv {
+
+enum class ReadyEventKind : std::uint8_t { FileDescriptor, Process };
+
+struct ReadyEvent {
+    ReadyEventKind kind{ReadyEventKind::FileDescriptor};
+    std::int64_t   ident{-1};
+    FdEvents       events;
+};
+
+class Backend {
+public:
+    virtual auto add_process(std::int64_t process_id) -> bool = 0;
+    virtual auto remove_process(std::int64_t process_id) -> bool = 0;
+    // Existing fd and poll operations remain.
+};
+
+} // namespace jb::core::priv
+```
+
+`EventLoop` keeps a loop-thread-only process-callback map and dispatches process events separately from fd events.
+These callbacks remain private EventLoop readiness callbacks; they are not substitutes for public Process signals.
+
+### 9.1 Linux epoll backend
+
+- `add_process()` invokes `pidfd_open(pid, 0)` through the Linux syscall interface and registers the returned
+  close-on-exec descriptor with epoll.
+- The backend owns maps in both directions so a pidfd readiness event becomes a typed process event, never an
+  accidental user fd event.
+- A child remains behind the start gate until registration succeeds, eliminating the fast-exit registration race.
+- `remove_process()` removes the epoll registration, closes the pidfd, and erases both maps transactionally.
+- `ENOSYS`/unsupported pidfd returns a safe `core.process.monitor_unsupported` start rejection. Supported v1 Linux
+  distributions have suitable kernels; no `SIGCHLD` thread or timer-poll fallback is introduced.
+- When notified, Process sends group-cleanup signals as needed and calls `waitpid(pid, ..., WNOHANG)` with EINTR retry.
+  The direct child is reaped exactly once.
+
+### 9.2 macOS kqueue backend
+
+The optional macOS stage implements the same backend methods with `EVFILT_PROC`, `NOTE_EXIT`, and `EV_ONESHOT` in the
+existing EventLoop kqueue. The event kind distinguishes a process identifier from an fd identifier. The common start
+gate makes registration occur while the child is alive.
+
+The design intentionally does not install a process-global `SIGCHLD` handler. pidfd and `EVFILT_PROC` provide scoped
+child readiness and avoid handler ownership conflicts. Phase 7 may add separate EventLoop signal-watching support for
+daemon `SIGTERM` and `SIGINT`; it must not replace this process watch without new evidence.
+
+## 10. POSIX spawn, I/O, and completion ordering
+
+### 10.1 Descriptor set
+
+Before `fork()`, create:
+
+- stdout pipe: blocking child writer, nonblocking close-on-exec parent reader;
+- stderr pipe: blocking child writer, nonblocking close-on-exec parent reader;
+- exec-status pipe: fixed-size child error record, close-on-exec writer;
+- start-gate pipe: the child blocks until parent setup succeeds; and
+- a read-only `/dev/null` descriptor for stdin.
+
+All creation is checked. A failure closes every previously created descriptor and returns without forking.
+
+### 10.2 Parent sequence
+
+1. Call `fork()`.
+2. Close child-only descriptor ends.
+3. Establish the child process group from the parent side while the child remains gated.
+4. Register stdout, stderr, exec-status, and process-exit watches.
+5. Arm no user timer yet.
+6. Release exactly one gate byte and close the gate.
+7. Enter `Starting` and return success.
+8. On exec-status EOF, enter `Running`, arm the monotonic timeout, and emit `started`.
+
+If any step before gate release fails, close the gate, kill the still-non-executing child, reap it synchronously, clean
+all resources, and return a start error with no signal obligation.
+
+### 10.3 Child sequence
+
+The child branch uses prebuilt buffers and fixed records only:
+
+1. close parent-only descriptor ends;
+2. wait for the gate byte; EOF means exit immediately without executing a target;
+3. make itself process-group leader with `setpgid(0, 0)`;
+4. duplicate `/dev/null`, stdout, and stderr onto descriptors 0, 1, and 2;
+5. place the exec-status writer on a known close-on-exec descriptor;
+6. close or mark close-on-exec every unrelated inherited descriptor;
+7. restore default `SIGPIPE`, `SIGTERM`, `SIGINT`, and `SIGCHLD` dispositions and unblock signals managed by JobU;
+8. `chdir()` to the requested directory;
+9. on Linux when requested, set `PR_SET_NO_NEW_PRIVS=1` and verify it;
+10. try the prepared `execve()` candidates in order;
+11. on any failure, write one fixed `{stage, errno}` record and call `_exit(127)`.
+
+No logging, allocation, mutex, filesystem object, `strerror()`, exception, iostream, fmt, or user callback is used after
+`fork()` and before `execve()`.
+
+### 10.4 Inherited descriptor cleanup
+
+The child must not leak the database, local listener, client sockets, curl sockets, or unrelated embedding-process
+descriptors into the target:
+
+- Linux first uses `close_range()` where available, preserving descriptors 0 through 3; an `ENOSYS` fallback closes
+  the precomputed bounded descriptor range one fd at a time.
+- macOS uses the native close-from mechanism or the same bounded close loop.
+- the exec-status descriptor is `FD_CLOEXEC` and is the only descriptor above stderr intentionally alive until exec;
+- tests deliberately create unrelated non-CLOEXEC descriptors and prove they are absent in the helper target.
+
+### 10.5 Output and finish barrier
+
+- Each readiness callback reads its nonblocking fd until EOF or `EAGAIN`.
+- Nonempty chunks are emitted in byte order through `standard_output` or `standard_error`.
+- If output becomes ready while state is `Starting`, first drain the exec-status pipe. Successful target output cannot
+  precede exec success, so this guarantees `started` is observed before output.
+- A child-exit callback observed while state is `Starting` performs the same exec-status drain before classifying the
+  exit. A target that successfully execs and exits immediately still emits `started` before `finished`; a child error
+  record instead produces only `StartFailed`.
+- EINTR retries. An unrecoverable pipe-read error marks that channel lost, closes it, and continues termination/reaping.
+- The two channels have no ordering guarantee relative to each other; order within each channel is preserved.
+- Process does not retain a cumulative output buffer.
+- A child-exit notification alone is not completion. Process waits until both output readers reached EOF or were
+  marked lost.
+- Before reaping a naturally exited leader, send `SIGKILL` to its still-existing process group. This prevents an
+  unjoined same-group descendant from surviving the attempt or indefinitely holding an output pipe.
+- Remove every watch and timer, reset state, and release native handles before emitting `finished`.
+
+Descendants that deliberately create a new session or process group are outside the v1 guarantee. Tests cover normal
+forked descendants that remain in the attempt group.
+
+## 11. Stop, timeout, and destruction semantics
+
+### 11.1 Cancellation and timeout
+
+`Process::stop(Cancelled)` and the automatic timeout path share one state machine:
+
+1. send `SIGTERM` to `-pgid`;
+2. after successful delivery or `ESRCH`, record the first semantic stop reason;
+3. enter `Stopping`;
+4. if grace is zero, send `SIGKILL` immediately; otherwise arm one monotonic timer;
+5. when the timer expires, send `SIGKILL` to `-pgid`;
+6. retain all watches and continue draining both pipes;
+7. finish only after child reaping and the output barrier.
+
+`ESRCH` is success when the process group is already gone. Other initial `kill()` failures return
+`core.process.signal_failed` from an explicit `stop()` without changing state or terminal cause, so the caller may
+retry and the attempt remains active. The automatic timeout path cannot return an error: it records `TimedOut`, logs
+only the stable safe failure, and still schedules the KILL escalation and waits for terminal observation. No capacity
+is released merely because TERM or KILL was sent.
+
+EventLoop watcher processing precedes timer delivery in a cycle. Therefore an already-observed natural child exit wins
+over a timeout in that cycle; once the timeout transition begins, its semantic result remains `TimedOut` even if the
+child handles TERM and exits with a code.
+
+### 11.2 Destruction and future Phase 7 interruption
+
+Process destruction is fail-safe cleanup, not a normal completion:
+
+- disconnect/suppress outgoing signals;
+- cancel timers and remove watches;
+- send immediate `SIGKILL` to the process group;
+- close pipe readers;
+- synchronously reap the direct child with EINTR handling; and
+- return without emitting `finished`.
+
+`ProcessStopReason::Interrupted` and `ProcessExitKind::Interrupted` reserve an explicit observed interruption for a
+future coordinated caller. `CliAttemptExecutor` does not use that result during Phase 6 normal execution. Phase 7 may
+use immediate interruption or destroy executors while deliberately leaving durable attempts running for recovery, but
+that policy is not implemented here.
+
+## 12. CLI job payload contract
+
+### 12.1 JSON shape
+
+The final decoded shape is:
+
+```json
+{
+  "command": "tool-or-absolute-path",
+  "arguments": ["arg-1", "arg-2"],
+  "working_directory": "/absolute/path",
+  "environment": {
+    "NAME": "value",
+    "REMOVE_ME": null
+  },
+  "expected_exit_codes": [0]
+}
+```
+
+Only `command` is required. Defaults are:
+
+| Member | Default |
+|---|---|
+| `arguments` | empty array |
+| `working_directory` | `/` |
+| `environment` | empty patch |
+| `expected_exit_codes` | `[0]` |
+
+A string environment value sets or replaces the entry. JSON `null` removes it from the effective explicit
+environment. Phase 6 starts from an empty environment, so a removal may be a no-op; defining removals now preserves the
+contract for Phase 8's resolved secret/environment layers. The three `JOBU_*` entries are injected afterward.
+
+Unknown top-level members remain preserved in durable JSON and ignored by a Phase 6 decoder. Nested `environment`
+members are data keys, not protocol extensions.
+
+### 12.2 Validation limits
+
+- `command` follows section 8's absolute-path-or-bare-name rule.
+- `arguments` contains at most 1024 strings; every value is NUL-free.
+- `working_directory`, when present, is a NUL-free absolute path.
+- `environment` contains at most 256 entries.
+- Environment names follow the Process grammar.
+- `JOBU_JOB_ID`, `JOBU_RUN_ID`, and `JOBU_ATTEMPT` cannot be supplied or removed by a job.
+- Every environment value is a string or null.
+- `expected_exit_codes` contains at most 256 unique unsigned integers from 0 through 255. The explicit empty array is
+  valid and means no numeric exit code is successful.
+- The existing deterministic 256 KiB complete payload limit remains authoritative.
+
+Expand `JobPayloadIssue` with safe reason tokens for invalid command, working directory, environment, and expected exit
+codes. Management continues mapping them to `jobu.job.invalid_payload` without including rejected values.
+
+### 12.3 No implicit shell
+
+`command: "echo hello"` is one executable name and does not invoke a shell. Redirection, pipes, wildcard expansion,
+quotes, substitutions, and environment interpolation are never parsed. A shell job is explicit:
+
+```json
+{
+  "command": "/bin/sh",
+  "arguments": ["-c", "printf '%s\\n' hello"]
+}
+```
+
+## 13. CLI attributes
+
+Add two standard definitions, increasing the fixed standard registry from 19 to 21 entries:
+
+| Name | Type | Built-in default | Validation |
+|---|---|---|---|
+| `cli.termination_grace` | Duration | 5000 ms | 0 through 300000 ms |
+| `cli.retry_exit_codes` | List | `["0-255"]` | at most 64 unique normalized selectors |
+
+An exit-code selector is either one canonical decimal integer `0` through `255` or one inclusive ascending range such
+as `1-3`. Leading zeros, whitespace, signs, descending ranges, empty ranges, overlaps, and duplicates are rejected.
+The decoder sorts and merges adjacent selectors into a private membership set after validation.
+
+Outcome evaluation checks `expected_exit_codes` first. Therefore the default retry set may include 0 without changing
+success. When a numeric exit is unexpected:
+
+- membership in `cli.retry_exit_codes` produces `FailureDisposition::Retryable`;
+- non-membership produces `FailureDisposition::Terminal`; and
+- an empty list makes every unexpected numeric exit terminal.
+
+Both attributes accept daemon-default, queue-default, and job scopes like the existing execution attributes. Old
+materialized snapshots acquire both built-in defaults during decode; schema version remains 1.
+
+## 14. CLI environment and metadata
+
+For each attempt, `CliAttemptExecutor` creates a new `ProcessEnvironment` from no ambient base and applies:
+
+1. Phase 6 literal payload environment entries/removals;
+2. future resolved environment/secret layers, currently absent; then
+3. mandatory JobU metadata, overriding no user value because reserved names were rejected.
+
+Injected values are:
+
+```text
+JOBU_JOB_ID=<job UUID>
+JOBU_RUN_ID=<run UUID>
+JOBU_ATTEMPT=<positive attempt number>
+```
+
+`JOBU_RUN_ID` is the durable run ID and remains stable across retries. `JOBU_ATTEMPT` increments. JobU injects no
+implicit `PATH`, `HOME`, locale, temporary-directory, proxy, credential, loader, or platform variable.
+
+For Phase 6, literal environment values are not secrets. They are persisted in the job payload and returned by
+existing job management reads. Documentation and logs must not suggest otherwise. Phase 8 will add protected secret
+references without changing Process's explicit-environment contract.
+
+## 15. `CliAttemptExecutor`
+
+The final public shape is:
+
+```cpp
+namespace jb::jobu::cli {
+
+struct CliAttemptExecutorOptions {
+    bool allow_root{false};
+};
+
+class CliAttemptExecutor final : public jb::core::Object,
+                                 public jb::jobu::AttemptExecutor {
+public:
+    explicit CliAttemptExecutor(CliAttemptExecutorOptions options = {},
+                                jb::core::Object* parent = nullptr);
+    ~CliAttemptExecutor() override;
+
+    CliAttemptExecutor(CliAttemptExecutor const&) = delete;
+    CliAttemptExecutor(CliAttemptExecutor&&) = delete;
+    auto operator=(CliAttemptExecutor const&) -> CliAttemptExecutor& = delete;
+    auto operator=(CliAttemptExecutor&&) -> CliAttemptExecutor& = delete;
+
+    [[nodiscard]] auto is_available(JobType type) const noexcept -> bool override;
+    [[nodiscard]] auto start(AttemptStartRequest request,
+                             AttemptCompletionHandler completion)
+        -> jb::core::Result<void, jb::core::Error> override;
+    [[nodiscard]] auto cancel(AttemptKey const& key)
+        -> jb::core::Result<void, jb::core::Error> override;
+
+private:
+    struct Private;
+};
+
+} // namespace jb::jobu::cli
+```
+
+The actual header provides Doxygen for ownership, owner thread, callback timing, root policy, and stable errors.
+`CliAttemptExecutor` contains no direct `_data` member: its `Private` inherits `jb::core::priv::ObjectPrivate` and is
+allocated through the protected Object constructor. The private owner back-reference is assigned only after base
+construction.
+
+### 15.1 Active-attempt ownership
+
+The private data maps `AttemptKey` to an active record containing:
+
+- the child `Process*`, owned as an Object child;
+- expected and retryable exit sets;
+- capture mode and two bounded capture buffers;
+- the exact `AttemptCompletionHandler`; and
+- completion/cancellation guards.
+
+Connect `Process::standard_output`, `standard_error`, and `finished` with receiver-aware connections whose receiver is
+the `CliAttemptExecutor`. Each slot may capture the executor and attempt key because receiver lifetime tracking
+deactivates it before private data can disappear.
+
+On Process finish:
+
+1. verify the active key and Process identity;
+2. map the exit to one owning `AttemptCompletion`;
+3. decide whether captured output is retained;
+4. move the attempt completion handler out;
+5. erase every executor-owned active reference;
+6. schedule the Process with `delete_later()`; then
+7. invoke the exact completion callback once.
+
+Retiring internal state before user code preserves safe reentrancy into `start()` or `cancel()`.
+
+### 15.2 Start and cancellation
+
+`is_available()` is true only for `JobType::Cli`, with a valid owner EventLoop and an allowed effective identity. It is
+false for HTTP and unknown enum values.
+
+`start()`:
+
+- rejects non-CLI, empty completion, invalid key, duplicate key, invalid durable payload/attributes, unavailable loop,
+  and root policy violations;
+- decodes the immutable snapshot again and treats a mismatch as `jobu.cli.invalid_snapshot`;
+- checks effective UID immediately before `Process::start()`;
+- creates a child Process, connects signals, inserts the active record, and calls Process start;
+- on Process start rejection, removes all state, deletes the Process without a callback, and returns a safe error; and
+- after acceptance, invokes the completion only from a later Process signal, never inside `start()`.
+
+`cancel()` finds the exact active Process and calls `stop(Cancelled)`. Success retains the completion obligation and
+capacity until the Process `finished` signal. An unknown key returns `jobu.cli.attempt_not_found`.
+
+The destructor disables Process slots/completions and lets Object-owned child destruction perform immediate group kill
+and reaping without invoking scheduler callbacks. Phase 7 remains responsible for the corresponding daemon durable
+recovery policy.
+
+## 16. Attempt result mapping
+
+### 16.1 Outcome table
+
+| Process observation | Attempt outcome | Failure disposition |
+|---|---|---|
+| expected numeric exit | `Succeeded` | absent |
+| unexpected numeric exit in `cli.retry_exit_codes` | `Failed` | `Retryable` |
+| unexpected numeric exit outside retry set | `Failed` | `Terminal` |
+| unrequested signal termination | `Failed` | `Retryable` |
+| timeout | `Failed` | `Retryable` |
+| explicit cancellation | `Cancelled` | absent |
+| async exec/chdir/security start failure | `Failed` | `Terminal` |
+
+`Interrupted` is not emitted by normal Phase 6 CLI attempts. Executor destruction suppresses the callback so durable
+running state remains available to Phase 7 recovery.
+
+### 16.2 Stable result objects
+
+Use these bounded shapes, with keys serialized deterministically by `JsonValue::Object`:
+
+```json
+{"exit_code":0,"outcome":"success","type":"cli"}
+{"exit_code":2,"outcome":"unexpected_exit","type":"cli"}
+{"outcome":"signal","signal":15,"type":"cli"}
+{"outcome":"timeout","signal":9,"type":"cli"}
+{"outcome":"cancelled","signal":15,"type":"cli"}
+{"error_code":"core.process.exec_failed","outcome":"start_failure","type":"cli"}
+```
+
+For timeout/cancellation, include either observed `exit_code` or `signal`, when available, but never both. Start-failure
+results include only the stable Process error code, not `message`, `detail`, errno text, command, or path. Pipe capture
+loss is represented by existing output metadata rather than duplicating it in result JSON.
+
+All objects are far below the existing 256 KiB result limit and contain no output or environment data.
+
+## 17. Output capture
+
+`output.capture`, `output.stdout_limit`, and `output.stderr_limit` retain their Phase 5 meanings:
+
+| Mode | Runtime behavior | Persistence |
+|---|---|---|
+| `none` | drain and discard both streams | no `AttemptOutput` |
+| `on_error` | retain bounded streams while running | persist for `Failed` or `Cancelled`; discard for `Succeeded` |
+| `always` | retain bounded streams while running | persist for every outcome |
+
+The private CLI capture buffer follows the already established algorithm:
+
+- prefix limit is `(limit + 1) / 2`;
+- suffix limit is `limit / 2`;
+- total bytes count every successfully observed byte;
+- once the prefix is full, keep a rolling final suffix;
+- a zero limit retains no bytes but still counts and marks nonempty input truncated;
+- `truncated` is exactly `total_bytes > bytes.size()`;
+- stdout maps to `AttemptOutput::primary` and stderr to `diagnostic`; and
+- when capture is selected, both channels are present even when observed empty.
+
+An unrecoverable Process pipe read or internal capture failure sets `capture_lost=true`. Configured truncation alone does
+not set capture loss. Output signals continue to be consumed and the child continues toward termination even after a
+retention limit is reached.
+
+The scheduler/persistence code is unchanged. It validates and commits output with the attempt/run transition using the
+existing schema-v1 columns.
+
+## 18. `AttemptExecutorGroup`
+
+Generic `jobu` gains an owned routing executor:
+
+```cpp
+namespace jb::jobu {
+
+class AttemptExecutorGroup final : public AttemptExecutor {
+public:
+    AttemptExecutorGroup();
+    ~AttemptExecutorGroup() override;
+
+    AttemptExecutorGroup(AttemptExecutorGroup const&) = delete;
+    AttemptExecutorGroup(AttemptExecutorGroup&&) = delete;
+    auto operator=(AttemptExecutorGroup const&) -> AttemptExecutorGroup& = delete;
+    auto operator=(AttemptExecutorGroup&&) -> AttemptExecutorGroup& = delete;
+
+    [[nodiscard]] auto add(JobType type,
+                           std::unique_ptr<AttemptExecutor> executor)
+        -> jb::core::Result<void, jb::core::Error>;
+
+    [[nodiscard]] auto is_available(JobType type) const noexcept -> bool override;
+    [[nodiscard]] auto start(AttemptStartRequest request,
+                             AttemptCompletionHandler completion)
+        -> jb::core::Result<void, jb::core::Error> override;
+    [[nodiscard]] auto cancel(AttemptKey const& key)
+        -> jb::core::Result<void, jb::core::Error> override;
+
+private:
+    struct Private;
+    std::unique_ptr<Private> _data;
+};
+
+} // namespace jb::jobu
+```
+
+This class is not an `Object`: it has no reusable event notification or affinity of its own, and its retained wrappers
+represent exact accepted attempt completions. A conventional pimpl member is therefore appropriate and does not
+violate the Object private-data rule.
+
+Rules:
+
+- one owned executor may be registered per `JobType`;
+- null/duplicate registration is rejected before use;
+- `start()` rejects an unregistered type or duplicate active key;
+- after child acceptance, remember the exact key-to-executor route;
+- wrap the child completion only to retire that route before forwarding the original exact callback;
+- `cancel()` uses the recorded route, so the key-only `AttemptExecutor` API remains unchanged;
+- child callback identity errors are forwarded for Scheduler's existing fail-closed validation; and
+- the destructor explicitly destroys owned executors while group routing state is still alive, then discards active
+  routes. Concrete executor destructors must suppress their callbacks, as the existing contract requires.
+
+No signal is added to the group. Replacing these exact one-operation wrappers with signals would make ownership and
+exactly-once discharge less clear.
+
+## 19. Security and safe diagnostics
+
+### 19.1 Effective UID policy
+
+- By default, `CliAttemptExecutor::is_available(Cli)` is false when `geteuid()==0`.
+- `start()` repeats the UID check immediately before Process creation.
+- `jobud --allow-root-cli` is a valueless, explicit unsafe override.
+- When the override is active at root, log one prominent startup warning without job payload data.
+- Without the override, a root daemon may continue serving RPC and HTTP; CLI work remains pending rather than being
+  converted into a failed attempt merely because deployment identity is unsafe.
+- A race that changes identity between availability admission and spawn produces a terminal safe start failure.
+- No per-job identity switch is attempted.
+
+### 19.2 Linux no-new-privileges
+
+The CLI executor sets `ProcessStartInfo::prevent_privilege_gain=true` on Linux. The child must set
+`PR_SET_NO_NEW_PRIVS` before target exec. Failure writes a fixed child-stage error and produces terminal
+`core.process.security_failed`; the target never executes. The setting is inherited across `execve()` and prevents
+set-user-ID, set-group-ID, and file-capability elevation from granting new privilege.
+
+macOS has no equivalent requirement in this phase. Root denial still applies. The public option is semantic rather
+than a Linux constant; requesting a strict unsupported mechanism returns a safe unsupported start error on a platform
+that cannot provide it.
+
+### 19.3 Diagnostic policy
+
+Allowed details are fixed reason/stage tokens and numeric backend error codes. Never include:
+
+- command or resolved executable path;
+- arguments or working directory;
+- environment name or value;
+- stdout/stderr bytes;
+- job, run, or attempt payload JSON; or
+- user-controlled `strerror()` context.
+
+Logs may include JobU UUIDs and attempt number where already permitted, plus the stable error code. Root-override
+warnings contain no job identity.
+
+## 20. Daemon and `jobuctl` integration
+
+### 20.1 `jobud`
+
+Add startup options:
+
+```text
+--cli-concurrency <positive uint32>   default 4
+--allow-root-cli                     default false; no value
+```
+
+Reject zero, overflow, duplicates, a value supplied to `--allow-root-cli`, and malformed/unknown options before
+opening the database or listener.
+
+Composition order:
+
+1. `Application`, time/UUID/attributes/cron/database;
+2. `SystemHttpClient`;
+3. `AttemptExecutorGroup`;
+4. owned `HttpAttemptExecutor` registration for `JobType::Http`;
+5. owned `CliAttemptExecutor` registration for `JobType::Cli`;
+6. `Scheduler` borrowing the group with both concurrency limits;
+7. management and RPC/listener objects.
+
+HTTP initialization and behavior remain unchanged. The scheduler now sees independent availability for both types.
+
+Increase advertised API version to 1.2 because the CLI payload gains defined optional fields and execution semantics.
+The capability list remains the existing 15 method names plus `system.info`; do not invent a new RPC method or claim
+Phase 8 run-control support.
+
+### 20.2 `jobuctl job create`
+
+Extend only CLI creation with:
+
+```text
+--working-directory PATH
+--env NAME=VALUE                  repeatable
+--unset-env NAME                 repeatable
+--expected-exit-code 0..255      repeatable
+```
+
+- No option means the corresponding payload member is omitted and daemon defaults apply.
+- Duplicate environment names, set/unset conflicts, duplicate expected codes, invalid names, and invalid codes are
+  rejected locally.
+- `--env NAME=` is a valid empty value.
+- CLI-only options are rejected for HTTP jobs; HTTP-only options remain rejected for CLI jobs.
+- Existing `--arg` behavior, including values beginning with `-`, remains intact.
+- The client uses existing `CreateJobRequest` and `job.create`; no protocol method is added.
+
+Advanced attribute editing, including `cli.termination_grace` and `cli.retry_exit_codes`, remains accessible through
+the existing JSON/RPC model but does not require a new general attribute CLI editor in Phase 6. Phase 8 completes the
+broader command surface.
+
+### 20.3 README
+
+Update documentation to state:
+
+- CLI and HTTP jobs execute through the real scheduler;
+- CLI commands are argv arrays, never implicit shell strings;
+- environments are clean and literal values are not protected secrets;
+- bare commands require an explicit payload `PATH`;
+- working directory defaults to `/`;
+- stdin is EOF, output is bounded, and cancellation/timeout target the process group;
+- root CLI execution is denied by default and the override is unsafe;
+- `--cli-concurrency` and new `jobuctl` options; and
+- Phase 7 recovery/shutdown and Phase 8 secret resolution remain pending.
+
+## 21. Error domains
+
+### 21.1 `core.process.*`
+
+| Code | Category | Meaning |
+|---|---|---|
+| `core.process.invalid_state` | Conflict | Start/stop is invalid for the current state. |
+| `core.process.invalid_request` | InvalidArgument | Executable, args, env, cwd, duration, PATH, or aggregate limits are invalid. |
+| `core.process.signal_configuration` | Conflict | `SIGCHLD` is configured to discard child status, so Process cannot promise an exit result. |
+| `core.process.event_loop_unavailable` | Unavailable | No valid owner-thread EventLoop is available. |
+| `core.process.resource_setup_failed` | ResourceExhausted/Io | Pipe, `/dev/null`, or descriptor setup failed before fork. |
+| `core.process.fork_failed` | ResourceExhausted | `fork()` failed. |
+| `core.process.monitor_unsupported` | Unsupported | Required native child-exit monitoring is unavailable. |
+| `core.process.watch_failed` | Unavailable | Parent could not register all required native watches before gate release. |
+| `core.process.chdir_failed` | Io | Child could not enter the requested directory. |
+| `core.process.security_failed` | PermissionDenied | Required pre-exec privilege hardening failed. |
+| `core.process.exec_failed` | NotFound/PermissionDenied/Io | No executable candidate could be executed. |
+| `core.process.signal_failed` | Io | An explicit stop signal could not be delivered. |
+| `core.process.stop_conflict` | Conflict | A different semantic stop reason is already active. |
+
+Errors returned synchronously imply no later signal obligation unless `stop()` is called on an already accepted
+Process. Asynchronous child setup/exec errors appear in `ProcessExit::start_error` and `finished`.
+
+### 21.2 `jobu.cli.*`
+
+| Code | Category | Meaning |
+|---|---|---|
+| `jobu.cli.unsupported_type` | Unsupported | Non-CLI request supplied to the CLI executor. |
+| `jobu.cli.invalid_start` | InvalidArgument | Empty callback or invalid attempt key. |
+| `jobu.cli.invalid_snapshot` | Internal | Durable payload or attributes violate the accepted contract. |
+| `jobu.cli.duplicate_attempt` | Conflict | Attempt key already active. |
+| `jobu.cli.event_loop_unavailable` | Unavailable | Executor has no valid owner loop. |
+| `jobu.cli.root_forbidden` | PermissionDenied | Effective root execution is not explicitly allowed. |
+| `jobu.cli.start_failed` | Unavailable/Internal | Process rejected start before acceptance; detail contains only the Process code. |
+| `jobu.cli.attempt_not_found` | NotFound | Cancellation key is inactive. |
+| `jobu.cli.cancel_failed` | Unavailable | Process stop request failed safely. |
+
+### 21.3 `jobu.executor.*`
+
+The group adds safe registration/routing errors such as `jobu.executor.invalid_registration`,
+`jobu.executor.duplicate_type`, `jobu.executor.unsupported_type`, `jobu.executor.duplicate_attempt`, and
+`jobu.executor.attempt_not_found`. Existing `jobu.executor.invalid_completion` remains Scheduler-owned.
+
+## 22. Testing strategy
+
+### 22.1 No real-time dependency in policy tests
+
+Payload, attribute, selector, path, environment, capture, executor-group, and result mapping tests are pure and use no
+sleep. Process integration necessarily crosses a kernel process boundary, but correctness synchronization uses helper
+pipes, child markers, native Process signals, and bounded watchdog deadlines. A delay may bound a failed test; it must
+not be the predicate proving success.
+
+### 22.2 Process helper modes
+
+Build one private test executable with explicit modes rather than invoking a shell:
+
+- report argv, cwd, environment, stdin EOF, and selected open descriptors;
+- write arbitrary binary/stdout/stderr patterns larger than pipe capacity;
+- exit with a supplied code;
+- terminate itself by a supplied signal;
+- exit immediately after writing a tail marker;
+- trap TERM and exit;
+- ignore TERM until KILL;
+- fork a same-group descendant and report both PIDs;
+- let the leader exit while the descendant holds an output fd;
+- print Linux `NoNewPrivs` from `/proc/self/status`; and
+- wait on a coordination fd so tests control ordering without sleeps.
+
+No helper behavior depends on external commands, network, inherited environment, or shell availability.
+
+### 22.3 Core Process matrix
+
+- public header compiles first and exposes no platform type;
+- default construction, Object parenting, affinity, noncopyability, and private-data inventory;
+- every invalid request class and stable safe detail token;
+- absolute exec and ordered bare-name PATH search;
+- missing PATH, empty/relative PATH entry, permission failure, and no candidate;
+- exact argv including empty and leading-dash arguments;
+- clean environment and no ambient HOME/PATH/locale/proxy variables;
+- default `/` and explicit cwd;
+- stdin immediate EOF;
+- started/output/finished order and same owner thread;
+- arbitrary binary stdout/stderr, interleaving, data larger than pipe capacity, and complete tail drain;
+- numeric exit and signal result invariants;
+- async exec/chdir/security failure;
+- pidfd watch registration and fast exit without a missed event or zombie;
+- TERM-handled cancellation, TERM-to-KILL escalation, timeout, and zero grace;
+- same-group descendant termination on cancel, timeout, natural leader exit, and destructor;
+- repeated same-reason stop and conflicting stop reason;
+- injected pipe/watch/fork/read/signal failures where a private seam is required;
+- unrelated descriptor noninheritance and child signal reset; and
+- concurrent children with no waiter thread and no unreaped direct child.
+
+### 22.4 CLI policy/executor matrix
+
+- all payload defaults and valid optional fields;
+- NUL, relative slash command, relative cwd, invalid env name/type/reserved name, size/count limit, and exit-code errors;
+- unknown additive top-level member preservation;
+- old minimal CLI payload remains valid;
+- selector grammar, normalization, defaults, empty retry set, and expected-before-retry precedence;
+- output head/tail ordering for odd/even/zero limits and arbitrary chunk boundaries;
+- output mode `none`, `on_error`, and `always` for every outcome;
+- metadata environment IDs and stable run ID across retry attempts;
+- root availability and immediate pre-spawn recheck through a private identity seam;
+- unsupported type, duplicate key, rejected start, active cancel, and missing cancel;
+- Process signals connect with the executor as receiver;
+- executor private state is retired before the exact completion callback re-enters;
+- executor destruction kills children and invokes no completion; and
+- results/errors/log captures contain none of the supplied sensitive marker strings.
+
+### 22.5 Executor group matrix
+
+- null, duplicate, and valid type registration;
+- independent dynamic availability;
+- CLI/HTTP start routing and key-to-executor cancellation routing;
+- duplicate active key rejection across types;
+- child start rejection creates no active route;
+- completion erases route before callback reentrancy;
+- incorrect child completion identity remains visible to Scheduler validation; and
+- group destruction destroys children before routing state and invokes no callback.
+
+### 22.6 Scheduler integration matrix
+
+- database running row is observable before the helper target reports execution;
+- CLI and HTTP global limits are independent;
+- queue combined concurrency still applies across both types;
+- weighted fairness remains independent by resource type;
+- concurrent CLI success and failure;
+- fixed/rescheduled retry after unexpected exit, signal, timeout, and terminal selector exclusion;
+- expected nonzero exit success;
+- cancellation retains capacity through TERM/KILL, output EOF, callback, and durable commit;
+- capture modes, truncation metadata, and atomic persistence;
+- recurring successor and suspension-drain behavior remain unchanged; and
+- HTTP regression cases retain Phase 5 results.
+
+### 22.7 Daemon end-to-end matrix
+
+- startup option rejection occurs before database/socket creation;
+- `jobuctl` creates a due CLI job with args, cwd, env, and expected code;
+- helper observes only explicit environment plus JobU metadata;
+- SQLite probe observes terminal run/attempt and exact stdout/stderr capture;
+- at least two CLI jobs overlap when CLI concurrency permits;
+- an HTTP and CLI job overlap without consuming each other's global slot;
+- cancellation/timeout helper descendants disappear;
+- root without override executes no CLI target; root with override logs warning and runs only in an isolated test
+  environment where that risk is explicit;
+- daemon remains alive after normal completions; and
+- terminating the test daemon does not claim Phase 7 coordinated shutdown semantics.
+
+## 23. Documentation, comments, and diagnostics gates
+
+### 23.1 Public documentation gate
+
+In every stage that adds or changes a public header:
+
+- document the file purpose;
+- document every public class, struct, enum, enum value, field, method, signal, alias, parameter, return, ownership,
+  thread-affinity, callback/signal timing, and reentrancy constraint;
+- explain all conditional field invariants;
+- document stable error domains and sensitive-data exclusions;
+- add/update a first-include public-header test; and
+- verify no private backend/dependency type leaks.
+
+### 23.2 Required code-level rationale comments
+
+Comments are specifically required around:
+
+- pidfd/epoll and `EVFILT_PROC` event tagging;
+- why the start gate precedes target execution;
+- why all allocation/pointer preparation occurs before fork;
+- child error-record and close-on-exec ordering;
+- child descriptor/signal cleanup;
+- parent/child `setpgid()` race closure;
+- `started` before first output despite readiness coalescing;
+- child-reaped plus both-pipes-closed completion barrier;
+- group kill before leader reap and its PID/PGID reuse protection;
+- timeout/cancel first-cause preservation;
+- capture ring ordering and total-byte overflow checks;
+- root recheck immediately before spawn;
+- Process receiver-aware connections;
+- state erasure before user completion callback;
+- executor-group destruction order; and
+- durable-before-external-effect assertions in integration tests.
+
+Do not add comments that merely translate a statement into English. Comments should preserve the reason a future
+maintainer might otherwise accidentally simplify away.
+
+### 23.3 Diagnostics gate
+
+Before each stage is handed off:
+
+- build all touched targets;
+- run the focused tests named by that stage;
+- run public-header tests for changed public headers;
+- inspect compiler diagnostics;
+- run the repository's available clangd/include-cleaner/clang-tidy diagnostics on changed C++ files;
+- scan for forbidden platform/dependency types in public headers;
+- review changed Object subclasses for one private block and post-base owner binding; and
+- stop for review before the next stage.
+
+Warnings or diagnostics introduced by the stage are failures, not deferred cleanup.
+
+## 24. Implementation stages
+
+Each stage is a separate approval and review boundary. Codex must implement only the named stage, verify it, provide a
+short handoff with files/tests/results/open risks, and stop.
+
+### Stage 6.1: Freeze the Process contract and request policy
+
+Add `process.hpp`, Process value types/signals, Object-private construction, idle state/query behavior, public-header
+test, and private request validation/preparation helpers. A valid production launch may still report backend
+unavailable until the Linux backend stages; invalid requests must already be definitive.
+
+Verification:
+
+- standalone header, type, noncopyability, signal signature, and Object parenting tests;
+- all section 8 validation, SIGCHLD-disposition, and PATH candidate tests;
+- aggregate-size and pointer-stability tests;
+- Process public header contains no native type and no second pimpl/data member;
+- Doxygen and changed-file diagnostics pass.
+
+Exit: the public API and pre-fork policy are fixed before system-call work begins.
+
+Suggested commit subject: `define asynchronous Process contract`
+
+Stop for review.
+
+### Stage 6.2: Add Linux child-exit watches to EventLoop
+
+Extend the private backend event kind/process-watch operations, EventLoop dispatch maps, fake backend, and Linux pidfd
+epoll integration. Do not spawn through Process yet.
+
+Verification:
+
+- fake registration, replacement/rejection, removal, typed dispatch, callback removal, and backend-failure tests;
+- real gated child pidfd readiness and exact `waitpid()` test;
+- fd identifiers cannot be confused with process identifiers;
+- no global signal handler, waiter thread, or timer polling;
+- existing EventLoop fd/timer/task tests remain green.
+
+Exit: one owner EventLoop can observe a Linux child exit as a typed private readiness event.
+
+Suggested commit subject: `watch Linux child exits in EventLoop`
+
+Stop for review.
+
+### Stage 6.3: Implement gated Linux spawn and exit reporting
+
+Implement pipes needed for the gate/exec status, `fork()`, process-group setup, absolute/bare-name `execve()`,
+asynchronous start failure, pidfd reaping, timeout arming point, and basic `started`/`finished` signals. stdout/stderr may
+temporarily be `/dev/null` in this stage.
+
+Verification:
+
+- absolute and PATH execution, immediate exit, numeric/signal exit, nonexistent/nonexecutable target, and cwd failure;
+- target cannot report execution before parent watch registration and `start()` acceptance;
+- every accepted start emits exactly one later finish; rejected start emits none;
+- no missed fast exit and no zombie;
+- all post-fork code passes an async-signal-safety review with rationale comments.
+
+Exit: Process can safely start and reap one non-output Linux child.
+
+Suggested commit subject: `spawn and reap Linux processes asynchronously`
+
+Stop for review.
+
+### Stage 6.4: Add asynchronous stdout and stderr
+
+Connect separate pipes, nonblocking edge-triggered draining, binary chunk signals, exec-before-output ordering, channel
+EOF/loss state, and the finish barrier.
+
+Verification:
+
+- binary data including NUL;
+- both streams beyond pipe capacity without deadlock;
+- per-channel byte order and complete tail capture;
+- `started` precedes output and `finished` follows both EOFs;
+- one channel closing early does not affect the other;
+- injected read failure marks only the affected loss flag;
+- no cumulative buffer exists in Process.
+
+Exit: Process exposes complete asynchronous output without blocking or unbounded retention.
+
+Suggested commit subject: `stream Process output through EventLoop`
+
+Stop for review.
+
+### Stage 6.5: Add group cancellation, timeout, and descendant cleanup
+
+Implement the stopping state, first-reason rule, TERM-to-KILL timer, group cleanup on natural leader exit, and
+destructor immediate kill/reap.
+
+Verification:
+
+- TERM-handled cancellation;
+- ignored TERM escalates to KILL;
+- automatic timeout and zero grace;
+- same-reason idempotence and different-reason conflict;
+- same-group descendant termination for cancel, timeout, leader exit, and destructor;
+- completion waits for pipe EOF and reports the semantic reason;
+- no signal is emitted from destructor.
+
+Exit: Process owns the complete lifecycle of the attempt process group.
+
+Suggested commit subject: `terminate Process groups deterministically`
+
+Stop for review.
+
+### Stage 6.6: Harden Linux pre-exec state
+
+Implement descriptor close-from behavior, stdin EOF, managed signal reset/unblock, and strict
+`PR_SET_NO_NEW_PRIVS` support. Finish the full Linux Process matrix.
+
+Verification:
+
+- unrelated non-CLOEXEC descriptors are absent in the target;
+- stdin reads EOF;
+- target observes expected signal disposition/mask;
+- helper proves `NoNewPrivs: 1` when requested;
+- injected hardening failure prevents target execution and reports terminal start failure;
+- environment remains exactly explicit;
+- full Process and EventLoop regression tests pass.
+
+Exit: the reusable Linux Process foundation is complete.
+
+Suggested commit subject: `harden Linux Process execution`
+
+Stop for review.
+
+### Stage 6.7: Complete CLI payload validation
+
+Add the private decoder, new safe `JobPayloadIssue` cases, full payload defaults/limits, environment patch, working
+directory, and expected exit codes. Management and durable-read validation share this decoder.
+
+Verification:
+
+- complete section 12 matrix;
+- old `{command}` and `{command,arguments}` documents remain valid;
+- unknown additive top-level fields survive serialization;
+- invalid data maps to safe `jobu.job.invalid_payload` reason tokens;
+- HTTP payload tests are unchanged and pass;
+- schema version/DDL are unchanged.
+
+Exit: every newly accepted CLI document has one deterministic execution interpretation.
+
+Suggested commit subject: `define complete CLI job payload`
+
+Stop for review.
+
+### Stage 6.8: Add CLI termination and retry attributes
+
+Add `cli.termination_grace`, `cli.retry_exit_codes`, selector normalization, materialization defaults, and public
+attribute documentation changes.
+
+Verification:
+
+- selector boundary/overlap/duplicate/canonical-form tests;
+- duration bounds and all three scopes;
+- old 19-value materialized snapshots decode with two built-ins;
+- partial layer and complete-set validation;
+- all HTTP/retry/output attribute regressions;
+- standalone attribute header and Doxygen gate;
+- schema remains version 1.
+
+Exit: CLI termination and numeric retry policy are available in immutable attempt snapshots.
+
+Suggested commit subject: `add CLI execution attributes`
+
+Stop for review.
+
+### Stage 6.9: Implement pure CLI result and capture policy
+
+Add exit mapping, stable result objects, retry membership, and the CLI bounded capture buffer without starting a real
+process.
+
+Verification:
+
+- every row in sections 16 and 17;
+- expected exit takes precedence over retry selectors;
+- odd/even/zero limits and arbitrary chunk boundaries retain exact first/last bytes;
+- total overflow and capture-loss handling;
+- deterministic result JSON size/shape;
+- marker scan proves no payload/path/env/output leaks.
+
+Exit: Process observations can be converted into valid scheduler completions deterministically.
+
+Suggested commit subject: `map CLI exits and bounded output`
+
+Stop for review.
+
+### Stage 6.10: Implement `CliAttemptExecutor`
+
+Add the `jobu-cli` target, Object-derived executor, Process child ownership, receiver-aware signal connections, active
+maps, clean environment/metadata construction, root checks, start, completion, and cancellation.
+
+Verification:
+
+- complete section 22.4 executor matrix using Process helper modes and private identity/failure seams;
+- callback never runs inside `start()`/`cancel()` and runs once after acceptance;
+- active state is erased before callback reentrancy;
+- destruction kills children and suppresses callbacks;
+- Object subclass inventory proves one inherited private block, const private access, and post-base owner binding;
+- public header first-include/Doxygen/dependency scan;
+- `jobu-cli` links neither SQLite nor curl.
+
+Exit: one CLI attempt can run safely behind the existing `AttemptExecutor` contract.
+
+Suggested commit subject: `add CLI attempt executor`
+
+Stop for review.
+
+### Stage 6.11: Add owned executor routing
+
+Implement `AttemptExecutorGroup`, register fake CLI/HTTP executors, and prove exact routing/destruction semantics.
+
+Verification:
+
+- complete section 22.5;
+- cancellation uses accepted key route rather than availability guessing;
+- callbacks remain exact operation callbacks, not signals;
+- child executors are destroyed before route storage;
+- public Doxygen, first-include, `[[nodiscard]]`, and diagnostics pass.
+
+Exit: Scheduler can continue borrowing one executor while multiple runner families remain isolated.
+
+Suggested commit subject: `route attempts through owned executors`
+
+Stop for review.
+
+### Stage 6.12: Integrate the real Process with the CLI executor
+
+Run the actual Linux Process through `CliAttemptExecutor` without Scheduler/database participation.
+
+Verification:
+
+- argv/cwd/clean env/metadata;
+- PATH lookup;
+- success, expected nonzero, retryable/terminal exit, signal, start failure, timeout, and cancellation;
+- all capture modes and both first/last limits;
+- same run ID and incremented attempt metadata across two starts;
+- Process/executor destruction and descendant cleanup;
+- no sensitive diagnostics.
+
+Exit: real Linux commands produce complete valid `AttemptCompletion` values.
+
+Suggested commit subject: `execute CLI attempts with Process`
+
+Stop for review.
+
+### Stage 6.13: Run CLI and HTTP through the real Scheduler
+
+Use `AttemptExecutorGroup` with real CLI and existing HTTP executors in scheduler integration tests. Do not modify
+Scheduler's public constructor or runner-neutral persistence.
+
+Verification:
+
+- complete section 22.6 Linux matrix;
+- durable running commit precedes helper execution;
+- independent global and combined queue concurrency;
+- retry/cancel/capture persistence and capacity retention;
+- mixed CLI/HTTP overlap;
+- all existing deterministic scheduler and HTTP integration tests pass;
+- no schema or HTTP result delta.
+
+Exit: Phase 6 scheduling behavior is complete in-process on Linux.
+
+Suggested commit subject: `integrate CLI execution with Scheduler`
+
+Stop for review.
+
+### Stage 6.14: Compose CLI execution in `jobud`
+
+Add daemon options, owned executor group composition, root availability/warning policy, CLI concurrency, API version
+1.2, and startup/lifetime tests.
+
+Verification:
+
+- zero/overflow/duplicate/value-on-flag/unknown option rejection before resources;
+- default/explicit concurrency reaches Scheduler options;
+- root policy through an injectable private identity probe;
+- declaration/destruction order audit;
+- exact 15 management methods remain registered;
+- HTTP daemon integration remains byte-for-byte semantically unchanged;
+- no Phase 7 signal/recovery/shutdown claim.
+
+Exit: a Linux daemon can make both registered runner families available safely.
+
+Suggested commit subject: `enable CLI execution in jobud`
+
+Stop for review.
+
+### Stage 6.15: Extend `jobuctl` CLI creation fields
+
+Add the four section 20.2 CLI option families, payload encoding, usage text, API-minor test updates, and local validation.
+
+Verification:
+
+- repeats, duplicates, empty env value, unset conflicts, invalid code/name/path, and leading-dash arguments;
+- generated `CreateJobRequest` JSON has exact fields/default omission;
+- CLI-only/HTTP-only cross-rejection;
+- older minimal command invocation remains unchanged;
+- no new RPC method or capability token;
+- command-line parser and all current `jobuctl` management tests pass.
+
+Exit: users can create the complete Phase 6 CLI payload through the existing client surface.
+
+Suggested commit subject: `expose CLI execution options in jobuctl`
+
+Stop for review.
+
+### Stage 6.16: Complete Linux daemon end-to-end and documentation
+
+Add the durable SQLite probe/helper-based daemon test, mixed concurrency scenarios, descendant termination checks, root
+matrix where environment permits, README updates, and Linux CI/dependency notes.
+
+Verification:
+
+- complete section 22.7 on primary Linux;
+- normal full SQLite-enabled CTest suite;
+- focused tests bind no external network and invoke no implicit shell;
+- target/thread inspection finds no waiter thread, repeated wait timer, or thread per attempt;
+- output and result durable probes prove exact schema-v1 values;
+- public Doxygen, code-comment, Object-private, signal/callback, sensitive-data, and HTTP regression audits.
+
+Exit: Phase 6 is functionally complete on Linux.
+
+Suggested commit subject: `complete Linux CLI scheduling`
+
+Stop for review before optional macOS work.
+
+### Stage 6.17 (optional): Add the macOS Process backend
+
+Implement kqueue `EVFILT_PROC` child watches and the macOS variants of pipe creation, close-from cleanup, and supported
+pre-exec operations. `prevent_privilege_gain` must report its documented platform behavior; do not emulate Linux
+`prctl` with an unrelated mechanism.
+
+Verification on macOS/Apple Clang:
+
+- complete EventLoop process-watch and Core Process matrix except Linux-only NoNewPrivs proof;
+- fast exit cannot beat registration because the gate remains common;
+- stdout/stderr, signal exit, TERM/KILL, timeout, descendant cleanup, destructor, fd cleanup, and no zombies;
+- existing kqueue fd/HTTP/local-socket tests pass;
+- platform differences are isolated and rationale-commented.
+
+Exit: the public Process contract works on supported macOS without changing Linux behavior.
+
+Suggested commit subject if changes are required: `support Process execution on macOS`
+
+Stop for review.
+
+### Stage 6.18 (optional): Complete macOS CLI scheduler and daemon verification
+
+Run CLI policy, executor, mixed scheduler, `jobuctl`, and daemon end-to-end coverage on macOS. Change production code
+only for demonstrated portable API/compiler/runtime differences.
+
+Verification:
+
+- full macOS build and CTest;
+- CLI/HTTP mixed concurrency;
+- clean environment, PATH/cwd/argv, output, expected/retry exit, timeout/cancel, and descendants;
+- root denial where a safe test environment permits; otherwise record the exact unverified case;
+- no source change is invented merely to create an optional-stage commit.
+
+Exit: supported macOS behavior is evidenced accurately.
+
+Suggested commit subject if changes are required: `verify CLI scheduling on macOS`
+
+Stop for review.
+
+### Stage 6.19: Final clean Linux verification and handoff
+
+From fresh directories on primary Linux:
+
+```sh
+cmake -S . -B .bld-phase6 -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build .bld-phase6 --verbose
+ctest --test-dir .bld-phase6/test --output-on-failure
+
+cmake -S . -B .bld-phase6-no-sqlite -G Ninja \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DJB_BUILD_SQLITE_DRIVER=OFF
+cmake --build .bld-phase6-no-sqlite --verbose
+```
+
+Do not run a second no-SQLite CTest suite. Its purpose is to prove that `core`, `rpc`, `net`, `net-http`, `jobu`,
+`jobu-http`, and the new `jobu-cli` compile independently of SQLite. `jobud` remains absent when its required
+SQLite-backed target is disabled.
+
+Final audits:
+
+- repeat the complete Object subclass inventory including `Process` and `CliAttemptExecutor`;
+- prove both new Objects extend one Object-owned private block with post-base owner binding;
+- classify every new signal and callback against the Phase 5 closure rule;
+- inspect Doxygen and standalone public-header coverage;
+- run diagnostics on all Phase 6 C++ changes;
+- scan public headers for POSIX/Linux/macOS/curl/SQLite types;
+- scan results/errors/log fixtures for marker leakage;
+- confirm no schema-v1/DDL, HTTP behavior, or management RPC method-set change;
+- confirm Process uses no waiter thread, repeated wait polling, or unbounded output buffer;
+- verify the worktree is clean after committed changes; and
+- write a handoff with exact revision, toolchain/dependency/kernel versions, build steps, test counts, optional macOS
+  evidence, and Phase 7/8 entry boundaries.
+
+Exit: Phase 6 is complete and independently evidenced.
+
+Suggested commit subject: `document Phase 6 verification invariants`
+
+## 25. Final acceptance checklist
+
+- [ ] `jb::core::Process` exposes only project/standard types.
+- [ ] Process derives from Object and has one Object-owned private block.
+- [ ] `CliAttemptExecutor` derives from Object and has one Object-owned private block.
+- [ ] Owner back-references are bound only after base construction.
+- [ ] Process uses signals for started/output/finished reusable events.
+- [ ] Process-to-CLI slots use the executor as receiver.
+- [ ] Attempt and routing completions remain exact callbacks.
+- [ ] Linux child exit uses pidfd/epoll with no waiter thread or SIGCHLD handler.
+- [ ] macOS, when implemented, uses kqueue `EVFILT_PROC`.
+- [ ] The target cannot exec before every parent watch is installed.
+- [ ] The post-fork child path allocates nothing and calls no user/library code that is unsafe there.
+- [ ] No implicit shell parsing or ambient PATH lookup exists.
+- [ ] Environment starts empty and contains only explicit values plus three JobU metadata entries.
+- [ ] stdin reaches EOF and unrelated descriptors do not leak.
+- [ ] stdout/stderr are separate, binary-safe, always drained, and not accumulated by Process.
+- [ ] `finished` waits for direct-child reaping and both output terminals.
+- [ ] Every attempt has its own process group.
+- [ ] TERM-to-KILL escalation and capacity retention are proven.
+- [ ] Same-group descendants die on cancel, timeout, leader exit, destructor, and future immediate kill.
+- [ ] Linux CLI target observes `NoNewPrivs: 1`.
+- [ ] Root CLI execution is denied by default and rechecked before spawn.
+- [ ] CLI payload defaults and old minimal documents are compatible.
+- [ ] Expected and retryable exit policy matches section 16.
+- [ ] Output first/last retention and capture-loss semantics match existing persistence validation.
+- [ ] AttemptExecutorGroup owns and safely destroys both runner implementations.
+- [ ] CLI and HTTP run concurrently with independent global and combined queue limits.
+- [ ] Durable running state precedes every external CLI effect.
+- [ ] Completion/output/run/retry/recurrence remain one transaction.
+- [ ] Schema remains version 1.
+- [ ] HTTP behavior and results remain unchanged.
+- [ ] The management RPC set remains 15 methods; API version is 1.2.
+- [ ] Every changed public declaration has useful Doxygen and first-include coverage.
+- [ ] Required non-obvious implementation blocks have rationale comments.
+- [ ] Changed C++ files are diagnostics-clean.
+- [ ] Full SQLite-enabled clean Linux tests pass.
+- [ ] SQLite-disabled configuration builds; no duplicate no-SQLite full CTest is required.
+- [ ] Optional macOS status is recorded accurately.
+
+## 26. Deferred entry boundaries
+
+### 26.1 Phase 7 may assume
+
+- both real runner families execute behind one owned router;
+- Process can force/observe process-group termination and suppress callbacks during destruction;
+- active CLI and HTTP attempts leave durable `running` state if the daemon exits before completion commits;
+- startup still refuses existing running state with `jobu.scheduler.recovery_required`; and
+- scheduler/output persistence already fails closed transactionally.
+
+Phase 7 owns startup recovery, recurrence/manual/suspension repair, SQLite fault injection, daemon `SIGTERM`/`SIGINT`
+integration, stop-admission order, immediate active-runner termination, and prompt service exit. Phase 6 must not mark
+durable attempts interrupted during destructor cleanup or claim graceful/coordinated shutdown.
+
+### 26.2 Phase 8 may assume
+
+- CLI environment construction has an explicit layer point before JobU metadata injection;
+- Phase 6 literal environment values are not secret;
+- attempt output is bounded and durably queryable at repository level; and
+- the current management API remains stable at 15 methods.
+
+Phase 8 owns protected secret resolution/redaction, complete run/attempt/history/output/statistics RPC, public Run Now
+and cancel, and the remaining `jobuctl` surface.
+
+## 27. Standards and platform references
+
+- [POSIX `fork()`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/fork.html)
+- [POSIX `execve()`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/execve.html)
+- [POSIX `waitpid()`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/wait.html)
+- [POSIX `setpgid()`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/setpgid.html)
+- [POSIX signal actions](https://pubs.opengroup.org/onlinepubs/9799919799/functions/sigaction.html)
+- [Linux `pidfd_open(2)`](https://man7.org/linux/man-pages/man2/pidfd_open.2.html)
+- [Linux `PR_SET_NO_NEW_PRIVS`](https://man7.org/linux/man-pages/man2/PR_SET_NO_NEW_PRIVS.2const.html)
+- [Linux `close_range(2)`](https://man7.org/linux/man-pages/man2/close_range.2.html)
+- [Apple `kqueue(2)` / `EVFILT_PROC`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/kqueue.2.html)
