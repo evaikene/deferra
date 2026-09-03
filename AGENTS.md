@@ -68,6 +68,26 @@ Use the checked-in `.clang-format`. Important defaults are 4-space indentation, 
 
 Follow existing naming patterns: snake_case file names such as `event_loop.cpp`, PascalCase types such as `EventLoop`, and lowerCamelCase or descriptive method names as already used in nearby code. Prefer small, focused classes and keep platform-specific code isolated behind backend files.
 
+## Object Private Data and Signals
+
+An `Object` subclass with private instance state must extend the single private block owned by `Object`. Derive its
+private structure directly or transitively from `jb::core::priv::ObjectPrivate` and pass that one heap allocation to
+the protected `Object` constructor. Do not add a second pimpl pointer or direct private implementation fields. Public
+`Signal` members and static process-wide state may remain direct class members.
+
+Do not pass a usable derived owner into a private-data constructor before the `Object` base is constructed. When
+private implementation code needs the public owner, bind the owner back-reference in the derived constructor body
+after `Object` has taken ownership of the private block, then install any connections that require the owner.
+
+Use a signal for a reusable observable event emitted by an `Object`. Use a receiver-aware connection whenever a slot
+captures an `Object`, so receiver destruction deactivates the slot. Reserve context-free connections for callables
+that borrow no `Object`, borrow only process-lifetime objects, or are explicitly disconnected before every captured
+target can be destroyed. Keep callbacks for one accepted operation's completion, strategies that produce a return
+value, and private non-`Object` adapter seams.
+
+Treat useful public Doxygen and concise rationale comments at non-obvious ownership, lifetime, ordering, failure, and
+reentrancy boundaries as stage completion requirements.
+
 ## Documentation & Comments
 
 Document public APIs with Doxygen-style comments. In `.cpp` files, document multi-step method/function bodies

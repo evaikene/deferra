@@ -893,9 +893,8 @@ The precise listener/RPC ordering may follow current code, but no retained callb
 
 ### 15.3 Management mutation rescan
 
-Do not add callbacks to `ManagementService`; its current synchronous service contract remains transport-independent.
-
-Extend the RPC adapter instead:
+Stage 5.15 originally kept `ManagementService` free of callbacks and extended the RPC adapter with an optional copied
+notification callback. The original adapter seam was:
 
 ```cpp
 using ManagementMutationHandler = std::function<void()>;
@@ -906,11 +905,19 @@ auto register_management_methods(jb::rpc::Server& server,
                                  ManagementMutationHandler mutation_committed = {}) -> bool;
 ```
 
-The actual public alias/function change receives complete Doxygen. Installed handlers borrow the callable, or the registration owns a copied callable according to the implementation choice; the documentation must state which. Prefer copying it into each mutating handler so the caller need not retain the `std::function` object, while captured targets must still outlive registrations.
+The adapter copied the callable into each mutating handler so the caller did not need to retain the `std::function`
+object. Each handler called it exactly once after a mutating service operation succeeded, including when later response
+encoding failed, and never for reads or failed mutations. `jobud` supplied a callback that requested a coalesced
+scheduler rescan without synchronous dispatch or nested database work.
 
-Call `mutation_committed` exactly once immediately after a mutating service operation succeeds, even if later response encoding fails, because the transaction has already committed. Do not call it for reads or failed mutations. Mutating methods are queue create/update/suspend/resume/delete and job create/update/suspend/resume/move/delete/run-now.
+The [Phase 5 closure design](jobu-phase5-closure-code-design.md) supersedes that adapter callback in Stages 5.27 and
+5.28. `ManagementService` now emits its reusable `mutation_committed` signal after a successful commit, replay, or
+lifecycle no-op, and `jobud` connects that signal to `Scheduler` with a receiver-aware connection. The RPC adapter
+owns no second notification mechanism.
 
-`jobud` supplies `[&scheduler] { scheduler.request_rescan(); }`. `request_rescan()` coalesces and never dispatches synchronously, so a mutation handler completes its RPC response without nested scheduling or database use.
+The notification contract includes the service-level `ManagementService::run_now()` operation. It did not add a
+public `job.run_now` wire method: Phase 5 retained its existing 15 registered management methods and API version 1.1,
+and public Run Now remained deferred.
 
 ### 15.4 Fatal component signals
 
