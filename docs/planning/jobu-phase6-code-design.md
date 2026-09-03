@@ -108,7 +108,7 @@ that stage, record the exact evidence, and revise this design before changing th
 | Reaping ownership | JobU retains the default, waitable `SIGCHLD` disposition and is the only code that may reap Process-owned child PIDs. |
 | Spawn mechanism | Use a carefully bounded `fork()`/`execve()` path because portable `posix_spawn()` cannot perform Linux `no_new_privs` between creation and target execution. |
 | Start gate | The child cannot execute the target until parent-side pipe and process watches are registered successfully. |
-| Child safety | All allocation, JSON/path parsing, vectors, and `char*` arrays are prepared before `fork()`; the child branch uses only fixed data and syscall-safe operations. |
+| Child safety | All allocation, JSON/path parsing, vectors, signal sets, and `char*` arrays are prepared before `fork()`; every blockable signal is blocked across the fork and every catchable inherited disposition is reset before the clean target mask is installed. |
 | Environment | Target environment starts empty. Job-supplied entries and JobU metadata are the only entries. |
 | PATH | Bare names require an explicit `PATH`; entries must be nonempty absolute directories and are searched in order. |
 | Standard input | File descriptor 0 reads EOF from `/dev/null`; JobU never writes input in v1. |
@@ -116,11 +116,11 @@ that stage, record the exact evidence, and revise this design before changing th
 | Completion barrier | `finished` is emitted only after the direct child is reaped and both output pipes reached EOF or an explicit capture-loss condition. |
 | Descendants | Every child is a process-group leader; stop signals target the group, and remaining same-group descendants are killed when the leader exits. |
 | Timeout/cancel | Send `SIGTERM`, retain capacity, then send `SIGKILL` after `cli.termination_grace` if the group remains. |
-| Root policy | CLI execution is unavailable at effective UID 0 unless the explicit unsafe daemon override is set; recheck immediately before every spawn. |
+| Root policy | CLI execution is unavailable at effective UID 0 unless the explicit unsafe daemon override is set; the parent rechecks before spawn and `Process` authoritatively enforces the fixed policy in the child immediately before `execve()`. |
 | Linux hardening | A Linux CLI child must successfully set `PR_SET_NO_NEW_PRIVS=1` before `execve()` or complete as a terminal start failure. |
 | Executor routing | A generic owned executor group routes by `JobType` and outlives/destroys child executors safely. Scheduler still borrows one `AttemptExecutor`. |
 | Capture persistence | Existing `AttemptOutput` and schema-v1 stdout/stderr columns are reused unchanged. |
-| Compatibility | Unknown additive CLI payload members remain preserved and ignored; old minimal `{command, arguments}` payloads acquire the new defaults. |
+| Compatibility | Unknown additive CLI payload members remain preserved and ignored; old minimal payloads remain valid for absolute commands, while bare commands require an explicit valid payload `PATH`. |
 | Error safety | Errors, results, and logs never contain command, arguments, paths, environment names/values, or output bytes. |
 | Documentation | Every new/changed public declaration receives Doxygen and standalone first-include coverage in the same stage. |
 | Code comments | Non-obvious implementation blocks explain why the ordering or mechanism exists, not merely restate the code. |
@@ -286,6 +286,7 @@ struct ProcessStartInfo {
     std::filesystem::path           working_directory{"/"};
     std::optional<Duration>         timeout;
     Duration                        termination_grace{std::chrono::seconds{5}};
+    bool                            require_non_root{false};
     bool                            prevent_privilege_gain{false};
 };
 
@@ -393,7 +394,7 @@ All potentially allocating work occurs before `fork()`:
 4. build null-terminated `char*` arrays whose pointers cannot be invalidated;
 5. open `/dev/null` and create all internal/output pipes;
 6. cache the descriptor-close upper bound needed by the child fallback path; and
-7. prepare the fixed managed-signal set and target mask used around `fork()`.
+7. prepare the full blockable-signal set and clean target mask used around `fork()`.
 
 ### 8.1 Generic request rules
 
@@ -406,6 +407,8 @@ All potentially allocating work occurs before `fork()`:
 - The working directory is absolute, contains no NUL, and is at most 4096 bytes. Existence and directory access are
   checked authoritatively by child `chdir()` to avoid a time-of-check/time-of-use claim.
 - `timeout`, when present, is positive. `termination_grace` is nonnegative and at most five minutes.
+- `require_non_root` is an immutable launch policy copied into child-safe storage. A parent-side check may reject
+  early, but the child check immediately before `execve()` is authoritative.
 - The parent `SIGCHLD` disposition must retain waitable children; an ignored/no-wait disposition is rejected rather
   than overwritten process-globally.
 - The aggregate bytes for argv and environment strings, including NUL terminators and pointer-array allowance, are at
@@ -505,7 +508,7 @@ All creation is checked. A failure closes every previously created descriptor an
 
 ### 10.2 Parent sequence
 
-1. Block the fixed managed-signal set in the calling thread and retain its original mask.
+1. Block every blockable signal in the calling thread and retain its original mask.
 2. Call `fork()` while those signals are blocked.
 3. In the parent, restore the original signal mask immediately on both success and failure paths.
 4. Close child-only descriptor ends.
@@ -530,12 +533,14 @@ The child branch uses prebuilt buffers and fixed records only:
 4. duplicate `/dev/null`, stdout, and stderr onto descriptors 0, 1, and 2;
 5. place the exec-status writer on a known close-on-exec descriptor;
 6. close or mark close-on-exec every unrelated inherited descriptor;
-7. while the managed signals inherited blocked from the parent, restore default `SIGPIPE`, `SIGTERM`, `SIGINT`, and
-   `SIGCHLD` dispositions; then install the prepared target signal mask before continuing;
-8. `chdir()` to the requested directory;
-9. on Linux when requested, set `PR_SET_NO_NEW_PRIVS=1` and verify it;
-10. try the prepared `execve()` candidates in order;
-11. on any failure, write one fixed `{stage, errno}` record and call `_exit(127)`.
+7. while all blockable signals remain blocked from the parent, restore every catchable signal disposition to
+   `SIG_DFL`; `SIGKILL` and `SIGSTOP` are excluded because they cannot be caught or reset;
+8. install the prepared clean target mask, which unblocks every blockable signal;
+9. `chdir()` to the requested directory;
+10. on Linux when requested, set `PR_SET_NO_NEW_PRIVS=1` and verify it;
+11. when `require_non_root` is true, reject effective UID 0 immediately before entering the exec candidate loop;
+12. try the prepared `execve()` candidates in order;
+13. on any failure, write one fixed `{stage, errno}` record and call `_exit(127)`.
 
 No logging, allocation, mutex, filesystem object, `strerror()`, exception, iostream, fmt, user callback, or inherited
 application signal handler is used after `fork()` and before `execve()`.
@@ -634,7 +639,10 @@ The final decoded shape is:
 }
 ```
 
-Only `command` is required. Defaults are:
+Only `command` is syntactically required. An absolute command works with the defaults below; a bare command also
+requires `environment.PATH` to set one valid explicit search path.
+
+Defaults are:
 
 | Member | Default |
 |---|---|
@@ -653,6 +661,9 @@ members are data keys, not protocol extensions.
 ### 12.2 Validation limits
 
 - `command` follows section 8's absolute-path-or-bare-name rule.
+- For a bare command, the effective explicit environment must contain `PATH` as a string. Missing `PATH`, a `null`
+  removal, an empty value, an empty entry, or any relative entry is rejected at management time using section 8.2's
+  exact splitting rules. An absolute command does not require `PATH`.
 - `arguments` contains at most 1024 strings; every value is NUL-free.
 - `working_directory`, when present, is a NUL-free absolute path of at most 4096 bytes, matching Process validation.
 - `environment` contains at most 256 entries.
@@ -661,10 +672,21 @@ members are data keys, not protocol extensions.
 - Every environment value is a NUL-free string or null.
 - `expected_exit_codes` contains at most 256 unique unsigned integers from 0 through 255. The explicit empty array is
   valid and means no numeric exit code is successful.
-- The existing deterministic 256 KiB complete payload limit remains authoritative.
+- The existing deterministic 256 KiB serialized payload limit remains authoritative, but is not sufficient by itself.
+  Management validation also calculates the final prepared argv/environment size using the same documented formula as
+  Process: string NUL terminators, both terminating pointer arrays, `sizeof(char*)`, and the three injected metadata
+  entries. Because job and run IDs do not yet exist at job-definition validation, reserve their canonical 36-character
+  UUID values and the maximum 20 decimal digits of `AttemptNumber`. A payload is rejected unless this worst-case
+  prepared request remains within 256 KiB. Process repeats the calculation with actual values and the runtime
+  `_SC_ARG_MAX` margin immediately before launch.
 
-Expand `JobPayloadIssue` with safe reason tokens for invalid command, working directory, environment, and expected exit
-codes. Management continues mapping them to `jobu.job.invalid_payload` without including rejected values.
+Boundary cross-tests must prove that every management-accepted maximum payload plus worst-case metadata passes the
+Process deterministic aggregate check. Keep the two implementations adjacent to named constants and update both in
+one stage if the Process formula or injected metadata changes.
+
+Expand `JobPayloadIssue` with safe reason tokens for invalid command, working directory, environment, PATH, prepared
+aggregate size, and expected exit codes. Management continues mapping them to `jobu.job.invalid_payload` without
+including rejected values.
 
 ### 12.3 No implicit shell
 
@@ -838,7 +860,7 @@ recovery policy.
 | unrequested signal termination | `Failed` | `Retryable` |
 | timeout | `Failed` | `Retryable` |
 | explicit cancellation | `Cancelled` | absent |
-| async exec/chdir/security start failure | `Failed` | `Terminal` |
+| async child-setup/exec/chdir/security start failure | `Failed` | `Terminal` |
 
 `Interrupted` is not emitted by normal Phase 6 CLI attempts. Executor destruction suppresses the callback so durable
 running state remains available to Phase 7 recovery.
@@ -849,6 +871,7 @@ Use these bounded shapes, with keys serialized deterministically by `JsonValue::
 
 ```json
 {
+  "capture_lost": false,
   "exit_code": 0,
   "outcome": "success",
   "stderr": {"captured_bytes": 0, "total_bytes": 0, "truncated": false},
@@ -856,6 +879,7 @@ Use these bounded shapes, with keys serialized deterministically by `JsonValue::
   "type": "cli"
 }
 {
+  "capture_lost": false,
   "exit_code": 2,
   "outcome": "unexpected_exit",
   "stderr": {"captured_bytes": 8, "total_bytes": 30, "truncated": true},
@@ -863,6 +887,7 @@ Use these bounded shapes, with keys serialized deterministically by `JsonValue::
   "type": "cli"
 }
 {
+  "capture_lost": false,
   "outcome": "signal",
   "signal": 15,
   "stderr": {"captured_bytes": 0, "total_bytes": 0, "truncated": false},
@@ -870,6 +895,7 @@ Use these bounded shapes, with keys serialized deterministically by `JsonValue::
   "type": "cli"
 }
 {
+  "capture_lost": false,
   "outcome": "timeout",
   "signal": 9,
   "stderr": {"captured_bytes": 0, "total_bytes": 0, "truncated": false},
@@ -877,6 +903,7 @@ Use these bounded shapes, with keys serialized deterministically by `JsonValue::
   "type": "cli"
 }
 {
+  "capture_lost": false,
   "outcome": "cancelled",
   "signal": 15,
   "stderr": {"captured_bytes": 0, "total_bytes": 0, "truncated": false},
@@ -884,6 +911,7 @@ Use these bounded shapes, with keys serialized deterministically by `JsonValue::
   "type": "cli"
 }
 {
+  "capture_lost": false,
   "error_code": "core.process.exec_failed",
   "outcome": "start_failure",
   "stderr": {"captured_bytes": 0, "total_bytes": 0, "truncated": false},
@@ -900,8 +928,10 @@ including zero-valued objects when no bytes were observed or capture mode retain
 required because schema v1 stores retained bytes and truncation flags but has no total-count columns. Captured output
 bytes remain outside result JSON. `captured_bytes` is the internal bounded buffer size before `on_error` success decides
 whether to omit durable `AttemptOutput`; mode `none` reports zero captured bytes while still counting successfully
-observed bytes in `total_bytes`. Pipe capture loss remains represented by existing output metadata rather than being
-duplicated in the result object.
+observed bytes in `total_bytes`. Pipe capture loss remains represented in existing output metadata whenever output is
+persisted. Every CLI result also contains the top-level Boolean `capture_lost`, preserving pipe-read or internal
+capture failure for mode `none` and for a successful `on_error` attempt where no `AttemptOutput` row is allowed.
+Configured truncation alone leaves `capture_lost=false`.
 
 All objects are far below the existing 256 KiB result limit and contain no output bytes or environment data.
 
@@ -932,12 +962,13 @@ remains limited to 4 MiB by `output.http_headers_limit`; no HTTP payload, attrib
 the public `AttemptOutputChannel` Doxygen, scheduler validation, fake executor validation, and focused tests together
 before real CLI completion can reach the scheduler.
 
-An unrecoverable Process pipe read or internal capture failure sets `capture_lost=true`. Configured truncation alone does
-not set capture loss. Output signals continue to be consumed and the child continues toward termination even after a
-retention limit is reached.
+An unrecoverable Process pipe read or internal capture failure sets `capture_lost=true` in both the CLI result and any
+persisted `AttemptOutput`. Configured truncation alone does not set capture loss. Output signals continue to be
+consumed and the child continues toward termination even after a retention limit is reached.
 
-The scheduler/persistence code is unchanged. It validates and commits output with the attempt/run transition using the
-existing schema-v1 columns.
+The schema and repository mapping remain unchanged. Scheduler validation changes only for the 64 MiB runner-neutral
+diagnostic guard described above and continues committing any selected output with the attempt/run transition using
+the existing schema-v1 columns.
 
 ## 18. `AttemptExecutorGroup`
 
@@ -999,12 +1030,16 @@ exactly-once discharge less clear.
 ### 19.1 Effective UID policy
 
 - By default, `CliAttemptExecutor::is_available(Cli)` is false when `geteuid()==0`.
-- `start()` repeats the UID check immediately before Process creation.
+- `start()` repeats the UID check immediately before Process creation as an early rejection.
+- The executor sets `ProcessStartInfo::require_non_root=true` unless the unsafe override is active. Process copies the
+  flag into child-safe storage, and the child authoritatively checks `geteuid()` immediately before the exec candidate
+  loop. No parent credential change can alter that child after `fork()`.
 - `jobud --allow-root-cli` is a valueless, explicit unsafe override.
 - When the override is active at root, log one prominent startup warning without job payload data.
 - Without the override, a root daemon may continue serving RPC and HTTP; CLI work remains pending rather than being
   converted into a failed attempt merely because deployment identity is unsafe.
-- A race that changes identity between availability admission and spawn produces a terminal safe start failure.
+- A race that changes the parent identity between availability admission and `fork()` produces terminal
+  `core.process.security_failed` from the child and the target never executes.
 - No per-job identity switch is attempted.
 
 ### 19.2 Linux no-new-privileges
@@ -1015,8 +1050,9 @@ The CLI executor sets `ProcessStartInfo::prevent_privilege_gain=true` on Linux. 
 set-user-ID, set-group-ID, and file-capability elevation from granting new privilege.
 
 macOS has no equivalent requirement in this phase. Root denial still applies. The public option is semantic rather
-than a Linux constant; requesting a strict unsupported mechanism returns a safe unsupported start error on a platform
-that cannot provide it.
+than a Linux constant; requesting a strict unsupported mechanism returns `core.process.security_unsupported` with
+category `Unsupported` on a platform that cannot provide it. An available mechanism that fails continues to return
+`core.process.security_failed`.
 
 ### 19.3 Diagnostic policy
 
@@ -1113,14 +1149,24 @@ Update documentation to state:
 | `core.process.fork_failed` | ResourceExhausted | `fork()` failed. |
 | `core.process.monitor_unsupported` | Unsupported | Required native child-exit monitoring is unavailable. |
 | `core.process.watch_failed` | Unavailable | Parent could not register all required native watches before gate release. |
+| `core.process.child_setup_failed` | Io | Process-group setup or child descriptor/signal-state setup failed before exec. |
 | `core.process.chdir_failed` | Io | Child could not enter the requested directory. |
-| `core.process.security_failed` | PermissionDenied | Required pre-exec privilege hardening failed. |
+| `core.process.security_unsupported` | Unsupported | Requested strict privilege hardening is unavailable on this platform. |
+| `core.process.security_failed` | PermissionDenied | Available pre-exec hardening or the required non-root policy failed. |
 | `core.process.exec_failed` | NotFound/PermissionDenied/Io | No executable candidate could be executed. |
 | `core.process.signal_failed` | Io | An explicit stop signal could not be delivered. |
 | `core.process.stop_conflict` | Conflict | A different semantic stop reason is already active. |
 
 Errors returned synchronously imply no later signal obligation unless `stop()` is called on an already accepted
 Process. Asynchronous child setup/exec errors appear in `ProcessExit::start_error` and `finished`.
+
+Parent- or child-side process-group setup and the fixed child error-record stages for descriptor
+duplication/cleanup or signal disposition/mask setup map to `core.process.child_setup_failed`; working-directory
+failure maps to `core.process.chdir_failed`; the authoritative non-root check or an available hardening operation
+failure maps to `core.process.security_failed`; and executable candidate failure to `core.process.exec_failed`.
+Unsupported hardening is known from the platform backend and rejected synchronously as
+`core.process.security_unsupported` before `fork()`.
+Only fixed safe stage tokens and numeric native codes may appear in `Error::detail`.
 
 ### 21.2 `jobu.cli.*`
 
@@ -1174,6 +1220,7 @@ No helper behavior depends on external commands, network, inherited environment,
 - public header compiles first and exposes no platform type;
 - default construction, Object parenting, affinity, noncopyability, and private-data inventory;
 - every invalid request class and stable safe detail token;
+- default and explicit `require_non_root` policy plus authoritative child-side rejection;
 - absolute exec and ordered bare-name PATH search;
 - missing PATH, empty/relative PATH entry, permission failure, and no candidate;
 - exact argv including empty and leading-dash arguments;
@@ -1183,14 +1230,14 @@ No helper behavior depends on external commands, network, inherited environment,
 - started/output/finished order and same owner thread;
 - arbitrary binary stdout/stderr, interleaving, data larger than pipe capacity, and complete tail drain;
 - numeric exit and signal result invariants;
-- async exec/chdir/security failure;
+- async child-setup/exec/chdir/security failure and unsupported-hardening distinction;
 - pidfd watch registration and fast exit without a missed event or zombie;
 - TERM-handled cancellation, TERM-to-KILL escalation, timeout, and zero grace;
 - same-group descendant termination on cancel, timeout, every leader exit, and destructor;
 - repeated same-reason stop and conflicting stop reason;
 - timeout begins before gate release and also terminates a helper stalled in pre-exec setup;
-- managed signals are blocked across `fork()`, parent masking is restored on every path, and inherited application
-  handlers cannot run in the child;
+- every blockable signal is blocked across `fork()`, parent masking is restored on every path, every catchable child
+  disposition is reset, and inherited application handlers cannot run in the child;
 - pre-exec signal death exercises the documented clean-EOF `started` limitation without claiming target execution;
 - injected pipe/watch/fork/read/signal failures where a private seam is required;
 - unrelated descriptor noninheritance and child signal reset; and
@@ -1199,17 +1246,22 @@ No helper behavior depends on external commands, network, inherited environment,
 ### 22.4 CLI policy/executor matrix
 
 - all payload defaults and valid optional fields;
+- absolute command without `PATH`, and bare command with valid explicit `PATH`;
+- bare command with missing, removed, empty, empty-entry, or relative-entry `PATH` is rejected;
 - NUL in arguments, working directory, and environment values; relative slash command; relative or over-4096-byte
   cwd; invalid env name/type/reserved name; size/count limits; and exit-code errors;
 - unknown additive top-level member preservation;
-- old minimal CLI payload remains valid;
+- old minimal CLI payload remains valid for an absolute command; bare command compatibility requires explicit `PATH`;
+- prepared aggregate boundaries include pointer arrays, NUL terminators, and worst-case injected metadata;
 - selector grammar, normalization, defaults, empty retry set, and expected-before-retry precedence;
 - output head/tail ordering for odd/even/zero limits and arbitrary chunk boundaries;
 - output mode `none`, `on_error`, and `always` for every outcome;
 - exact per-stream captured/total/truncated result metadata for zero, complete, truncated, and discarded capture;
+- result `capture_lost` for mode `none`, successful `on_error`, and persisted-output outcomes;
 - diagnostic retention from 4 MiB through the 64 MiB structural limit while HTTP headers remain capped at 4 MiB;
 - metadata environment IDs and stable run ID across retry attempts;
-- root availability and immediate pre-spawn recheck through a private identity seam;
+- root availability, immediate pre-spawn recheck, fixed Process policy propagation, and authoritative child rejection
+  through private identity seams;
 - unsupported type, duplicate key, rejected start, active cancel, and missing cancel;
 - Process signals connect with the executor as receiver;
 - executor private state is retired before the exact completion callback re-enters;
@@ -1277,7 +1329,8 @@ Comments are specifically required around:
 - why the start gate precedes target execution;
 - why all allocation/pointer preparation occurs before fork;
 - child error-record and close-on-exec ordering;
-- signal blocking around `fork()`, restoration on every parent path, and child disposition reset while blocked;
+- all-signal blocking around `fork()`, restoration on every parent path, and every catchable child disposition reset
+  while blocked;
 - child descriptor/signal cleanup;
 - parent/child `setpgid()` race closure;
 - observable exec-status resolution and `started` before first output despite readiness coalescing;
@@ -1286,6 +1339,7 @@ Comments are specifically required around:
 - timeout/cancel first-cause preservation;
 - capture ring ordering, result-metadata preservation, and total-byte overflow checks;
 - root recheck immediately before spawn;
+- authoritative child-side non-root check immediately before the exec candidate loop;
 - Process receiver-aware connections;
 - state erasure before user completion callback;
 - executor-group destruction order; and
@@ -1357,17 +1411,22 @@ Stop for review.
 
 ### Stage 6.3: Implement gated Linux spawn and exit reporting
 
-Implement pipes needed for the gate/exec status, signal blocking around `fork()`, process-group setup,
-absolute/bare-name `execve()`, asynchronous start failure, pidfd reaping, timeout arming before gate release, and the
-documented observable `started`/`finished` signals. stdout/stderr may temporarily be `/dev/null` in this stage.
+Implement pipes needed for the gate/exec status, blocking every blockable signal around `fork()`, resetting every
+catchable child disposition before installing the clean target mask, process-group setup, child-side non-root policy,
+absolute/bare-name `execve()`, asynchronous start failure, pidfd reaping, and the documented observable
+`started`/`finished` signals. stdout/stderr may temporarily be `/dev/null` in this stage. Timeout and explicit stop are
+implemented together in Stage 6.5.
 
 Verification:
 
 - absolute and PATH execution, immediate exit, numeric/signal exit, nonexistent/nonexecutable target, and cwd failure;
 - target cannot report execution before parent watch registration and `start()` acceptance;
 - parent signal masks are restored after fork failure and every successful parent path;
-- a pre-exec helper stall is covered by timeout and a pre-exec signal death does not produce a stronger `started`
-  claim than section 7.1 permits;
+- arbitrary inherited handlers such as `SIGHUP` and `SIGUSR1` cannot run in the child; target-visible catchable
+  dispositions are default and its blockable mask is clean;
+- a private child-identity seam proves `require_non_root` rejects immediately before the exec loop;
+- child setup stages map to `core.process.child_setup_failed`, while cwd and exec retain their specific codes;
+- a pre-exec signal death does not produce a stronger `started` claim than section 7.1 permits;
 - every accepted start emits exactly one later finish; rejected start emits none;
 - no missed fast exit and no zombie;
 - all post-fork code passes an async-signal-safety review with rationale comments.
@@ -1401,14 +1460,14 @@ Stop for review.
 
 ### Stage 6.5: Add group cancellation, timeout, and descendant cleanup
 
-Implement the stopping state, first-reason rule, TERM-to-KILL timer, group cleanup before reaping every leader exit,
-and destructor immediate kill/reap.
+Implement the stopping state, first-reason rule, launch timeout armed before gate release, TERM-to-KILL timer, group
+cleanup before reaping every leader exit, and destructor immediate kill/reap.
 
 Verification:
 
 - TERM-handled cancellation;
 - ignored TERM escalates to KILL;
-- automatic timeout and zero grace;
+- automatic timeout, pre-exec-stall timeout, rejection cleanup of an armed timeout, and zero grace;
 - same-reason idempotence and different-reason conflict;
 - same-group descendant termination for cancel, timeout, leader exit, and destructor;
 - group KILL is attempted while the leader remains unreaped, without replacing the recorded semantic outcome;
@@ -1423,9 +1482,8 @@ Stop for review.
 
 ### Stage 6.6: Harden Linux pre-exec state
 
-Implement descriptor close-from behavior, stdin EOF, managed signal reset while blocked followed by the prepared
-target mask, and strict
-`PR_SET_NO_NEW_PRIVS` support. Finish the full Linux Process matrix.
+Implement descriptor close-from behavior, stdin EOF, and strict `PR_SET_NO_NEW_PRIVS` support. Signal reset and target
+mask installation are already complete in Stage 6.3. Finish the full Linux Process matrix.
 
 Verification:
 
@@ -1434,6 +1492,8 @@ Verification:
 - target observes expected signal disposition/mask;
 - helper proves `NoNewPrivs: 1` when requested;
 - injected hardening failure prevents target execution and reports terminal start failure;
+- unsupported strict hardening maps to `core.process.security_unsupported`, while an available operation failure maps
+  to `core.process.security_failed`;
 - environment remains exactly explicit;
 - full Process and EventLoop regression tests pass.
 
@@ -1452,7 +1512,11 @@ Verification:
 
 - complete section 12 matrix;
 - over-4096-byte working directories and NUL-containing environment values fail at management time;
-- old `{command}` and `{command,arguments}` documents remain valid;
+- bare commands require a present, nonremoved, nonempty valid absolute-entry `PATH`; absolute commands do not;
+- prepared aggregate boundaries include pointer arrays, NULs, and worst-case injected metadata and cross-check against
+  Process validation;
+- old `{command}` and `{command,arguments}` documents remain valid when command is absolute, or when a bare command has
+  an explicit valid `PATH`;
 - unknown additive top-level fields survive serialization;
 - invalid data maps to safe `jobu.job.invalid_payload` reason tokens;
 - HTTP payload tests are unchanged and pass;
@@ -1497,6 +1561,7 @@ Verification:
 - odd/even/zero limits and arbitrary chunk boundaries retain exact first/last bytes;
 - total overflow and capture-loss handling;
 - deterministic result JSON size/shape including captured/total/truncated metadata for both streams;
+- `capture_lost` remains durable in result JSON for mode `none` and successful `on_error` without an output row;
 - scheduler and fake-executor diagnostic validation accepts up to 64 MiB while HTTP header attributes still cap
   capture at 4 MiB;
 - marker scan proves no payload/path/env/output leaks.
@@ -1563,6 +1628,8 @@ Verification:
 - success, expected nonzero, retryable/terminal exit, signal, start failure, timeout, and cancellation;
 - all capture modes and both first/last limits;
 - same run ID and incremented attempt metadata across two starts;
+- production wiring propagates `require_non_root`, and an authoritative child-side rejection prevents target
+  execution when the private identity seam reports root immediately before exec;
 - Process/executor destruction and descendant cleanup;
 - production Process signals, rather than private callbacks, carry reusable lifecycle/output events;
 - no sensitive diagnostics.
@@ -1744,8 +1811,8 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] macOS uses kqueue `EVFILT_PROC` and passes the complete Stage 6.18 verification.
 - [ ] The target cannot exec before every parent watch is installed.
 - [ ] The post-fork child path allocates nothing and calls no user/library code that is unsafe there.
-- [ ] Managed signals are blocked across `fork()`, the parent mask is always restored, and child dispositions are
-      reset before the prepared target mask is installed.
+- [ ] Every blockable signal is blocked across `fork()`, the parent mask is always restored, and every catchable child
+      disposition is reset before the clean target mask is installed.
 - [ ] No implicit shell parsing or ambient PATH lookup exists.
 - [ ] Environment starts empty and contains only explicit values plus three JobU metadata entries.
 - [ ] stdin reaches EOF and unrelated descriptors do not leak.
@@ -1755,11 +1822,15 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] TERM-to-KILL escalation and capacity retention are proven.
 - [ ] Same-group descendants die on cancel, timeout, leader exit, destructor, and future immediate kill.
 - [ ] Linux CLI target observes `NoNewPrivs: 1`.
-- [ ] Root CLI execution is denied by default and rechecked before spawn.
-- [ ] CLI payload defaults and old minimal documents are compatible.
+- [ ] Root CLI execution is denied by default, checked early in the executor, and enforced authoritatively by the child
+      immediately before `execve()`.
+- [ ] CLI payload defaults and old minimal absolute-command documents are compatible.
+- [ ] Bare commands require an explicit valid payload `PATH` at management time.
+- [ ] Management's worst-case prepared aggregate calculation guarantees acceptance by Process's deterministic limit.
 - [ ] Expected and retryable exit policy matches section 16.
 - [ ] Output first/last retention and capture-loss semantics match existing persistence validation.
 - [ ] CLI result JSON preserves captured, total, and truncated metadata for stdout and stderr.
+- [ ] CLI result JSON preserves `capture_lost` even when no `AttemptOutput` row is permitted.
 - [ ] Runner-neutral diagnostic retention accepts 64 MiB while HTTP header capture remains capped at 4 MiB.
 - [ ] AttemptExecutorGroup owns and safely destroys both runner implementations.
 - [ ] CLI and HTTP run concurrently with independent global and combined queue limits.
@@ -1770,6 +1841,7 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] The management RPC set remains 15 methods; API version is 1.2.
 - [ ] Every changed public declaration has useful Doxygen and first-include coverage.
 - [ ] Required non-obvious implementation blocks have rationale comments.
+- [ ] Stable errors distinguish child setup, unsupported hardening, and failed available hardening.
 - [ ] Changed C++ files are diagnostics-clean.
 - [ ] Full SQLite-enabled clean Linux tests pass.
 - [ ] SQLite-disabled configuration builds; no duplicate no-SQLite full CTest is required.
