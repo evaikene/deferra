@@ -115,7 +115,7 @@ shutdown contract in technical-plan section 15.2.
 | Receiver safety | Every Process signal slot that captures `CliAttemptExecutor` uses the executor as its receiver. |
 | Event-loop model | Spawn, pipe I/O, process exit, timeout, cancellation, and completion run on one owner EventLoop thread. Every pipe callback has a finite read budget so output cannot starve timers or other readiness. |
 | Readiness lifetime | Every Process fd/process readiness callback uses a one-way invalidatable per-registration anchor. Cleanup invalidates the anchor before attempting native removal or closing/resetting state, so retained or already-polled callbacks cannot access stale Process data. |
-| Child monitoring | Linux uses pidfds registered with epoll; macOS uses `EVFILT_PROC` in the existing kqueue backend. No global `SIGCHLD` handler or waiter thread is added. |
+| Child monitoring | Linux uses pidfds registered one-shot with epoll; macOS uses one-shot `EVFILT_PROC` in the existing kqueue backend. No global `SIGCHLD` handler or waiter thread is added. |
 | Reaping ownership | JobU retains the default, waitable `SIGCHLD` disposition and is the only code that may reap Process-owned child PIDs. |
 | Spawn mechanism | Linux uses `_Fork()` followed by the bounded pre-exec path because portable `posix_spawn()` cannot perform `no_new_privs` between creation and target execution. The later macOS backend uses `fork()` with the explicitly scoped at-fork contract in section 10.6. |
 | Start gate | The child cannot execute the target until parent-side pipe and process watches are registered successfully. A private Unix socket-pair gate uses platform no-`SIGPIPE` send support without inspecting or consuming host signals. |
@@ -515,10 +515,13 @@ These callbacks remain private EventLoop readiness callbacks; they are not subst
 ### 9.1 Linux epoll backend
 
 - `add_process()` invokes `pidfd_open(pid, 0)` through the Linux syscall interface and registers the returned
-  close-on-exec descriptor with epoll. It returns `Unsupported` only when native process monitoring is unavailable and
-  `Failed` for pidfd or epoll registration failures on an otherwise supported kernel.
+  close-on-exec descriptor with `EPOLLIN | EPOLLONESHOT`. It returns `Unsupported` only when native process monitoring
+  is unavailable and `Failed` for pidfd or epoll registration failures on an otherwise supported kernel.
 - The backend owns maps in both directions so a pidfd readiness event becomes a typed process event, never an
   accidental user fd event.
+- Process pidfds are never rearmed after readiness delivery. A pidfd remains readable after child exit, so one-shot
+  registration prevents a failed `remove_process()` from returning the same retained registration on every subsequent
+  `epoll_wait()` and driving the EventLoop into a busy loop.
 - A child remains behind the start gate until registration succeeds, eliminating the fast-exit registration race.
 - `remove_process()` removes the epoll registration, closes the pidfd, and erases both maps transactionally.
 - `Unsupported` maps to the safe `core.process.monitor_unsupported` start rejection; `Failed` maps to
@@ -555,6 +558,10 @@ This rule also applies when an observed stopping leader's process watch is retir
 deadline forcibly closes an output reader. Output-drain continuations additionally keep the receiver-bound Object
 lifetime rule in section 10.5. Persistent fake-backend removal failure must prove that later injected readiness,
 already-polled dispatch, Process reset/restart, and destruction all become safe no-ops for the invalid registration.
+On Linux, `EPOLLONESHOT` separately guarantees that a delivered pidfd registration retained after removal failure does
+not become continuously ready: later nonblocking polls produce no further event unless explicitly rearmed, and process
+watches are never rearmed. The invalidatable anchor remains mandatory because one-shot registration does not make an
+event already returned by `epoll_wait()` safe to dispatch after cleanup.
 
 ## 10. POSIX spawn, I/O, and completion ordering
 
@@ -1427,6 +1434,8 @@ constructing Process, allowing descriptor-normalization coverage without damagin
   continuation per channel, and does not delay timers, process-exit readiness, cancellation, or unrelated fd events;
 - persistent fd/process-watch removal failure followed by already-polled or later injected readiness cannot access a
   reset, restarted, or destroyed Process; each old-generation callback becomes permanently inert before removal;
+- a delivered Linux pidfd watch whose removal persistently fails produces no event on subsequent nonblocking polls,
+  does not spin the EventLoop, and does not delay unrelated timers or tasks;
 - numeric exit and signal result invariants;
 - async child-setup/exec/chdir/security failure and unsupported-hardening distinction;
 - pidfd watch registration and fast exit without a missed event or zombie;
@@ -1549,7 +1558,7 @@ In every stage that adds or changes a public header:
 
 Comments are specifically required around:
 
-- pidfd/epoll and `EVFILT_PROC` event tagging;
+- pidfd/epoll and `EVFILT_PROC` event tagging, including why process registrations are one-shot and never rearmed;
 - why the start gate precedes target execution;
 - why readiness callbacks use per-registration one-way invalidatable anchors and why invalidation must precede removal,
   descriptor close, reset, restart, and destruction;
@@ -1638,7 +1647,7 @@ Stop for review.
 ### Stage 6.2: Add Linux child-exit watches to EventLoop
 
 Extend the private backend event kind/process-watch operations, EventLoop dispatch maps, fake backend, and Linux pidfd
-epoll integration. Do not spawn through Process yet.
+epoll integration. Linux pidfds use `EPOLLIN | EPOLLONESHOT` and are never rearmed. Do not spawn through Process yet.
 
 Verification:
 
@@ -1647,6 +1656,8 @@ Verification:
 - registration distinguishes `Unsupported` from `Failed` and maps them to
   `core.process.monitor_unsupported` and `core.process.watch_failed` respectively;
 - real gated child pidfd readiness and exact `waitpid()` test;
+- a Linux backend removal-failure seam leaves a delivered registration installed, after which repeated nonblocking
+  polls return no further process event and unrelated timers/tasks continue to run;
 - fd identifiers cannot be confused with process identifiers;
 - no global signal handler, waiter thread, or timer polling;
 - existing EventLoop fd/timer/task tests remain green.
@@ -1679,7 +1690,8 @@ Verification:
   preexisting or concurrently thread-directed pending `SIGPIPE` untouched, and leaves no watch, timer, descriptor, or
   zombie;
 - exec-status/process-watch removal failure retains at most an invalid-anchored callback; later readiness, reset,
-  restart, and destruction perform no stale access;
+  restart, and destruction perform no stale access, and a delivered retained pidfd registration cannot repeatedly wake
+  the EventLoop;
 - launches remain correctly wired when descriptors 0, 1, 2, or 3 are closed individually or together before Process
   creates its descriptors;
 - arbitrary inherited handlers such as `SIGHUP` and `SIGUSR1` cannot run in the child; target-visible catchable
@@ -2121,7 +2133,8 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] Attempt and routing completions remain exact callbacks.
 - [ ] Every Process readiness callback is protected by a one-way per-registration anchor invalidated before removal,
       close, reset, restart, or destruction.
-- [ ] Linux child exit uses pidfd/epoll with no waiter thread or SIGCHLD handler.
+- [ ] Linux child exit uses `EPOLLIN | EPOLLONESHOT` pidfd registration with no rearm, waiter thread, or SIGCHLD
+      handler; persistent removal failure cannot repeatedly wake or spin the EventLoop.
 - [ ] macOS uses kqueue `EVFILT_PROC` and passes the complete Stage 6.18 verification.
 - [ ] The target cannot exec before every parent watch is installed.
 - [ ] Linux uses `_Fork()` so application `pthread_atfork()` handlers cannot enter the child; the macOS guarantee is
