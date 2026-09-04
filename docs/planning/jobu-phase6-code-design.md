@@ -104,21 +104,22 @@ that stage, record the exact evidence, and revise this design before changing th
 | Notifications | Process lifecycle and output are signals; the one accepted attempt's completion remains `AttemptCompletionHandler`. |
 | Receiver safety | Every Process signal slot that captures `CliAttemptExecutor` uses the executor as its receiver. |
 | Event-loop model | Spawn, pipe I/O, process exit, timeout, cancellation, and completion run on one owner EventLoop thread. Every pipe callback has a finite read budget so output cannot starve timers or other readiness. |
+| Readiness lifetime | Every Process fd/process readiness callback uses a one-way invalidatable per-registration anchor. Cleanup invalidates the anchor before attempting native removal or closing/resetting state, so retained or already-polled callbacks cannot access stale Process data. |
 | Child monitoring | Linux uses pidfds registered with epoll; macOS uses `EVFILT_PROC` in the existing kqueue backend. No global `SIGCHLD` handler or waiter thread is added. |
 | Reaping ownership | JobU retains the default, waitable `SIGCHLD` disposition and is the only code that may reap Process-owned child PIDs. |
 | Spawn mechanism | Linux uses `_Fork()` followed by the bounded pre-exec path because portable `posix_spawn()` cannot perform `no_new_privs` between creation and target execution. The later macOS backend uses `fork()` with the explicitly scoped at-fork contract in section 10.6. |
-| Start gate | The child cannot execute the target until parent-side pipe and process watches are registered successfully. |
+| Start gate | The child cannot execute the target until parent-side pipe and process watches are registered successfully. A private Unix socket-pair gate uses platform no-`SIGPIPE` send support without inspecting or consuming host signals. |
 | Child safety | All allocation, JSON/path parsing, vectors, signal sets, descriptors, and `char*` arrays are prepared before process creation; every blockable signal is blocked across creation and every catchable inherited disposition is reset before the clean target mask is installed. Process-controlled child code uses only async-signal-safe operations. |
 | Environment | Target environment starts empty. Job-supplied entries and JobU metadata are the only entries. |
 | PATH | Bare names require an explicit `PATH`; entries must be nonempty absolute directories, are searched in order, and have bounded count and expanded candidate storage. |
 | Standard input | File descriptor 0 reads EOF from `/dev/null`; JobU never writes input in v1. |
 | Output | stdout and stderr stay separate, are drained fairly in bounded chunks through EOF or an explicit bounded capture-loss terminal, and never become permanent process backpressure after capture limits. |
-| Completion barrier | `finished` is emitted only after the direct child is reaped and both output pipes reached EOF or an explicit capture-loss condition, including forced closure at the bounded post-reap drain deadline. |
+| Completion barrier | Reaping immediately enters non-signallable `Finishing` and invalidates PID/PGID state. `finished` is emitted only after both output pipes reach EOF or an explicit capture-loss condition, including forced closure at the bounded post-reap drain deadline. |
 | Descendants | Every child is a process-group leader; stop signals target the group. Remaining same-group descendants are killed immediately after a natural leader exit, or at the existing grace deadline when a stopping leader exits early. |
 | Timeout/cancel | Send `SIGTERM`, retain capacity, preserve an exited leader unreaped so the complete group receives `cli.termination_grace`, then send `SIGKILL` at the deadline if the group may remain. |
 | Root policy | CLI execution is unavailable at effective UID 0 unless the explicit unsafe daemon override is set; the parent rechecks before spawn and `Process` authoritatively enforces the fixed policy in the child immediately before `execve()`. |
 | Linux hardening | A Linux CLI child must successfully set `PR_SET_NO_NEW_PRIVS=1` before `execve()` or complete as a terminal start failure. |
-| Executor routing | A generic owned executor group routes by `JobType` and outlives/destroys child executors safely. Scheduler still borrows one `AttemptExecutor`. |
+| Executor routing | A generic owned executor group routes by `JobType`, rejects Object-derived executors that already have a parent, and outlives/destroys accepted child executors safely. Scheduler still borrows one `AttemptExecutor`. |
 | Capture persistence | Existing `AttemptOutput` and schema-v1 stdout/stderr columns are reused unchanged. |
 | Compatibility | Unknown additive CLI payload members remain preserved and ignored; old minimal payloads remain valid for absolute commands, while bare commands require an explicit valid payload `PATH`. |
 | Error safety | Errors, results, and logs never contain command, arguments, paths, environment names/values, or output bytes. |
@@ -170,7 +171,7 @@ src/core/process.hpp                         public Process contract
 src/core/process.cpp                         Object construction and public forwarding
 src/core/process_priv.hpp                    ProcessPrivate : ObjectPrivate
 src/core/process_request_priv.hpp/.cpp       validation and pre-fork argv/env/PATH preparation
-src/core/process_posix_priv.hpp/.cpp         common pipes, gate, exec error, reaping, group stop
+src/core/process_posix_priv.hpp/.cpp         common pipes, socket gate, exec error, reaping, group stop
 src/core/process_linux_priv.cpp              _Fork, pidfd, and no_new_privs operations
 src/core/process_macos_priv.cpp              later mandatory fork/macOS platform operations
 ```
@@ -263,6 +264,7 @@ enum class ProcessState : std::uint8_t {
     Starting,
     Running,
     Stopping,
+    Finishing,
 };
 
 enum class ProcessExitKind : std::uint8_t {
@@ -352,15 +354,24 @@ rules receive useful Doxygen in the actual header. The sketch omits comments onl
 - Repeating `stop()` in `Stopping` with the same reason succeeds idempotently. A different reason returns
   `core.process.stop_conflict` and does not replace the first terminal cause. A call in `NotRunning` returns the stable
   `core.process.invalid_state` error.
+- Immediately after the direct child is reaped, Process clears its child PID and process-group ID and enters
+  `Finishing` before performing another output drain or invoking any user-visible signal. `Finishing` means no owned
+  target can be signalled, but one or both output channels are still reaching EOF or their bounded loss terminal.
+  `process_id()` is empty and `start()` remains invalid in this state.
+- `stop()` in `Finishing` never invokes `kill()`. If an explicit stop reason was accepted earlier, repeating that same
+  reason succeeds idempotently and a different reason returns `core.process.stop_conflict`; otherwise it returns
+  `core.process.invalid_state`. A timeout-fixed result is not replaced by a later explicit stop.
 - The request's `timeout`, when present, is monotonic and internally starts the same TERM-to-KILL path with
   `ProcessExitKind::TimedOut`. Its deadline starts when launch is accepted, before the child gate is released; it is
   not deferred until exec-status resolution.
 - `finished` is emitted exactly once for every successful `start()` acceptance, including asynchronous start failure.
-- `state()` is `NotRunning` and `process_id()` is empty before `finished` emission. A direct slot may therefore schedule
-  another start, but must not synchronously delete the sender; use `delete_later()`.
+- Once both output channels are terminal, `state()` becomes `NotRunning` before `finished` emission; `process_id()` has
+  already been empty since entry to `Finishing`. A direct slot may therefore schedule another start, but must not
+  synchronously delete the sender; use `delete_later()`.
 - A rejected `start()` emits no signal and leaves `NotRunning`.
-- The destructor suppresses signals, sends immediate `SIGKILL` to an active group, closes watches/pipes, and reaps its
-  direct child. It never calls user code.
+- The destructor suppresses signals and invalidates every readiness anchor before attempting watch removal. It sends
+  immediate `SIGKILL` and reaps only while native child/group identity is still valid, then closes descriptors. In
+  `Finishing`, the identifiers are already invalid and destruction must not send a signal. It never calls user code.
 
 ### 7.2 Exit invariants
 
@@ -393,7 +404,8 @@ All potentially allocating work occurs before `_Fork()` on Linux or `fork()` on 
 2. build executable candidates;
 3. build stable owning argv/environment string storage;
 4. build null-terminated `char*` arrays whose pointers cannot be invalidated;
-5. open `/dev/null`, create all internal/output pipes, and normalize their descriptors above 3;
+5. open `/dev/null`, create the internal/output pipes and start-gate socket pair, and normalize their descriptors above
+   3;
 6. cache the descriptor-close upper bound needed by the child fallback path; and
 7. prepare the full blockable-signal set and clean target mask used around process creation.
 
@@ -498,6 +510,25 @@ The design intentionally does not install a process-global `SIGCHLD` handler. pi
 child readiness and avoid handler ownership conflicts. Phase 7 may add separate EventLoop signal-watching support for
 daemon `SIGTERM` and `SIGINT`; it must not replace this process watch without new evidence.
 
+### 9.3 Process callback lifetime and failed removal
+
+`EventLoop::unwatch_fd()` and the private process-watch removal operation may fail while retaining the old callback
+registration. Closing a descriptor also does not make a retained C++ callback safe, and an event already returned by
+the backend may still be waiting for EventLoop dispatch. Process must therefore not rely on successful native removal
+for callback lifetime.
+
+Each accepted readiness registration—stdout, stderr, exec status, and process exit—gets a distinct private shared
+anchor. The EventLoop callback captures only a weak reference to that anchor, never an unguarded Process/private-data
+pointer. The anchor identifies its owner and accepted-start generation while valid. Before every removal attempt,
+descriptor close, per-run reset, or Process destruction, invalidate the affected anchor first. A callback whose weak
+anchor expired, is invalid, or belongs to an old generation returns without accessing Process state or reposting work.
+Anchors are one-way: a subsequent `start()` creates new anchors rather than reactivating an old one.
+
+This rule also applies when an observed stopping leader's process watch is retired before reap and when the post-reap
+deadline forcibly closes an output reader. Output-drain continuations additionally keep the receiver-bound Object
+lifetime rule in section 10.5. Persistent fake-backend removal failure must prove that later injected readiness,
+already-polled dispatch, Process reset/restart, and destruction all become safe no-ops for the invalid registration.
+
 ## 10. POSIX spawn, I/O, and completion ordering
 
 ### 10.1 Descriptor set
@@ -507,10 +538,12 @@ Before platform child creation, create:
 - stdout pipe: blocking child writer, nonblocking close-on-exec parent reader;
 - stderr pipe: blocking child writer, nonblocking close-on-exec parent reader;
 - exec-status pipe: fixed-size child error record, close-on-exec writer;
-- start-gate pipe: the child blocks until parent setup succeeds; and
+- start-gate Unix-domain stream socket pair: the child blocks until parent setup succeeds, while the parent endpoint
+  supports platform-local no-`SIGPIPE` send; and
 - a read-only `/dev/null` descriptor for stdin.
 
-All creation is checked. A failure closes every previously created descriptor and returns without creating a child.
+All creation and required parent-end socket option setup are checked. A failure closes every previously created
+descriptor and returns without creating a child.
 
 Every descriptor created for Process is normalized to a value greater than 3 before process creation. If an
 `open()` or pipe operation returns 0, 1, 2, or 3 because the embedding process had closed a conventional descriptor,
@@ -529,7 +562,8 @@ remapping. This normalization is distinct from Stage 6.6's later cleanup of unre
 5. Establish the child process group from the parent side while the child remains gated.
 6. Register stdout, stderr, exec-status, and process-exit watches.
 7. Enter `Starting` and arm the monotonic timeout from the accepted-launch deadline.
-8. Release exactly one gate byte through the local no-`SIGPIPE` operation described below and close the gate.
+8. Send exactly one gate byte through the platform-local no-`SIGPIPE` socket operation described below and close the
+   gate endpoint.
 9. Return success.
 10. On clean exec-status EOF, apply section 7.1's state rule and emit `started`; do not restart or extend the timeout.
 
@@ -537,20 +571,24 @@ If any step before gate release fails, cancel an armed timeout, close the gate, 
 reap it synchronously, clean all resources, restore the parent signal mask if it has not yet been restored, and return
 a start error with no signal obligation.
 
-Gate release must not rely on a process-global ignored `SIGPIPE`. The private parent-side operation temporarily blocks
-`SIGPIPE` in the calling thread, records whether that signal was already pending, writes the gate byte, and handles
-`EPIPE` as a controlled start rejection. If the write generated a new pending `SIGPIPE`, consume exactly that signal
-with a zero-timeout signal wait before restoring the caller's mask; never consume a signal that was already pending.
-On `EPIPE`, cancel the launch timeout, kill/reap if still necessary, remove all registered watches, close all
-descriptors, and return `core.process.child_setup_failed` with a fixed gate-closed detail token. A successful
-`start()` is never reported for a child that disappears before gate release.
+Gate release must not rely on a process-global ignored `SIGPIPE`, temporary thread masking, pending-signal inspection,
+or `sigwait()` consumption. The gate is a Unix-domain stream socket pair created and normalized before process
+creation. Linux sends the byte with `send(..., MSG_NOSIGNAL)`. The macOS setup enables `SO_NOSIGPIPE` on the parent's
+sending endpoint before `fork()` and then uses `send()`. These operations atomically suppress only a gate-send-generated
+`SIGPIPE`; a host signal already pending or concurrently directed to the owner thread remains untouched.
+
+Retry `send()` on `EINTR`. `EPIPE`, connection reset, a zero/short transfer, or another terminal send failure is a
+controlled start rejection: cancel the launch timeout, kill/reap if still necessary, invalidate every callback anchor
+before removing registered watches, close all descriptors, and return `core.process.child_setup_failed` with a fixed
+safe gate-failure detail token. A successful `start()` is never reported for a child that disappears before gate
+release.
 
 ### 10.3 Child sequence
 
 The child branch uses prebuilt buffers and fixed records only:
 
 1. close parent-only descriptor ends;
-2. wait for the gate byte; EOF means exit immediately without executing a target;
+2. read the gate byte from the child socket endpoint; EOF means exit immediately without executing a target;
 3. make itself process-group leader with `setpgid(0, 0)`;
 4. collision-safely duplicate the normalized `/dev/null`, stdout, stderr, and exec-status sources onto descriptors 0,
    1, 2, and 3, then set close-on-exec on descriptor 3;
@@ -609,23 +647,29 @@ descriptors into the target:
   process group before reaping. Keep the leader unreaped until this group kill is attempted so its PID/PGID cannot be
   reused. This prevents an unjoined same-group descendant from surviving the attempt.
 - If leader exit readiness arrives in `Stopping` while grace remains, record `leader_exit_observed`, remove the
-  process-readiness watch so it cannot redispatch, but deliberately do not reap the child or send an early
-  `SIGKILL`. Continue bounded output draining and retain scheduler capacity. Keeping the leader as an owned zombie
-  prevents PID/PGID reuse while every descendant receives the complete configured TERM grace.
+  process-readiness watch so it cannot redispatch, but deliberately do not reap the child or send an early `SIGKILL`.
+  Invalidate that registration's callback anchor before attempting removal. Continue bounded output draining and
+  retain scheduler capacity. Keeping the leader as an owned zombie prevents PID/PGID reuse while every descendant
+  receives the complete configured TERM grace.
 - At the grace deadline, send `SIGKILL` to the process group. If `leader_exit_observed` is set, reap the retained leader
   immediately afterward; otherwise keep the process-exit watch and reap when exit readiness arrives. The cleanup
   signal does not replace the recorded cancellation or timeout outcome. Even if both output pipes reached EOF, a
   retained leader is not reaped or completed early because pipe closure does not prove that every same-group
   descendant has exited.
-- After the group-kill attempt and direct-child reap, immediately drain both output readers again. If either reader is
-  still open, arm the private monotonic `kPostReapDrainTimeout = 1s` deadline while normal readiness draining
-  continues. EOF on both channels cancels that deadline and permits completion.
+- Immediately after any successful direct-child reap, invalidate the process-watch anchor and clear the stored child
+  PID and process-group ID before another drain, signal emission, or reentrant call can occur. Enter `Finishing`; no
+  path from this point may call `kill()` with the former numeric identifiers. Then drain both output readers again. If
+  either reader is still open, arm the private monotonic `kPostReapDrainTimeout = 1s` deadline while normal readiness
+  draining continues. EOF on both channels cancels that deadline and permits completion.
 - When the post-reap deadline expires, cancel any pending continuation and give each remaining reader one final
   `kPipeReadBudgetBytes` drain only. Do not loop through `EAGAIN` and do not repost. If EOF is not reached within that
-  finite drain, unwatch and close the reader and mark only that channel lost. This bounds completion when a descendant
-  escaped the process group or continuously writes through a retained output descriptor, without discarding already
-  readable tail bytes within the final budget or weakening the normal EOF path.
-- Remove every watch and timer, reset state, and release native handles before emitting `finished`.
+  finite drain, invalidate its callback anchor before unwatching and closing the reader, then mark only that channel
+  lost. This bounds completion when a descendant escaped the process group or continuously writes through a retained
+  output descriptor, without discarding already readable tail bytes within the final budget or weakening the normal
+  EOF path.
+- Invalidate every remaining registration anchor before attempting watch removal, cancel every timer, release handles,
+  and enter `NotRunning` before emitting `finished`. Failed backend removal may retain only a callback whose anchor is
+  permanently inert.
 
 Descendants that deliberately create a new session or process group are outside the v1 guarantee. Tests cover normal
 forked descendants that remain in the attempt group. Escaping the group does not, however, permit a descendant to
@@ -659,7 +703,8 @@ private libc entry point or introduce a helper-process architecture without a se
    bounded pipe draining without sending early `SIGKILL`;
 6. when the timer expires, send `SIGKILL` to `-pgid`, then reap an already-observed retained leader or wait for the
    still-running leader's exit readiness;
-7. only after the group-kill attempt and leader reap, enter the post-reap output barrier; and
+7. immediately after the group-kill attempt and leader reap, clear PID/PGID, enter non-signallable `Finishing`, and
+   start the post-reap output barrier; and
 8. finish only after both output channels reach EOF or their bounded loss terminal.
 
 `ESRCH` is success when the process group is already gone. Other initial `kill()` failures return
@@ -682,10 +727,11 @@ child handles TERM and exits with a code.
 Process destruction is fail-safe cleanup, not a normal completion:
 
 - disconnect/suppress outgoing signals;
-- cancel timers and remove watches;
-- send immediate `SIGKILL` to the process group;
+- permanently invalidate all readiness anchors, then cancel timers and attempt to remove watches;
+- send immediate `SIGKILL` only when an unreaped child's process-group ID remains valid;
 - close pipe readers;
-- synchronously reap the direct child with EINTR handling; and
+- synchronously reap the direct child with EINTR handling when it has not already been reaped;
+- never signal a saved numeric identifier after entry to `Finishing`; and
 - return without emitting `finished`.
 
 `ProcessStopReason::Interrupted` and `ProcessExitKind::Interrupted` reserve an explicit observed interruption for a
@@ -1089,6 +1135,14 @@ Rules:
 
 - one owned executor may be registered per `JobType`;
 - null/duplicate registration is rejected before use;
+- before storing an executor, `add()` uses cross-cast from the polymorphic `AttemptExecutor` to detect an
+  Object-derived implementation. If that Object already has a non-null parent, reject it with
+  `jobu.executor.invalid_registration`; the group must never coexist with Object-tree ownership of the same executor;
+- rejection stores no pointer or route. The by-value `unique_ptr` is destroyed before `add()` returns, so a rejected
+  parented Object unlinks itself from its parent exactly once and cannot leave either owner with a dangling pointer;
+- successful registration is an exclusive ownership transfer. An accepted Object-derived executor must have
+  `parent()==nullptr` for the rest of its group-owned lifetime and must not be reparented through a retained raw
+  pointer; this ownership constraint is documented on `add()`;
 - `start()` rejects an unregistered type or duplicate active key;
 - after child acceptance, remember the exact key-to-executor route;
 - wrap the child completion only to retire that route before forwarding the original exact callback;
@@ -1222,7 +1276,7 @@ Update documentation to state:
 | `core.process.invalid_request` | InvalidArgument | Executable, args, env, cwd, duration, PATH, or aggregate limits are invalid. |
 | `core.process.signal_configuration` | Conflict | `SIGCHLD` is configured to discard child status, so Process cannot promise an exit result. |
 | `core.process.event_loop_unavailable` | Unavailable | No valid owner-thread EventLoop is available. |
-| `core.process.resource_setup_failed` | ResourceExhausted/Io | Pipe, `/dev/null`, or descriptor setup failed before child creation. |
+| `core.process.resource_setup_failed` | ResourceExhausted/Io | Pipe, socket pair, `/dev/null`, or descriptor setup failed before child creation. |
 | `core.process.fork_failed` | ResourceExhausted | Platform child creation failed. |
 | `core.process.monitor_unsupported` | Unsupported | Required native child-exit monitoring is unavailable. |
 | `core.process.watch_failed` | Unavailable | Parent could not register all required native watches before gate release. |
@@ -1237,10 +1291,11 @@ Update documentation to state:
 Errors returned synchronously imply no later signal obligation unless `stop()` is called on an already accepted
 Process. Asynchronous child setup/exec errors appear in `ProcessExit::start_error` and `finished`.
 
-Gate `EPIPE`, parent- or child-side process-group setup, and the fixed child error-record stages for descriptor
-duplication/cleanup or signal disposition/mask setup map to `core.process.child_setup_failed`; working-directory
-failure maps to `core.process.chdir_failed`; the authoritative non-root check or an available hardening operation
-failure maps to `core.process.security_failed`; and executable candidate failure to `core.process.exec_failed`.
+Terminal gate-send failure, parent- or child-side process-group setup, and the fixed child error-record stages for
+descriptor duplication/cleanup or signal disposition/mask setup map to `core.process.child_setup_failed`;
+working-directory failure maps to `core.process.chdir_failed`; the authoritative non-root check or an available
+hardening operation failure maps to `core.process.security_failed`; and executable candidate failure to
+`core.process.exec_failed`.
 Unsupported hardening is known from the platform backend and rejected synchronously as
 `core.process.security_unsupported` before child creation.
 Only fixed safe stage tokens and numeric native codes may appear in `Error::detail`.
@@ -1261,7 +1316,8 @@ Only fixed safe stage tokens and numeric native codes may appear in `Error::deta
 
 ### 21.3 `jobu.executor.*`
 
-The group adds safe registration/routing errors such as `jobu.executor.invalid_registration`,
+The group adds safe registration/routing errors such as `jobu.executor.invalid_registration` (including a null or
+already-parented executor),
 `jobu.executor.duplicate_type`, `jobu.executor.unsupported_type`, `jobu.executor.duplicate_attempt`, and
 `jobu.executor.attempt_not_found`. Existing `jobu.executor.invalid_completion` remains Scheduler-owned.
 
@@ -1314,6 +1370,8 @@ constructing Process, allowing descriptor-normalization coverage without damagin
 - arbitrary binary stdout/stderr, interleaving, data larger than pipe capacity, and complete tail drain;
 - continuously readable stdout/stderr consumes no more than 256 KiB per callback, coalesces one lifetime-safe
   continuation per channel, and does not delay timers, process-exit readiness, cancellation, or unrelated fd events;
+- persistent fd/process-watch removal failure followed by already-polled or later injected readiness cannot access a
+  reset, restarted, or destroyed Process; each old-generation callback becomes permanently inert before removal;
 - numeric exit and signal result invariants;
 - async child-setup/exec/chdir/security failure and unsupported-hardening distinction;
 - pidfd watch registration and fast exit without a missed event or zombie;
@@ -1326,6 +1384,8 @@ constructing Process, allowing descriptor-normalization coverage without damagin
 - escaped-session descendants retaining or continuously writing stdout or stderr reach the one-second post-reap
   deadline; the final drain remains within one 256 KiB budget, preserves bytes read within that budget, marks only the
   affected channel lost, and cannot retain capacity indefinitely;
+- direct-child reap clears PID/PGID and enters `Finishing` before post-reap output delivery; reentrant `stop()` and
+  destruction from that interval issue no signal to the former numeric process group;
 - repeated same-reason stop and conflicting stop reason;
 - timeout begins before gate release and also terminates a helper stalled in pre-exec setup;
 - every blockable signal is blocked across process creation, parent masking is restored on every path, every catchable
@@ -1333,8 +1393,9 @@ constructing Process, allowing descriptor-normalization coverage without damagin
 - Linux `_Fork()` bypasses a synthetic `pthread_atfork()` child handler; macOS coverage follows section 10.6's scoped
   contract;
 - pre-exec signal death exercises the documented clean-EOF `started` limitation without claiming target execution;
-- pre-gate child death produces controlled `EPIPE` rejection without delivering `SIGPIPE` or leaking watches, timers,
-  descriptors, or a zombie;
+- pre-gate child death produces controlled socket-send rejection without delivering `SIGPIPE` or leaking watches,
+  timers, descriptors, or a zombie; a `SIGPIPE` already pending or directed to the owner thread during release remains
+  pending and is never consumed by Process;
 - descriptors 0, 1, 2, and 3 closed individually and together cannot collide with prepared child sources or miswire
   target stdio/exec status;
 - injected pipe/watch/child-creation/read/signal failures where a private seam is required;
@@ -1371,6 +1432,9 @@ constructing Process, allowing descriptor-normalization coverage without damagin
 ### 22.5 Executor group matrix
 
 - null, duplicate, and valid type registration;
+- already-parented Object-derived executor rejection leaves the group unchanged, destroys/unlinks the rejected object
+  exactly once, and leaves the parent's child list clean;
+- an accepted Object-derived executor is unparented and exclusively group-owned through destruction;
 - independent dynamic availability;
 - CLI/HTTP start routing and key-to-executor cancellation routing;
 - duplicate active key rejection across types;
@@ -1427,10 +1491,12 @@ Comments are specifically required around:
 
 - pidfd/epoll and `EVFILT_PROC` event tagging;
 - why the start gate precedes target execution;
+- why readiness callbacks use per-registration one-way invalidatable anchors and why invalidation must precede removal,
+  descriptor close, reset, restart, and destruction;
 - why all allocation/pointer preparation and PATH expansion occur before process creation and remain bounded;
 - why Linux uses `_Fork()` and where the macOS `pthread_atfork()` boundary begins and ends;
 - collision-safe normalization when conventional descriptors were closed by the host;
-- local gate-write `SIGPIPE` suppression, preservation of a previously pending signal, and `EPIPE` cleanup;
+- socket-gate `MSG_NOSIGNAL`/`SO_NOSIGPIPE` selection, non-interference with host signal state, and failed-send cleanup;
 - child error-record and close-on-exec ordering;
 - all-signal blocking around process creation, restoration on every parent path, and every catchable child disposition
   reset while blocked;
@@ -1443,13 +1509,14 @@ Comments are specifically required around:
 - why the post-reap final drain has a hard byte budget and never reposts;
 - why natural/expired-grace cleanup kills the group before leader reap, while a leader exiting during active grace is
   retained unreaped until the deadline to preserve both descendant grace and PID/PGID reuse protection;
+- why reap clears PID/PGID and enters non-signallable `Finishing` before post-reap output can re-enter Process;
 - timeout/cancel first-cause preservation;
 - capture ring ordering, result-metadata preservation, and total-byte overflow checks;
 - root recheck immediately before spawn;
 - authoritative child-side non-root check immediately before the exec candidate loop;
 - Process receiver-aware connections;
 - state erasure before user completion callback;
-- executor-group destruction order; and
+- executor-group rejection of already-parented Object-derived executors and destruction order; and
 - durable-before-external-effect assertions in integration tests.
 
 Do not add comments that merely translate a statement into English. Comments should preserve the reason a future
@@ -1488,7 +1555,7 @@ unavailable until the Linux backend stages; invalid requests must already be def
 
 Verification:
 
-- standalone header, type, noncopyability, signal signature, and Object parenting tests;
+- standalone header, type, noncopyability, `Finishing` state, signal signature, and Object parenting tests;
 - all section 8 validation, SIGCHLD-disposition, and PATH candidate tests;
 - aggregate-size, PATH entry/expansion boundary, and pointer-stability tests;
 - Process public header contains no native type and no second pimpl/data member;
@@ -1507,7 +1574,8 @@ epoll integration. Do not spawn through Process yet.
 
 Verification:
 
-- fake registration, replacement/rejection, removal, typed dispatch, callback removal, and backend-failure tests;
+- fake registration, replacement/rejection, removal, typed dispatch, retained-callback behavior, and backend-failure
+  tests;
 - registration distinguishes `Unsupported` from `Failed` and maps them to
   `core.process.monitor_unsupported` and `core.process.watch_failed` respectively;
 - real gated child pidfd readiness and exact `waitpid()` test;
@@ -1523,12 +1591,13 @@ Stop for review.
 
 ### Stage 6.3: Implement gated Linux spawn and exit reporting
 
-Implement Linux `_Fork()`, pipes needed for the gate/exec status, collision-safe normalization of Process-created
-descriptors above 3, local no-`SIGPIPE` gate release, blocking every blockable signal around child creation, resetting
-every catchable child disposition before installing the clean target mask, process-group setup, child-side non-root
-policy, absolute/bare-name `execve()`, asynchronous start failure, pidfd reaping, and the documented observable
-`started`/`finished` signals. stdout/stderr may temporarily be `/dev/null` in this stage. General inherited-descriptor
-cleanup remains in Stage 6.6; timeout and explicit stop are implemented together in Stage 6.5.
+Implement Linux `_Fork()`, the start-gate Unix socket pair, exec-status pipe, collision-safe normalization of
+Process-created descriptors above 3, `MSG_NOSIGNAL` gate release, blocking every blockable signal around child
+creation, resetting every catchable child disposition before installing the clean target mask, process-group setup,
+child-side non-root policy, absolute/bare-name `execve()`, asynchronous start failure, pidfd reaping, per-registration
+callback anchors, and the documented observable `started`/`finished` signals. stdout/stderr may temporarily be
+`/dev/null` in this stage. General inherited-descriptor cleanup remains in Stage 6.6; timeout and explicit stop are
+implemented together in Stage 6.5.
 
 Verification:
 
@@ -1538,8 +1607,11 @@ Verification:
 - target cannot report execution before parent watch registration and `start()` acceptance;
 - parent signal masks are restored after `_Fork()` failure and every successful parent path;
 - a synthetic `pthread_atfork()` child handler is not invoked through Linux `_Fork()`;
-- pre-release child death returns controlled `core.process.child_setup_failed`, does not deliver `SIGPIPE`, preserves
-  any previously pending `SIGPIPE`, and leaves no watch, timer, descriptor, or zombie;
+- pre-release child death returns controlled `core.process.child_setup_failed`, does not deliver `SIGPIPE`, leaves
+  preexisting or concurrently thread-directed pending `SIGPIPE` untouched, and leaves no watch, timer, descriptor, or
+  zombie;
+- exec-status/process-watch removal failure retains at most an invalid-anchored callback; later readiness, reset,
+  restart, and destruction perform no stale access;
 - launches remain correctly wired when descriptors 0, 1, 2, or 3 are closed individually or together before Process
   creates its descriptors;
 - arbitrary inherited handlers such as `SIGHUP` and `SIGUSR1` cannot run in the child; target-visible catchable
@@ -1560,8 +1632,8 @@ Stop for review.
 ### Stage 6.4: Add asynchronous stdout and stderr
 
 Connect separate pipes, nonblocking edge-triggered draining, the 64 KiB read chunk and 256 KiB callback budget,
-coalesced receiver-bound continuations, binary chunk signals, exec-before-output ordering, channel EOF/loss state,
-and the finish barrier.
+per-registration invalidatable anchors, coalesced receiver-bound continuations, binary chunk signals,
+exec-before-output ordering, channel EOF/loss state, and the finish barrier.
 
 Verification:
 
@@ -1572,6 +1644,8 @@ Verification:
 - timers, a second watched descriptor, and process-exit readiness progress while one or both streams remain
   continuously readable;
 - destroying Process with a pending continuation produces no callback, stale access, or repost;
+- persistent stdout/stderr unwatch failure followed by already-polled or later readiness is inert after channel close,
+  Process reset/restart, and Process destruction;
 - per-channel byte order and complete tail capture;
 - `started` precedes output and `finished` follows both EOFs;
 - one channel closing early does not affect the other;
@@ -1587,8 +1661,8 @@ Stop for review.
 ### Stage 6.5: Add group cancellation, timeout, and descendant cleanup
 
 Implement the stopping state, first-reason rule, launch timeout armed before gate release, TERM-to-KILL timer, group
-cleanup with active-grace leader retention, the one-second post-reap output deadline, and destructor immediate
-kill/reap.
+cleanup with active-grace leader retention, PID/PGID invalidation plus non-signallable `Finishing`, the one-second
+post-reap output deadline, and destructor immediate kill/reap.
 
 Verification:
 
@@ -1610,6 +1684,8 @@ Verification:
   reposts, readable bytes within that budget survive, and only the retained channel is marked lost;
 - a continuously writing escaped descendant cannot starve the post-reap deadline callback or retain scheduler
   capacity;
+- after direct-child reap, `state()` is `Finishing` and `process_id()` is empty before any post-reap output signal;
+  reentrant stop calls and destruction during the output barrier never invoke the signal seam with the former PGID;
 - completion waits for pipe EOF and reports the semantic reason;
 - no signal is emitted from destructor.
 
@@ -1745,6 +1821,8 @@ Implement `AttemptExecutorGroup`, register fake CLI/HTTP executors, and prove ex
 Verification:
 
 - complete section 22.5;
+- parented Object-derived registration is rejected before storage, destroys/unlinks the rejected object exactly once,
+  and leaves group routing unchanged; accepted Object-derived executors remain unparented and exclusively group-owned;
 - cancellation uses accepted key route rather than availability guessing;
 - callbacks remain exact operation callbacks, not signals;
 - child executors are destroyed before route storage;
@@ -1868,15 +1946,16 @@ Stop for review before mandatory macOS work.
 
 ### Stage 6.17: Add the macOS Process backend
 
-Implement kqueue `EVFILT_PROC` child watches and the macOS variants of pipe creation, close-from cleanup, and supported
-pre-exec operations. `prevent_privilege_gain` must report its documented platform behavior; do not emulate Linux
-`prctl` with an unrelated mechanism. Use public `fork()` under section 10.6's scoped at-fork contract; do not use the
-deprecated macOS `vfork()` or a private libc entry point.
+Implement kqueue `EVFILT_PROC` child watches and the macOS variants of pipe/socket-pair creation, `SO_NOSIGPIPE` gate
+setup, close-from cleanup, and supported pre-exec operations. `prevent_privilege_gain` must report its documented
+platform behavior; do not emulate Linux `prctl` with an unrelated mechanism. Use public `fork()` under section 10.6's
+scoped at-fork contract; do not use the deprecated macOS `vfork()` or a private libc entry point.
 
 Verification on macOS/Apple Clang:
 
 - complete EventLoop process-watch and Core Process matrix except Linux-only NoNewPrivs proof;
 - fast exit cannot beat registration because the gate remains common;
+- gate release neither delivers `SIGPIPE` nor consumes a pending host signal;
 - stdout/stderr, signal exit, TERM/KILL, timeout, descendant cleanup, destructor, fd cleanup, and no zombies;
 - existing kqueue fd/HTTP/local-socket tests pass;
 - the Process-controlled post-`fork()` child path passes the async-signal-safety audit, and the exact limitation for
@@ -1938,6 +2017,9 @@ Final audits:
 - scan results/errors/log fixtures for marker leakage;
 - confirm no schema-v1/DDL, HTTP behavior, or management RPC method-set change;
 - confirm Process uses no waiter thread, repeated wait polling, or unbounded output buffer;
+- prove every readiness registration is invalidated before removal/close and no post-reap path can signal a stale
+  PID/PGID;
+- prove the executor group never shares ownership with an Object parent;
 - verify the worktree is clean after committed changes; and
 - write a handoff with exact revision, Linux and macOS toolchain/dependency/kernel versions, build steps, test counts,
   mandatory macOS evidence, and Phase 7/8 entry boundaries.
@@ -1955,6 +2037,8 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] Process uses signals for observable launch-channel resolution, output, and finished reusable events.
 - [ ] Process-to-CLI slots use the executor as receiver.
 - [ ] Attempt and routing completions remain exact callbacks.
+- [ ] Every Process readiness callback is protected by a one-way per-registration anchor invalidated before removal,
+      close, reset, restart, or destruction.
 - [ ] Linux child exit uses pidfd/epoll with no waiter thread or SIGCHLD handler.
 - [ ] macOS uses kqueue `EVFILT_PROC` and passes the complete Stage 6.18 verification.
 - [ ] The target cannot exec before every parent watch is installed.
@@ -1963,7 +2047,8 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] The Process-controlled post-creation child path allocates nothing and calls no unsafe user/library code.
 - [ ] Every blockable signal is blocked across process creation, the parent mask is always restored, and every
       catchable child disposition is reset before the clean target mask is installed.
-- [ ] Gate release cannot deliver `SIGPIPE`; `EPIPE` is a complete controlled rejection path.
+- [ ] Socket-gate release cannot deliver `SIGPIPE`, inspect or consume host pending signals, and every failed send is a
+      complete controlled rejection path.
 - [ ] Closing descriptors 0 through 3 before launch cannot miswire stdio, the gate, or exec-status reporting.
 - [ ] No implicit shell parsing or ambient PATH lookup exists.
 - [ ] Environment starts empty and contains only explicit values plus three JobU metadata entries.
@@ -1973,6 +2058,8 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] No output callback or final drain exceeds its byte budget; coalesced lifetime-safe continuations preserve
       edge-triggered progress without starving timers or other readiness.
 - [ ] `finished` waits for direct-child reaping and both output terminals.
+- [ ] Direct-child reap clears PID/PGID and enters non-signallable `Finishing` before post-reap output or other
+      reentrancy; no later operation can signal the former numeric group.
 - [ ] An escaped descendant retaining an output writer reaches bounded completion with accurate channel-loss flags.
 - [ ] Every attempt has its own process group.
 - [ ] TERM-to-KILL escalation and capacity retention are proven.
@@ -1991,7 +2078,8 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] CLI result JSON preserves captured, total, and truncated metadata for stdout and stderr.
 - [ ] CLI result JSON preserves `capture_lost` even when no `AttemptOutput` row is permitted.
 - [ ] Runner-neutral diagnostic retention accepts 64 MiB while HTTP header capture remains capped at 4 MiB.
-- [ ] AttemptExecutorGroup owns and safely destroys both runner implementations.
+- [ ] AttemptExecutorGroup rejects already-parented Object-derived executors and exclusively owns/safely destroys both
+      accepted runner implementations.
 - [ ] CLI and HTTP run concurrently with independent global and combined queue limits.
 - [ ] Durable running state precedes every external CLI effect.
 - [ ] Completion/output/run/retry/recurrence remain one transaction.
@@ -2038,9 +2126,10 @@ and cancel, and the remaining `jobuctl` surface.
 - [POSIX `execve()`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/execve.html)
 - [POSIX `waitpid()`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/wait.html)
 - [POSIX `setpgid()`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/setpgid.html)
+- [POSIX `socketpair()`](https://pubs.opengroup.org/onlinepubs/9799919799/functions/socketpair.html)
 - [POSIX signal actions](https://pubs.opengroup.org/onlinepubs/9799919799/functions/sigaction.html)
 - [Linux `pidfd_open(2)`](https://man7.org/linux/man-pages/man2/pidfd_open.2.html)
 - [Linux `PR_SET_NO_NEW_PRIVS`](https://man7.org/linux/man-pages/man2/PR_SET_NO_NEW_PRIVS.2const.html)
 - [Linux `close_range(2)`](https://man7.org/linux/man-pages/man2/close_range.2.html)
-- [Linux pipe `SIGPIPE`/`EPIPE` semantics](https://man7.org/linux/man-pages/man7/pipe.7.html)
+- [Linux `send(2)` and `MSG_NOSIGNAL`](https://man7.org/linux/man-pages/man2/send.2.html)
 - [Apple `kqueue(2)` / `EVFILT_PROC`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/kqueue.2.html)
