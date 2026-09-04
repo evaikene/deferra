@@ -94,6 +94,16 @@ that stage, record the exact evidence, and revise this design before changing th
 - Changes to HTTP payload, retry, redirect, TLS, capture, or result behavior.
 - A second scheduler thread, a waiter thread per child, or polling `waitpid()` on a repeating timer.
 
+The v1 technical plan uses “shutdown kill” in the Phase 6 runner bullet and separately assigns “immediate service
+shutdown” to Phase 7. This design resolves those statements as two layers, not duplicate daemon work. Phase 6 provides
+and tests the runner-level primitive: destroying an active `Process` or `CliAttemptExecutor` immediately kills and
+reaps the owned CLI process group without rewriting durable state. Phase 7 owns the service-level trigger and ordering:
+install daemon `SIGTERM`/`SIGINT` handling, stop mutation/dispatch admission, cancel HTTP work, invoke the CLI kill
+primitive, close infrastructure, and exit promptly. Until Phase 7, default OS termination may bypass C++ destructors;
+that explicit phase-boundary weakness is accepted because an intermediate phase is not the completed v1 service. Do
+not move partial daemon signal handling into Phase 6. This staging clarification does not weaken the completed-v1
+shutdown contract in technical-plan section 15.2.
+
 ## 4. Non-negotiable decisions
 
 | Decision | Required result |
@@ -117,6 +127,7 @@ that stage, record the exact evidence, and revise this design before changing th
 | Completion barrier | Reaping immediately enters non-signallable `Finishing` and invalidates PID/PGID state. `finished` is emitted only after both output pipes reach EOF or an explicit capture-loss condition, including forced closure at the bounded post-reap drain deadline. |
 | Descendants | Every child is a process-group leader; stop signals target the group. Remaining same-group descendants are killed immediately after a natural leader exit, or at the existing grace deadline when a stopping leader exits early. |
 | Timeout/cancel | Send `SIGTERM`, retain capacity, preserve an exited leader unreaped so the complete group receives `cli.termination_grace`, then send `SIGKILL` at the deadline if the group may remain. |
+| Deadline arithmetic | Process captures one launch time and uses checked addition for the optional timeout. An unrepresentable absolute deadline is rejected before resource setup; unchecked `TimePoint + Duration` is forbidden. |
 | Root policy | CLI execution is unavailable at effective UID 0 unless the explicit unsafe daemon override is set; the parent rechecks before spawn and `Process` authoritatively enforces the fixed policy in the child immediately before `execve()`. |
 | Linux hardening | A Linux CLI child must successfully set `PR_SET_NO_NEW_PRIVS=1` before `execve()` or complete as a terminal start failure. |
 | Executor routing | A generic owned executor group routes by `JobType`, rejects Object-derived executors that already have a parent, and outlives/destroys accepted child executors safely. Scheduler still borrows one `AttemptExecutor`. |
@@ -362,8 +373,10 @@ rules receive useful Doxygen in the actual header. The sketch omits comments onl
   reason succeeds idempotently and a different reason returns `core.process.stop_conflict`; otherwise it returns
   `core.process.invalid_state`. A timeout-fixed result is not replaced by a later explicit stop.
 - The request's `timeout`, when present, is monotonic and internally starts the same TERM-to-KILL path with
-  `ProcessExitKind::TimedOut`. Its deadline starts when launch is accepted, before the child gate is released; it is
-  not deferred until exec-status resolution.
+  `ProcessExitKind::TimedOut`. `start()` captures one `launch_time` before resource setup, validates and stores the
+  checked absolute deadline, and later arms it with `EventLoop::post_at()`. The deadline therefore includes parent
+  preparation and starts before the child gate is released; it is not recomputed or deferred until exec-status
+  resolution.
 - `finished` is emitted exactly once for every successful `start()` acceptance, including asynchronous start failure.
 - Once both output channels are terminal, `state()` becomes `NotRunning` before `finished` emission; `process_id()` has
   already been empty since entry to `Finishing`. A direct slot may therefore schedule another start, but must not
@@ -400,7 +413,8 @@ return forced-to-check results.
 
 All potentially allocating work occurs before `_Fork()` on Linux or `fork()` on macOS:
 
-1. validate strings, environment, durations, and owner-loop state;
+1. validate owner-loop/state, capture one `launch_time`, and validate strings, environment, durations, and the checked
+   timeout deadline;
 2. build executable candidates;
 3. build stable owning argv/environment string storage;
 4. build null-terminated `char*` arrays whose pointers cannot be invalidated;
@@ -419,7 +433,8 @@ All potentially allocating work occurs before `_Fork()` on Linux or `fork()` on 
 - Environment values contain no NUL.
 - The working directory is absolute, contains no NUL, and is at most 4096 bytes. Existence and directory access are
   checked authoritatively by child `chdir()` to avoid a time-of-check/time-of-use claim.
-- `timeout`, when present, is positive. `termination_grace` is nonnegative and at most five minutes.
+- `timeout`, when present, is positive and `launch_time + timeout` must fit in `TimePoint`; `termination_grace` is
+  nonnegative and at most five minutes.
 - `require_non_root` is an immutable launch policy copied into child-safe storage. A parent-side check may reject
   early, but the child check immediately before `execve()` is authoritative.
 - The parent `SIGCHLD` disposition must retain waitable children; an ignored/no-wait disposition is rejected rather
@@ -427,6 +442,13 @@ All potentially allocating work occurs before `_Fork()` on Linux or `fork()` on 
 - The aggregate bytes for argv and environment strings, including NUL terminators and pointer-array allowance, are at
   most 256 KiB and must also fit the runtime `_SC_ARG_MAX` safety margin.
 - Invalid values return `InvalidArgument/core.process.invalid_request` with a fixed reason token in `detail`.
+
+The private checked-deadline helper must never evaluate the potentially overflowing addition while validating it. For
+a positive `Duration`, compare the base time against `TimePoint::max() - duration`; construct `base + duration` only
+after that comparison succeeds. `start()` passes its single captured `launch_time` through this helper and retains the
+returned absolute deadline. Failure uses the fixed safe detail token `timeout.deadline_out_of_range` and occurs before
+opening descriptors or creating a child. Do not impose JobU's 30-day policy on the reusable Process API: JobU already
+validates `job.timeout` separately, while Process accepts every positive timeout representable from the captured base.
 
 ### 8.2 Deterministic PATH lookup
 
@@ -738,6 +760,11 @@ Process destruction is fail-safe cleanup, not a normal completion:
 future coordinated caller. `CliAttemptExecutor` does not use that result during Phase 6 normal execution. Phase 7 may
 use immediate interruption or destroy executors while deliberately leaving durable attempts running for recovery, but
 that policy is not implemented here.
+
+Process and executor destruction are the Phase 6 “shutdown kill” mechanism required by the runner contract. They do
+not make ordinary daemon `SIGTERM` or `SIGINT` safe by themselves because default signal termination does not unwind
+the object tree. Phase 7 must call this proven mechanism from its coordinated service-shutdown path after closing
+admission, as section 3.2 specifies.
 
 ## 12. CLI job payload contract
 
@@ -1387,6 +1414,8 @@ constructing Process, allowing descriptor-normalization coverage without damagin
 - direct-child reap clears PID/PGID and enters `Finishing` before post-reap output delivery; reentrant `stop()` and
   destruction from that interval issue no signal to the former numeric process group;
 - repeated same-reason stop and conflicting stop reason;
+- timeout deadline construction accepts the exact representable boundary and ordinary 30-day values, rejects one-tick
+  overflow and `Duration::max()` without evaluating an overflowing addition, and uses the single captured launch time;
 - timeout begins before gate release and also terminates a helper stalled in pre-exec setup;
 - every blockable signal is blocked across process creation, parent masking is restored on every path, every catchable
   child disposition is reset, and inherited application handlers cannot run in Process-controlled child code;
@@ -1510,6 +1539,7 @@ Comments are specifically required around:
 - why natural/expired-grace cleanup kills the group before leader reap, while a leader exiting during active grace is
   retained unreaped until the deadline to preserve both descendant grace and PID/PGID reuse protection;
 - why reap clears PID/PGID and enters non-signallable `Finishing` before post-reap output can re-enter Process;
+- checked timeout-deadline construction, single launch-time capture, and absolute `post_at()` scheduling;
 - timeout/cancel first-cause preservation;
 - capture ring ordering, result-metadata preservation, and total-byte overflow checks;
 - root recheck immediately before spawn;
@@ -1545,7 +1575,8 @@ short handoff with files/tests/results/open risks, and stop.
 These intermediate merge boundaries are not supported releases. A stage may temporarily lack safety or hardening
 that a later named stage adds—for example, Stage 6.3 may launch without Stage 6.6's general inherited-descriptor
 cleanup. Such an explicit gap does not move later work forward; only the completed Phase 6 acceptance checklist
-defines production-ready behavior.
+defines production-ready behavior within this phase's runner scope. Full v1 daemon lifecycle readiness additionally
+requires Phase 7's coordinated service shutdown and recovery work.
 
 ### Stage 6.1: Freeze the Process contract and request policy
 
@@ -1556,7 +1587,8 @@ unavailable until the Linux backend stages; invalid requests must already be def
 Verification:
 
 - standalone header, type, noncopyability, `Finishing` state, signal signature, and Object parenting tests;
-- all section 8 validation, SIGCHLD-disposition, and PATH candidate tests;
+- all section 8 validation, checked-deadline exact-boundary/overflow tests, SIGCHLD-disposition, and PATH candidate
+  tests;
 - aggregate-size, PATH entry/expansion boundary, and pointer-stability tests;
 - Process public header contains no native type and no second pimpl/data member;
 - Doxygen and changed-file diagnostics pass.
@@ -1668,7 +1700,8 @@ Verification:
 
 - TERM-handled cancellation;
 - ignored TERM escalates to KILL;
-- automatic timeout, pre-exec-stall timeout, rejection cleanup of an armed timeout, and zero grace;
+- automatic timeout from the precomputed absolute `post_at()` deadline, pre-exec-stall timeout, rejection cleanup of
+  an armed timeout, and zero grace;
 - same-reason idempotence and different-reason conflict;
 - same-group descendant termination for cancel, timeout, leader exit, and destructor;
 - natural leader exit and zero/expired grace attempt group KILL before leader reap without replacing the recorded
@@ -1850,6 +1883,8 @@ Verification:
 - production wiring propagates `require_non_root`, and an authoritative child-side rejection prevents target
   execution when the private identity seam reports root immediately before exec;
 - Process/executor destruction and descendant cleanup;
+- executor destruction proves the immediate runner-level shutdown-kill primitive without claiming daemon signal
+  handling;
 - production Process signals, rather than private callbacks, carry reusable lifecycle/output events;
 - no sensitive diagnostics.
 
@@ -1936,7 +1971,9 @@ Verification:
 - focused tests bind no external network and invoke no implicit shell;
 - target/thread inspection finds no waiter thread, repeated wait timer, or thread per attempt;
 - output and result durable probes prove exact schema-v1 values;
-- public Doxygen, code-comment, Object-private, signal/callback, sensitive-data, and HTTP regression audits.
+- public Doxygen, code-comment, Object-private, signal/callback, sensitive-data, and HTTP regression audits;
+- explicit evidence that Process/executor destruction performs the runner shutdown kill, while daemon signal handling
+  remains absent and documented for Phase 7.
 
 Exit: Phase 6 is functionally complete on Linux.
 
@@ -2020,6 +2057,7 @@ Final audits:
 - prove every readiness registration is invalidated before removal/close and no post-reap path can signal a stale
   PID/PGID;
 - prove the executor group never shares ownership with an Object parent;
+- distinguish the tested runner-level destruction kill from Phase 7's not-yet-implemented daemon signal path;
 - verify the worktree is clean after committed changes; and
 - write a handoff with exact revision, Linux and macOS toolchain/dependency/kernel versions, build steps, test counts,
   mandatory macOS evidence, and Phase 7/8 entry boundaries.
@@ -2063,9 +2101,13 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] An escaped descendant retaining an output writer reaches bounded completion with accurate channel-loss flags.
 - [ ] Every attempt has its own process group.
 - [ ] TERM-to-KILL escalation and capacity retention are proven.
+- [ ] Process timeout deadline addition is checked before resource setup; the exact representable boundary succeeds and
+      an overflowing duration returns `core.process.invalid_request` without spawning.
 - [ ] `termination_grace` applies to the complete group: an exited stopping leader remains unreaped until the
       deadline, cooperative descendants receive the remaining grace, and group KILL precedes the retained reap.
 - [ ] Same-group descendants die on cancel, timeout, leader exit, destructor, and future immediate kill.
+- [ ] Process and CLI-executor destruction prove the runner-level shutdown-kill primitive; daemon signal/admission/
+      infrastructure shutdown remains explicitly assigned to Phase 7.
 - [ ] Linux CLI target observes `NoNewPrivs: 1`.
 - [ ] Root CLI execution is denied by default, checked early in the executor, and enforced authoritatively by the child
       immediately before `execve()`.
@@ -2107,7 +2149,9 @@ Suggested commit subject: `document Phase 6 verification invariants`
 
 Phase 7 owns startup recovery, recurrence/manual/suspension repair, SQLite fault injection, daemon `SIGTERM`/`SIGINT`
 integration, stop-admission order, immediate active-runner termination, and prompt service exit. Phase 6 must not mark
-durable attempts interrupted during destructor cleanup or claim graceful/coordinated shutdown.
+durable attempts interrupted during destructor cleanup or claim graceful/coordinated shutdown. Its first service-level
+shutdown tests must prove that the Phase 6 Process/executor destruction primitive is actually reached before exit;
+default signal termination without stack unwinding is not sufficient.
 
 ### 26.2 Phase 8 may assume
 
