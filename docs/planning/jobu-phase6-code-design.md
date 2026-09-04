@@ -113,9 +113,9 @@ that stage, record the exact evidence, and revise this design before changing th
 | PATH | Bare names require an explicit `PATH`; entries must be nonempty absolute directories, are searched in order, and have bounded count and expanded candidate storage. |
 | Standard input | File descriptor 0 reads EOF from `/dev/null`; JobU never writes input in v1. |
 | Output | stdout and stderr stay separate, are drained fairly in bounded chunks through EOF or an explicit bounded capture-loss terminal, and never become permanent process backpressure after capture limits. |
-| Completion barrier | `finished` is emitted only after the direct child is reaped and both output pipes reached EOF or an explicit capture-loss condition, including forced closure at the bounded post-leader drain deadline. |
-| Descendants | Every child is a process-group leader; stop signals target the group, and remaining same-group descendants are killed when the leader exits. |
-| Timeout/cancel | Send `SIGTERM`, retain capacity, then send `SIGKILL` after `cli.termination_grace` if the group remains. |
+| Completion barrier | `finished` is emitted only after the direct child is reaped and both output pipes reached EOF or an explicit capture-loss condition, including forced closure at the bounded post-reap drain deadline. |
+| Descendants | Every child is a process-group leader; stop signals target the group. Remaining same-group descendants are killed immediately after a natural leader exit, or at the existing grace deadline when a stopping leader exits early. |
+| Timeout/cancel | Send `SIGTERM`, retain capacity, preserve an exited leader unreaped so the complete group receives `cli.termination_grace`, then send `SIGKILL` at the deadline if the group may remain. |
 | Root policy | CLI execution is unavailable at effective UID 0 unless the explicit unsafe daemon override is set; the parent rechecks before spawn and `Process` authoritatively enforces the fixed policy in the child immediately before `execve()`. |
 | Linux hardening | A Linux CLI child must successfully set `PR_SET_NO_NEW_PRIVS=1` before `execve()` or complete as a terminal start failure. |
 | Executor routing | A generic owned executor group routes by `JobType` and outlives/destroys child executors safely. Scheduler still borrows one `AttemptExecutor`. |
@@ -376,7 +376,7 @@ rules receive useful Doxygen in the actual header. The sketch omits comments onl
 For a stop reason, the semantic kind does not change if the target handles `SIGTERM` and exits normally. The observed
 exit code or signal remains available as diagnostic metadata. `stdout_lost` and `stderr_lost` are independent flags and
 do not change the leader's exit classification. A flag is set by an unrecoverable read failure or when the
-corresponding reader must be closed at the bounded post-leader drain deadline.
+corresponding reader must be closed at the bounded post-reap drain deadline.
 
 A child terminated by a signal before `execve()` without writing a complete error record is classified from the
 observed wait status, or from the already accepted cancellation/timeout reason. It is not reported as `StartFailed`
@@ -605,14 +605,22 @@ descriptors into the target:
 - Process does not retain a cumulative output buffer.
 - A child-exit notification alone is not completion. Process waits until both output readers reached EOF or were
   marked lost.
-- Before reaping a leader in any state, including `Stopping`, send `SIGKILL` to its still-existing process group. Keep
-  the leader unreaped until this group kill is attempted so its PID/PGID cannot be reused. This prevents an unjoined
-  same-group descendant from surviving the attempt. The cleanup signal does not replace an already recorded
-  cancellation or timeout outcome.
+- For a leader exit outside `Stopping`, or after zero/expired stopping grace, send `SIGKILL` to the still-existing
+  process group before reaping. Keep the leader unreaped until this group kill is attempted so its PID/PGID cannot be
+  reused. This prevents an unjoined same-group descendant from surviving the attempt.
+- If leader exit readiness arrives in `Stopping` while grace remains, record `leader_exit_observed`, remove the
+  process-readiness watch so it cannot redispatch, but deliberately do not reap the child or send an early
+  `SIGKILL`. Continue bounded output draining and retain scheduler capacity. Keeping the leader as an owned zombie
+  prevents PID/PGID reuse while every descendant receives the complete configured TERM grace.
+- At the grace deadline, send `SIGKILL` to the process group. If `leader_exit_observed` is set, reap the retained leader
+  immediately afterward; otherwise keep the process-exit watch and reap when exit readiness arrives. The cleanup
+  signal does not replace the recorded cancellation or timeout outcome. Even if both output pipes reached EOF, a
+  retained leader is not reaped or completed early because pipe closure does not prove that every same-group
+  descendant has exited.
 - After the group-kill attempt and direct-child reap, immediately drain both output readers again. If either reader is
-  still open, arm the private monotonic `kPostLeaderDrainTimeout = 1s` deadline while normal readiness draining
+  still open, arm the private monotonic `kPostReapDrainTimeout = 1s` deadline while normal readiness draining
   continues. EOF on both channels cancels that deadline and permits completion.
-- When the post-leader deadline expires, cancel any pending continuation and give each remaining reader one final
+- When the post-reap deadline expires, cancel any pending continuation and give each remaining reader one final
   `kPipeReadBudgetBytes` drain only. Do not loop through `EAGAIN` and do not repost. If EOF is not reached within that
   finite drain, unwatch and close the reader and mark only that channel lost. This bounds completion when a descendant
   escaped the process group or continuously writes through a retained output descriptor, without discarding already
@@ -647,15 +655,23 @@ private libc entry point or introduce a helper-process architecture without a se
 2. after successful delivery or `ESRCH`, record the first semantic stop reason;
 3. enter `Stopping`;
 4. if grace is zero, send `SIGKILL` immediately; otherwise arm one monotonic timer;
-5. when the timer expires, send `SIGKILL` to `-pgid`;
-6. retain all watches and continue draining both pipes;
-7. finish only after child reaping and the output barrier.
+5. if leader exit is observed before the timer expires, remove its readiness watch but retain it unreaped and continue
+   bounded pipe draining without sending early `SIGKILL`;
+6. when the timer expires, send `SIGKILL` to `-pgid`, then reap an already-observed retained leader or wait for the
+   still-running leader's exit readiness;
+7. only after the group-kill attempt and leader reap, enter the post-reap output barrier; and
+8. finish only after both output channels reach EOF or their bounded loss terminal.
 
 `ESRCH` is success when the process group is already gone. Other initial `kill()` failures return
 `core.process.signal_failed` from an explicit `stop()` without changing state or terminal cause, so the caller may
 retry and the attempt remains active. The automatic timeout path cannot return an error: it records `TimedOut`, logs
 only the stable safe failure, and still schedules the KILL escalation and waits for terminal observation. No capacity
 is released merely because TERM or KILL was sent.
+
+The grace period belongs to the process group, not only its leader. A leader that handles TERM and exits promptly does
+not shorten descendant grace. Retaining that exited leader may delay completion until the configured deadline even
+when both output channels already reached EOF; this is intentional because v1 has no portable race-free proof that
+the process group contains no other member while preserving the PGID against reuse.
 
 EventLoop watcher processing precedes timer delivery in a cycle. Therefore an already-observed natural child exit wins
 over a timeout in that cycle; once the timeout transition begins, its semantic result remains `TimedOut` even if the
@@ -1271,6 +1287,7 @@ Build one private test executable with explicit modes rather than invoking a she
 - trap TERM and exit;
 - ignore TERM until KILL;
 - fork a same-group descendant and report both PIDs;
+- on TERM, let the leader exit while a same-group descendant either exits later with a marker or ignores TERM;
 - let the leader exit while the descendant holds an output fd;
 - create a new session in a descendant and retain either stdout or stderr beyond the leader's exit;
 - print Linux `NoNewPrivs` from `/proc/self/status`; and
@@ -1302,7 +1319,11 @@ constructing Process, allowing descriptor-normalization coverage without damagin
 - pidfd watch registration and fast exit without a missed event or zombie;
 - TERM-handled cancellation, TERM-to-KILL escalation, timeout, and zero grace;
 - same-group descendant termination on cancel, timeout, every leader exit, and destructor;
-- escaped-session descendants retaining or continuously writing stdout or stderr reach the one-second post-leader
+- when a stopping leader exits before nonzero grace, its readiness watch is removed, it remains owned and unreaped,
+  output continues draining, and no group `SIGKILL` occurs before the deadline;
+- a TERM-cooperative descendant may exit during the remaining grace, while a TERM-ignoring descendant is killed at
+  the deadline; both paths reap the retained leader exactly once without PID/PGID reuse;
+- escaped-session descendants retaining or continuously writing stdout or stderr reach the one-second post-reap
   deadline; the final drain remains within one 256 KiB budget, preserves bytes read within that budget, marks only the
   affected channel lost, and cannot retain capacity indefinitely;
 - repeated same-reason stop and conflicting stop reason;
@@ -1419,8 +1440,9 @@ Comments are specifically required around:
 - per-callback pipe-read budgets, edge-triggered continuation reposting, per-channel coalescing, and Object-lifetime
   protection for queued continuation delivery;
 - child-reaped plus both-pipes-closed completion barrier and the bounded escaped-writer fallback;
-- why the post-leader final drain has a hard byte budget and never reposts;
-- group kill before leader reap and its PID/PGID reuse protection;
+- why the post-reap final drain has a hard byte budget and never reposts;
+- why natural/expired-grace cleanup kills the group before leader reap, while a leader exiting during active grace is
+  retained unreaped until the deadline to preserve both descendant grace and PID/PGID reuse protection;
 - timeout/cancel first-cause preservation;
 - capture ring ordering, result-metadata preservation, and total-byte overflow checks;
 - root recheck immediately before spawn;
@@ -1565,7 +1587,7 @@ Stop for review.
 ### Stage 6.5: Add group cancellation, timeout, and descendant cleanup
 
 Implement the stopping state, first-reason rule, launch timeout armed before gate release, TERM-to-KILL timer, group
-cleanup before reaping every leader exit, the one-second post-leader output deadline, and destructor immediate
+cleanup with active-grace leader retention, the one-second post-reap output deadline, and destructor immediate
 kill/reap.
 
 Verification:
@@ -1575,11 +1597,18 @@ Verification:
 - automatic timeout, pre-exec-stall timeout, rejection cleanup of an armed timeout, and zero grace;
 - same-reason idempotence and different-reason conflict;
 - same-group descendant termination for cancel, timeout, leader exit, and destructor;
-- group KILL is attempted while the leader remains unreaped, without replacing the recorded semantic outcome;
-- a descendant that calls `setsid()` and retains stdout or stderr cannot hold completion beyond the post-leader
+- natural leader exit and zero/expired grace attempt group KILL before leader reap without replacing the recorded
+  semantic outcome;
+- when a TERM-handling leader exits during nonzero grace, its process watch is removed, it remains unreaped, bounded
+  output draining continues, and the group receives no early KILL;
+- a cooperative descendant exits and records a marker during the remaining grace; a separate TERM-ignoring descendant
+  receives KILL at the deadline, after which the retained leader is reaped exactly once;
+- an already observed leader plus output EOF still retains capacity through the deadline, while destructor cleanup
+  remains immediate;
+- a descendant that calls `setsid()` and retains stdout or stderr cannot hold completion beyond the post-reap
   deadline; deterministic fake time advances the deadline, the final drain reads no more than 256 KiB and never
   reposts, readable bytes within that budget survive, and only the retained channel is marked lost;
-- a continuously writing escaped descendant cannot starve the post-leader deadline callback or retain scheduler
+- a continuously writing escaped descendant cannot starve the post-reap deadline callback or retain scheduler
   capacity;
 - completion waits for pipe EOF and reports the semantic reason;
 - no signal is emitted from destructor.
@@ -1947,6 +1976,8 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] An escaped descendant retaining an output writer reaches bounded completion with accurate channel-loss flags.
 - [ ] Every attempt has its own process group.
 - [ ] TERM-to-KILL escalation and capacity retention are proven.
+- [ ] `termination_grace` applies to the complete group: an exited stopping leader remains unreaped until the
+      deadline, cooperative descendants receive the remaining grace, and group KILL precedes the retained reap.
 - [ ] Same-group descendants die on cancel, timeout, leader exit, destructor, and future immediate kill.
 - [ ] Linux CLI target observes `NoNewPrivs: 1`.
 - [ ] Root CLI execution is denied by default, checked early in the executor, and enforced authoritatively by the child
