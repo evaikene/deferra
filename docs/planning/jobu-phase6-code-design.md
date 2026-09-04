@@ -103,7 +103,7 @@ that stage, record the exact evidence, and revise this design before changing th
 | CLI executor ownership | `CliAttemptExecutor` derives from `Object` and `AttemptExecutor`, extends the same private block, and owns active `Process` children through the Object tree. |
 | Notifications | Process lifecycle and output are signals; the one accepted attempt's completion remains `AttemptCompletionHandler`. |
 | Receiver safety | Every Process signal slot that captures `CliAttemptExecutor` uses the executor as its receiver. |
-| Event-loop model | Spawn, pipe I/O, process exit, timeout, cancellation, and completion run on one owner EventLoop thread. |
+| Event-loop model | Spawn, pipe I/O, process exit, timeout, cancellation, and completion run on one owner EventLoop thread. Every pipe callback has a finite read budget so output cannot starve timers or other readiness. |
 | Child monitoring | Linux uses pidfds registered with epoll; macOS uses `EVFILT_PROC` in the existing kqueue backend. No global `SIGCHLD` handler or waiter thread is added. |
 | Reaping ownership | JobU retains the default, waitable `SIGCHLD` disposition and is the only code that may reap Process-owned child PIDs. |
 | Spawn mechanism | Linux uses `_Fork()` followed by the bounded pre-exec path because portable `posix_spawn()` cannot perform `no_new_privs` between creation and target execution. The later macOS backend uses `fork()` with the explicitly scoped at-fork contract in section 10.6. |
@@ -112,7 +112,7 @@ that stage, record the exact evidence, and revise this design before changing th
 | Environment | Target environment starts empty. Job-supplied entries and JobU metadata are the only entries. |
 | PATH | Bare names require an explicit `PATH`; entries must be nonempty absolute directories, are searched in order, and have bounded count and expanded candidate storage. |
 | Standard input | File descriptor 0 reads EOF from `/dev/null`; JobU never writes input in v1. |
-| Output | stdout and stderr stay separate, are drained through EOF or an explicit bounded capture-loss terminal, and never become process backpressure after capture limits. |
+| Output | stdout and stderr stay separate, are drained fairly in bounded chunks through EOF or an explicit bounded capture-loss terminal, and never become permanent process backpressure after capture limits. |
 | Completion barrier | `finished` is emitted only after the direct child is reaped and both output pipes reached EOF or an explicit capture-loss condition, including forced closure at the bounded post-leader drain deadline. |
 | Descendants | Every child is a process-group leader; stop signals target the group, and remaining same-group descendants are killed when the leader exits. |
 | Timeout/cancel | Send `SIGTERM`, retain capacity, then send `SIGKILL` after `cli.termination_grace` if the group remains. |
@@ -582,8 +582,18 @@ descriptors into the target:
 
 ### 10.5 Output and finish barrier
 
-- Each readiness callback reads its nonblocking fd until EOF or `EAGAIN`.
-- Nonempty chunks are emitted in byte order through `standard_output` or `standard_error`.
+- Each readiness callback reads at most `kPipeReadBudgetBytes = 256 KiB`, using reads no larger than
+  `kPipeReadChunkBytes = 64 KiB`. It stops earlier on EOF, `EAGAIN`, or an unrecoverable error.
+- Nonempty chunks are emitted in byte order through `standard_output` or `standard_error`; the budget counts bytes
+  read, independently for each callback and channel.
+- Reaching the byte budget before a terminal read schedules one coalesced, receiver-bound continuation for that
+  channel. The continuation clears its pending flag and performs another bounded drain. If it also exhausts the
+  budget, it reposts itself for a later EventLoop cycle. A readiness event and a pending continuation must never queue
+  duplicate drains for the same channel.
+- The continuation uses the Process Object's lifetime-aware event delivery, not a context-free lambda retaining a raw
+  Process pointer. Because watcher callbacks return after a finite budget, EventLoop can fire expired timers and
+  dispatch other ready descriptors. Explicit continuation is required for edge-triggered backends because Process may
+  deliberately stop reading while the fd remains readable and therefore cannot wait for another readiness edge.
 - If output becomes ready before exec-status resolution, first drain the exec-status pipe. Target output cannot be
   produced before a successful exec, so this guarantees the observable `started` notification precedes output.
 - A child-exit callback observed while state is `Starting` performs the same exec-status drain before classifying the
@@ -602,9 +612,11 @@ descriptors into the target:
 - After the group-kill attempt and direct-child reap, immediately drain both output readers again. If either reader is
   still open, arm the private monotonic `kPostLeaderDrainTimeout = 1s` deadline while normal readiness draining
   continues. EOF on both channels cancels that deadline and permits completion.
-- When the post-leader deadline expires, drain each remaining reader once through `EAGAIN`, then unwatch and close it,
-  marking only that channel lost. This bounds completion when a descendant escaped the process group and retained an
-  output writer, without discarding already readable tail bytes or weakening the normal EOF path.
+- When the post-leader deadline expires, cancel any pending continuation and give each remaining reader one final
+  `kPipeReadBudgetBytes` drain only. Do not loop through `EAGAIN` and do not repost. If EOF is not reached within that
+  finite drain, unwatch and close the reader and mark only that channel lost. This bounds completion when a descendant
+  escaped the process group or continuously writes through a retained output descriptor, without discarding already
+  readable tail bytes within the final budget or weakening the normal EOF path.
 - Remove every watch and timer, reset state, and release native handles before emitting `finished`.
 
 Descendants that deliberately create a new session or process group are outside the v1 guarantee. Tests cover normal
@@ -1143,7 +1155,9 @@ HTTP initialization and behavior remain unchanged. The scheduler now sees indepe
 
 Increase advertised API version to 1.2 because the CLI payload gains defined optional fields and execution semantics.
 The capability list remains the existing 15 method names plus `system.info`; do not invent a new RPC method or claim
-Phase 8 run-control support.
+Phase 8 run-control support. API 1.2 is descriptive, not a compatibility gate: JobU has no supported mixed-version
+deployment or external client contract at this stage, so `jobuctl` does not preflight the daemon minor version before
+using the new fields. A new client sending them to an older development daemon is outside the supported contract.
 
 ### 20.2 `jobuctl job create`
 
@@ -1250,6 +1264,7 @@ Build one private test executable with explicit modes rather than invoking a she
 
 - report argv, cwd, environment, stdin EOF, and selected open descriptors;
 - write arbitrary binary/stdout/stderr patterns larger than pipe capacity;
+- continuously write stdout, stderr, or both until terminated;
 - exit with a supplied code;
 - terminate itself by a supplied signal;
 - exit immediately after writing a tail marker;
@@ -1280,13 +1295,16 @@ constructing Process, allowing descriptor-normalization coverage without damagin
 - stdin immediate EOF;
 - started/output/finished order and same owner thread;
 - arbitrary binary stdout/stderr, interleaving, data larger than pipe capacity, and complete tail drain;
+- continuously readable stdout/stderr consumes no more than 256 KiB per callback, coalesces one lifetime-safe
+  continuation per channel, and does not delay timers, process-exit readiness, cancellation, or unrelated fd events;
 - numeric exit and signal result invariants;
 - async child-setup/exec/chdir/security failure and unsupported-hardening distinction;
 - pidfd watch registration and fast exit without a missed event or zombie;
 - TERM-handled cancellation, TERM-to-KILL escalation, timeout, and zero grace;
 - same-group descendant termination on cancel, timeout, every leader exit, and destructor;
-- escaped-session descendants retaining stdout or stderr reach the one-second post-leader deadline, preserve readable
-  tail bytes, mark only the affected channel lost, and cannot retain capacity indefinitely;
+- escaped-session descendants retaining or continuously writing stdout or stderr reach the one-second post-leader
+  deadline; the final drain remains within one 256 KiB budget, preserves bytes read within that budget, marks only the
+  affected channel lost, and cannot retain capacity indefinitely;
 - repeated same-reason stop and conflicting stop reason;
 - timeout begins before gate release and also terminates a helper stalled in pre-exec setup;
 - every blockable signal is blocked across process creation, parent masking is restored on every path, every catchable
@@ -1398,7 +1416,10 @@ Comments are specifically required around:
 - child descriptor/signal cleanup;
 - parent/child `setpgid()` race closure;
 - observable exec-status resolution and `started` before first output despite readiness coalescing;
+- per-callback pipe-read budgets, edge-triggered continuation reposting, per-channel coalescing, and Object-lifetime
+  protection for queued continuation delivery;
 - child-reaped plus both-pipes-closed completion barrier and the bounded escaped-writer fallback;
+- why the post-leader final drain has a hard byte budget and never reposts;
 - group kill before leader reap and its PID/PGID reuse protection;
 - timeout/cancel first-cause preservation;
 - capture ring ordering, result-metadata preservation, and total-byte overflow checks;
@@ -1516,13 +1537,19 @@ Stop for review.
 
 ### Stage 6.4: Add asynchronous stdout and stderr
 
-Connect separate pipes, nonblocking edge-triggered draining, binary chunk signals, exec-before-output ordering, channel
-EOF/loss state, and the finish barrier.
+Connect separate pipes, nonblocking edge-triggered draining, the 64 KiB read chunk and 256 KiB callback budget,
+coalesced receiver-bound continuations, binary chunk signals, exec-before-output ordering, channel EOF/loss state,
+and the finish barrier.
 
 Verification:
 
 - binary data including NUL;
 - both streams beyond pipe capacity without deadlock;
+- a continuously writing helper proves each callback returns at the byte budget and queued continuations preserve byte
+  order without duplication;
+- timers, a second watched descriptor, and process-exit readiness progress while one or both streams remain
+  continuously readable;
+- destroying Process with a pending continuation produces no callback, stale access, or repost;
 - per-channel byte order and complete tail capture;
 - `started` precedes output and `finished` follows both EOFs;
 - one channel closing early does not affect the other;
@@ -1550,8 +1577,10 @@ Verification:
 - same-group descendant termination for cancel, timeout, leader exit, and destructor;
 - group KILL is attempted while the leader remains unreaped, without replacing the recorded semantic outcome;
 - a descendant that calls `setsid()` and retains stdout or stderr cannot hold completion beyond the post-leader
-  deadline; deterministic fake time advances the deadline, readable tail bytes survive, and only the retained channel
-  is marked lost;
+  deadline; deterministic fake time advances the deadline, the final drain reads no more than 256 KiB and never
+  reposts, readable bytes within that budget survive, and only the retained channel is marked lost;
+- a continuously writing escaped descendant cannot starve the post-leader deadline callback or retain scheduler
+  capacity;
 - completion waits for pipe EOF and reports the semantic reason;
 - no signal is emitted from destructor.
 
@@ -1734,6 +1763,8 @@ Verification:
 - durable running commit precedes helper execution;
 - independent global and combined queue concurrency;
 - retry/cancel/capture persistence and capacity retention;
+- continuously writing CLI output cannot starve timeout/cancellation completion or the dispatch of another eligible
+  CLI/HTTP attempt;
 - mixed CLI/HTTP overlap;
 - all existing deterministic scheduler and HTTP integration tests pass;
 - no schema or HTTP result delta.
@@ -1767,7 +1798,8 @@ Stop for review.
 
 ### Stage 6.15: Extend `jobuctl` CLI creation fields
 
-Add the four section 20.2 CLI option families, payload encoding, usage text, API-minor test updates, and local validation.
+Add the four section 20.2 CLI option families, payload encoding, usage text, advertised API-minor expectation updates,
+and local validation.
 
 Verification:
 
@@ -1775,6 +1807,7 @@ Verification:
 - generated `CreateJobRequest` JSON has exact fields/default omission;
 - CLI-only/HTTP-only cross-rejection;
 - older minimal command invocation remains unchanged;
+- new options are sent through the existing method without an API-minor preflight or compatibility rejection;
 - no new RPC method or capability token;
 - command-line parser and all current `jobuctl` management tests pass.
 
@@ -1908,6 +1941,8 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] stdin reaches EOF and unrelated descriptors do not leak.
 - [ ] stdout/stderr are separate, binary-safe, drained through EOF or explicit bounded loss, and not accumulated by
       Process.
+- [ ] No output callback or final drain exceeds its byte budget; coalesced lifetime-safe continuations preserve
+      edge-triggered progress without starving timers or other readiness.
 - [ ] `finished` waits for direct-child reaping and both output terminals.
 - [ ] An escaped descendant retaining an output writer reaches bounded completion with accurate channel-loss flags.
 - [ ] Every attempt has its own process group.
@@ -1932,6 +1967,7 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] Schema remains version 1.
 - [ ] HTTP behavior and results remain unchanged.
 - [ ] The management RPC set remains 15 methods; API version is 1.2.
+- [ ] `jobuctl` does not gate the new CLI creation fields on the daemon API minor version.
 - [ ] Every changed public declaration has useful Doxygen and first-include coverage.
 - [ ] Required non-obvious implementation blocks have rationale comments.
 - [ ] Stable errors distinguish child setup, unsupported hardening, and failed available hardening.
