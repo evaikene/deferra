@@ -349,13 +349,19 @@ rules receive useful Doxygen in the actual header. The sketch omits comments onl
 - Construct and use a Process on one Object/EventLoop owner thread.
 - The hosting process must not set `SIGCHLD` to `SIG_IGN` or use `SA_NOCLDWAIT`, and outside code must not call a
   wait function for a PID owned by Process.
+- `started`, `standard_output`, `standard_error`, and `finished` may all use Direct delivery. A slot connected to any
+  Process signal must not synchronously delete the sender; it must use `delete_later()`. The emitting readiness/output
+  path may resume after the slot returns, and synchronous sender destruction would invalidate that path. This
+  restriction and the permitted state-dependent reentrant calls are documented on every public signal.
 - `start()` requires `NotRunning`, a valid current owner EventLoop, and a valid request.
-- After successful acceptance, `state()` is `Starting`; no signal is emitted from inside `start()`.
-- `started` is emitted once when the exec-status channel reaches clean EOF without a complete child error record and
-  before any output signal is delivered. This is the strongest portable parent-side observation available from the
-  close-on-exec protocol: it normally means `execve()` succeeded, but an asynchronous signal can terminate the child
-  before `execve()` and close the writer without an error record. The public Doxygen must state this limitation and
-  must not claim that the signal proves target code executed.
+- After successful acceptance, `state()` is normally `Starting`; no signal is emitted from inside `start()`. The
+  pre-gate expired-timeout path below is also an accepted start but returns in `Stopping` with `TimedOut` fixed.
+- `started` is emitted once when the gate was released and the exec-status channel reaches clean EOF without a complete
+  child error record, and before any output signal is delivered. This is the strongest portable parent-side
+  observation available from the close-on-exec protocol: it normally means `execve()` succeeded, but an asynchronous
+  signal can terminate the child before `execve()` and close the writer without an error record. The public Doxygen
+  must state this limitation and must not claim that the signal proves target code executed. Clean EOF after a gate
+  that was deliberately left unreleased never emits `started`.
 - When clean exec-status EOF is observed in `Starting`, `state()` becomes `Running` before `started` emission. If a
   stop reason was already accepted, state remains `Stopping`; `started` still reports the clean launch-channel outcome
   before any output or `finished` signal.
@@ -379,8 +385,7 @@ rules receive useful Doxygen in the actual header. The sketch omits comments onl
   resolution.
 - `finished` is emitted exactly once for every successful `start()` acceptance, including asynchronous start failure.
 - Once both output channels are terminal, `state()` becomes `NotRunning` before `finished` emission; `process_id()` has
-  already been empty since entry to `Finishing`. A direct slot may therefore schedule another start, but must not
-  synchronously delete the sender; use `delete_later()`.
+  already been empty since entry to `Finishing`. A direct slot may therefore schedule another start.
 - A rejected `start()` emits no signal and leaves `NotRunning`.
 - The destructor suppresses signals and invalidates every readiness anchor before attempting watch removal. It sends
   immediate `SIGKILL` and reaps only while native child/group identity is still valid, then closes descriptors. In
@@ -584,14 +589,31 @@ remapping. This normalization is distinct from Stage 6.6's later cleanup of unre
 5. Establish the child process group from the parent side while the child remains gated.
 6. Register stdout, stderr, exec-status, and process-exit watches.
 7. Enter `Starting` and arm the monotonic timeout from the accepted-launch deadline.
-8. Send exactly one gate byte through the platform-local no-`SIGPIPE` socket operation described below and close the
+8. Immediately before gate send, compare a fresh `Clock::now()` with the stored deadline and take the accepted
+   pre-gate timeout path below when it is already expired.
+9. Send exactly one gate byte through the platform-local no-`SIGPIPE` socket operation described below and close the
    gate endpoint.
-9. Return success.
-10. On clean exec-status EOF, apply section 7.1's state rule and emit `started`; do not restart or extend the timeout.
+10. Record that the gate was released and return success.
+11. On clean exec-status EOF after gate release, apply section 7.1's state rule and emit `started`; do not restart or
+    extend the timeout.
 
 If any step before gate release fails, cancel an armed timeout, close the gate, kill the still-non-executing child,
 reap it synchronously, clean all resources, restore the parent signal mask if it has not yet been restored, and return
 a start error with no signal obligation.
+
+Deadline expiry at step 8 is not a start rejection because child ownership, process-group identity, and every watch
+have already been accepted. Cancel the queued timeout handle, fix the semantic result as `TimedOut`, enter `Stopping`,
+leave `gate_released=false`, close the parent gate endpoint without sending a byte, and immediately send `SIGKILL` to
+the still-gated process group. The target has not received permission to execute, so termination grace does not apply.
+Keep the process/output/exec-status watches and return success without emitting a signal inside `start()`. Gate EOF
+causes the child to exit without `execve()`; its clean exec-status EOF is not a `started` observation. Normal readiness,
+reaping, `Finishing`, and output-terminal processing then emit exactly one `finished` with kind `TimedOut`. A group-kill
+failure is logged with only safe fixed diagnostics and does not turn the accepted outcome into a synchronous error;
+gate EOF still provides the normal child-exit path.
+
+The immediate check prevents Process from knowingly releasing a child after parent preparation consumed the entire
+timeout. It does not claim real-time execution at the exact deadline: when the check succeeds, scheduling can still
+advance before the child reaches `execve()`, and the already-armed EventLoop timeout remains the enforcement mechanism.
 
 Gate release must not rely on a process-global ignored `SIGPIPE`, temporary thread masking, pending-signal inspection,
 or `sigwait()` consumption. The gate is a Unix-domain stream socket pair created and normalized before process
@@ -645,7 +667,9 @@ descriptors into the target:
 - Each readiness callback reads at most `kPipeReadBudgetBytes = 256 KiB`, using reads no larger than
   `kPipeReadChunkBytes = 64 KiB`. It stops earlier on EOF, `EAGAIN`, or an unrecoverable error.
 - Nonempty chunks are emitted in byte order through `standard_output` or `standard_error`; the budget counts bytes
-  read, independently for each callback and channel.
+  read, independently for each callback and channel. After every emission the callback may continue its bounded drain;
+  section 7.1's prohibition on synchronous sender deletion therefore applies even when the slot does not itself call a
+  Process method.
 - Reaching the byte budget before a terminal read schedules one coalesced, receiver-bound continuation for that
   channel. The continuation clears its pending flag and performs another bounded drain. If it also exhausts the
   budget, it reposts itself for a later EventLoop cycle. A readiness event and a pending continuation must never queue
@@ -657,9 +681,10 @@ descriptors into the target:
 - If output becomes ready before exec-status resolution, first drain the exec-status pipe. Target output cannot be
   produced before a successful exec, so this guarantees the observable `started` notification precedes output.
 - A child-exit callback observed while state is `Starting` performs the same exec-status drain before classifying the
-  exit. Clean EOF emits `started` before `finished`, including for a target that execs and exits immediately. A complete
-  child error record instead produces only `StartFailed`. Clean EOF is not described as proof of exec success because
-  pre-exec signal death can close the pipe without writing a record.
+  exit. Clean EOF after gate release emits `started` before `finished`, including for a target that execs and exits
+  immediately. A complete child error record instead produces only `StartFailed`. Clean EOF is not described as proof
+  of exec success because pre-exec signal death can close the pipe without writing a record. The known-unreleased
+  timeout path suppresses `started` regardless of clean EOF.
 - EINTR retries. An unrecoverable pipe-read error marks that channel lost, closes it, and continues termination/reaping.
 - The two channels have no ordering guarantee relative to each other; order within each channel is preserved.
 - Process does not retain a cumulative output buffer.
@@ -1394,6 +1419,9 @@ constructing Process, allowing descriptor-normalization coverage without damagin
 - default `/` and explicit cwd;
 - stdin immediate EOF;
 - started/output/finished order and same owner thread;
+- `delete_later()` requested from each of `started`, `standard_output`, `standard_error`, and `finished` permits the
+  current emission/readiness work to return safely and eventually deletes through the owner EventLoop with no stale
+  access, descriptor, or zombie;
 - arbitrary binary stdout/stderr, interleaving, data larger than pipe capacity, and complete tail drain;
 - continuously readable stdout/stderr consumes no more than 256 KiB per callback, coalesces one lifetime-safe
   continuation per channel, and does not delay timers, process-exit readiness, cancellation, or unrelated fd events;
@@ -1416,6 +1444,9 @@ constructing Process, allowing descriptor-normalization coverage without damagin
 - repeated same-reason stop and conflicting stop reason;
 - timeout deadline construction accepts the exact representable boundary and ordinary 30-day values, rejects one-tick
   overflow and `Duration::max()` without evaluating an overflowing addition, and uses the single captured launch time;
+- a deterministic parent-sequence clock seam expires the stored deadline after watch setup but before gate send: the
+  send seam is not called, no target marker appears, `start()` succeeds in `Stopping`, `started` is absent, and exactly
+  one later `TimedOut` finish follows complete gated-child cleanup;
 - timeout begins before gate release and also terminates a helper stalled in pre-exec setup;
 - every blockable signal is blocked across process creation, parent masking is restored on every path, every catchable
   child disposition is reset, and inherited application handlers cannot run in Process-controlled child code;
@@ -1527,6 +1558,8 @@ Comments are specifically required around:
 - collision-safe normalization when conventional descriptors were closed by the host;
 - socket-gate `MSG_NOSIGNAL`/`SO_NOSIGPIPE` selection, non-interference with host signal state, and failed-send cleanup;
 - child error-record and close-on-exec ordering;
+- the final pre-gate deadline check, why expiry is an accepted asynchronous timeout rather than a rejected start, and
+  why known-unreleased clean exec-status EOF suppresses `started`;
 - all-signal blocking around process creation, restoration on every parent path, and every catchable child disposition
   reset while blocked;
 - child descriptor/signal cleanup;
@@ -1545,6 +1578,8 @@ Comments are specifically required around:
 - root recheck immediately before spawn;
 - authoritative child-side non-root check immediately before the exec candidate loop;
 - Process receiver-aware connections;
+- why synchronous Process sender deletion is forbidden from every public signal and why `delete_later()` is safe across
+  the remaining readiness/output work;
 - state erasure before user completion callback;
 - executor-group rejection of already-parented Object-derived executors and destruction order; and
 - durable-before-external-effect assertions in integration tests.
@@ -1586,7 +1621,8 @@ unavailable until the Linux backend stages; invalid requests must already be def
 
 Verification:
 
-- standalone header, type, noncopyability, `Finishing` state, signal signature, and Object parenting tests;
+- standalone header, type, noncopyability, `Finishing` state, signal signature/deletion Doxygen, and Object parenting
+  tests;
 - all section 8 validation, checked-deadline exact-boundary/overflow tests, SIGCHLD-disposition, and PATH candidate
   tests;
 - aggregate-size, PATH entry/expansion boundary, and pointer-stability tests;
@@ -1651,6 +1687,8 @@ Verification:
 - a private child-identity seam proves `require_non_root` rejects immediately before the exec loop;
 - child setup stages map to `core.process.child_setup_failed`, while cwd and exec retain their specific codes;
 - a pre-exec signal death does not produce a stronger `started` claim than section 7.1 permits;
+- `started` and `finished` direct slots using `delete_later()` can return into and complete the active callback safely;
+  eventual deferred destruction leaks no child;
 - every accepted start emits exactly one later finish; rejected start emits none;
 - no missed fast exit and no zombie;
 - all Process-controlled post-creation child code passes an async-signal-safety review with rationale comments.
@@ -1676,6 +1714,8 @@ Verification:
 - timers, a second watched descriptor, and process-exit readiness progress while one or both streams remain
   continuously readable;
 - destroying Process with a pending continuation produces no callback, stale access, or repost;
+- `standard_output` and `standard_error` direct slots using `delete_later()` allow the current bounded drain to resume
+  safely; eventual deferred destruction invalidates remaining work and leaks no watch, descriptor, or child;
 - persistent stdout/stderr unwatch failure followed by already-polled or later readiness is inert after channel close,
   Process reset/restart, and Process destruction;
 - per-channel byte order and complete tail capture;
@@ -1702,6 +1742,8 @@ Verification:
 - ignored TERM escalates to KILL;
 - automatic timeout from the precomputed absolute `post_at()` deadline, pre-exec-stall timeout, rejection cleanup of
   an armed timeout, and zero grace;
+- deterministic expiry during parent setup keeps the gate unsent, bypasses termination grace, invokes immediate group
+  KILL, returns accepted `Stopping`, emits no `started`, and completes once as `TimedOut` without target execution;
 - same-reason idempotence and different-reason conflict;
 - same-group descendant termination for cancel, timeout, leader exit, and destructor;
 - natural leader exit and zero/expired grace attempt group KILL before leader reap without replacing the recorded
@@ -2073,6 +2115,8 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] `CliAttemptExecutor` derives from Object and has one Object-owned private block.
 - [ ] Owner back-references are bound only after base construction.
 - [ ] Process uses signals for observable launch-channel resolution, output, and finished reusable events.
+- [ ] Doxygen forbids synchronous sender deletion from every Process signal; `delete_later()` is verified for started,
+      both output channels, and finished.
 - [ ] Process-to-CLI slots use the executor as receiver.
 - [ ] Attempt and routing completions remain exact callbacks.
 - [ ] Every Process readiness callback is protected by a one-way per-registration anchor invalidated before removal,
@@ -2103,6 +2147,8 @@ Suggested commit subject: `document Phase 6 verification invariants`
 - [ ] TERM-to-KILL escalation and capacity retention are proven.
 - [ ] Process timeout deadline addition is checked before resource setup; the exact representable boundary succeeds and
       an overflowing duration returns `core.process.invalid_request` without spawning.
+- [ ] A timeout already expired at the final pre-gate check is accepted as `TimedOut`, never releases or executes the
+      target, emits no `started`, and completes asynchronously without leaking resources.
 - [ ] `termination_grace` applies to the complete group: an exited stopping leader remains unreaped until the
       deadline, cooperative descendants receive the remaining grace, and group KILL precedes the retained reap.
 - [ ] Same-group descendants die on cancel, timeout, leader exit, destructor, and future immediate kill.
