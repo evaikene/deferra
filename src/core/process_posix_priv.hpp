@@ -40,7 +40,7 @@ struct ProcessChildError {
 
 /// Child syscall seam and fixed fault observations, copied before creation. No allocating callable enters the child.
 struct ProcessChildOptions {
-    uid_t (*effective_uid)() noexcept {::geteuid};
+    uid_t (*effective_uid)(){::geteuid};
     ProcessChildStage fail_stage{ProcessChildStage::None};
     int               signal_before_reset{0};
     int               signal_before_exec{0};
