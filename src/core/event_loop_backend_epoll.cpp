@@ -145,7 +145,9 @@ public:
         }
         auto const fd = _process_operations->open_pidfd(static_cast<int>(process_id));
         if (fd < 0) {
-            return errno == ENOSYS ? ProcessRegistrationResult::Unsupported : ProcessRegistrationResult::Failed;
+            // ENODEV means the kernel lacks the anonymous-inode support required by pidfds.
+            return errno == ENOSYS || errno == ENODEV ? ProcessRegistrationResult::Unsupported
+                                                      : ProcessRegistrationResult::Failed;
         }
 
         // Prepare both lookups before native registration so syscall failure can roll back the complete entry.

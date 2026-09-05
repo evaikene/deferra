@@ -20,9 +20,9 @@
 
 #  include <cerrno>
 #  include <chrono>
+#  include <csignal> // IWYU pragma: keep Provides POSIX kill() and SIGKILL through <signal.h>.
 #  include <fcntl.h>
 #  include <poll.h>
-#  include <signal.h>
 #  include <sys/epoll.h>
 #  include <sys/socket.h>
 #  include <sys/types.h>
@@ -414,8 +414,10 @@ TEST_CASE("Linux process-watch failures retain no partial native registration",
         CHECK(backend->add_process(pid) == ProcessRegistrationResult::Failed);
     }
     CHECK(operations->open_calls == 0);
-    operations->open_error = ENOSYS;
-    CHECK(backend->add_process(42) == ProcessRegistrationResult::Unsupported);
+    for (auto const error : {ENOSYS, ENODEV}) {
+        operations->open_error = error;
+        CHECK(backend->add_process(42) == ProcessRegistrationResult::Unsupported);
+    }
     for (auto const error : {EPERM, ESRCH, EMFILE}) {
         operations->open_error = error;
         CHECK(backend->add_process(42) == ProcessRegistrationResult::Failed);
@@ -427,11 +429,13 @@ TEST_CASE("Linux process-watch failures retain no partial native registration",
     GatedChild child;
     REQUIRE(child.start());
     operations->open_error = 0;
-    operations->add_error  = ENOSYS;
-    CHECK(backend->add_process(child.pid()) == ProcessRegistrationResult::Failed);
-    check_closed(operations->pidfd);
-    CHECK(backend->remove_process(child.pid()));
-    CHECK(operations->remove_calls == 0);
+    for (auto const error : {ENOSYS, ENODEV}) {
+        operations->add_error = error;
+        CHECK(backend->add_process(child.pid()) == ProcessRegistrationResult::Failed);
+        check_closed(operations->pidfd);
+        CHECK(backend->remove_process(child.pid()));
+        CHECK(operations->remove_calls == 0);
+    }
     operations->add_error = 0;
     REQUIRE(backend->add_process(child.pid()) == ProcessRegistrationResult::Added);
     CHECK_FALSE(backend->add_fd(operations->pidfd, FdEvent::Read, FdTriggerMode::Level));
