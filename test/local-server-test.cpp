@@ -234,7 +234,7 @@ TEST_CASE("LocalServer configures listener and accepted descriptors", "[net][loc
     client.connect_to_server(path);
     REQUIRE(fake.backend->add_fd_calls == 2);
 
-    fake.backend->ready_events.push_back({.fd = listener_fd, .events = FdEvent::Read});
+    fake.backend->ready_events.push_back({.ident = listener_fd, .events = FdEvent::Read});
     CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
 
     REQUIRE(fake.backend->add_fd_calls == 3);
@@ -271,7 +271,7 @@ TEST_CASE("LocalServer discards an accepted socket when its first watch fails", 
     client.connect_to_server(path);
     REQUIRE(fake.backend->add_fd_calls == 2);
 
-    fake.backend->ready_events.push_back({.fd = listener_fd, .events = FdEvent::Read});
+    fake.backend->ready_events.push_back({.ident = listener_fd, .events = FdEvent::Read});
     CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
 
     CHECK(fake.backend->add_fd_calls == 3);

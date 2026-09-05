@@ -68,6 +68,14 @@ Use the checked-in `.clang-format`. Important defaults are 4-space indentation, 
 
 Follow existing naming patterns: snake_case file names such as `event_loop.cpp`, PascalCase types such as `EventLoop`, and lowerCamelCase or descriptive method names as already used in nearby code. Prefer small, focused classes and keep platform-specific code isolated behind backend files.
 
+## Exception Handling
+
+- Only functions or methods explicitly documented with Doxygen `@throws` may let exceptions escape. Use `noexcept`
+  to enforce non-throwing boundaries.
+- Never catch `std::bad_alloc`, including through `catch (...)` cleanup-and-rethrow handlers. Do not convert allocation
+  failures into `Result` errors or attempt recovery: further allocations may fail in unexpected places. Treat
+  out-of-memory as fatal; an allocation failure at a `noexcept` boundary terminates the process.
+
 ## Object Private Data and Signals
 
 An `Object` subclass with private instance state must extend the single private block owned by `Object`. Derive its

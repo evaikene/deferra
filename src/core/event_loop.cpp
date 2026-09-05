@@ -177,6 +177,58 @@ auto EventLoop::unwatch_fd(FdWatch handle) -> bool
     return true;
 }
 
+auto EventLoop::watch_process(std::int64_t process_id, Task callback) -> Result<void, Error>
+{
+    if (!assert_on_loop_thread() || !_backend) {
+        return Result<void, Error>::failure({.category = ErrorCategory::Unavailable,
+                                             .code     = "core.process.event_loop_unavailable",
+                                             .message  = "Process watch requires a valid owner EventLoop"});
+    }
+    if (process_id <= 0 || !callback) {
+        return Result<void, Error>::failure({.category = ErrorCategory::InvalidArgument,
+                                             .code     = "core.process.invalid_request",
+                                             .message  = "Invalid process watch",
+                                             .detail   = "watch.invalid_registration"});
+    }
+    if (auto const existing = _process_watchers.find(process_id); existing != _process_watchers.end()) {
+        // Callback replacement must not rearm an exited child's persistently readable pidfd.
+        existing->second = std::move(callback);
+        return Result<void, Error>::success();
+    }
+
+    // Allocate callback storage before installing native state. Backend failure is transactional.
+    auto const entry  = _process_watchers.emplace(process_id, std::move(callback)).first;
+    auto const result = _backend->add_process(process_id);
+    if (result == priv::ProcessRegistrationResult::Added) {
+        return Result<void, Error>::success();
+    }
+    _process_watchers.erase(entry);
+    if (result == priv::ProcessRegistrationResult::Unsupported) {
+        return Result<void, Error>::failure({.category = ErrorCategory::Unsupported,
+                                             .code     = "core.process.monitor_unsupported",
+                                             .message  = "Native child monitoring is unavailable"});
+    }
+    return Result<void, Error>::failure({.category = ErrorCategory::Unavailable,
+                                         .code     = "core.process.watch_failed",
+                                         .message  = "Native child watch registration failed"});
+}
+
+auto EventLoop::unwatch_process(std::int64_t process_id) -> bool
+{
+    if (!assert_on_loop_thread()) {
+        return false;
+    }
+    auto const entry = _process_watchers.find(process_id);
+    if (entry == _process_watchers.end()) {
+        return true;
+    }
+    if (!_backend || !_backend->remove_process(process_id)) {
+        return false;
+    }
+    _process_watchers.erase(entry);
+    return true;
+}
+
 auto EventLoop::quit() -> bool
 {
     return post([this]() -> void { _running.store(false, std::memory_order_relaxed); });
@@ -230,7 +282,7 @@ auto EventLoop::process_events(EventFlags flags, int ms) -> ProcessEventsResult
 
     auto const was_running = _running.load(std::memory_order_relaxed);
 
-    // 1. poll and dispatch fd events
+    // 1. poll and dispatch native events in their separate identifier namespaces
     if (flags.test(EventFlag::Watchers)) {
         static constexpr int kMaxEvents{64};
         priv::ReadyEvent     events[kMaxEvents];
@@ -243,7 +295,14 @@ auto EventLoop::process_events(EventFlags flags, int ms) -> ProcessEventsResult
         }
 
         for (int i = 0; i < n; ++i) {
-            dispatch_fd(events[i]);
+            switch (events[i].kind) {
+                case priv::ReadyEventKind::FileDescriptor:
+                    dispatch_fd(events[i]);
+                    break;
+                case priv::ReadyEventKind::Process:
+                    dispatch_process(events[i].ident);
+                    break;
+            }
         }
     }
 
@@ -304,9 +363,23 @@ auto EventLoop::compute_timeout_ms(int max_timeout_ms) -> int
 
 void EventLoop::dispatch_fd(priv::ReadyEvent const& ev) const
 {
-    auto it = _watchers.find(ev.fd);
+    if (ev.ident < 0 || ev.ident > std::numeric_limits<int>::max()) {
+        return;
+    }
+    auto const fd = static_cast<int>(ev.ident);
+    auto       it = _watchers.find(fd);
     if (it != _watchers.end()) {
-        it->second.callback(ev.fd, ev.events);
+        it->second.callback(fd, ev.events);
+    }
+}
+
+void EventLoop::dispatch_process(std::int64_t process_id) const
+{
+    auto const entry = _process_watchers.find(process_id);
+    if (entry != _process_watchers.end()) {
+        // Keep the active callable alive if it removes or replaces its own map entry.
+        auto callback = entry->second;
+        callback();
     }
 }
 
