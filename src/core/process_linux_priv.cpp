@@ -36,4 +36,9 @@ auto ProcessOperations::release_gate(int fd, pid_t /*pid*/) -> ssize_t
     char const permission{'x'};
     return ::send(fd, &permission, 1, MSG_NOSIGNAL);
 }
+
+auto ProcessOperations::read_output(int fd, void* buffer, std::size_t size) noexcept -> ssize_t
+{
+    return ::read(fd, buffer, size);
+}
 } // namespace jb::core::priv
