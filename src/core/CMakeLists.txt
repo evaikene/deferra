@@ -24,6 +24,7 @@ set(HDRS
     json.hpp
     logging.hpp
     object.hpp
+    process.hpp
     result.hpp
     shared_data.hpp
     signal.hpp
@@ -42,6 +43,8 @@ set(PRIV_HDRS
     file_priv.hpp
     io_device_priv.hpp
     object_priv.hpp
+    process_priv.hpp
+    process_request_priv.hpp
     signal_priv.hpp
     thread_context.hpp
     timer_heap.hpp
@@ -60,6 +63,8 @@ set(SRCS
     json.cpp
     logging.cpp
     object.cpp
+    process.cpp
+    process_request_priv.cpp
     thread_context.cpp
     timer.cpp
     time_source.cpp

@@ -3,6 +3,19 @@ find_package(OpenSSL REQUIRED)
 
 enable_testing()
 
+# Process contract and deterministic request preparation (no child launch).
+add_executable(process-public-header-test process-public-header-test.cpp)
+target_link_libraries(process-public-header-test PRIVATE core)
+add_test(NAME process-public-header-test COMMAND $<TARGET_FILE:process-public-header-test>)
+
+add_executable(process-request-test process-request-test.cpp)
+target_link_libraries(process-request-test PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME process-request-test COMMAND $<TARGET_FILE:process-request-test>)
+
+add_executable(process-test process-test.cpp)
+target_link_libraries(process-test PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME process-test COMMAND $<TARGET_FILE:process-test>)
+
 # Object test
 set(TARGET "object-test")
 add_executable(${TARGET} object-test.cpp)
