@@ -70,7 +70,12 @@ ProcessDescriptors::~ProcessDescriptors()
 void ProcessDescriptors::close_all() noexcept
 {
     close_process_fd(input);
-    close_process_fd(output);
+    for (auto& fd : output_read) {
+        close_process_fd(fd);
+    }
+    for (auto& fd : output_write) {
+        close_process_fd(fd);
+    }
     close_process_fd(status_read);
     close_process_fd(status_write);
     close_process_fd(gate_parent);
@@ -143,10 +148,6 @@ auto prepare_process_descriptors(ProcessDescriptors& descriptors, ProcessOperati
     if (descriptors.input < 0 || !normalize_descriptor(descriptors.input)) {
         return failed();
     }
-    descriptors.output = operations.open_null(O_WRONLY);
-    if (descriptors.output < 0 || !normalize_descriptor(descriptors.output)) {
-        return failed();
-    }
     int pair[2];
     if (operations.make_pipe(pair) != 0) {
         return failed();
@@ -155,6 +156,20 @@ auto prepare_process_descriptors(ProcessDescriptors& descriptors, ProcessOperati
     descriptors.status_write = pair[1];
     if (!normalize_descriptor(descriptors.status_read) || !normalize_descriptor(descriptors.status_write)) {
         return failed();
+    }
+    for (std::size_t i = 0; i < descriptors.output_read.size(); ++i) {
+        if (operations.make_pipe(pair) != 0) {
+            return failed();
+        }
+        descriptors.output_read[i]  = pair[0];
+        descriptors.output_write[i] = pair[1];
+        if (!normalize_descriptor(descriptors.output_read[i]) || !normalize_descriptor(descriptors.output_write[i])) {
+            return failed();
+        }
+        auto const flags = ::fcntl(descriptors.output_read[i], F_GETFL);
+        if (flags < 0 || ::fcntl(descriptors.output_read[i], F_SETFL, flags | O_NONBLOCK) != 0) {
+            return failed();
+        }
     }
     if (operations.make_gate(pair) != 0) {
         return failed();
@@ -209,6 +224,9 @@ auto prepare_process_child(PreparedProcessRequest const& request, ProcessChildOp
     // Everything referenced here was frozen in the parent. No destructor, allocation, logger, mutex,
     // application handler, or exception path runs between _Fork() and execve()/_exit().
     ::close(descriptors.status_read);
+    for (auto const fd : descriptors.output_read) {
+        ::close(fd);
+    }
     ::close(descriptors.gate_parent);
     char    permission{};
     ssize_t received;
@@ -229,13 +247,15 @@ auto prepare_process_child(PreparedProcessRequest const& request, ProcessChildOp
     }
     check_child_stage(plan.options, descriptors.status_write, ProcessChildStage::Descriptors);
     // Every source is >3, so mapping 0/1/2/3 cannot overwrite another required source.
-    if (::dup2(descriptors.input, STDIN_FILENO) < 0 || ::dup2(descriptors.output, STDOUT_FILENO) < 0 ||
-        ::dup2(descriptors.output, STDERR_FILENO) < 0 || ::dup2(descriptors.status_write, 3) < 0 ||
+    if (::dup2(descriptors.input, STDIN_FILENO) < 0 || ::dup2(descriptors.output_write[0], STDOUT_FILENO) < 0 ||
+        ::dup2(descriptors.output_write[1], STDERR_FILENO) < 0 || ::dup2(descriptors.status_write, 3) < 0 ||
         ::fcntl(3, F_SETFD, FD_CLOEXEC) != 0) {
         fail_child(descriptors.status_write, ProcessChildStage::Descriptors, errno);
     }
     ::close(descriptors.input);
-    ::close(descriptors.output);
+    for (auto const fd : descriptors.output_write) {
+        ::close(fd);
+    }
     ::close(descriptors.status_write);
     // Unrelated inherited-descriptor cleanup belongs to Stage 6.6, not this source normalization step.
     if (plan.options.signal_before_reset != 0) {

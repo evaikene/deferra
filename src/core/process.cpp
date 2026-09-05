@@ -11,6 +11,7 @@
 #include <utility>
 
 #if defined(__linux__)
+#  include <algorithm>
 #  include <cassert>
 #  include <cerrno>
 #  include <exception>
@@ -150,6 +151,10 @@ auto Process::Private::launch() -> Result<void, Error>
     ++generation;
     status_anchor  = std::make_shared<Anchor>(Anchor{.data = this, .generation = generation});
     process_anchor = std::make_shared<Anchor>(Anchor{.data = this, .generation = generation});
+    for (auto& channel : channels) {
+        channel.anchor   = std::make_shared<Anchor>(Anchor{.data = this, .generation = generation});
+        channel.terminal = false;
+    }
     sigset_t   original_mask{};
     auto const mask_error = ::pthread_sigmask(SIG_SETMASK, &plan.blocked, &original_mask);
     if (mask_error != 0) {
@@ -175,7 +180,9 @@ auto Process::Private::launch() -> Result<void, Error>
                                           fork_error));
     }
     priv::close_process_fd(descriptors.input);
-    priv::close_process_fd(descriptors.output);
+    for (auto& fd : descriptors.output_write) {
+        priv::close_process_fd(fd);
+    }
     priv::close_process_fd(descriptors.status_write);
     priv::close_process_fd(descriptors.gate_child);
     if (operations->establish_group(pid) != 0) {
@@ -197,11 +204,31 @@ auto Process::Private::launch() -> Result<void, Error>
                                  // callable.
                                  auto* data = anchor->data;
                                  data->read_status();
+                                 data->drain_output(0);
+                                 data->drain_output(1);
                                  data->finish_if_ready();
                              });
     if (!status_watch) {
         return reject(
             priv::process_error("core.process.watch_failed", ErrorCategory::Unavailable, "watch.exec_status"));
+    }
+    for (std::size_t i = 0; i < channels.size(); ++i) {
+        auto& channel = channels[i];
+        channel.watch =
+            event_loop->watch_fd(descriptors.output_read[i],
+                                 FdEvent::Read,
+                                 FdTriggerMode::Edge,
+                                 [weak = std::weak_ptr<Anchor>{channel.anchor}, i](int, FdEvents) noexcept {
+                                     auto anchor = weak.lock();
+                                     if (anchor && anchor->data && anchor->generation == anchor->data->generation) {
+                                         anchor->data->output_ready(i);
+                                     }
+                                 });
+        if (!channel.watch) {
+            return reject(priv::process_error("core.process.watch_failed",
+                                              ErrorCategory::Unavailable,
+                                              i == 0 ? "watch.stdout" : "watch.stderr"));
+        }
     }
     auto watched = event_loop->watch_process(pid, [weak = std::weak_ptr<Anchor>{process_anchor}]() noexcept {
         auto anchor = weak.lock();
@@ -224,7 +251,7 @@ auto Process::Private::launch() -> Result<void, Error>
                                           "parent.gate",
                                           sent < 0 ? errno : EIO));
     }
-    // The gate is the acceptance commit point: the target cannot execute before both watches exist.
+    // The gate is the acceptance commit point: the target cannot execute before all four watches exist.
     // No signal is emitted here, even when the child has already exited before start() returns.
     gate_released = true;
     priv::close_process_fd(descriptors.gate_parent);
@@ -255,6 +282,93 @@ void Process::Private::retire_process()
     if (process_watched) {
         static_cast<void>(event_loop->unwatch_process(pid));
         process_watched = false;
+    }
+}
+
+void Process::Private::retire_output(std::size_t index)
+{
+    auto& channel = channels[index];
+    // Removal may retain callbacks, and posted continuations may outlive this run. Neither may regain access.
+    if (channel.anchor) {
+        channel.anchor->data = nullptr;
+        channel.anchor.reset();
+    }
+    channel.continuation_pending = false;
+    channel.terminal             = true;
+    if (channel.watch) {
+        static_cast<void>(event_loop->unwatch_fd(channel.watch));
+        channel.watch = {};
+    }
+    priv::close_process_fd(descriptors.output_read[index]);
+}
+
+void Process::Private::output_ready(std::size_t index)
+{
+    drain_output(index);
+    finish_if_ready();
+}
+
+void Process::Private::drain_output(std::size_t index)
+{
+    auto& channel = channels[index];
+    if (channel.terminal || channel.continuation_pending || channel.draining) {
+        return;
+    }
+    channel.draining = true;
+    // A coalesced output event can precede launch-channel dispatch. Resolve it before exposing any target bytes.
+    read_status();
+    if (!status_resolved) {
+        channel.draining = false;
+        return;
+    }
+    ByteBuffer  chunk(kPipeReadChunkBytes);
+    std::size_t total{0};
+    while (total < kPipeReadBudgetBytes) {
+        chunk.resize(std::min(kPipeReadChunkBytes, kPipeReadBudgetBytes - total));
+        auto const count = operations->read_output(descriptors.output_read[index], chunk.data(), chunk.size());
+        if (count > 0) {
+            auto const size  = static_cast<std::size_t>(count);
+            total           += size;
+            chunk.resize(size);
+            owner->emit(index == 0 ? owner->standard_output : owner->standard_error, chunk);
+            // Direct slots may request delete_later(); the Object remains alive until this bounded drain returns.
+            continue;
+        }
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            break;
+        }
+        if (count < 0) {
+            (index == 0 ? exit.stdout_lost : exit.stderr_lost) = true;
+        }
+        retire_output(index);
+        break;
+    }
+    channel.draining = false;
+    if (!channel.terminal && total == kPipeReadBudgetBytes) {
+        // Edge readiness need not recur while unread bytes remain. Coalesce with native callbacks until delivery;
+        // each continuation consumes only one budget and queues any further work for a later Object event cycle.
+        channel.continuation_pending = true;
+        auto const posted            = event_loop->post_event_delivery(
+            owner,
+            lifetime,
+            [weak = std::weak_ptr<Anchor>{channel.anchor}, index]() noexcept {
+                auto anchor = weak.lock();
+                if (!anchor || !anchor->data || anchor->generation != anchor->data->generation) {
+                    return;
+                }
+                auto* data                                 = anchor->data;
+                data->channels[index].continuation_pending = false;
+                data->output_ready(index);
+            });
+        if (!posted) {
+            // Receiver-bound delivery preserves Object lifetime safety while reporting enqueue failure.
+            // Merely clearing pending cannot restore a missing edge; explicitly terminate only this capture.
+            (index == 0 ? exit.stdout_lost : exit.stderr_lost) = true;
+            retire_output(index);
+        }
     }
 }
 
@@ -327,12 +441,15 @@ void Process::Private::child_ready()
         exit.kind          = ProcessExitKind::Signaled;
         exit.signal_number = WTERMSIG(status);
     }
+    // Identity is already invalid and state is Finishing before output can re-enter the public API.
+    drain_output(0);
+    drain_output(1);
     finish_if_ready();
 }
 
 void Process::Private::finish_if_ready()
 {
-    if (!reaped || !status_resolved) {
+    if (!reaped || !status_resolved || !channels[0].terminal || !channels[1].terminal) {
         return;
     }
     if (exit.start_error) {
@@ -341,7 +458,7 @@ void Process::Private::finish_if_ready()
         exit.signal_number.reset();
     }
     auto result = std::move(exit);
-    // Stage 6.3 has no output readers. Retire everything before a direct finished slot can restart.
+    // Reaping alone cannot discard tail bytes. Both EOF/loss terminals are established; retire before restart.
     cleanup();
     owner->emit(owner->finished, result);
 }
@@ -350,6 +467,9 @@ void Process::Private::cleanup() noexcept
 {
     retire_status();
     retire_process();
+    for (std::size_t i = 0; i < channels.size(); ++i) {
+        retire_output(i);
+    }
     priv::close_process_fd(descriptors.gate_parent);
     if (pid > 0) {
         // Rejection/deferred destruction must not leak the direct child. Full descendant/grace policy is Stage 6.5.

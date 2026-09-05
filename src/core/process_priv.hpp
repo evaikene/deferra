@@ -7,6 +7,7 @@
 #  include "process_posix_priv.hpp"
 #  include "process_request_priv.hpp"
 
+#  include <array>
 #  include <cstddef>
 #  include <memory>
 #endif
@@ -23,6 +24,18 @@ struct Process::Private : priv::ObjectPrivate {
         Private*      data;
         std::uint64_t generation;
     };
+
+    struct OutputChannel {
+        std::shared_ptr<Anchor> anchor;
+        FdWatch                 watch;
+        bool                    terminal{true};
+        bool                    continuation_pending{false};
+        bool                    draining{false};
+    };
+
+    static constexpr std::size_t kPipeReadChunkBytes{std::size_t{64} * 1024};
+    static constexpr std::size_t kPipeReadBudgetBytes{std::size_t{256} * 1024};
+    std::array<OutputChannel, 2> channels;
 
     std::shared_ptr<priv::ProcessOperations>      operations{std::make_shared<priv::ProcessOperations>()};
     std::unique_ptr<priv::PreparedProcessRequest> request;
@@ -44,6 +57,9 @@ struct Process::Private : priv::ObjectPrivate {
     /// @throws std::exception from an injected parent-side test adapter; rolls back before propagation.
     auto launch() -> Result<void, Error>;
     void read_status();
+    void output_ready(std::size_t index);
+    void drain_output(std::size_t index);
+    void retire_output(std::size_t index);
     void child_ready();
     void finish_if_ready();
     void retire_status();

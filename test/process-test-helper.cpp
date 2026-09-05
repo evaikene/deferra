@@ -2,6 +2,8 @@
 #include "process.hpp"
 #include "support/fake_event_loop_backend.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
@@ -11,6 +13,7 @@
 #include <string_view>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <unistd.h>
 
@@ -45,21 +48,28 @@ auto isolated_launch(char const* executable, int closed, bool missing) -> int
             ::close(fd);
         }
     }
-    jb::core::Process process;
-    int               result{90};
-    bool              finished{false};
-    int               started{0};
-    auto              started_connection  = process.started.connect([&] { ++started; });
-    auto              finished_connection = process.finished.connect([&](jb::core::ProcessExit const& exit) {
+    jb::core::Process  process;
+    int                result{90};
+    bool               finished{false};
+    int                started{0};
+    std::array<int, 2> output_bytes{};
+    auto               output_connection   = process.standard_output.connect([&](jb::core::ByteBuffer const& chunk) {
+        output_bytes[0] += chunk == jb::core::ByteBuffer{std::byte{'x'}} ? 1 : 100;
+    });
+    auto               error_connection    = process.standard_error.connect([&](jb::core::ByteBuffer const& chunk) {
+        output_bytes[1] += chunk == jb::core::ByteBuffer{std::byte{'x'}} ? 1 : 100;
+    });
+    auto               started_connection  = process.started.connect([&] { ++started; });
+    auto               finished_connection = process.finished.connect([&](jb::core::ProcessExit const& exit) {
         finished = true;
         if (missing) {
             result = exit.start_error && started == 0 ? 0 : 91;
         }
         else {
-            result = exit.exit_code == 37 && started == 1 ? 0 : 92;
+            result = exit.exit_code == 37 && started == 1 && output_bytes == std::array{1, 1} ? 0 : 92;
         }
     });
-    auto              accepted =
+    auto               accepted =
         process.start({.executable = missing ? "/no-such-process-helper" : executable, .arguments = {"stdio"}});
     if (!accepted) {
         return 93;
@@ -70,6 +80,8 @@ auto isolated_launch(char const* executable, int closed, bool missing) -> int
     }
     started_connection.disconnect();
     finished_connection.disconnect();
+    output_connection.disconnect();
+    error_connection.disconnect();
     if ((closed & 8) == 0) {
         ::close(reserved);
     }
@@ -106,6 +118,85 @@ auto inspect(int argc, char** argv) noexcept -> int
     }
     return 0;
 }
+
+auto wait_permission(int fd) noexcept -> bool
+{
+    char    permission{};
+    ssize_t count;
+    do {
+        count = ::read(fd, &permission, 1);
+    } while (count < 0 && errno == EINTR);
+    return count == 1;
+}
+
+// Each stream has its own position-dependent pattern, including NUL. Partial writes retain that position.
+auto write_pattern(int fd, std::size_t offset, std::size_t size, std::size_t channel) noexcept -> ssize_t
+{
+    std::array<unsigned char, 4096> bytes{};
+    size = std::min(size, bytes.size());
+    for (std::size_t i = 0; i < size; ++i) {
+        bytes[i] = static_cast<unsigned char>((offset + i + (channel * 73)) % 251);
+    }
+    ssize_t count;
+    do {
+        count = ::write(fd, bytes.data(), size);
+    } while (count < 0 && errno == EINTR);
+    return count;
+}
+
+auto output(std::array<std::size_t, 2> sizes) noexcept -> int
+{
+    std::array<std::size_t, 2> positions{};
+    while (positions != sizes) {
+        for (std::size_t i = 0; i < sizes.size(); ++i) {
+            if (positions[i] == sizes[i]) {
+                continue;
+            }
+            auto const count = write_pattern(static_cast<int>(i) + 1, positions[i], sizes[i] - positions[i], i);
+            if (count <= 0) {
+                return 75;
+            }
+            positions[i] += static_cast<std::size_t>(count);
+        }
+    }
+    return 37;
+}
+
+auto continuous_output(int mask) noexcept -> int
+{
+    // A single helper can keep either/both streams supplied without blocking one stream behind the other's writer.
+    // These target-local nonblocking flags do not alter the parent's reader file descriptions.
+    std::array<pollfd, 2>      polls{};
+    std::array<std::size_t, 2> positions{};
+    for (std::size_t i = 0; i < polls.size(); ++i) {
+        auto const fd = static_cast<int>(i) + 1;
+        polls[i]      = {.fd = (mask & (1 << i)) != 0 ? fd : -1, .events = POLLOUT, .revents = 0};
+        if (polls[i].fd >= 0 && ::fcntl(fd, F_SETFL, O_NONBLOCK) != 0) {
+            return 74;
+        }
+    }
+    for (;;) {
+        auto const ready = ::poll(polls.data(), polls.size(), -1);
+        if (ready < 0 && errno == EINTR) {
+            continue;
+        }
+        if (ready <= 0) {
+            return 73;
+        }
+        for (std::size_t i = 0; i < polls.size(); ++i) {
+            if ((polls[i].revents & POLLOUT) == 0) {
+                continue;
+            }
+            auto const count = write_pattern(polls[i].fd, positions[i], 4096, i);
+            if (count > 0) {
+                positions[i] += static_cast<std::size_t>(count);
+            }
+            else if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                return 72;
+            }
+        }
+    }
+}
 } // namespace
 
 auto main(int argc, char** argv) -> int
@@ -127,7 +218,8 @@ auto main(int argc, char** argv) -> int
     if (mode == "stdio") {
         char byte{};
         if ((::fcntl(0, F_GETFL) & O_ACCMODE) != O_RDONLY || (::fcntl(1, F_GETFL) & O_ACCMODE) != O_WRONLY ||
-            (::fcntl(2, F_GETFL) & O_ACCMODE) != O_WRONLY || ::read(0, &byte, 1) != 0 || ::write(1, "x", 1) != 1 ||
+            (::fcntl(2, F_GETFL) & O_ACCMODE) != O_WRONLY || (::fcntl(1, F_GETFL) & O_NONBLOCK) != 0 ||
+            (::fcntl(2, F_GETFL) & O_NONBLOCK) != 0 || ::read(0, &byte, 1) != 0 || ::write(1, "x", 1) != 1 ||
             ::write(2, "x", 1) != 1 || ::fcntl(3, F_GETFD) != -1 || errno != EBADF) {
             return 89;
         }
@@ -152,12 +244,23 @@ auto main(int argc, char** argv) -> int
         return inspect(argc, argv);
     }
     if (mode == "wait" && argc == 3) {
-        char    permission{};
-        ssize_t count;
-        do {
-            count = ::read(number(argv[2]), &permission, 1);
-        } while (count < 0 && errno == EINTR);
-        return count == 1 ? 0 : 96;
+        return wait_permission(number(argv[2])) ? 0 : 96;
+    }
+    if (mode == "output" && argc == 4 && number(argv[2]) >= 0 && number(argv[3]) >= 0) {
+        return output({static_cast<std::size_t>(number(argv[2])), static_cast<std::size_t>(number(argv[3]))});
+    }
+    if (mode == "continuous" && argc == 3 && number(argv[2]) >= 1 && number(argv[2]) <= 3) {
+        return continuous_output(number(argv[2]));
+    }
+    if (mode == "early" && argc == 4 && (number(argv[2]) == 0 || number(argv[2]) == 1)) {
+        auto const closed_channel = number(argv[2]);
+        auto const open_channel   = 1 - closed_channel;
+        ::close(closed_channel + 1);
+        if (write_pattern(open_channel + 1, 0, 1, static_cast<std::size_t>(open_channel)) != 1 ||
+            !wait_permission(number(argv[3]))) {
+            return 71;
+        }
+        return write_pattern(open_channel + 1, 1, 4096, static_cast<std::size_t>(open_channel)) == 4096 ? 37 : 70;
     }
     return 95;
 }

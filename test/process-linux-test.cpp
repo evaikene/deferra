@@ -9,9 +9,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <csignal> // IWYU pragma: keep Provides POSIX signal sets and dispositions.
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -24,6 +27,7 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -61,6 +65,7 @@ struct Run {
     int                        starts{0};
     int                        finishes{0};
     std::optional<ProcessExit> result;
+    std::array<ByteBuffer, 2>  bytes;
     Object                     receiver;
     Process                    process;
 
@@ -82,8 +87,17 @@ struct Run {
             CHECK_FALSE(process.process_id());
             CHECK(EventLoop::current() == loop.get());
         });
-        auto output   = process.standard_output.connect(&receiver, [](ByteBuffer const&) { FAIL("Stage 6.3 output"); });
-        auto error    = process.standard_error.connect(&receiver, [](ByteBuffer const&) { FAIL("Stage 6.3 output"); });
+        auto collect  = [this](std::size_t index, ByteBuffer const& chunk) {
+            CHECK(starts == finishes + 1);
+            CHECK_FALSE(chunk.empty());
+            CHECK(chunk.size() <= std::size_t{64} * 1024);
+            CHECK(EventLoop::current() == loop.get());
+            bytes[index].insert(bytes[index].end(), chunk.begin(), chunk.end());
+        };
+        auto output =
+            process.standard_output.connect(&receiver, [collect](ByteBuffer const& chunk) { collect(0, chunk); });
+        auto error =
+            process.standard_error.connect(&receiver, [collect](ByteBuffer const& chunk) { collect(1, chunk); });
     }
 
     /// @throws Catch::TestFailureException when readiness fails or the watchdog expires.
@@ -139,6 +153,9 @@ public:
     int                   fork_calls{0};
     int                   send_calls{0};
     int                   status_fd{-1};
+    std::array<int, 2>    output_fds{-1, -1};
+    int                   pipe_calls{0};
+    int                   fail_pipe_call{0};
     EventLoop*            loop{nullptr};
     bool                  watches_before_release{false};
     bool                  blocked_at_creation{false};
@@ -148,6 +165,7 @@ public:
 
     auto open_null(int flags) noexcept -> int override
     {
+        pipe_calls = 0;
         if (failure == Failure::Open) {
             errno = EMFILE;
             return -1;
@@ -157,13 +175,21 @@ public:
 
     auto make_pipe(int* pair) noexcept -> int override
     {
-        if (failure == Failure::Pipe) {
+        ++pipe_calls;
+        if (failure == Failure::Pipe || pipe_calls == fail_pipe_call) {
             errno = EMFILE;
             return -1;
         }
         auto const result = ProcessOperations::make_pipe(pair);
         if (result == 0) {
-            status_fd = pair[0];
+            // Every run creates exec status first, then stdout and stderr.
+            auto const index = (pipe_calls - 1) % 3;
+            if (index == 0) {
+                status_fd = pair[0];
+            }
+            else {
+                output_fds[static_cast<std::size_t>(index - 1)] = pair[0];
+            }
         }
         return result;
     }
@@ -214,8 +240,10 @@ public:
         ::pthread_sigmask(SIG_SETMASK, nullptr, &mask);
         restored_at_release = ::sigismember(&mask, SIGHUP) == 0;
         if (loop) {
-            watches_before_release =
-                EventLoopTestAccess::fd_callback(*loop, status_fd) && EventLoopTestAccess::process_callback(*loop, pid);
+            watches_before_release = EventLoopTestAccess::fd_callback(*loop, status_fd) &&
+                                     EventLoopTestAccess::process_callback(*loop, pid) &&
+                                     EventLoopTestAccess::fd_callback(*loop, output_fds[0]) &&
+                                     EventLoopTestAccess::fd_callback(*loop, output_fds[1]);
         }
         if (send_interrupted && send_calls == 1) {
             errno = EINTR;
@@ -239,6 +267,104 @@ public:
     }
 
     auto child_options() noexcept -> ProcessChildOptions override { return options; }
+};
+
+class OutputOperations final : public ScriptedOperations {
+public:
+    std::array<std::deque<int>, 2> read_errors;
+    std::array<bool, 2>            hold{};
+    std::array<bool, 2>            refill{};
+    std::array<bool, 2>            eof{};
+    std::array<std::size_t, 2>     synthetic_remaining{};
+    std::array<std::size_t, 2>     read_calls{};
+    std::array<std::size_t, 2>     read_bytes{};
+    std::size_t                    max_request{0};
+    bool                           refill_failed{false};
+
+    auto read_output(int fd, void* buffer, std::size_t size) noexcept -> ssize_t override
+    {
+        auto const index = fd == output_fds[0] ? std::size_t{0} : std::size_t{1};
+        ++read_calls[index];
+        max_request = std::max(max_request, size);
+        if (!read_errors[index].empty()) {
+            errno = read_errors[index].front();
+            read_errors[index].pop_front();
+            return -1;
+        }
+        if (hold[index]) {
+            errno = EAGAIN;
+            return -1;
+        }
+        if (synthetic_remaining[index] != 0) {
+            auto const count = std::min(size, synthetic_remaining[index]);
+            auto*      bytes = static_cast<std::byte*>(buffer);
+            for (std::size_t i = 0; i < count; ++i) {
+                bytes[i] = static_cast<std::byte>((read_bytes[index] + i + (index * 73)) % 251);
+            }
+            synthetic_remaining[index] -= count;
+            read_bytes[index]          += count;
+            return static_cast<ssize_t>(count);
+        }
+        if (refill[index]) {
+            // Test-only coordination keeps the native endless writer supplied between reads. The production
+            // operation remains a nonblocking read; this watchdog never constitutes the success predicate.
+            pollfd item{.fd = fd, .events = POLLIN, .revents = 0};
+            int    ready;
+            do {
+                ready = ::poll(&item, 1, 3000);
+            } while (ready < 0 && errno == EINTR);
+            if (ready <= 0) {
+                refill_failed = true;
+                errno         = EIO;
+                return -1;
+            }
+        }
+        auto const count = ProcessOperations::read_output(fd, buffer, size);
+        if (count > 0) {
+            read_bytes[index] += static_cast<std::size_t>(count);
+        }
+        eof[index] = count == 0;
+        return count;
+    }
+};
+
+/// @throws Catch::TestFailureException if the child cannot be observed without taking Process's reaping ownership.
+void observe_exit(pid_t pid)
+{
+    siginfo_t info{};
+    int       result;
+    do {
+        result = ::waitid(P_PID, static_cast<id_t>(pid), &info, WEXITED | WNOWAIT);
+    } while (result < 0 && errno == EINTR);
+    REQUIRE(result == 0);
+}
+
+auto matches_pattern(ByteBuffer const& bytes, std::size_t channel, std::size_t offset = 0) -> bool
+{
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        if (bytes[i] != static_cast<std::byte>((offset + i + (channel * 73)) % 251)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Coordination fds deliberately remain inherited until Stage 6.6 replaces that existing helper seam.
+struct CoordinationPipe {
+    std::array<int, 2> fds{-1, -1};
+
+    /// @throws Catch::TestFailureException when the coordination pipe cannot be created.
+    CoordinationPipe() { REQUIRE(::pipe(fds.data()) == 0); }
+
+    ~CoordinationPipe()
+    {
+        for (auto fd : fds) {
+            ::close(fd);
+        }
+    }
+
+    CoordinationPipe(CoordinationPipe const&)                    = delete;
+    auto operator=(CoordinationPipe const&) -> CoordinationPipe& = delete;
 };
 
 class SignalScope final {
@@ -484,7 +610,7 @@ TEST_CASE("Linux Process unwinds parent setup without releasing the target or re
     auto const                   marker      = directory.path() / "executed";
     auto const                   descriptors = descriptor_count();
 
-    // Inject a non-allocation exception after both watches exist; never catch or simulate std::bad_alloc recovery.
+    // Inject a non-allocation exception after all watches exist; never catch or simulate std::bad_alloc recovery.
     REQUIRE_THROWS_AS(run.process.start(helper({"marker", marker.string()})), std::runtime_error);
     CHECK(run.process.state() == ProcessState::NotRunning);
     CHECK_FALSE(run.process.process_id());
@@ -635,7 +761,7 @@ TEST_CASE("Linux Process old callbacks stay inert after failed removal restart a
     int                    finished{0};
     auto                   process    = std::make_unique<Process>();
     auto                   connection = process->finished.connect(&receiver, [&](ProcessExit const&) { ++finished; });
-    auto                   operations = std::make_shared<ScriptedOperations>();
+    auto                   operations = std::make_shared<OutputOperations>();
     ProcessTestAccess::set_operations(*process, operations);
     std::vector<FdCallback> stale_fds;
     std::vector<Task>       stale_processes;
@@ -644,6 +770,9 @@ TEST_CASE("Linux Process old callbacks stay inert after failed removal restart a
         auto const pid = operations->observed_pid;
         auto const fd  = operations->status_fd;
         stale_fds.push_back(EventLoopTestAccess::fd_callback(*loop, fd));
+        for (auto output_fd : operations->output_fds) {
+            stale_fds.push_back(EventLoopTestAccess::fd_callback(*loop, output_fd));
+        }
         stale_processes.push_back(EventLoopTestAccess::process_callback(*loop, pid));
         siginfo_t info{};
         int       waited;
@@ -653,13 +782,16 @@ TEST_CASE("Linux Process old callbacks stay inert after failed removal restart a
         REQUIRE(waited == 0);
         // Process exit retires both callbacks; subsequent events were already returned in the same poll batch.
         fake->ready_events = {
-            {.kind = ReadyEventKind::Process, .ident = pid           },
-            {.ident = fd,                     .events = FdEvent::Read},
-            {.kind = ReadyEventKind::Process, .ident = pid           }
+            {.kind = ReadyEventKind::Process,    .ident = pid           },
+            {.ident = fd,                        .events = FdEvent::Read},
+            {.ident = operations->output_fds[0], .events = FdEvent::Read},
+            {.ident = operations->output_fds[1], .events = FdEvent::Read},
+            {.kind = ReadyEventKind::Process,    .ident = pid           }
         };
         CHECK(loop->process_events(EventFlag::All, 0) == ProcessEventsResult::Stopped);
         CHECK(finished == run + 1);
         check_reaped(pid);
+        auto const reads = operations->read_calls;
         for (auto const& callback : stale_fds) {
             callback(fd, FdEvent::Read);
         }
@@ -667,10 +799,12 @@ TEST_CASE("Linux Process old callbacks stay inert after failed removal restart a
             callback();
         }
         CHECK(finished == run + 1);
+        CHECK(operations->read_calls == reads);
     }
     REQUIRE(process->start(helper()));
     auto const active_pid = operations->observed_pid;
     auto const active_fd  = operations->status_fd;
+    auto const reads      = operations->read_calls;
     // Old callbacks must not resolve or reap a newly accepted run.
     for (auto const& callback : stale_fds) {
         callback(active_fd, FdEvent::Read);
@@ -680,7 +814,11 @@ TEST_CASE("Linux Process old callbacks stay inert after failed removal restart a
     }
     CHECK(process->state() == ProcessState::Starting);
     CHECK(finished == 3);
+    CHECK(operations->read_calls == reads);
     stale_fds.push_back(EventLoopTestAccess::fd_callback(*loop, active_fd));
+    for (auto output_fd : operations->output_fds) {
+        stale_fds.push_back(EventLoopTestAccess::fd_callback(*loop, output_fd));
+    }
     stale_processes.push_back(EventLoopTestAccess::process_callback(*loop, active_pid));
     process.reset();
     check_reaped(active_pid);
@@ -691,11 +829,14 @@ TEST_CASE("Linux Process old callbacks stay inert after failed removal restart a
         callback();
     }
     fake->ready_events = {
-        {.ident = active_fd,              .events = FdEvent::Read},
-        {.kind = ReadyEventKind::Process, .ident = active_pid    }
+        {.ident = active_fd,                 .events = FdEvent::Read},
+        {.ident = operations->output_fds[0], .events = FdEvent::Read},
+        {.ident = operations->output_fds[1], .events = FdEvent::Read},
+        {.kind = ReadyEventKind::Process,    .ident = active_pid    }
     };
     CHECK(loop->process_events(EventFlag::All, 0) == ProcessEventsResult::Stopped);
     CHECK(finished == 3);
+    CHECK(operations->read_calls == reads);
 }
 
 namespace {
@@ -749,11 +890,16 @@ TEST_CASE("Linux Process direct finished slots can restart safely", "[core][proc
     Run  run;
     int  count{0};
     auto connection = run.process.finished.connect(&run.receiver, [&](ProcessExit const&) {
+        CHECK(run.bytes[0].size() == 8193);
+        CHECK(run.bytes[1].size() == 4097);
+        CHECK(matches_pattern(run.bytes[0], 0));
+        CHECK(matches_pattern(run.bytes[1], 1));
+        run.bytes = {};
         if (++count < 3) {
-            CHECK(run.process.start(helper()));
+            CHECK(run.process.start(helper({"output", "8193", "4097"})));
         }
     });
-    REQUIRE(run.process.start(helper()));
+    REQUIRE(run.process.start(helper({"output", "8193", "4097"})));
     run.until([&] { return count == 3; });
     CHECK(run.starts == 3);
     CHECK(run.finishes == 3);
@@ -822,4 +968,450 @@ TEST_CASE("Linux Process rejects unenforced later-stage policies before native s
     CHECK(operations->fork_calls == 0);
     CHECK(run.starts == 0);
     CHECK(run.finishes == 0);
+}
+
+TEST_CASE("Linux Process streams binary channels beyond pipe capacity and preserves both tails",
+          "[core][process][linux][output]")
+{
+    for (auto sizes : {
+             std::array{0,       0      },
+             std::array{1,       1      },
+             std::array{1048593, 1049079},
+             std::array{0,       1048607}
+    }) {
+        CAPTURE(sizes);
+        Run  run;
+        auto operations = std::make_shared<OutputOperations>();
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto       finish = run.process.finished.connect(&run.receiver, [&](ProcessExit const&) {
+            CHECK(operations->eof == std::array{true, true});
+        });
+        auto const result = run.execute(helper({"output", std::to_string(sizes[0]), std::to_string(sizes[1])}));
+        CHECK(result.exit_code == 37);
+        CHECK_FALSE(result.stdout_lost);
+        CHECK_FALSE(result.stderr_lost);
+        for (std::size_t i = 0; i < sizes.size(); ++i) {
+            CHECK(run.bytes[i].size() == static_cast<std::size_t>(sizes[i]));
+            CHECK(matches_pattern(run.bytes[i], i));
+        }
+        CHECK(operations->max_request <= std::size_t{64} * 1024);
+    }
+}
+
+TEST_CASE("Linux Process rolls back each partial output pipe and watch setup", "[core][process][linux][output]")
+{
+    for (int failure = 0; failure < 6; ++failure) {
+        CAPTURE(failure);
+        auto  backend = std::make_unique<FakeEventLoopBackend>();
+        auto* fake    = backend.get();
+        Run   run{std::move(backend)};
+        auto  operations = std::make_shared<ScriptedOperations>();
+        if (failure < 3) {
+            operations->fail_pipe_call = failure + 1;
+        }
+        else {
+            fake->add_fd_results = std::deque<bool>(static_cast<std::size_t>(failure - 3), true);
+            fake->add_fd_results.push_back(false);
+        }
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto const descriptors = descriptor_count();
+        auto       result      = run.process.start(helper());
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code ==
+              (failure < 3 ? "core.process.resource_setup_failed" : "core.process.watch_failed"));
+        CHECK(operations->send_calls == 0);
+        CHECK(run.process.state() == ProcessState::NotRunning);
+        CHECK(EventLoopTestAccess::active_process_count(*run.loop) == 0);
+        CHECK_FALSE(EventLoopTestAccess::fd_callback(*run.loop, operations->status_fd));
+        for (auto fd : operations->output_fds) {
+            CHECK_FALSE(EventLoopTestAccess::fd_callback(*run.loop, fd));
+        }
+        CHECK(descriptor_count() == descriptors);
+        CHECK(run.loop->process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+        CHECK(run.starts == 0);
+        CHECK(run.finishes == 0);
+        if (failure < 3) {
+            CHECK(operations->fork_calls == 0);
+        }
+        else {
+            check_reaped(operations->observed_pid);
+        }
+    }
+}
+
+TEST_CASE("Linux Process keeps the other channel alive after early EOF", "[core][process][linux][output]")
+{
+    for (std::size_t closed = 0; closed < 2; ++closed) {
+        CoordinationPipe gate;
+        Run              run;
+        auto             operations = std::make_shared<OutputOperations>();
+        ProcessTestAccess::set_operations(run.process, operations);
+        REQUIRE(run.process.start(helper({"early", std::to_string(closed), std::to_string(gate.fds[0])})));
+        auto const pid  = operations->observed_pid;
+        auto const open = 1 - closed;
+        run.until([&] { return operations->eof[closed] && run.bytes[open].size() == 1; });
+        CHECK_FALSE(operations->eof[open]);
+        CHECK(run.finishes == 0);
+        CHECK(run.process.state() == ProcessState::Running);
+        REQUIRE(::write(gate.fds[1], "x", 1) == 1);
+        run.until([&] { return run.finishes == 1; });
+        CHECK(run.result->exit_code == 37);
+        CHECK(run.bytes[closed].empty());
+        CHECK(run.bytes[open].size() == 4097);
+        CHECK(matches_pattern(run.bytes[open], open));
+        check_reaped(pid);
+    }
+}
+
+TEST_CASE("Linux Process reap waits for independently controlled output terminals", "[core][process][linux][output]")
+{
+    auto  backend = std::make_unique<FakeEventLoopBackend>();
+    auto* fake    = backend.get();
+    Run   run{std::move(backend)};
+    auto  operations = std::make_shared<OutputOperations>();
+    operations->hold = {true, true};
+    ProcessTestAccess::set_operations(run.process, operations);
+    REQUIRE(run.process.start(helper({"output", "11", "17"})));
+    auto const pid = operations->observed_pid;
+    observe_exit(pid);
+    fake->ready_events = {
+        {.ident = operations->output_fds[0], .events = FdEvent::Read},
+        {.kind = ReadyEventKind::Process,    .ident = pid           },
+        {.ident = operations->output_fds[1], .events = FdEvent::Read}
+    };
+    CHECK(run.loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
+    CHECK(run.starts == 1);
+    CHECK(run.finishes == 0);
+    CHECK(run.process.state() == ProcessState::Finishing);
+    CHECK_FALSE(run.process.process_id());
+    check_reaped(pid);
+    auto inspect = [&](ByteBuffer const&) {
+        CHECK(run.process.state() == ProcessState::Finishing);
+        CHECK_FALSE(run.process.process_id());
+        CHECK_FALSE(run.process.start(helper()));
+        CHECK_FALSE(run.process.stop());
+    };
+    auto output = run.process.standard_output.connect(&run.receiver, inspect);
+    auto error  = run.process.standard_error.connect(&run.receiver, inspect);
+    for (std::size_t i = 0; i < 2; ++i) {
+        operations->hold[i] = false;
+        fake->ready_events  = {
+            {.ident = operations->output_fds[i], .events = FdEvent::Read}
+        };
+        CHECK(run.loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
+        CHECK(operations->eof[i]);
+        CHECK(run.finishes == static_cast<int>(i));
+    }
+    CHECK(run.bytes[0].size() == 11);
+    CHECK(run.bytes[1].size() == 17);
+    CHECK(matches_pattern(run.bytes[0], 0));
+    CHECK(matches_pattern(run.bytes[1], 1));
+    CHECK(run.result->exit_code == 37);
+}
+
+TEST_CASE("Linux Process retries interrupted reads and coalesces budget continuations without another edge",
+          "[core][process][linux][output]")
+{
+    constexpr std::size_t budget{std::size_t{256} * 1024};
+    auto                  backend = std::make_unique<FakeEventLoopBackend>();
+    auto*                 fake    = backend.get();
+    Run                   run{std::move(backend)};
+    auto                  operations   = std::make_shared<OutputOperations>();
+    operations->read_errors[0]         = {EINTR, EAGAIN};
+    operations->synthetic_remaining[0] = (3 * budget) + 31;
+    ProcessTestAccess::set_operations(run.process, operations);
+    REQUIRE(run.process.start(helper()));
+    auto const pid = operations->observed_pid;
+    observe_exit(pid);
+    auto const fd      = operations->output_fds[0];
+    fake->ready_events = {
+        {.ident = fd, .events = FdEvent::Read}
+    };
+    CHECK(run.loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
+    CHECK(run.starts == 1);
+    CHECK(operations->read_calls[0] == 2);
+    CHECK(run.bytes[0].empty());
+    CHECK(run.loop->process_events(EventFlag::Events, 0) != ProcessEventsResult::Failed);
+    CHECK(operations->read_calls[0] == 2); // EAGAIN waits for readiness rather than spinning a continuation.
+    fake->ready_events = {
+        {.ident = fd,                     .events = FdEvent::Read},
+        {.ident = fd,                     .events = FdEvent::Read},
+        {.kind = ReadyEventKind::Process, .ident = pid           }
+    };
+    CHECK(run.loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
+    CHECK(run.bytes[0].size() == budget);
+    CHECK(operations->read_calls[0] == 6);
+    CHECK(run.process.state() == ProcessState::Finishing);
+    CHECK(run.finishes == 0);
+    for (std::size_t cycle = 2; cycle <= 3; ++cycle) {
+        CHECK(run.loop->process_events(EventFlag::Events, 0) != ProcessEventsResult::Failed);
+        CHECK(run.bytes[0].size() == cycle * budget);
+        CHECK(run.finishes == 0);
+    }
+    CHECK(run.loop->process_events(EventFlag::Events, 0) != ProcessEventsResult::Failed);
+    CHECK(run.bytes[0].size() == (3 * budget) + 31);
+    CHECK(matches_pattern(run.bytes[0], 0));
+    CHECK(operations->max_request == std::size_t{64} * 1024);
+    CHECK(run.finishes == 1);
+    CHECK(run.result->exit_code == 37);
+    CHECK_FALSE(run.result->stdout_lost);
+    CHECK_FALSE(run.result->stderr_lost);
+    auto const calls = operations->read_calls;
+    CHECK(run.loop->process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+    CHECK(operations->read_calls == calls);
+}
+
+TEST_CASE("Linux Process endless native writers yield to timers descriptors and another child exit",
+          "[core][process][linux][output]")
+{
+    constexpr std::size_t budget{std::size_t{256} * 1024};
+    for (int mask : {1, 2, 3}) {
+        CAPTURE(mask);
+        auto  backend = std::make_unique<FakeEventLoopBackend>();
+        auto* fake    = backend.get();
+        Run   run{std::move(backend)};
+        auto  operations = std::make_shared<OutputOperations>();
+        ProcessTestAccess::set_operations(run.process, operations);
+        REQUIRE(run.process.start(helper({"continuous", std::to_string(mask)})));
+        for (std::size_t i = 0; i < 2; ++i) {
+            operations->refill[i] = (mask & (1 << i)) != 0;
+            if (operations->refill[i]) {
+                pollfd item{.fd = operations->output_fds[i], .events = POLLIN, .revents = 0};
+                REQUIRE(::poll(&item, 1, 3000) == 1);
+                fake->ready_events.push_back({.ident = item.fd, .events = FdEvent::Read});
+                fake->ready_events.push_back({.ident = item.fd, .events = FdEvent::Read});
+            }
+        }
+        CoordinationPipe unrelated;
+        bool             descriptor_ready{false};
+        bool             timer_ready{false};
+        bool             child_finished{false};
+        auto watch = run.loop->watch_fd(unrelated.fds[0], FdEvent::Read, FdTriggerMode::Edge, [&](int, FdEvents) {
+            descriptor_ready = true;
+        });
+        REQUIRE(watch);
+        REQUIRE(::write(unrelated.fds[1], "x", 1) == 1);
+        Process other;
+        auto    finish = other.finished.connect(&run.receiver, [&](ProcessExit const& exit) {
+            CHECK(exit.exit_code == 37);
+            child_finished = true;
+        });
+        REQUIRE(other.start(helper()));
+        auto const other_pid = static_cast<pid_t>(*other.process_id());
+        observe_exit(other_pid);
+        fake->ready_events.push_back({.ident = unrelated.fds[0], .events = FdEvent::Read});
+        fake->ready_events.push_back({.kind = ReadyEventKind::Process, .ident = other_pid});
+        auto timer = run.loop->post_at(Clock::now(), [&] { timer_ready = true; });
+        REQUIRE(timer);
+        CHECK(run.loop->process_events(EventFlags{EventFlag::Watchers, EventFlag::Timers}, 0) !=
+              ProcessEventsResult::Failed);
+        CHECK(descriptor_ready);
+        CHECK(timer_ready);
+        CHECK(child_finished);
+        check_reaped(other_pid);
+        for (std::size_t cycle = 1; cycle <= 4; ++cycle) {
+            if (cycle != 1) {
+                CHECK(run.loop->process_events(EventFlag::Events, 0) != ProcessEventsResult::Failed);
+            }
+            for (std::size_t i = 0; i < 2; ++i) {
+                CHECK(run.bytes[i].size() == (operations->refill[i] ? cycle * budget : 0));
+                CHECK(matches_pattern(run.bytes[i], i));
+            }
+        }
+        CHECK_FALSE(operations->refill_failed);
+        CHECK(operations->max_request == std::size_t{64} * 1024);
+        CHECK(run.finishes == 0);
+        CHECK(run.loop->unwatch_fd(watch));
+    }
+}
+
+TEST_CASE("Linux Process failed continuation enqueue retires only its channel without stranding completion",
+          "[core][process][linux][output]")
+{
+    constexpr std::size_t budget{std::size_t{256} * 1024};
+    for (std::size_t failed = 0; failed < 2; ++failed) {
+        for (bool repost : {false, true}) {
+            CAPTURE(failed, repost);
+            auto  backend          = std::make_unique<FakeEventLoopBackend>();
+            auto* fake             = backend.get();
+            fake->remove_fd_result = false;
+            Run  run{std::move(backend)};
+            auto operations                             = std::make_shared<OutputOperations>();
+            operations->hold                            = {true, true};
+            operations->synthetic_remaining[failed]     = (3 * budget) + 31;
+            operations->synthetic_remaining[1 - failed] = 17;
+            ProcessTestAccess::set_operations(run.process, operations);
+            REQUIRE(run.process.start(helper()));
+            auto const pid = operations->observed_pid;
+            observe_exit(pid);
+            fake->ready_events = {
+                {.kind = ReadyEventKind::Process, .ident = pid}
+            };
+            REQUIRE(run.loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
+            REQUIRE(run.process.state() == ProcessState::Finishing);
+            check_reaped(pid);
+
+            // Keep the other channel open so enqueue failure must retire exactly one channel before completion.
+            auto const fd    = operations->output_fds[failed];
+            auto const stale = EventLoopTestAccess::fd_callback(*run.loop, fd);
+            REQUIRE(stale);
+            operations->hold[failed] = false;
+            fake->wakeup_result      = repost;
+            auto const wakeups       = fake->wakeup_calls;
+            fake->ready_events       = {
+                {.ident = fd, .events = FdEvent::Read},
+                {.ident = fd, .events = FdEvent::Read}
+            };
+            REQUIRE(run.loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
+            CHECK(run.bytes[failed].size() == budget);
+            if (repost) {
+                fake->wakeup_result = false;
+                REQUIRE(run.loop->process_events(EventFlag::Events, 0) != ProcessEventsResult::Failed);
+            }
+            CHECK(fake->wakeup_calls == wakeups + (repost ? 2 : 1));
+            CHECK(run.bytes[failed].size() == (repost ? 2 * budget : budget));
+            CHECK(matches_pattern(run.bytes[failed], failed));
+            CHECK(run.finishes == 0);
+            CHECK(::fcntl(fd, F_GETFD) == -1);
+            CHECK(errno == EBADF);
+            REQUIRE(EventLoopTestAccess::fd_callback(*run.loop, fd)); // Failed unwatch retained the inert callback.
+
+            auto const reads = operations->read_calls;
+            stale(fd, FdEvent::Read);
+            fake->ready_events = {
+                {.ident = fd, .events = FdEvent::Read}
+            };
+            REQUIRE(run.loop->process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+            CHECK(operations->read_calls == reads);
+            CHECK(fake->wakeup_calls == wakeups + (repost ? 2 : 1)); // No retry or repost loop on persistent failure.
+
+            operations->hold[1 - failed] = false;
+            fake->ready_events           = {
+                {.ident = operations->output_fds[1 - failed], .events = FdEvent::Read}
+            };
+            REQUIRE(run.loop->process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+            REQUIRE(run.result);
+            CHECK(run.finishes == 1);
+            CHECK(run.result->exit_code == 37);
+            CHECK(run.result->stdout_lost == (failed == 0));
+            CHECK(run.result->stderr_lost == (failed == 1));
+            CHECK(run.bytes[1 - failed].size() == 17);
+            CHECK(matches_pattern(run.bytes[1 - failed], 1 - failed));
+
+            // Restoring wakeup and reusing the Process must not reactivate failed-generation work or loss state.
+            fake->wakeup_result             = true;
+            operations->synthetic_remaining = {};
+            REQUIRE(run.process.start(helper()));
+            auto const next_pid     = operations->observed_pid;
+            auto const before_stale = operations->read_calls;
+            stale(fd, FdEvent::Read);
+            REQUIRE(run.loop->process_events(EventFlag::Events, 0) != ProcessEventsResult::Failed);
+            CHECK(operations->read_calls == before_stale);
+            CHECK(run.process.state() == ProcessState::Starting);
+            observe_exit(next_pid);
+            fake->ready_events = {
+                {.kind = ReadyEventKind::Process, .ident = next_pid}
+            };
+            REQUIRE(run.loop->process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+            CHECK(run.finishes == 2);
+            CHECK_FALSE(run.result->stdout_lost);
+            CHECK_FALSE(run.result->stderr_lost);
+            check_reaped(next_pid);
+        }
+    }
+}
+
+TEST_CASE("Linux Process read failure loses only its channel and preserves leader classification",
+          "[core][process][linux][output]")
+{
+    for (std::size_t failed = 0; failed < 2; ++failed) {
+        auto  backend = std::make_unique<FakeEventLoopBackend>();
+        auto* fake    = backend.get();
+        Run   run{std::move(backend)};
+        auto  operations                = std::make_shared<OutputOperations>();
+        operations->read_errors[failed] = {EIO};
+        ProcessTestAccess::set_operations(run.process, operations);
+        REQUIRE(run.process.start(helper({"output", "11", "17"})));
+        auto const pid = operations->observed_pid;
+        observe_exit(pid);
+        fake->ready_events = {
+            {.kind = ReadyEventKind::Process, .ident = pid}
+        };
+        CHECK(run.loop->process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+        REQUIRE(run.result);
+        CHECK(run.result->kind == ProcessExitKind::Exited);
+        CHECK(run.result->exit_code == 37);
+        CHECK(run.result->stdout_lost == (failed == 0));
+        CHECK(run.result->stderr_lost == (failed == 1));
+        CHECK(run.bytes[failed].empty());
+        CHECK(run.bytes[1 - failed].size() == (failed == 0 ? 17 : 11));
+        CHECK(matches_pattern(run.bytes[1 - failed], 1 - failed));
+        check_reaped(pid);
+    }
+}
+
+TEST_CASE("Linux Process output slots defer deletion across a bounded drain and pending continuation",
+          "[core][process][linux][output]")
+{
+    constexpr std::size_t budget{std::size_t{256} * 1024};
+    for (std::size_t index = 0; index < 2; ++index) {
+        auto  backend               = std::make_unique<FakeEventLoopBackend>();
+        auto* fake                  = backend.get();
+        fake->remove_fd_result      = false;
+        auto                   loop = EventLoopTestAccess::make_event_loop(std::move(backend));
+        ScopedCurrentEventLoop current{loop.get()};
+        CoordinationPipe       gate;
+        Object                 receiver;
+        auto const             descriptors = descriptor_count();
+        auto*                  process     = new Process;
+        bool                   destroyed{false};
+        bool                   slot_returned{false};
+        int                    finishes{0};
+        std::size_t            bytes{0};
+        auto                   operations      = std::make_shared<OutputOperations>();
+        operations->synthetic_remaining[index] = 2 * budget;
+        ProcessTestAccess::set_operations(*process, operations);
+        auto destroy = process->destroyed.connect(&receiver, [&] { destroyed = true; });
+        auto output  = (index == 0 ? process->standard_output : process->standard_error)
+                           .connect(
+                               &receiver,
+                               [&](ByteBuffer const& chunk) {
+                                  CHECK_FALSE(destroyed);
+                                  CHECK(matches_pattern(chunk, index, bytes));
+                                  bytes += chunk.size();
+                                  process->delete_later();
+                                  slot_returned = true;
+                               },
+                               ConnectionType::Direct);
+        auto finish  = process->finished.connect(&receiver, [&](ProcessExit const&) { ++finishes; });
+        REQUIRE(process->start(helper({"wait", std::to_string(gate.fds[0])})));
+        auto const pid = operations->observed_pid;
+        pollfd     status{.fd = operations->status_fd, .events = POLLIN, .revents = 0};
+        REQUIRE(::poll(&status, 1, 3000) == 1);
+        auto const fd      = operations->output_fds[index];
+        auto       stale   = EventLoopTestAccess::fd_callback(*loop, fd);
+        fake->ready_events = {
+            {.ident = fd, .events = FdEvent::Read}
+        };
+        CHECK(loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
+        CHECK(slot_returned);
+        CHECK_FALSE(destroyed);
+        CHECK(bytes == budget); // The direct slot returns into the remaining reads before deferred deletion.
+        auto const calls = operations->read_calls;
+        CHECK(loop->process_events(EventFlag::Tasks, 0) != ProcessEventsResult::Failed);
+        CHECK(destroyed);
+        if (!destroyed) {
+            delete process;
+        }
+        check_reaped(pid);
+        stale(fd, FdEvent::Read);
+        fake->ready_events = {
+            {.ident = fd, .events = FdEvent::Read}
+        };
+        CHECK(loop->process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+        CHECK(loop->process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+        CHECK(operations->read_calls == calls);
+        CHECK(finishes == 0);
+        CHECK(descriptor_count() == descriptors);
+    }
 }

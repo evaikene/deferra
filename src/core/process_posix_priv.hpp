@@ -57,18 +57,22 @@ public:
     virtual auto establish_group(pid_t pid) noexcept -> int;
     /// @throws std::exception from an injected test adapter before sending; throwing after release is forbidden.
     virtual auto release_gate(int fd, pid_t pid) -> ssize_t;
+    /// Parent-only output read seam; the child never calls a virtual operation.
+    virtual auto read_output(int fd, void* buffer, std::size_t size) noexcept -> ssize_t;
 
     virtual auto child_options() noexcept -> ProcessChildOptions { return {}; }
 };
 
 /// All owned descriptors are above 3 before child creation. Destruction never invokes user code.
 struct ProcessDescriptors {
-    int input{-1};
-    int output{-1};
-    int status_read{-1};
-    int status_write{-1};
-    int gate_parent{-1};
-    int gate_child{-1};
+    int                input{-1};
+    // Index 0 is stdout, index 1 is stderr. Only parent readers become nonblocking.
+    std::array<int, 2> output_read{-1, -1};
+    std::array<int, 2> output_write{-1, -1};
+    int                status_read{-1};
+    int                status_write{-1};
+    int                gate_parent{-1};
+    int                gate_child{-1};
     ProcessDescriptors() = default;
     ~ProcessDescriptors();
     ProcessDescriptors(ProcessDescriptors const&)                    = delete;

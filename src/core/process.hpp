@@ -85,9 +85,9 @@ struct ProcessExit {
     std::optional<int>   signal_number;
     /// Present only for StartFailed; a safe core.process.* error proving child setup/exec failure.
     std::optional<Error> start_error;
-    /// stdout ended through read failure or bounded post-reap forced closure rather than EOF.
+    /// stdout ended through read/drain-scheduling failure or bounded post-reap forced closure rather than EOF.
     bool                 stdout_lost{false};
-    /// stderr ended through read failure or bounded post-reap forced closure rather than EOF.
+    /// stderr ended through read/drain-scheduling failure or bounded post-reap forced closure rather than EOF.
     bool                 stderr_lost{false};
 };
 
@@ -99,9 +99,10 @@ struct ProcessExit {
 /// argv/environment storage including NULs and pointer arrays is capped at 256 KiB and the runtime argument limit;
 /// expanded PATH candidate storage has a separate 256 KiB limit. No shell or ambient PATH lookup is performed.
 /// All errors use core.process.* codes and fixed safe details, excluding user-supplied strings and output.
-/// @note Stage 6.3 supports Linux launch and exit reporting with stdout/stderr directed to /dev/null.
-/// Output streaming, timeout/stop, inherited-descriptor cleanup, and privilege-gain prevention arrive in
-/// Stages 6.4-6.6. Requests requiring timeout or privilege-gain prevention currently reject before spawning.
+/// @note Stage 6.4 supports Linux launch, bounded output streaming, and completion after reaping and output EOF/loss.
+/// Timeout/stop, descendant cleanup and the bounded post-reap deadline arrive in Stage 6.5; a retained descendant
+/// writer can currently delay completion. Inherited-descriptor cleanup and privilege-gain prevention arrive in
+/// Stage 6.6. Requests requiring timeout or privilege-gain prevention currently reject before spawning.
 /// Other platforms retain core.process.monitor_unsupported until their backend stage.
 class Process final : public Object {
 public:
