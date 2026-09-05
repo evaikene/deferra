@@ -214,7 +214,7 @@ TEST_CASE("EventLoop callback-only replacement does not update the backend", "[c
         CHECK(replacement.fd == original.fd);
         CHECK(fake.backend->add_fd_calls == add_calls);
 
-        fake.backend->ready_events.push_back({.fd = fd, .events = FdEvent::Read});
+        fake.backend->ready_events.push_back({.ident = fd, .events = FdEvent::Read});
         CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
         CHECK(original_calls == 0);
         CHECK(replacement_calls == 1);
@@ -271,7 +271,7 @@ TEST_CASE("EventLoop preserves an existing watch when event and trigger replacem
     CHECK(registration->events.bits() == FdEvents{FdEvent::Read}.bits());
     CHECK(registration->trigger_mode == FdTriggerMode::Edge);
 
-    fake.backend->ready_events.push_back({.fd = 42, .events = FdEvent::Read});
+    fake.backend->ready_events.push_back({.ident = 42, .events = FdEvent::Read});
     CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
     CHECK(original_calls == 1);
     CHECK(replacement_calls == 0);
@@ -301,7 +301,7 @@ TEST_CASE("EventLoop preserves an existing watch when trigger-only replacement f
     CHECK(registration->events.bits() == FdEvents{FdEvent::Read}.bits());
     CHECK(registration->trigger_mode == FdTriggerMode::Edge);
 
-    fake.backend->ready_events.push_back({.fd = 42, .events = FdEvent::Read});
+    fake.backend->ready_events.push_back({.ident = 42, .events = FdEvent::Read});
     CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
     CHECK(original_calls == 1);
     CHECK(replacement_calls == 0);
@@ -334,14 +334,14 @@ TEST_CASE("EventLoop retains a watch after failed removal", "[core][event_loop]"
 
     fake.backend->remove_fd_result = false;
     CHECK_FALSE(fake.loop->unwatch_fd(watch));
-    fake.backend->ready_events.push_back({.fd = 42, .events = FdEvent::Read});
+    fake.backend->ready_events.push_back({.ident = 42, .events = FdEvent::Read});
     CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
     CHECK(callback_calls == 1);
 
     fake.backend->remove_fd_result = true;
     CHECK(fake.loop->unwatch_fd(watch));
     CHECK(fake.loop->unwatch_fd(watch));
-    fake.backend->ready_events.push_back({.fd = 42, .events = FdEvent::Read});
+    fake.backend->ready_events.push_back({.ident = 42, .events = FdEvent::Read});
     CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
     CHECK(callback_calls == 1);
 }

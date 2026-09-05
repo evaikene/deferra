@@ -1,25 +1,55 @@
 #if defined(__linux__)
 
 #  include "event_loop_backend.hpp"
+#  include "event_loop_backend_epoll_priv.hpp"
 #  include "logging.hpp"
 
 #  include <algorithm>
 #  include <cerrno>
 #  include <cstring>
+#  include <limits>
 #  include <memory>
+#  include <unordered_map>
+#  include <utility>
 
 #  include <sys/epoll.h>
 #  include <sys/eventfd.h>
+#  include <sys/syscall.h>
+#  include <sys/types.h>
 
 #  include <unistd.h>
 
 namespace jb::core::priv {
 
+auto EpollProcessOperations::open_pidfd(int process_id) -> int
+{
+#  if defined(SYS_pidfd_open)
+    return static_cast<int>(::syscall(SYS_pidfd_open, process_id, 0));
+#  else
+    (void)process_id;
+    errno = ENOSYS;
+    return -1;
+#  endif
+}
+
+auto EpollProcessOperations::control(int poller, int operation, int fd, epoll_event* event) -> int
+{
+    return ::epoll_ctl(poller, operation, fd, event);
+}
+
 class EpollBackend final : public Backend {
 public:
 
+    explicit EpollBackend(std::shared_ptr<EpollProcessOperations> operations)
+        : _process_operations(std::move(operations))
+    {}
+
     ~EpollBackend() override
     {
+        // Backend destruction releases monitoring resources, never child-reaping ownership.
+        for (auto const& [pid, fd] : _process_fds) {
+            ::close(fd);
+        }
         if (_wake_fd >= 0) {
             ::close(_wake_fd);
         }
@@ -47,8 +77,8 @@ public:
 
         // register wakeup fd once
         epoll_event ev{};
-        ev.events  = EPOLLIN;
-        ev.data.fd = _wake_fd;
+        ev.events   = EPOLLIN;
+        ev.data.u64 = static_cast<std::uint64_t>(_wake_fd);
         if (::epoll_ctl(_epoll_fd, EPOLL_CTL_ADD, _wake_fd, &ev) < 0) {
             auto const error = errno;
             log_error("epoll_ctl ADD wake fd failed: {}", std::strerror(error));
@@ -61,12 +91,15 @@ public:
 
     auto add_fd(int fd, FdEvents events, FdTriggerMode trigger_mode) -> bool override
     {
+        if (_fd_processes.contains(fd)) {
+            return false;
+        }
         epoll_event ev{};
         ev.events = to_epoll(events);
         if (trigger_mode == FdTriggerMode::Edge) {
             ev.events |= EPOLLET;
         }
-        ev.data.fd = fd;
+        ev.data.u64 = static_cast<std::uint64_t>(fd);
 
         if (::epoll_ctl(_epoll_fd, EPOLL_CTL_MOD, fd, &ev) < 0) {
             auto const modify_error = errno;
@@ -86,6 +119,9 @@ public:
 
     auto remove_fd(int fd) -> bool override
     {
+        if (_fd_processes.contains(fd)) {
+            return false;
+        }
         if (::epoll_ctl(_epoll_fd, EPOLL_CTL_DEL, fd, nullptr) == 0) {
             return true;
         }
@@ -97,6 +133,54 @@ public:
 
         log_error("epoll_ctl DEL failed for fd {}: {}", fd, std::strerror(error));
         return false;
+    }
+
+    auto add_process(std::int64_t process_id) -> ProcessRegistrationResult override
+    {
+        if (process_id <= 0 || process_id > std::numeric_limits<pid_t>::max()) {
+            return ProcessRegistrationResult::Failed;
+        }
+        if (_process_fds.contains(process_id)) {
+            return ProcessRegistrationResult::Added;
+        }
+        auto const fd = _process_operations->open_pidfd(static_cast<int>(process_id));
+        if (fd < 0) {
+            return errno == ENOSYS ? ProcessRegistrationResult::Unsupported : ProcessRegistrationResult::Failed;
+        }
+
+        // Prepare both lookups before native registration so syscall failure can roll back the complete entry.
+        _process_fds.emplace(process_id, fd);
+        _fd_processes.emplace(fd, process_id);
+        epoll_event event{};
+        // pidfds stay readable after exit. One-shot delivery prevents spinning when removal fails;
+        // the tag prevents a numeric fd/PID collision from becoming an ordinary fd notification.
+        event.events   = EPOLLIN | EPOLLONESHOT;
+        event.data.u64 = kProcessTag | static_cast<std::uint64_t>(fd);
+        if (_process_operations->control(_epoll_fd, EPOLL_CTL_ADD, fd, &event) != 0) {
+            _process_fds.erase(process_id);
+            _fd_processes.erase(fd);
+            ::close(fd);
+            return ProcessRegistrationResult::Failed;
+        }
+        return ProcessRegistrationResult::Added;
+    }
+
+    auto remove_process(std::int64_t process_id) -> bool override
+    {
+        auto const entry = _process_fds.find(process_id);
+        if (entry == _process_fds.end()) {
+            return true;
+        }
+        auto const fd = entry->second;
+        // Retain both maps and the descriptor on failure so EventLoop can safely retry removal.
+        // A previously delivered watch is deliberately never rearmed, even along this failure path.
+        if (_process_operations->control(_epoll_fd, EPOLL_CTL_DEL, fd, nullptr) != 0) {
+            return false;
+        }
+        ::close(fd);
+        _fd_processes.erase(fd);
+        _process_fds.erase(entry);
+        return true;
     }
 
     auto poll(ReadyEvent* out, int max_events, int timeout_ms) -> int override
@@ -118,7 +202,14 @@ public:
 
         int written{0};
         for (int i = 0; i < n; ++i) {
-            auto fd = events[i].data.fd;
+            auto const tag = events[i].data.u64;
+            auto const fd  = static_cast<int>(tag & ~kProcessTag);
+            if ((tag & kProcessTag) != 0) {
+                if (auto const entry = _fd_processes.find(fd); entry != _fd_processes.end()) {
+                    out[written++] = {.kind = ReadyEventKind::Process, .ident = entry->second, .events = {}};
+                }
+                continue;
+            }
             if (fd == _wake_fd) {
                 if (!drain_wake_fd()) {
                     return -1;
@@ -126,7 +217,9 @@ public:
                 continue; // not a user event
             }
 
-            out[written++] = {.fd = fd, .events = from_epoll(events[i].events)};
+            out[written++] = {.kind   = ReadyEventKind::FileDescriptor,
+                              .ident  = fd,
+                              .events = from_epoll(events[i].events)};
         }
 
         return written;
@@ -157,8 +250,12 @@ public:
     }
 
 private:
-    int _epoll_fd{-1};
-    int _wake_fd{-1};
+    static constexpr std::uint64_t          kProcessTag = std::uint64_t{1} << 63U;
+    std::shared_ptr<EpollProcessOperations> _process_operations;
+    std::unordered_map<std::int64_t, int>   _process_fds;
+    std::unordered_map<int, std::int64_t>   _fd_processes;
+    int                                     _epoll_fd{-1};
+    int                                     _wake_fd{-1};
 
     void close_descriptors()
     {
@@ -226,7 +323,15 @@ private:
 
 auto make_backend() -> std::unique_ptr<Backend>
 {
-    auto backend = std::make_unique<EpollBackend>();
+    return make_epoll_backend(std::make_shared<EpollProcessOperations>());
+}
+
+auto make_epoll_backend(std::shared_ptr<EpollProcessOperations> operations) -> std::unique_ptr<Backend>
+{
+    if (!operations) {
+        return nullptr;
+    }
+    auto backend = std::make_unique<EpollBackend>(std::move(operations));
     if (!backend->initialize()) {
         return nullptr;
     }

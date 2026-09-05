@@ -500,6 +500,12 @@ add_executable(${TARGET} event-loop-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Private child-exit watch tests, including real pidfds on Linux
+add_executable(event-loop-process-watch-test event-loop-process-watch-test.cpp)
+target_link_libraries(event-loop-process-watch-test PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME event-loop-process-watch-test COMMAND $<TARGET_FILE:event-loop-process-watch-test>)
+set_tests_properties(event-loop-process-watch-test PROPERTIES TIMEOUT 30)
+
 # Kqueue backend transition test
 set(TARGET "kqueue-backend-test")
 add_executable(${TARGET} kqueue-backend-test.cpp)

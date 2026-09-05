@@ -119,6 +119,14 @@ public:
         return true;
     }
 
+    auto add_process(std::int64_t /*process_id*/) -> ProcessRegistrationResult override
+    {
+        // Native EVFILT_PROC monitoring is introduced at the separate macOS stage.
+        return ProcessRegistrationResult::Unsupported;
+    }
+
+    auto remove_process(std::int64_t /*process_id*/) -> bool override { return true; }
+
     auto poll(ReadyEvent* out, int max_events, int timeout_ms) -> int override
     {
         if (!_healthy.load(std::memory_order_relaxed)) {
@@ -173,14 +181,14 @@ public:
 
             bool merged = false;
             for (int j = 0; j < written; ++j) {
-                if (out[j].fd == fd) {
+                if (out[j].kind == ReadyEventKind::FileDescriptor && out[j].ident == fd) {
                     out[j].events.set(mask);
                     merged = true;
                     break;
                 }
             }
             if (!merged) {
-                out[written++] = {.fd = fd, .events = mask};
+                out[written++] = {.kind = ReadyEventKind::FileDescriptor, .ident = fd, .events = mask};
             }
         }
 

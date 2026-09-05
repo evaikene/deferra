@@ -1,10 +1,16 @@
+/** @file event_loop.hpp
+ * @brief Owner-thread task, timer, object-event, and native readiness dispatch.
+ */
 #pragma once
 
+#include "error.hpp"
 #include "event_loop_backend.hpp"
 #include "event_loop_types.hpp"
+#include "result.hpp"
 #include "timer_heap.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <queue>
 #include <unordered_map>
@@ -14,6 +20,7 @@ namespace jb::core {
 class Application;
 class Event;
 class Object;
+class Process;
 class ThreadCtx;
 
 namespace priv {
@@ -194,7 +201,7 @@ public:
     ///         the loop state, or `Failed` for an invalid loop, thread-contract
     ///         violation, or backend polling failure
     ///
-    /// The `ms` timeout applies only to fd events. If `EventFlag::Watchers` is not set in `flags`,
+    /// The `ms` timeout applies to native readiness. If `EventFlag::Watchers` is not set in `flags`,
     /// then `ms` is ignored and this method behaves the same as `process_events(flags)`.
     ///
     /// Deferred deletes are processed after task or object-event phases. Timer-only
@@ -207,6 +214,7 @@ private:
 
     friend class Application;
     friend class Object;
+    friend class Process;
     friend struct priv::EventLoopTestAccess;
 
     explicit EventLoop(std::unique_ptr<priv::Backend> backend);
@@ -243,13 +251,23 @@ private:
     std::mutex                      _deferred_delete_queue_mx;
 
     // Loop-thread-only state - NOT thread-safe
-    std::unique_ptr<priv::Backend>      _backend;
-    priv::TimerHeap                     _timers;
-    std::unordered_map<int, WatchEntry> _watchers;
+    std::unique_ptr<priv::Backend>         _backend;
+    priv::TimerHeap                        _timers;
+    std::unordered_map<int, WatchEntry>    _watchers;
+    std::unordered_map<std::int64_t, Task> _process_watchers;
+
+    /// Owner-thread Process seam: install or replace a callback without native rearming.
+    /// Returns safe core.process errors; failed registration preserves previous state.
+    /// The callback runs only during watcher dispatch and may remove/replace its own watch.
+    [[nodiscard]] auto watch_process(std::int64_t process_id, Task callback) -> Result<void, Error>;
+    /// Remove a process callback only after native removal succeeds; absence is success.
+    /// Callers must invalidate their lifetime anchor before removal, including on failure.
+    [[nodiscard]] auto unwatch_process(std::int64_t process_id) -> bool;
 
     auto assert_on_loop_thread() const -> bool;
     auto compute_timeout_ms(int max_timeout_ms) -> int;
     void dispatch_fd(priv::ReadyEvent const& ev) const;
+    void dispatch_process(std::int64_t process_id) const;
     auto post_event(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, std::unique_ptr<Event> event)
         -> bool;
     auto post_event_delivery(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, Task delivery) -> bool;

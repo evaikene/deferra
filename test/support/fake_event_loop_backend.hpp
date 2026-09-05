@@ -1,11 +1,14 @@
 #pragma once
 
+#include "error.hpp"
 #include "event_loop.hpp"
 #include "event_loop_backend.hpp"
+#include "result.hpp"
 #include "thread_context.hpp"
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <optional>
@@ -70,20 +73,52 @@ public:
         return static_cast<int>(count);
     }
 
+    auto add_process(std::int64_t process_id) -> ProcessRegistrationResult override
+    {
+        ++add_process_calls;
+        last_added_process = process_id;
+        if (!add_process_results.empty()) {
+            auto const result = add_process_results.front();
+            add_process_results.pop_front();
+            return result;
+        }
+        return add_process_result;
+    }
+
+    auto remove_process(std::int64_t process_id) -> bool override
+    {
+        ++remove_process_calls;
+        last_removed_process = process_id;
+        if (!remove_process_results.empty()) {
+            auto const result = remove_process_results.front();
+            remove_process_results.pop_front();
+            return result;
+        }
+        return remove_process_result;
+    }
+
     auto wakeup() -> bool override
     {
         ++wakeup_calls;
         return wakeup_result;
     }
 
-    bool                            add_fd_result{true};
-    bool                            remove_fd_result{true};
-    bool                            wakeup_result{true};
-    std::deque<bool>                add_fd_results;
-    std::deque<bool>                remove_fd_results;
-    std::optional<int>              poll_result;
-    std::vector<ReadyEvent>         ready_events;
-    std::vector<FakeFdRegistration> add_fd_history;
+    bool                                  add_fd_result{true};
+    bool                                  remove_fd_result{true};
+    bool                                  wakeup_result{true};
+    std::deque<bool>                      add_fd_results;
+    std::deque<bool>                      remove_fd_results;
+    std::optional<int>                    poll_result;
+    std::vector<ReadyEvent>               ready_events;
+    std::vector<FakeFdRegistration>       add_fd_history;
+    ProcessRegistrationResult             add_process_result{ProcessRegistrationResult::Added};
+    bool                                  remove_process_result{true};
+    std::deque<ProcessRegistrationResult> add_process_results;
+    std::deque<bool>                      remove_process_results;
+    int                                   add_process_calls{0};
+    int                                   remove_process_calls{0};
+    std::int64_t                          last_added_process{-1};
+    std::int64_t                          last_removed_process{-1};
 
     int           add_fd_calls{0};
     int           remove_fd_calls{0};
@@ -127,6 +162,24 @@ struct EventLoopTestAccess {
     }
 
     static auto active_timer_count(EventLoop const& loop) -> std::size_t { return loop._timers._timers.size(); }
+
+    static auto watch_process(EventLoop& loop, std::int64_t process_id, Task callback) -> Result<void, Error>
+    {
+        return loop.watch_process(process_id, std::move(callback));
+    }
+
+    static auto unwatch_process(EventLoop& loop, std::int64_t process_id) -> bool
+    {
+        return loop.unwatch_process(process_id);
+    }
+
+    static auto process_callback(EventLoop const& loop, std::int64_t process_id) -> Task
+    {
+        auto const entry = loop._process_watchers.find(process_id);
+        return entry == loop._process_watchers.end() ? Task{} : entry->second;
+    }
+
+    static auto active_process_count(EventLoop const& loop) -> std::size_t { return loop._process_watchers.size(); }
 };
 
 /// Owned fake backend and its EventLoop test wrapper.

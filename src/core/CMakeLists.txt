@@ -38,6 +38,7 @@ set(HDRS
 set(PRIV_HDRS
     application_priv.hpp
     event_loop_backend.hpp
+    event_loop_backend_epoll_priv.hpp
     event_loop_backend_kqueue_priv.hpp
     event_thread_priv.hpp
     file_priv.hpp

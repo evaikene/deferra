@@ -2146,7 +2146,7 @@ TEST_CASE("system HTTP client leaves persistent failed-watch callbacks inert", "
 
     fake.backend->remove_fd_result = false;
     client.reset();
-    fake.backend->ready_events.push_back({.fd = watched_fd, .events = jb::core::FdEvent::Read});
+    fake.backend->ready_events.push_back({.ident = watched_fd, .events = jb::core::FdEvent::Read});
     REQUIRE(fake.loop->process_events(jb::core::EventFlag::Watchers, 0) != jb::core::ProcessEventsResult::Failed);
     CHECK(callback_count == 0);
 }
@@ -2309,7 +2309,7 @@ TEST_CASE("curl multi adapter cancels timers and unwatches final socket handles"
     CHECK(fake.backend->remove_fd_calls == remove_calls + 1);
     CHECK(fake.backend->last_removed_fd == 43);
 
-    fake.backend->ready_events.push_back({.fd = 43, .events = jb::core::FdEvent::Read});
+    fake.backend->ready_events.push_back({.ident = 43, .events = jb::core::FdEvent::Read});
     REQUIRE(fake.loop->process_events(jb::core::EventFlag::Watchers, 37) != jb::core::ProcessEventsResult::Failed);
     CHECK(fake.backend->last_timeout_ms == 37);
     CHECK(completion_count == 0);

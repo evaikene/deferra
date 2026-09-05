@@ -8,6 +8,14 @@ using WatchFdMethod = jb::core::FdWatch (jb::core::EventLoop::*)(int,
                                                                  jb::core::FdTriggerMode,
                                                                  jb::core::FdCallback);
 
+template <typename Loop>
+concept PublicProcessWatch = requires
+{
+    &Loop::watch_process;
+};
+
+static_assert(!PublicProcessWatch<jb::core::EventLoop>);
+
 static_assert(std::is_same_v<std::underlying_type_t<jb::core::FdTriggerMode>, std::uint8_t>);
 static_assert(std::is_same_v<decltype(&jb::core::EventLoop::watch_fd), WatchFdMethod>);
 
