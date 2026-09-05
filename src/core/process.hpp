@@ -85,9 +85,9 @@ struct ProcessExit {
     std::optional<int>   signal_number;
     /// Present only for StartFailed; a safe core.process.* error proving child setup/exec failure.
     std::optional<Error> start_error;
-    /// stdout ended through read failure or bounded post-reap forced closure rather than EOF.
+    /// stdout ended through read/drain-scheduling failure or bounded post-reap forced closure rather than EOF.
     bool                 stdout_lost{false};
-    /// stderr ended through read failure or bounded post-reap forced closure rather than EOF.
+    /// stderr ended through read/drain-scheduling failure or bounded post-reap forced closure rather than EOF.
     bool                 stderr_lost{false};
 };
 

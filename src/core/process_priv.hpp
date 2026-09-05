@@ -28,7 +28,6 @@ struct Process::Private : priv::ObjectPrivate {
     struct OutputChannel {
         std::shared_ptr<Anchor> anchor;
         FdWatch                 watch;
-        Signal<>                continuation;
         bool                    terminal{true};
         bool                    continuation_pending{false};
         bool                    draining{false};

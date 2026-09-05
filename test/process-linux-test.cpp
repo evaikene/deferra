@@ -1225,6 +1225,102 @@ TEST_CASE("Linux Process endless native writers yield to timers descriptors and 
     }
 }
 
+TEST_CASE("Linux Process failed continuation enqueue retires only its channel without stranding completion",
+          "[core][process][linux][output]")
+{
+    constexpr std::size_t budget{std::size_t{256} * 1024};
+    for (std::size_t failed = 0; failed < 2; ++failed) {
+        for (bool repost : {false, true}) {
+            CAPTURE(failed, repost);
+            auto  backend          = std::make_unique<FakeEventLoopBackend>();
+            auto* fake             = backend.get();
+            fake->remove_fd_result = false;
+            Run  run{std::move(backend)};
+            auto operations                             = std::make_shared<OutputOperations>();
+            operations->hold                            = {true, true};
+            operations->synthetic_remaining[failed]     = (3 * budget) + 31;
+            operations->synthetic_remaining[1 - failed] = 17;
+            ProcessTestAccess::set_operations(run.process, operations);
+            REQUIRE(run.process.start(helper()));
+            auto const pid = operations->observed_pid;
+            observe_exit(pid);
+            fake->ready_events = {
+                {.kind = ReadyEventKind::Process, .ident = pid}
+            };
+            REQUIRE(run.loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
+            REQUIRE(run.process.state() == ProcessState::Finishing);
+            check_reaped(pid);
+
+            // Keep the other channel open so enqueue failure must retire exactly one channel before completion.
+            auto const fd    = operations->output_fds[failed];
+            auto const stale = EventLoopTestAccess::fd_callback(*run.loop, fd);
+            REQUIRE(stale);
+            operations->hold[failed] = false;
+            fake->wakeup_result      = repost;
+            auto const wakeups       = fake->wakeup_calls;
+            fake->ready_events       = {
+                {.ident = fd, .events = FdEvent::Read},
+                {.ident = fd, .events = FdEvent::Read}
+            };
+            REQUIRE(run.loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
+            CHECK(run.bytes[failed].size() == budget);
+            if (repost) {
+                fake->wakeup_result = false;
+                REQUIRE(run.loop->process_events(EventFlag::Events, 0) != ProcessEventsResult::Failed);
+            }
+            CHECK(fake->wakeup_calls == wakeups + (repost ? 2 : 1));
+            CHECK(run.bytes[failed].size() == (repost ? 2 * budget : budget));
+            CHECK(matches_pattern(run.bytes[failed], failed));
+            CHECK(run.finishes == 0);
+            CHECK(::fcntl(fd, F_GETFD) == -1);
+            CHECK(errno == EBADF);
+            REQUIRE(EventLoopTestAccess::fd_callback(*run.loop, fd)); // Failed unwatch retained the inert callback.
+
+            auto const reads = operations->read_calls;
+            stale(fd, FdEvent::Read);
+            fake->ready_events = {
+                {.ident = fd, .events = FdEvent::Read}
+            };
+            REQUIRE(run.loop->process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+            CHECK(operations->read_calls == reads);
+            CHECK(fake->wakeup_calls == wakeups + (repost ? 2 : 1)); // No retry or repost loop on persistent failure.
+
+            operations->hold[1 - failed] = false;
+            fake->ready_events           = {
+                {.ident = operations->output_fds[1 - failed], .events = FdEvent::Read}
+            };
+            REQUIRE(run.loop->process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+            REQUIRE(run.result);
+            CHECK(run.finishes == 1);
+            CHECK(run.result->exit_code == 37);
+            CHECK(run.result->stdout_lost == (failed == 0));
+            CHECK(run.result->stderr_lost == (failed == 1));
+            CHECK(run.bytes[1 - failed].size() == 17);
+            CHECK(matches_pattern(run.bytes[1 - failed], 1 - failed));
+
+            // Restoring wakeup and reusing the Process must not reactivate failed-generation work or loss state.
+            fake->wakeup_result             = true;
+            operations->synthetic_remaining = {};
+            REQUIRE(run.process.start(helper()));
+            auto const next_pid     = operations->observed_pid;
+            auto const before_stale = operations->read_calls;
+            stale(fd, FdEvent::Read);
+            REQUIRE(run.loop->process_events(EventFlag::Events, 0) != ProcessEventsResult::Failed);
+            CHECK(operations->read_calls == before_stale);
+            CHECK(run.process.state() == ProcessState::Starting);
+            observe_exit(next_pid);
+            fake->ready_events = {
+                {.kind = ReadyEventKind::Process, .ident = next_pid}
+            };
+            REQUIRE(run.loop->process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+            CHECK(run.finishes == 2);
+            CHECK_FALSE(run.result->stdout_lost);
+            CHECK_FALSE(run.result->stderr_lost);
+            check_reaped(next_pid);
+        }
+    }
+}
+
 TEST_CASE("Linux Process read failure loses only its channel and preserves leader classification",
           "[core][process][linux][output]")
 {

@@ -151,24 +151,9 @@ auto Process::Private::launch() -> Result<void, Error>
     ++generation;
     status_anchor  = std::make_shared<Anchor>(Anchor{.data = this, .generation = generation});
     process_anchor = std::make_shared<Anchor>(Anchor{.data = this, .generation = generation});
-    for (std::size_t i = 0; i < channels.size(); ++i) {
-        auto& channel    = channels[i];
+    for (auto& channel : channels) {
         channel.anchor   = std::make_shared<Anchor>(Anchor{.data = this, .generation = generation});
         channel.terminal = false;
-        // Queued receiver-aware signals use the Object event lane, whose snapshot defers reposts to a later cycle.
-        // Bind only after Object construction; both receiver lifetime and the run's one-way anchor protect delivery.
-        auto connection  = channel.continuation.connect(
-            owner,
-            [weak = std::weak_ptr<Anchor>{channel.anchor}, i]() noexcept {
-                auto anchor = weak.lock();
-                if (!anchor || !anchor->data || anchor->generation != anchor->data->generation) {
-                    return;
-                }
-                auto* data                             = anchor->data;
-                data->channels[i].continuation_pending = false;
-                data->output_ready(i);
-            },
-            ConnectionType::Queued);
     }
     sigset_t   original_mask{};
     auto const mask_error = ::pthread_sigmask(SIG_SETMASK, &plan.blocked, &original_mask);
@@ -308,7 +293,6 @@ void Process::Private::retire_output(std::size_t index)
         channel.anchor->data = nullptr;
         channel.anchor.reset();
     }
-    channel.continuation.disconnect_all();
     channel.continuation_pending = false;
     channel.terminal             = true;
     if (channel.watch) {
@@ -367,7 +351,24 @@ void Process::Private::drain_output(std::size_t index)
         // Edge readiness need not recur while unread bytes remain. Coalesce with native callbacks until delivery;
         // each continuation consumes only one budget and queues any further work for a later Object event cycle.
         channel.continuation_pending = true;
-        owner->emit(channel.continuation);
+        auto const posted            = event_loop->post_event_delivery(
+            owner,
+            lifetime,
+            [weak = std::weak_ptr<Anchor>{channel.anchor}, index]() noexcept {
+                auto anchor = weak.lock();
+                if (!anchor || !anchor->data || anchor->generation != anchor->data->generation) {
+                    return;
+                }
+                auto* data                                 = anchor->data;
+                data->channels[index].continuation_pending = false;
+                data->output_ready(index);
+            });
+        if (!posted) {
+            // Receiver-bound delivery preserves Object lifetime safety while reporting enqueue failure.
+            // Merely clearing pending cannot restore a missing edge; explicitly terminate only this capture.
+            (index == 0 ? exit.stdout_lost : exit.stderr_lost) = true;
+            retire_output(index);
+        }
     }
 }
 
