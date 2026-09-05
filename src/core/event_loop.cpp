@@ -138,8 +138,8 @@ auto EventLoop::watch_fd(int fd, FdEvents events, FdTriggerMode trigger_mode, Fd
     }
 
     auto const existing = _watchers.find(fd);
-    if (existing != _watchers.end() && existing->second.events.bits() == events.bits() &&
-        existing->second.trigger_mode == trigger_mode) {
+    if (existing != _watchers.end() && !existing->second.refresh_required &&
+        existing->second.events.bits() == events.bits() && existing->second.trigger_mode == trigger_mode) {
         // An unchanged native registration replaces only the callback and has
         // no backend-specific rearm or readiness-refresh side effect.
         existing->second.callback = std::move(callback);
@@ -170,6 +170,9 @@ auto EventLoop::unwatch_fd(FdWatch handle) -> bool
     }
 
     if (!_backend || !_backend->remove_fd(handle.fd)) {
+        // Closing after failed removal can retire native state while retaining this numeric fd entry.
+        // A later watch must reach the backend rather than assume that the old registration still exists.
+        it->second.refresh_required = true;
         return false;
     }
 

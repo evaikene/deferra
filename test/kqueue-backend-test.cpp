@@ -112,6 +112,59 @@ TEST_CASE("Kqueue filter transition changes edge filters to level", "[core][kque
     check_change(changes.calls[3], FdEvent::Write, KqueueFilterMode::Level);
 }
 
+TEST_CASE("Kqueue refresh reinstalls unchanged enabled filters", "[core][kqueue]")
+{
+    for (auto const trigger_mode : {FdTriggerMode::Edge, FdTriggerMode::Level}) {
+        for (auto const events : {
+                 FdEvents{FdEvent::Read},
+                 FdEvents{FdEvent::Read, FdEvent::Write}
+        }) {
+            ScriptedFilterChanges changes;
+            auto const            requested = registration(events, trigger_mode);
+            auto const            status =
+                jb::core::priv::transition_kqueue_filters(requested, requested, std::ref(changes), true);
+            CHECK(status == KqueueTransitionStatus::Applied);
+            auto const expected_mode =
+                trigger_mode == FdTriggerMode::Edge ? KqueueFilterMode::Edge : KqueueFilterMode::Level;
+            REQUIRE(changes.calls.size() == (events.test(FdEvent::Write) ? 2U : 1U));
+            check_change(changes.calls[0], FdEvent::Read, expected_mode);
+            if (events.test(FdEvent::Write)) {
+                check_change(changes.calls[1], FdEvent::Write, expected_mode);
+            }
+        }
+    }
+}
+
+TEST_CASE("Kqueue refresh failure preserves transactional rollback", "[core][kqueue]")
+{
+    for (auto const restored : {false, true}) {
+        ScriptedFilterChanges changes{
+            .results = {true, false, restored}
+        };
+        auto const requested = registration(FdEvents{FdEvent::Read, FdEvent::Write}, FdTriggerMode::Edge);
+        auto const status    = jb::core::priv::transition_kqueue_filters(requested, requested, std::ref(changes), true);
+        CHECK(status == (restored ? KqueueTransitionStatus::FailedRolledBack : KqueueTransitionStatus::RollbackFailed));
+        REQUIRE(changes.calls.size() == 3);
+        check_change(changes.calls[0], FdEvent::Read, KqueueFilterMode::Edge);
+        check_change(changes.calls[1], FdEvent::Write, KqueueFilterMode::Edge);
+        check_change(changes.calls[2], FdEvent::Read, KqueueFilterMode::Edge);
+    }
+}
+
+TEST_CASE("Kqueue refresh reapplies unchanged filters alongside a changed mask", "[core][kqueue]")
+{
+    ScriptedFilterChanges changes;
+    auto const            status = jb::core::priv::transition_kqueue_filters(
+        registration(FdEvents{FdEvent::Read, FdEvent::Write}, FdTriggerMode::Edge),
+        registration(FdEvent::Read, FdTriggerMode::Edge),
+        std::ref(changes),
+        true);
+    CHECK(status == KqueueTransitionStatus::Applied);
+    REQUIRE(changes.calls.size() == 2);
+    check_change(changes.calls[0], FdEvent::Read, KqueueFilterMode::Edge);
+    check_change(changes.calls[1], FdEvent::Write, KqueueFilterMode::Disabled);
+}
+
 TEST_CASE("Kqueue filter transition changes level filters to edge", "[core][kqueue]")
 {
     ScriptedFilterChanges changes;

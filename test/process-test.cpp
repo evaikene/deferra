@@ -124,9 +124,10 @@ TEST_CASE("Process rejects an invalid native owner EventLoop", "[core][process]"
     CHECK_FALSE(process.process_id());
 }
 
-TEST_CASE("Process rejected launches emit no Process signals or native registrations", "[core][process]")
+TEST_CASE("Process rejected launches emit no Process signals or retained registrations", "[core][process]")
 {
-    auto                   fake = make_fake_event_loop();
+    auto fake                        = make_fake_event_loop();
+    fake.backend->add_process_result = ProcessRegistrationResult::Unsupported;
     ScopedCurrentEventLoop current{fake.loop.get()};
     ScopedSigchld          disposition;
     disposition.install(false, false);
@@ -146,7 +147,6 @@ TEST_CASE("Process rejected launches emit no Process signals or native registrat
             REQUIRE_FALSE(result);
             CHECK(result.error().code == "core.process.monitor_unsupported");
             CHECK(result.error().category == ErrorCategory::Unsupported);
-            CHECK(result.error().detail == "backend.not_implemented");
             CHECK(process.state() == ProcessState::NotRunning);
             CHECK_FALSE(process.process_id());
         }
@@ -161,14 +161,15 @@ TEST_CASE("Process rejected launches emit no Process signals or native registrat
     }
     CHECK(fake.loop->process_events(EventFlag::All, 0) == ProcessEventsResult::Stopped);
     CHECK(signals == 0);
-    CHECK(fake.backend->add_fd_calls == 0);
-    CHECK(fake.backend->remove_fd_calls == 0);
+    CHECK(fake.backend->add_fd_calls == fake.backend->remove_fd_calls);
+    CHECK(EventLoopTestAccess::active_process_count(*fake.loop) == 0);
     CHECK(EventLoopTestAccess::active_timer_count(*fake.loop) == 0);
 }
 
 TEST_CASE("Process observes SIGCHLD disposition without changing host policy", "[core][process]")
 {
-    auto                   fake = make_fake_event_loop();
+    auto fake                        = make_fake_event_loop();
+    fake.backend->add_process_result = ProcessRegistrationResult::Unsupported;
     ScopedCurrentEventLoop current{fake.loop.get()};
     ScopedSigchld          guard;
     for (bool ignored : {false, true}) {

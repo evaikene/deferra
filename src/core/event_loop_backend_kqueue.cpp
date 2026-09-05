@@ -89,7 +89,9 @@ public:
             .events       = events,
             .trigger_mode = trigger_mode,
         };
-        if (transition_fd(fd, current, requested) != KqueueTransitionStatus::Applied) {
+        // EventLoop skips ordinary callback-only replacements. Reaching the backend must apply
+        // every requested filter, including after failed removal followed by descriptor reuse.
+        if (transition_fd(fd, current, requested, true) != KqueueTransitionStatus::Applied) {
             return false;
         }
 
@@ -263,17 +265,22 @@ private:
         return flags;
     }
 
-    auto transition_fd(int fd, KqueueFdRegistration const& current, KqueueFdRegistration const& requested)
-        -> KqueueTransitionStatus
+    auto transition_fd(int                         fd,
+                       KqueueFdRegistration const& current,
+                       KqueueFdRegistration const& requested,
+                       bool                        refresh_enabled = false) -> KqueueTransitionStatus
     {
-        auto const status =
-            transition_kqueue_filters(current, requested, [this, fd](FdEvent event, KqueueFilterMode mode) {
+        auto const status = transition_kqueue_filters(
+            current,
+            requested,
+            [this, fd](FdEvent event, KqueueFilterMode mode) {
                 auto const filter = static_cast<std::int16_t>(event == FdEvent::Read ? EVFILT_READ : EVFILT_WRITE);
                 // macOS does not persist EV_CLEAR changes from an in-place
                 // EV_ADD, so the transition helper deletes an enabled filter
                 // before adding it in a different trigger mode.
                 return apply_filter_change(fd, filter, filter_flags(mode));
-            });
+            },
+            refresh_enabled);
 
         if (status == KqueueTransitionStatus::RollbackFailed) {
             log_error("kevent filter rollback failed for fd {}; event-loop backend is unusable", fd);

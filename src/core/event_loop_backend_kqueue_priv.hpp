@@ -43,10 +43,13 @@ constexpr auto kqueue_filter_mode(KqueueFdRegistration const& registration, FdEv
 /// The callback receives the filter and requested native mode. A false callback
 /// result means that operation did not change the native filter state. Successfully
 /// applied primitive changes are journaled and rolled back in reverse order.
+/// When refresh_enabled is true, reapply unchanged enabled filters too: a retained
+/// registration may refer to a closed/reused descriptor whose native filters are gone.
 template <typename ApplyFilter>
 auto transition_kqueue_filters(KqueueFdRegistration const& current,
                                KqueueFdRegistration const& requested,
-                               ApplyFilter&&               apply_filter) -> KqueueTransitionStatus
+                               ApplyFilter&&               apply_filter,
+                               bool                        refresh_enabled = false) -> KqueueTransitionStatus
 {
     static constexpr std::array kFilters{FdEvent::Read, FdEvent::Write};
 
@@ -75,6 +78,11 @@ auto transition_kqueue_filters(KqueueFdRegistration const& current,
         auto const current_mode   = kqueue_filter_mode(current, filter);
         auto const requested_mode = kqueue_filter_mode(requested, filter);
         if (current_mode == requested_mode) {
+            if (refresh_enabled && requested_mode != KqueueFilterMode::Disabled &&
+                !apply_change(filter, current_mode, requested_mode)) {
+                transition_succeeded = false;
+                break;
+            }
             continue;
         }
 

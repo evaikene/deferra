@@ -16,6 +16,17 @@ add_executable(process-test process-test.cpp)
 target_link_libraries(process-test PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME process-test COMMAND $<TARGET_FILE:process-test>)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(process-test-helper process-test-helper.cpp)
+    target_link_libraries(process-test-helper PRIVATE core)
+    add_executable(process-linux-test process-linux-test.cpp support/temporary_directory.cpp)
+    target_link_libraries(process-linux-test PRIVATE core Catch2::Catch2WithMain)
+    target_compile_definitions(process-linux-test PRIVATE PROCESS_TEST_HELPER="$<TARGET_FILE:process-test-helper>")
+    add_dependencies(process-linux-test process-test-helper)
+    add_test(NAME process-linux-test COMMAND $<TARGET_FILE:process-linux-test>)
+    set_tests_properties(process-linux-test PROPERTIES TIMEOUT 30)
+endif()
+
 # Object test
 set(TARGET "object-test")
 add_executable(${TARGET} object-test.cpp)

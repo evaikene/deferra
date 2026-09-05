@@ -134,8 +134,11 @@ public:
     /// mode. When changing the events or trigger mode requires a backend update,
     /// failure leaves the previous watch active. If the events and trigger mode
     /// are unchanged, only the callback is replaced and no native registration
-    /// operation is performed. Callback-only replacement is not a rearm
-    /// mechanism.
+    /// operation is performed, unless removal previously failed. After failed
+    /// removal, registration must refresh native state because the descriptor
+    /// may have been closed and reused; refresh failure retains the previous
+    /// watch and the requirement to refresh. Ordinary callback-only replacement
+    /// is not a rearm mechanism.
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
     auto watch_fd(int fd, FdEvents events, FdTriggerMode trigger_mode, FdCallback callback) -> FdWatch;
@@ -146,7 +149,8 @@ public:
     ///         removal succeeds; false when an active registration could not be removed
     ///
     /// On failure the public watch entry is retained so removal can be retried or
-    /// the descriptor can be closed.
+    /// the descriptor can be closed. The next registration for that descriptor
+    /// requires a native refresh, even when its events and trigger mode match.
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
     auto unwatch_fd(FdWatch handle) -> bool;
@@ -223,6 +227,7 @@ private:
         FdCallback    callback;
         FdEvents      events;
         FdTriggerMode trigger_mode;
+        bool          refresh_required{false};
     };
 
     struct EventEntry {
