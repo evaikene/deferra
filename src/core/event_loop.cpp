@@ -194,13 +194,23 @@ auto EventLoop::watch_process(std::int64_t process_id, Task callback) -> Result<
                                              .detail   = "watch.invalid_registration"});
     }
     if (auto const existing = _process_watchers.find(process_id); existing != _process_watchers.end()) {
-        // Callback replacement must not rearm an exited child's persistently readable pidfd.
-        existing->second = std::move(callback);
-        return Result<void, Error>::success();
+        if (!existing->second.removal_failed) {
+            // Ordinary callback replacement must not rearm an exited child's persistently readable pidfd.
+            existing->second.callback = std::move(callback);
+            return Result<void, Error>::success();
+        }
+        // An invalidated registration can outlive its child and numeric PID. Do not accept another child
+        // against that old one-shot pidfd: remove it first, or reject while Process still holds its gate.
+        if (!unwatch_process(process_id)) {
+            return Result<void, Error>::failure({.category = ErrorCategory::Unavailable,
+                                                 .code     = "core.process.watch_failed",
+                                                 .message  = "Retained child watch could not be removed",
+                                                 .detail   = "watch.retained_registration"});
+        }
     }
 
     // Allocate callback storage before installing native state. Backend failure is transactional.
-    auto const entry  = _process_watchers.emplace(process_id, std::move(callback)).first;
+    auto const entry  = _process_watchers.emplace(process_id, ProcessWatchEntry{.callback = std::move(callback)}).first;
     auto const result = _backend->add_process(process_id);
     if (result == priv::ProcessRegistrationResult::Added) {
         return Result<void, Error>::success();
@@ -226,6 +236,7 @@ auto EventLoop::unwatch_process(std::int64_t process_id) -> bool
         return true;
     }
     if (!_backend || !_backend->remove_process(process_id)) {
+        entry->second.removal_failed = true;
         return false;
     }
     _process_watchers.erase(entry);
@@ -381,7 +392,7 @@ void EventLoop::dispatch_process(std::int64_t process_id) const
     auto const entry = _process_watchers.find(process_id);
     if (entry != _process_watchers.end()) {
         // Keep the active callable alive if it removes or replaces its own map entry.
-        auto callback = entry->second;
+        auto callback = entry->second.callback;
         callback();
     }
 }

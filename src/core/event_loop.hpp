@@ -230,6 +230,11 @@ private:
         bool          refresh_required{false};
     };
 
+    struct ProcessWatchEntry {
+        Task callback;
+        bool removal_failed{false};
+    };
+
     struct EventEntry {
         Object*                             receiver;
         std::weak_ptr<priv::ObjectLifetime> lifetime;
@@ -256,13 +261,15 @@ private:
     std::mutex                      _deferred_delete_queue_mx;
 
     // Loop-thread-only state - NOT thread-safe
-    std::unique_ptr<priv::Backend>         _backend;
-    priv::TimerHeap                        _timers;
-    std::unordered_map<int, WatchEntry>    _watchers;
-    std::unordered_map<std::int64_t, Task> _process_watchers;
+    std::unique_ptr<priv::Backend>                      _backend;
+    priv::TimerHeap                                     _timers;
+    std::unordered_map<int, WatchEntry>                 _watchers;
+    std::unordered_map<std::int64_t, ProcessWatchEntry> _process_watchers;
 
-    /// Owner-thread Process seam: install or replace a callback without native rearming.
-    /// Returns safe core.process errors; failed registration preserves previous state.
+    /// Owner-thread Process seam: install or replace a callback without native rearming of a live registration.
+    /// After failed removal, retry native removal before installing a fresh watch: the PID may have been reused.
+    /// Returns safe core.process errors. Failed removal retains the old callback; successful removal retires it
+    /// even if the subsequent fresh registration fails.
     /// The callback runs only during watcher dispatch and may remove/replace its own watch.
     [[nodiscard]] auto watch_process(std::int64_t process_id, Task callback) -> Result<void, Error>;
     /// Remove a process callback only after native removal succeeds; absence is success.

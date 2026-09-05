@@ -135,20 +135,97 @@ TEST_CASE("Kqueue refresh reinstalls unchanged enabled filters", "[core][kqueue]
     }
 }
 
-TEST_CASE("Kqueue refresh failure preserves transactional rollback", "[core][kqueue]")
+TEST_CASE("Kqueue partial refresh cannot claim rollback from unknown native state", "[core][kqueue]")
 {
-    for (auto const restored : {false, true}) {
-        ScriptedFilterChanges changes{
-            .results = {true, false, restored}
-        };
-        auto const requested = registration(FdEvents{FdEvent::Read, FdEvent::Write}, FdTriggerMode::Edge);
-        auto const status    = jb::core::priv::transition_kqueue_filters(requested, requested, std::ref(changes), true);
-        CHECK(status == (restored ? KqueueTransitionStatus::FailedRolledBack : KqueueTransitionStatus::RollbackFailed));
-        REQUIRE(changes.calls.size() == 3);
-        check_change(changes.calls[0], FdEvent::Read, KqueueFilterMode::Edge);
-        check_change(changes.calls[1], FdEvent::Write, KqueueFilterMode::Edge);
-        check_change(changes.calls[2], FdEvent::Read, KqueueFilterMode::Edge);
+    for (auto const mode : {FdTriggerMode::Edge, FdTriggerMode::Level}) {
+        auto const enabled = mode == FdTriggerMode::Edge ? KqueueFilterMode::Edge : KqueueFilterMode::Level;
+        for (auto const native_events : {
+                 FdEvents{},
+                 FdEvents{FdEvent::Read},
+                 FdEvents{FdEvent::Write},
+                 FdEvents{FdEvent::Read, FdEvent::Write}
+        }) {
+            for (auto const requested_events : {
+                     FdEvents{FdEvent::Read},
+                     FdEvents{FdEvent::Read, FdEvent::Write}
+            }) {
+                auto       native_read    = native_events.test(FdEvent::Read) ? enabled : KqueueFilterMode::Disabled;
+                auto       native_write   = native_events.test(FdEvent::Write) ? enabled : KqueueFilterMode::Disabled;
+                auto const original_write = native_write;
+                int        calls{0};
+                auto       apply = [&](FdEvent filter, KqueueFilterMode requested_mode) {
+                    if (++calls == 2) {
+                        return false;
+                    }
+                    (filter == FdEvent::Read ? native_read : native_write) = requested_mode;
+                    return true;
+                };
+                // Logical filters survive failed removal; any subset of native filters may have disappeared.
+                auto const status = jb::core::priv::transition_kqueue_filters(
+                    registration(FdEvents{FdEvent::Read, FdEvent::Write}, mode),
+                    registration(requested_events, mode),
+                    apply,
+                    true);
+                CHECK(status == KqueueTransitionStatus::RollbackFailed);
+                CHECK(calls == 2);
+                CHECK(native_read == enabled);
+                CHECK(native_write == original_write);
+            }
+        }
     }
+}
+
+TEST_CASE("Kqueue partial mode refresh does not recreate an unproven old filter", "[core][kqueue]")
+{
+    for (auto const present : {false, true}) {
+        auto native_read = present ? KqueueFilterMode::Edge : KqueueFilterMode::Disabled;
+        int  calls{0};
+        auto apply = [&](FdEvent, KqueueFilterMode requested_mode) {
+            if (++calls == 2) {
+                return false;
+            }
+            native_read = requested_mode;
+            return true;
+        };
+        auto const status = jb::core::priv::transition_kqueue_filters(registration(FdEvent::Read, FdTriggerMode::Edge),
+                                                                      registration(FdEvent::Read, FdTriggerMode::Level),
+                                                                      apply,
+                                                                      true);
+        CHECK(status == KqueueTransitionStatus::RollbackFailed);
+        CHECK(calls == 2);
+        CHECK(native_read == KqueueFilterMode::Disabled);
+    }
+}
+
+TEST_CASE("Kqueue refresh failure before mutation leaves native state unchanged", "[core][kqueue]")
+{
+    ScriptedFilterChanges changes{.results = {false}};
+    auto const            current = registration(FdEvents{FdEvent::Read, FdEvent::Write}, FdTriggerMode::Edge);
+    CHECK(jb::core::priv::transition_kqueue_filters(current, current, std::ref(changes), true) ==
+          KqueueTransitionStatus::FailedRolledBack);
+    REQUIRE(changes.calls.size() == 1);
+}
+
+TEST_CASE("Kqueue initial registration can roll back during refresh", "[core][kqueue]")
+{
+    auto native_read = KqueueFilterMode::Disabled;
+    int  calls{0};
+    auto apply = [&](FdEvent filter, KqueueFilterMode requested_mode) {
+        ++calls;
+        if (filter == FdEvent::Write) {
+            return false;
+        }
+        native_read = requested_mode;
+        return true;
+    };
+    auto const status = jb::core::priv::transition_kqueue_filters(
+        registration({}, FdTriggerMode::Edge),
+        registration(FdEvents{FdEvent::Read, FdEvent::Write}, FdTriggerMode::Edge),
+        apply,
+        true);
+    CHECK(status == KqueueTransitionStatus::FailedRolledBack);
+    CHECK(calls == 3);
+    CHECK(native_read == KqueueFilterMode::Disabled);
 }
 
 TEST_CASE("Kqueue refresh reapplies unchanged filters alongside a changed mask", "[core][kqueue]")

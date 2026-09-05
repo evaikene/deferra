@@ -175,6 +175,11 @@ TEST_CASE("Process observes SIGCHLD disposition without changing host policy", "
     for (bool ignored : {false, true}) {
         for (bool no_wait : {false, true}) {
             guard.install(ignored, no_wait);
+            // Compare effective policy: macOS reports SA_NOCLDWAIT for SIG_IGN even when not explicitly requested.
+            struct sigaction baseline{};
+            REQUIRE(sigaction(SIGCHLD, nullptr, &baseline) == 0);
+            CAPTURE(ignored, no_wait, baseline.sa_flags);
+            CHECK(baseline.sa_handler == (ignored ? SIG_IGN : SIG_DFL));
             auto result = validate_process_signal_configuration();
             CHECK(result.has_value() == (!ignored && !no_wait));
             Process process;
@@ -192,8 +197,8 @@ TEST_CASE("Process observes SIGCHLD disposition without changing host policy", "
             }
             struct sigaction observed{};
             REQUIRE(sigaction(SIGCHLD, nullptr, &observed) == 0);
-            CHECK(observed.sa_handler == (ignored ? SIG_IGN : SIG_DFL));
-            CHECK(((observed.sa_flags & SA_NOCLDWAIT) != 0) == no_wait);
+            CHECK(observed.sa_handler == baseline.sa_handler);
+            CHECK(observed.sa_flags == baseline.sa_flags);
         }
     }
 }
