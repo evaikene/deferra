@@ -134,8 +134,11 @@ public:
     /// mode. When changing the events or trigger mode requires a backend update,
     /// failure leaves the previous watch active. If the events and trigger mode
     /// are unchanged, only the callback is replaced and no native registration
-    /// operation is performed. Callback-only replacement is not a rearm
-    /// mechanism.
+    /// operation is performed, unless removal previously failed. After failed
+    /// removal, registration must refresh native state because the descriptor
+    /// may have been closed and reused; refresh failure retains the previous
+    /// watch and the requirement to refresh. Ordinary callback-only replacement
+    /// is not a rearm mechanism.
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
     auto watch_fd(int fd, FdEvents events, FdTriggerMode trigger_mode, FdCallback callback) -> FdWatch;
@@ -146,7 +149,8 @@ public:
     ///         removal succeeds; false when an active registration could not be removed
     ///
     /// On failure the public watch entry is retained so removal can be retried or
-    /// the descriptor can be closed.
+    /// the descriptor can be closed. The next registration for that descriptor
+    /// requires a native refresh, even when its events and trigger mode match.
     ///
     /// This method is NOT thread-safe and must be called from the thread running the event loop.
     auto unwatch_fd(FdWatch handle) -> bool;
@@ -223,6 +227,12 @@ private:
         FdCallback    callback;
         FdEvents      events;
         FdTriggerMode trigger_mode;
+        bool          refresh_required{false};
+    };
+
+    struct ProcessWatchEntry {
+        Task callback;
+        bool removal_failed{false};
     };
 
     struct EventEntry {
@@ -251,13 +261,15 @@ private:
     std::mutex                      _deferred_delete_queue_mx;
 
     // Loop-thread-only state - NOT thread-safe
-    std::unique_ptr<priv::Backend>         _backend;
-    priv::TimerHeap                        _timers;
-    std::unordered_map<int, WatchEntry>    _watchers;
-    std::unordered_map<std::int64_t, Task> _process_watchers;
+    std::unique_ptr<priv::Backend>                      _backend;
+    priv::TimerHeap                                     _timers;
+    std::unordered_map<int, WatchEntry>                 _watchers;
+    std::unordered_map<std::int64_t, ProcessWatchEntry> _process_watchers;
 
-    /// Owner-thread Process seam: install or replace a callback without native rearming.
-    /// Returns safe core.process errors; failed registration preserves previous state.
+    /// Owner-thread Process seam: install or replace a callback without native rearming of a live registration.
+    /// After failed removal, retry native removal before installing a fresh watch: the PID may have been reused.
+    /// Returns safe core.process errors. Failed removal retains the old callback; successful removal retires it
+    /// even if the subsequent fresh registration fails.
     /// The callback runs only during watcher dispatch and may remove/replace its own watch.
     [[nodiscard]] auto watch_process(std::int64_t process_id, Task callback) -> Result<void, Error>;
     /// Remove a process callback only after native removal succeeds; absence is success.

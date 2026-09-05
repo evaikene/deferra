@@ -1,4 +1,5 @@
 #include "event_loop.hpp"
+#include "event_loop_backend.hpp"
 #include "support/fake_event_loop_backend.hpp"
 #include "thread_context.hpp"
 
@@ -6,6 +7,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <cstdint>
 #include <fcntl.h>
 #include <memory>
 #include <thread>
@@ -103,6 +105,36 @@ private:
             _write_fd = -1;
         }
     }
+};
+
+/// Fail removal without changing native state; all registration and readiness still use the real backend.
+class FailedRemovalBackend final : public jb::core::priv::Backend {
+public:
+    std::unique_ptr<Backend> native{jb::core::priv::make_backend()};
+    bool                     fail_removal{true};
+    int                      add_calls{0};
+
+    auto add_fd(int fd, FdEvents events, FdTriggerMode mode) noexcept -> bool override
+    {
+        ++add_calls;
+        return native->add_fd(fd, events, mode);
+    }
+
+    auto remove_fd(int fd) noexcept -> bool override { return !fail_removal && native->remove_fd(fd); }
+
+    auto add_process(std::int64_t pid) noexcept -> jb::core::priv::ProcessRegistrationResult override
+    {
+        return native->add_process(pid);
+    }
+
+    auto remove_process(std::int64_t pid) noexcept -> bool override { return native->remove_process(pid); }
+
+    auto poll(jb::core::priv::ReadyEvent* out, int max_events, int timeout_ms) noexcept -> int override
+    {
+        return native->poll(out, max_events, timeout_ms);
+    }
+
+    auto wakeup() noexcept -> bool override { return native->wakeup(); }
 };
 
 } // anonymous namespace
@@ -344,6 +376,77 @@ TEST_CASE("EventLoop retains a watch after failed removal", "[core][event_loop]"
     fake.backend->ready_events.push_back({.ident = 42, .events = FdEvent::Read});
     CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
     CHECK(callback_calls == 1);
+}
+
+TEST_CASE("EventLoop retries native refresh after failed removal and failed registration", "[core][event_loop]")
+{
+    for (auto const mode : {FdTriggerMode::Edge, FdTriggerMode::Level}) {
+        auto       fake = make_fake_loop();
+        int        original_calls{0};
+        int        replacement_calls{0};
+        auto const original = fake.loop->watch_fd(42, FdEvent::Read, mode, [&](int, FdEvents) { ++original_calls; });
+        REQUIRE(original);
+        fake.backend->remove_fd_result = false;
+        REQUIRE_FALSE(fake.loop->unwatch_fd(original));
+
+        // Failure must retain both the callable and the need to refresh on every later retry.
+        fake.backend->add_fd_results = {false, false, true};
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            CHECK_FALSE(fake.loop->watch_fd(42, FdEvent::Read, mode, [&](int, FdEvents) { ++replacement_calls; }));
+            CHECK(fake.backend->add_fd_calls == attempt + 2);
+            fake.backend->ready_events.push_back({.ident = 42, .events = FdEvent::Read});
+            CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+        }
+        CHECK(original_calls == 2);
+        CHECK(replacement_calls == 0);
+        REQUIRE(fake.loop->watch_fd(42, FdEvent::Read, mode, [&](int, FdEvents) { ++replacement_calls; }));
+        CHECK(fake.backend->add_fd_calls == 4);
+        // Once refreshed, ordinary callback-only replacement must again avoid touching native state.
+        REQUIRE(fake.loop->watch_fd(42, FdEvent::Read, mode, [&](int, FdEvents) { ++replacement_calls; }));
+        CHECK(fake.backend->add_fd_calls == 4);
+        fake.backend->ready_events.push_back({.ident = 42, .events = FdEvent::Read});
+        CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+        CHECK(original_calls == 2);
+        CHECK(replacement_calls == 1);
+    }
+}
+
+TEST_CASE("EventLoop restores native readiness for a reused fd after failed removal", "[core][event_loop]")
+{
+    for (auto const mode : {FdTriggerMode::Edge, FdTriggerMode::Level}) {
+        auto backend = std::make_unique<FailedRemovalBackend>();
+        REQUIRE(backend->native);
+        auto* probe    = backend.get();
+        auto  loop     = jb::core::priv::EventLoopTestAccess::make_event_loop(std::move(backend));
+        auto  original = std::make_unique<NonblockingPipe>();
+        REQUIRE(*original);
+        auto const fd = original->read_fd();
+        int        original_calls{0};
+        int        replacement_calls{0};
+        auto       watch = loop->watch_fd(fd, FdEvent::Read, mode, [&](int, FdEvents) { ++original_calls; });
+        REQUIRE(watch);
+        REQUIRE_FALSE(loop->unwatch_fd(watch));
+
+        // No intervening descriptor allocation: pipe reuses the lowest descriptors just released.
+        original.reset();
+        NonblockingPipe replacement;
+        REQUIRE(replacement);
+        REQUIRE(replacement.read_fd() == fd);
+        watch = loop->watch_fd(fd, FdEvent::Read, mode, [&](int, FdEvents) {
+            ++replacement_calls;
+            CHECK(replacement.drain_read_end());
+        });
+        REQUIRE(watch);
+        CHECK(probe->add_calls == 2);
+        REQUIRE(replacement.write_byte());
+        CHECK(loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+        CHECK(original_calls == 0);
+        CHECK(replacement_calls == 1);
+        CHECK(loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+        CHECK(replacement_calls == 1);
+        probe->fail_removal = false;
+        CHECK(loop->unwatch_fd(watch));
+    }
 }
 
 TEST_CASE("EventLoop reports backend poll failures", "[core][event_loop]")

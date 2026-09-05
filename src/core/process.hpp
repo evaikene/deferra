@@ -15,11 +15,16 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace jb::core {
+
+namespace priv {
+struct ProcessTestAccess;
+}
 
 /// Complete target environment; no ambient variables are inherited. Names use ASCII identifier syntax.
 using ProcessEnvironment = std::map<std::string, std::string, std::less<>>;
@@ -94,8 +99,10 @@ struct ProcessExit {
 /// argv/environment storage including NULs and pointer arrays is capped at 256 KiB and the runtime argument limit;
 /// expanded PATH candidate storage has a separate 256 KiB limit. No shell or ambient PATH lookup is performed.
 /// All errors use core.process.* codes and fixed safe details, excluding user-supplied strings and output.
-/// @note Stage 6.1 implements request preparation and idle behavior only. Valid launches currently reject with
-/// core.process.monitor_unsupported, without creating native resources or emitting Process signals.
+/// @note Stage 6.3 supports Linux launch and exit reporting with stdout/stderr directed to /dev/null.
+/// Output streaming, timeout/stop, inherited-descriptor cleanup, and privilege-gain prevention arrive in
+/// Stages 6.4-6.6. Requests requiring timeout or privilege-gain prevention currently reject before spawning.
+/// Other platforms retain core.process.monitor_unsupported until their backend stage.
 class Process final : public Object {
 public:
     /// Constructs an idle Process and transfers ownership to @p parent when non-null.
@@ -163,7 +170,10 @@ public:
     Signal<ProcessExit> finished;
 
 private:
+    friend struct priv::ProcessTestAccess;
     struct Private;
+    /// Retains allocation ownership until Object construction succeeds.
+    Process(std::unique_ptr<Private> data, Object* parent);
 };
 
 } // namespace jb::core

@@ -176,7 +176,7 @@ struct EventLoopTestAccess {
     static auto process_callback(EventLoop const& loop, std::int64_t process_id) -> Task
     {
         auto const entry = loop._process_watchers.find(process_id);
-        return entry == loop._process_watchers.end() ? Task{} : entry->second;
+        return entry == loop._process_watchers.end() ? Task{} : entry->second.callback;
     }
 
     static auto active_process_count(EventLoop const& loop) -> std::size_t { return loop._process_watchers.size(); }

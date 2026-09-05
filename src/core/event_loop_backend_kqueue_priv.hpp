@@ -12,6 +12,7 @@ namespace jb::core::priv {
 enum class KqueueTransitionStatus : std::uint8_t {
     Applied,
     FailedRolledBack,
+    /// Native state could not be restored or its prior state was unknown; the backend must become unusable.
     RollbackFailed,
 };
 
@@ -37,16 +38,20 @@ constexpr auto kqueue_filter_mode(KqueueFdRegistration const& registration, FdEv
     return registration.trigger_mode == FdTriggerMode::Edge ? KqueueFilterMode::Edge : KqueueFilterMode::Level;
 }
 
-/// Applies a complete kqueue fd-filter registration and restores the original
-/// registration on failure.
+/// Applies a complete kqueue fd-filter registration and restores known original state on failure.
 ///
 /// The callback receives the filter and requested native mode. A false callback
 /// result means that operation did not change the native filter state. Successfully
 /// applied primitive changes are journaled and rolled back in reverse order.
+/// When refresh_enabled is true, reapply unchanged enabled filters too: a retained
+/// registration may refer to a closed/reused descriptor whose native filters are gone.
+/// A partial refresh of an existing registration returns RollbackFailed without replaying
+/// its logical modes: those modes do not establish which native filters existed before the refresh.
 template <typename ApplyFilter>
 auto transition_kqueue_filters(KqueueFdRegistration const& current,
                                KqueueFdRegistration const& requested,
-                               ApplyFilter&&               apply_filter) -> KqueueTransitionStatus
+                               ApplyFilter&&               apply_filter,
+                               bool                        refresh_enabled = false) -> KqueueTransitionStatus
 {
     static constexpr std::array kFilters{FdEvent::Read, FdEvent::Write};
 
@@ -75,6 +80,11 @@ auto transition_kqueue_filters(KqueueFdRegistration const& current,
         auto const current_mode   = kqueue_filter_mode(current, filter);
         auto const requested_mode = kqueue_filter_mode(requested, filter);
         if (current_mode == requested_mode) {
+            if (refresh_enabled && requested_mode != KqueueFilterMode::Disabled &&
+                !apply_change(filter, current_mode, requested_mode)) {
+                transition_succeeded = false;
+                break;
+            }
             continue;
         }
 
@@ -93,6 +103,13 @@ auto transition_kqueue_filters(KqueueFdRegistration const& current,
 
     if (transition_succeeded) {
         return KqueueTransitionStatus::Applied;
+    }
+
+    if (refresh_enabled && applied_count > 0 &&
+        (current.events.test(FdEvent::Read) || current.events.test(FdEvent::Write))) {
+        // Replaying logical modes could install filters that were absent after descriptor reuse and
+        // expose the old callback to a different descriptor. Stop the backend instead of claiming rollback.
+        return KqueueTransitionStatus::RollbackFailed;
     }
 
     auto rollback_succeeded = true;

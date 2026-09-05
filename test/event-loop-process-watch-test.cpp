@@ -10,9 +10,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
-#include <limits>
 #include <memory>
-#include <utility>
 #include <vector>
 
 #if defined(__linux__)
@@ -22,12 +20,14 @@
 #  include <chrono>
 #  include <csignal> // IWYU pragma: keep Provides POSIX kill() and SIGKILL through <signal.h>.
 #  include <fcntl.h>
+#  include <limits>
 #  include <poll.h>
 #  include <sys/epoll.h>
 #  include <sys/socket.h>
 #  include <sys/types.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
+#  include <utility>
 #endif
 
 using namespace jb::core;
@@ -118,6 +118,76 @@ TEST_CASE("Process removal failure retains its callback until successful retry",
     fake.backend->ready_events.push_back({.kind = ReadyEventKind::Process, .ident = 42, .events = {}});
     CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
     CHECK(calls == 4);
+}
+
+TEST_CASE("Process replacement rejects a retained watch when native removal still fails",
+          "[core][event-loop][process-watch]")
+{
+    auto fake = make_fake_event_loop();
+    int  original_calls{0};
+    int  replacement_calls{0};
+    REQUIRE(EventLoopTestAccess::watch_process(*fake.loop, 42, [&] { ++original_calls; }));
+    fake.backend->remove_process_result = false;
+    REQUIRE_FALSE(EventLoopTestAccess::unwatch_process(*fake.loop, 42));
+
+    auto result = EventLoopTestAccess::watch_process(*fake.loop, 42, [&] { ++replacement_calls; });
+    REQUIRE_FALSE(result);
+    CHECK(result.error().category == ErrorCategory::Unavailable);
+    CHECK(result.error().code == "core.process.watch_failed");
+    CHECK(result.error().detail == "watch.retained_registration");
+    CHECK(fake.backend->remove_process_calls == 2);
+    CHECK(fake.backend->add_process_calls == 1);
+    CHECK(EventLoopTestAccess::active_process_count(*fake.loop) == 1);
+    fake.backend->ready_events.push_back({.kind = ReadyEventKind::Process, .ident = 42, .events = {}});
+    CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+    CHECK(original_calls == 1);
+    CHECK(replacement_calls == 0);
+
+    // Another PID remains independent of the retained registration.
+    REQUIRE(EventLoopTestAccess::watch_process(*fake.loop, 43, [] {}));
+    CHECK(fake.backend->add_process_calls == 2);
+}
+
+TEST_CASE("Process replacement retires a retained watch before attempting fresh registration",
+          "[core][event-loop][process-watch]")
+{
+    for (auto const added : {ProcessRegistrationResult::Added,
+                             ProcessRegistrationResult::Failed,
+                             ProcessRegistrationResult::Unsupported}) {
+        auto fake = make_fake_event_loop();
+        int  original_calls{0};
+        int  replacement_calls{0};
+        REQUIRE(EventLoopTestAccess::watch_process(*fake.loop, 42, [&] { ++original_calls; }));
+        fake.backend->remove_process_results = {false, true};
+        REQUIRE_FALSE(EventLoopTestAccess::unwatch_process(*fake.loop, 42));
+        fake.backend->add_process_result = added;
+
+        auto result = EventLoopTestAccess::watch_process(*fake.loop, 42, [&] { ++replacement_calls; });
+        CHECK(fake.backend->remove_process_calls == 2);
+        CHECK(fake.backend->last_removed_process == 42);
+        CHECK(fake.backend->add_process_calls == 2);
+        CHECK(fake.backend->last_added_process == 42);
+        if (added == ProcessRegistrationResult::Added) {
+            REQUIRE(result);
+            CHECK(EventLoopTestAccess::active_process_count(*fake.loop) == 1);
+            // A successfully refreshed entry once again supports ordinary callback-only replacement.
+            REQUIRE(EventLoopTestAccess::watch_process(*fake.loop, 42, [&] { ++replacement_calls; }));
+            CHECK(fake.backend->remove_process_calls == 2);
+            CHECK(fake.backend->add_process_calls == 2);
+        }
+        else {
+            REQUIRE_FALSE(result);
+            CHECK(result.error().code == (added == ProcessRegistrationResult::Unsupported
+                                              ? "core.process.monitor_unsupported"
+                                              : "core.process.watch_failed"));
+            CHECK(EventLoopTestAccess::active_process_count(*fake.loop) == 0);
+            CHECK_FALSE(EventLoopTestAccess::process_callback(*fake.loop, 42));
+        }
+        fake.backend->ready_events.push_back({.kind = ReadyEventKind::Process, .ident = 42, .events = {}});
+        CHECK(fake.loop->process_events(EventFlag::Watchers, 0) == ProcessEventsResult::Stopped);
+        CHECK(original_calls == 0);
+        CHECK(replacement_calls == (added == ProcessRegistrationResult::Added ? 1 : 0));
+    }
 }
 
 TEST_CASE("Typed readiness isolates equal fd and process identifiers and preserves wide PIDs",
@@ -267,6 +337,7 @@ public:
     int           add_calls{0};
     int           remove_calls{0};
     int           pidfd{-1};
+    pid_t         target_pid{-1};
     std::uint32_t registered_events{0};
 
     auto open_pidfd(int process_id) -> int override
@@ -276,7 +347,8 @@ public:
             errno = open_error;
             return -1;
         }
-        pidfd = EpollProcessOperations::open_pidfd(process_id);
+        // Map one logical watch key to successive real children without relying on kernel PID reuse timing.
+        pidfd = EpollProcessOperations::open_pidfd(target_pid > 0 ? target_pid : process_id);
         return pidfd;
     }
 
@@ -377,7 +449,9 @@ TEST_CASE("Delivered Linux pidfds never rearm when removal fails", "[core][event
     REQUIRE(::poll(&descriptor, 1, 0) == 1);
     CHECK((descriptor.revents & POLLIN) != 0);
     CHECK(native->add_process(pid) == ProcessRegistrationResult::Added);
-    REQUIRE(EventLoopTestAccess::watch_process(*loop, pid, [&] { ++notifications; }));
+    auto replacement = EventLoopTestAccess::watch_process(*loop, pid, [&] { ++notifications; });
+    REQUIRE_FALSE(replacement);
+    CHECK(replacement.error().code == "core.process.watch_failed");
     CHECK(operations->open_calls == 1);
     CHECK(operations->add_calls == 1);
 
@@ -400,6 +474,60 @@ TEST_CASE("Delivered Linux pidfds never rearm when removal fails", "[core][event
     int status{};
     REQUIRE(child.reap(status) == pid);
     CHECK(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 37);
+}
+
+TEST_CASE("Linux retained process watches install a fresh pidfd for a reused watch key",
+          "[core][event-loop][process-watch][linux]")
+{
+    GatedChild first;
+    REQUIRE(first.start());
+    auto const key        = first.pid();
+    auto       operations = std::make_shared<ScriptedProcessOperations>();
+    auto       loop       = EventLoopTestAccess::make_event_loop(make_epoll_backend(operations));
+    REQUIRE(loop->is_valid());
+    operations->fail_remove = true;
+    int first_notifications{0};
+    REQUIRE(EventLoopTestAccess::watch_process(*loop, key, [&] {
+        ++first_notifications;
+        CHECK_FALSE(EventLoopTestAccess::unwatch_process(*loop, key));
+    }));
+    REQUIRE(first.release());
+    REQUIRE(pump_until_exit(*loop, first_notifications));
+    int status{};
+    REQUIRE(first.reap(status) == key);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 37);
+
+    // The old child is reaped, but failed removal still owns its delivered pidfd. Keep the logical key
+    // and change only the syscall target so the next registration must observe a different real child.
+    GatedChild second;
+    REQUIRE(second.start());
+    auto const second_pid  = second.pid();
+    operations->target_pid = second_pid;
+    int second_notifications{0};
+    REQUIRE_FALSE(EventLoopTestAccess::watch_process(*loop, key, [&] { ++second_notifications; }));
+    CHECK(operations->open_calls == 1);
+    CHECK(operations->add_calls == 1);
+
+    operations->fail_remove = false;
+    REQUIRE(EventLoopTestAccess::watch_process(*loop, key, [&] {
+        ++second_notifications;
+        CHECK(EventLoopTestAccess::unwatch_process(*loop, key));
+    }));
+    CHECK(operations->remove_calls == 3);
+    CHECK(operations->open_calls == 2);
+    CHECK(operations->add_calls == 2);
+    CHECK(loop->process_events(EventFlag::All, 0) == ProcessEventsResult::Stopped);
+    CHECK(first_notifications == 1);
+    CHECK(second_notifications == 0);
+    REQUIRE(second.release());
+    REQUIRE(pump_until_exit(*loop, second_notifications));
+    CHECK(first_notifications == 1);
+    CHECK(EventLoopTestAccess::active_process_count(*loop) == 0);
+    check_closed(operations->pidfd);
+    REQUIRE(second.reap(status) == second_pid);
+    REQUIRE(WIFEXITED(status));
     CHECK(WEXITSTATUS(status) == 37);
 }
 
