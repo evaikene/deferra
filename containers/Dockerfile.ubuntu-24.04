@@ -1,0 +1,22 @@
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        catch2 \
+        cmake \
+        g++ \
+        gdb \
+        git \
+        libcurl4-openssl-dev \
+        libfmt-dev \
+        libssl-dev \
+        libsqlite3-dev \
+        ninja-build \
+        nlohmann-json3-dev \
+        procps \
+        strace \
+        tzdata \
+    && rm -rf /var/lib/apt/lists/*
