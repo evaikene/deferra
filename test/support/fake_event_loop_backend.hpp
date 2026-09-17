@@ -163,6 +163,8 @@ struct EventLoopTestAccess {
 
     static auto active_timer_count(EventLoop const& loop) -> std::size_t { return loop._timers._timers.size(); }
 
+    static void fire_timers(EventLoop& loop, TimePoint now) { loop._timers.fire_expired(now); }
+
     static auto watch_process(EventLoop& loop, std::int64_t process_id, Task callback) -> Result<void, Error>
     {
         return loop.watch_process(process_id, std::move(callback));

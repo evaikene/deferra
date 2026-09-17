@@ -22,7 +22,6 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -65,6 +64,7 @@ struct Run {
     int                        starts{0};
     int                        finishes{0};
     std::optional<ProcessExit> result;
+    ProcessState               expected_started_state{ProcessState::Running};
     std::array<ByteBuffer, 2>  bytes;
     Object                     receiver;
     Process                    process;
@@ -77,7 +77,7 @@ struct Run {
         REQUIRE(loop->is_valid());
         auto started  = process.started.connect(&receiver, [this] {
             ++starts;
-            CHECK(process.state() == ProcessState::Running);
+            CHECK(process.state() == expected_started_state);
             CHECK(EventLoop::current() == loop.get());
         });
         auto finished = process.finished.connect(&receiver, [this](ProcessExit const& exit) {
@@ -101,11 +101,11 @@ struct Run {
     }
 
     /// @throws Catch::TestFailureException when readiness fails or the watchdog expires.
-    void until(std::function<bool()> const& predicate) const
+    void until(std::function<bool()> const& predicate, EventFlags flags = EventFlag::All) const
     {
         auto const deadline = Clock::now() + 3s;
         while (!predicate() && Clock::now() < deadline) {
-            REQUIRE(loop->process_events(EventFlag::All, 10) != ProcessEventsResult::Failed);
+            REQUIRE(loop->process_events(flags, 10) != ProcessEventsResult::Failed);
         }
         REQUIRE(predicate());
     }
@@ -116,7 +116,11 @@ struct Run {
         auto const previous_starts   = starts;
         auto const previous_finishes = finishes;
         result.reset();
-        REQUIRE(process.start(std::move(info)));
+        auto accepted = process.start(std::move(info));
+        if (!accepted) {
+            UNSCOPED_INFO("start error: " << accepted.error().code << " " << accepted.error().detail);
+        }
+        REQUIRE(accepted);
         CHECK(starts == previous_starts);
         CHECK(finishes == previous_finishes);
         CHECK(process.state() == ProcessState::Starting);
@@ -136,6 +140,12 @@ struct Run {
 /// Parent syscall faults and observations never execute framework code in the child branch.
 class ScriptedOperations : public ProcessOperations {
 public:
+    struct SignalCall {
+        bool  group;
+        pid_t id;
+        int   signal;
+    };
+
     enum class Failure : std::uint8_t {
         None,
         Open,
@@ -147,21 +157,27 @@ public:
         ShortSend,
         DeadChild
     };
-    Failure               failure{Failure::None};
-    ProcessChildOptions   options;
-    pid_t                 observed_pid{-1};
-    int                   fork_calls{0};
-    int                   send_calls{0};
-    int                   status_fd{-1};
-    std::array<int, 2>    output_fds{-1, -1};
-    int                   pipe_calls{0};
-    int                   fail_pipe_call{0};
-    EventLoop*            loop{nullptr};
-    bool                  watches_before_release{false};
-    bool                  blocked_at_creation{false};
-    bool                  restored_at_release{false};
-    bool                  send_interrupted{false};
-    std::function<void()> before_send;
+    Failure                  failure{Failure::None};
+    ProcessChildOptions      options;
+    pid_t                    observed_pid{-1};
+    int                      fork_calls{0};
+    int                      send_calls{0};
+    int                      status_fd{-1};
+    std::array<int, 2>       output_fds{-1, -1};
+    int                      pipe_calls{0};
+    int                      fail_pipe_call{0};
+    EventLoop*               loop{nullptr};
+    bool                     watches_before_release{false};
+    bool                     blocked_at_creation{false};
+    bool                     restored_at_release{false};
+    bool                     send_interrupted{false};
+    std::function<void()>    before_send;
+    std::optional<TimePoint> now;
+    std::deque<TimePoint>    now_values;
+    std::deque<int>          group_signal_errors;
+    std::vector<SignalCall>  signal_calls;
+    std::vector<int>         wait_options;
+    std::vector<char>        lifecycle_calls;
 
     auto open_null(int flags) noexcept -> int override
     {
@@ -182,6 +198,24 @@ public:
         }
         auto const result = ProcessOperations::make_pipe(pair);
         if (result == 0) {
+            // Fake backends own no native descriptor. Normalize here so the recorded test seam follows the
+            // descriptor that Process watches instead of a low number that production normalization closes.
+            for (int i = 0; i < 2; ++i) {
+                if (pair[i] > 3) {
+                    continue;
+                }
+                auto const normalized = ::fcntl(pair[i], F_DUPFD_CLOEXEC, 4);
+                if (normalized < 0) {
+                    auto const error = errno;
+                    ::close(pair[0]);
+                    ::close(pair[1]);
+                    errno = error;
+                    return -1;
+                }
+                ::close(pair[i]);
+                pair[i] = normalized;
+            }
+
             // Every run creates exec status first, then stdout and stderr.
             auto const index = (pipe_calls - 1) % 3;
             if (index == 0) {
@@ -267,6 +301,48 @@ public:
     }
 
     auto child_options() noexcept -> ProcessChildOptions override { return options; }
+
+    auto monotonic_now() noexcept -> TimePoint override
+    {
+        if (!now_values.empty()) {
+            auto const value = now_values.front();
+            now_values.pop_front();
+            return value;
+        }
+        if (now) {
+            return *now;
+        }
+        return ProcessOperations::monotonic_now();
+    }
+
+    auto signal_group(pid_t group_id, int signal) noexcept -> int override
+    {
+        signal_calls.push_back({.group = true, .id = group_id, .signal = signal});
+        lifecycle_calls.push_back(signal == SIGTERM ? 'T' : 'K');
+        if (!group_signal_errors.empty()) {
+            auto const error = group_signal_errors.front();
+            group_signal_errors.pop_front();
+            if (error != 0) {
+                errno = error;
+                return -1;
+            }
+        }
+        return ProcessOperations::signal_group(group_id, signal);
+    }
+
+    auto signal_process(pid_t process_id, int signal) noexcept -> int override
+    {
+        signal_calls.push_back({.group = false, .id = process_id, .signal = signal});
+        lifecycle_calls.push_back('D');
+        return ProcessOperations::signal_process(process_id, signal);
+    }
+
+    auto wait_process(pid_t process_id, int* status, int options) noexcept -> pid_t override
+    {
+        wait_options.push_back(options);
+        lifecycle_calls.push_back('W');
+        return ProcessOperations::wait_process(process_id, status, options);
+    }
 };
 
 class OutputOperations final : public ScriptedOperations {
@@ -339,6 +415,99 @@ void observe_exit(pid_t pid)
     REQUIRE(result == 0);
 }
 
+/// @throws Catch::TestFailureException if the child does not reach its injected stopped state.
+void observe_stop(pid_t pid)
+{
+    siginfo_t info{};
+    int       result;
+    do {
+        result = ::waitid(P_PID, static_cast<id_t>(pid), &info, WSTOPPED | WNOWAIT);
+    } while (result < 0 && errno == EINTR);
+
+    REQUIRE(result == 0);
+    CHECK(info.si_code == CLD_STOPPED);
+    CHECK(info.si_status == SIGSTOP);
+}
+
+/// @throws Catch::TestFailureException when deterministic helper coordination does not arrive before the watchdog.
+void read_exact(int fd, void* destination, std::size_t size)
+{
+    auto*       bytes    = static_cast<char*>(destination);
+    std::size_t received = 0;
+    while (received < size) {
+        pollfd item{.fd = fd, .events = POLLIN, .revents = 0};
+        REQUIRE(::poll(&item, 1, 3000) == 1);
+        auto const count = ::read(fd, bytes + received, size - received);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        REQUIRE(count > 0);
+        received += static_cast<std::size_t>(count);
+    }
+}
+
+/// Identity-stable observation of a helper descendant that this test process cannot reap.
+class ProcessTerminationWatch final {
+public:
+    /// @throws Catch::TestFailureException when the PID is invalid or cannot be watched.
+    explicit ProcessTerminationWatch(pid_t pid)
+        : _pid(pid)
+    {
+        REQUIRE(pid > 0);
+
+        EpollProcessOperations operations;
+        _fd = operations.open_pidfd(pid);
+        if (_fd >= 0) {
+            return;
+        }
+
+        auto const error = errno;
+        UNSCOPED_INFO("pidfd_open(" << pid << ") failed with errno " << error);
+        REQUIRE(error == ESRCH);
+    }
+
+    ~ProcessTerminationWatch()
+    {
+        if (_fd >= 0) {
+            ::close(_fd);
+        }
+    }
+
+    ProcessTerminationWatch(ProcessTerminationWatch const&)                    = delete;
+    auto operator=(ProcessTerminationWatch const&) -> ProcessTerminationWatch& = delete;
+
+    /// @throws Catch::TestFailureException when the process does not terminate within the watchdog interval.
+    void check_terminated() const
+    {
+        if (_fd < 0) {
+            return;
+        }
+
+        pollfd item{.fd = _fd, .events = POLLIN, .revents = 0};
+        int    ready;
+        do {
+            ready = ::poll(&item, 1, 3000);
+        } while (ready < 0 && errno == EINTR);
+
+        if (ready < 0) {
+            UNSCOPED_INFO("poll(pidfd for " << _pid << ") failed with errno " << errno);
+        }
+        REQUIRE(ready == 1);
+        CHECK((item.revents & POLLIN) != 0);
+    }
+
+private:
+    pid_t _pid;
+    int   _fd{-1};
+};
+
+auto group_signal_count(ScriptedOperations const& operations, int signal) -> std::size_t
+{
+    return static_cast<std::size_t>(std::ranges::count_if(operations.signal_calls, [signal](auto const& call) {
+        return call.group && call.signal == signal;
+    }));
+}
+
 auto matches_pattern(ByteBuffer const& bytes, std::size_t channel, std::size_t offset = 0) -> bool
 {
     for (std::size_t i = 0; i < bytes.size(); ++i) {
@@ -354,7 +523,22 @@ struct CoordinationPipe {
     std::array<int, 2> fds{-1, -1};
 
     /// @throws Catch::TestFailureException when the coordination pipe cannot be created.
-    CoordinationPipe() { REQUIRE(::pipe(fds.data()) == 0); }
+    CoordinationPipe()
+    {
+        REQUIRE(::pipe(fds.data()) == 0);
+        for (auto& fd : fds) {
+            if (fd > 3) {
+                continue;
+            }
+
+            // Process reserves fd 3 for its close-on-exec status channel. Keep this deliberately inherited test
+            // seam above that mapping so helper coordination is independent of the invoking shell's open fds.
+            auto const normalized = ::fcntl(fd, F_DUPFD, 4);
+            REQUIRE(normalized >= 0);
+            ::close(fd);
+            fd = normalized;
+        }
+    }
 
     ~CoordinationPipe()
     {
@@ -950,24 +1134,482 @@ TEST_CASE("Linux Process direct lifecycle slots defer destruction without leakin
     }
 }
 
-TEST_CASE("Linux Process rejects unenforced later-stage policies before native setup", "[core][process][linux]")
+TEST_CASE("Linux Process rejects unenforced privilege hardening before native setup", "[core][process][linux]")
 {
     Run  run;
     auto operations = std::make_shared<ScriptedOperations>();
     ProcessTestAccess::set_operations(run.process, operations);
-    for (bool hardening : {false, true}) {
-        auto info                   = helper();
-        info.prevent_privilege_gain = hardening;
-        if (!hardening) {
-            info.timeout = 1s;
-        }
-        auto result = run.process.start(std::move(info));
-        REQUIRE_FALSE(result);
-        CHECK(result.error().category == ErrorCategory::Unsupported);
-    }
+    auto info                   = helper();
+    info.prevent_privilege_gain = true;
+    auto result                 = run.process.start(std::move(info));
+    REQUIRE_FALSE(result);
+    CHECK(result.error().category == ErrorCategory::Unsupported);
     CHECK(operations->fork_calls == 0);
     CHECK(run.starts == 0);
     CHECK(run.finishes == 0);
+}
+
+TEST_CASE("Linux Process cancellation preserves its first cause and escalates after complete grace",
+          "[core][process][linux][lifecycle]")
+{
+    SECTION("TERM-handling target remains owned until group cleanup")
+    {
+        Run        run;
+        auto       operations = std::make_shared<ScriptedOperations>();
+        auto const base       = Clock::now();
+        operations->now       = base;
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto info              = helper({"term", "0"});
+        info.termination_grace = 10s;
+        REQUIRE(run.process.start(std::move(info)));
+        run.until([&] { return run.starts == 1 && run.bytes[0] == ByteBuffer{std::byte{'R'}}; });
+
+        REQUIRE(run.process.stop(ProcessStopReason::Cancelled));
+        CHECK(run.process.state() == ProcessState::Stopping);
+        REQUIRE(run.process.stop(ProcessStopReason::Cancelled));
+        auto conflict = run.process.stop(ProcessStopReason::Interrupted);
+        REQUIRE_FALSE(conflict);
+        CHECK(conflict.error().code == "core.process.stop_conflict");
+        run.until([&] { return EventLoopTestAccess::active_process_count(*run.loop) == 0; }, EventFlag::Watchers);
+        CHECK(run.process.state() == ProcessState::Stopping);
+        CHECK(run.process.process_id());
+        CHECK(run.finishes == 0);
+        CHECK(group_signal_count(*operations, SIGTERM) == 1);
+        CHECK(group_signal_count(*operations, SIGKILL) == 0);
+
+        operations->now = base + 10s;
+        EventLoopTestAccess::fire_timers(*run.loop, *operations->now);
+        REQUIRE(run.result);
+        CHECK(run.result->kind == ProcessExitKind::Cancelled);
+        CHECK(run.result->exit_code == 42);
+        CHECK(run.bytes[0] == ByteBuffer{std::byte{'R'}, std::byte{'T'}});
+        CHECK(group_signal_count(*operations, SIGKILL) == 1);
+        CHECK(std::ranges::count(operations->wait_options, 0) == 1);
+    }
+
+    SECTION("Ignored TERM reaches KILL and explicit delivery failure is retryable")
+    {
+        Run  run;
+        auto operations = std::make_shared<ScriptedOperations>();
+        operations->group_signal_errors.push_back(EPERM);
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto info              = helper({"term", "1"});
+        info.termination_grace = 10s;
+        REQUIRE(run.process.start(std::move(info)));
+        run.until([&] { return run.bytes[0] == ByteBuffer{std::byte{'R'}}; });
+
+        auto rejected = run.process.stop();
+        REQUIRE_FALSE(rejected);
+        CHECK(rejected.error().code == "core.process.signal_failed");
+        CHECK(run.process.state() == ProcessState::Running);
+        REQUIRE(run.process.stop());
+        CHECK(run.process.state() == ProcessState::Stopping);
+        EventLoopTestAccess::fire_timers(*run.loop, TimePoint::max());
+        run.until([&] { return run.result.has_value(); });
+        CHECK(run.result->kind == ProcessExitKind::Cancelled);
+        CHECK(run.result->signal_number == SIGKILL);
+        CHECK(group_signal_count(*operations, SIGTERM) == 2);
+        CHECK(group_signal_count(*operations, SIGKILL) == 1);
+    }
+
+    SECTION("ESRCH accepts the stop transition")
+    {
+        Run  run;
+        auto operations = std::make_shared<ScriptedOperations>();
+        operations->group_signal_errors.push_back(ESRCH);
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto info              = helper({"term", "1"});
+        info.termination_grace = Duration::zero();
+        REQUIRE(run.process.start(std::move(info)));
+        run.until([&] { return run.bytes[0] == ByteBuffer{std::byte{'R'}}; });
+        REQUIRE(run.process.stop());
+        CHECK(run.process.state() == ProcessState::Stopping);
+        run.until([&] { return run.result.has_value(); });
+        CHECK(run.result->kind == ProcessExitKind::Cancelled);
+        CHECK(run.result->signal_number == SIGKILL);
+    }
+}
+
+TEST_CASE("Linux Process timeout starts at the accepted launch deadline", "[core][process][linux][lifecycle]")
+{
+    SECTION("Runtime timeout shares TERM-to-KILL escalation")
+    {
+        Run        run;
+        auto       operations = std::make_shared<ScriptedOperations>();
+        auto const base       = Clock::now();
+        operations->now       = base;
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto info              = helper({"term", "1"});
+        info.timeout           = 5s;
+        info.termination_grace = 2s;
+        REQUIRE(run.process.start(std::move(info)));
+        run.until([&] { return run.bytes[0] == ByteBuffer{std::byte{'R'}}; });
+
+        operations->now = base + 5s;
+        EventLoopTestAccess::fire_timers(*run.loop, *operations->now);
+        CHECK(run.process.state() == ProcessState::Stopping);
+        auto conflict = run.process.stop();
+        REQUIRE_FALSE(conflict);
+        CHECK(conflict.error().code == "core.process.stop_conflict");
+        CHECK(group_signal_count(*operations, SIGTERM) == 1);
+
+        operations->now = base + 7s;
+        EventLoopTestAccess::fire_timers(*run.loop, *operations->now);
+        run.until([&] { return run.result.has_value(); });
+        CHECK(run.result->kind == ProcessExitKind::TimedOut);
+        CHECK(run.result->signal_number == SIGKILL);
+        CHECK(group_signal_count(*operations, SIGKILL) == 1);
+    }
+
+    SECTION("Timeout kills a target stopped in pre-exec setup")
+    {
+        Run        run;
+        auto       operations                  = std::make_shared<ScriptedOperations>();
+        auto const base                        = Clock::now();
+        operations->now                        = base;
+        operations->options.signal_before_exec = SIGSTOP;
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto info              = helper();
+        info.timeout           = 5s;
+        info.termination_grace = Duration::zero();
+        REQUIRE(run.process.start(std::move(info)));
+        observe_stop(operations->observed_pid);
+        run.expected_started_state = ProcessState::Stopping;
+        operations->now            = base + 5s;
+        EventLoopTestAccess::fire_timers(*run.loop, *operations->now);
+        run.until([&] { return run.result.has_value(); });
+        CHECK(run.starts == 1); // Gate release makes clean EOF observable even though the target never execs.
+        CHECK(run.result->kind == ProcessExitKind::TimedOut);
+        CHECK(run.result->signal_number == SIGKILL);
+    }
+
+    SECTION("Expiry during parent setup accepts a gated timeout without target execution")
+    {
+        jb::test::TemporaryDirectory directory;
+        auto const                   marker = directory.path() / "executed";
+        Run                          run;
+        auto                         operations = std::make_shared<ScriptedOperations>();
+        auto const                   base       = TimePoint{Duration{1000}};
+        operations->now_values                  = {base, base + 5s};
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto info    = helper({"marker", marker.string()});
+        info.timeout = 5s;
+        REQUIRE(run.process.start(std::move(info)));
+        CHECK(run.process.state() == ProcessState::Stopping);
+        CHECK(operations->send_calls == 0);
+        CHECK(run.starts == 0);
+        CHECK(group_signal_count(*operations, SIGTERM) == 0);
+        CHECK(group_signal_count(*operations, SIGKILL) == 1);
+        run.until([&] { return run.result.has_value(); });
+        CHECK(run.result->kind == ProcessExitKind::TimedOut);
+        CHECK_FALSE(std::filesystem::exists(marker));
+    }
+
+    SECTION("Rejected gate release cancels its armed timeout")
+    {
+        Run  run;
+        auto operations     = std::make_shared<ScriptedOperations>();
+        operations->failure = ScriptedOperations::Failure::Send;
+        operations->now     = Clock::now();
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto info    = helper();
+        info.timeout = 30s;
+        auto result  = run.process.start(std::move(info));
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == "core.process.child_setup_failed");
+        CHECK(EventLoopTestAccess::active_timer_count(*run.loop) == 0);
+        CHECK(run.process.state() == ProcessState::NotRunning);
+        check_reaped(operations->observed_pid);
+    }
+}
+
+TEST_CASE("Linux Process owns same-group descendants through every leader outcome", "[core][process][linux][lifecycle]")
+{
+    SECTION("Natural leader exit kills the group before reap")
+    {
+        CoordinationPipe report;
+        Run              run;
+        auto             operations = std::make_shared<ScriptedOperations>();
+        ProcessTestAccess::set_operations(run.process, operations);
+        REQUIRE(run.process.start(helper({"group-exit", std::to_string(report.fds[1])})));
+        std::array<pid_t, 2> identities{};
+        read_exact(report.fds[0], identities.data(), sizeof(identities));
+        ProcessTerminationWatch descendant{identities[1]};
+        run.until([&] { return run.result.has_value(); });
+        CHECK(run.result->kind == ProcessExitKind::Exited);
+        CHECK(run.result->exit_code == 37);
+        descendant.check_terminated();
+        auto const kill = std::ranges::find(operations->lifecycle_calls, 'K');
+        auto const wait = std::ranges::find(operations->lifecycle_calls, 'W');
+        REQUIRE(kill != operations->lifecycle_calls.end());
+        REQUIRE(wait != operations->lifecycle_calls.end());
+        CHECK(kill < wait);
+    }
+
+    SECTION("Zero-grace cancellation kills leader and descendant")
+    {
+        CoordinationPipe report;
+        Run              run;
+        auto             operations = std::make_shared<ScriptedOperations>();
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto info              = helper({"group-wait", std::to_string(report.fds[1])});
+        info.termination_grace = Duration::zero();
+        REQUIRE(run.process.start(std::move(info)));
+        std::array<pid_t, 2> identities{};
+        read_exact(report.fds[0], identities.data(), sizeof(identities));
+        ProcessTerminationWatch descendant{identities[1]};
+        run.expected_started_state = ProcessState::Stopping;
+        REQUIRE(run.process.stop());
+        run.until([&] { return run.result.has_value(); });
+        CHECK(run.result->kind == ProcessExitKind::Cancelled);
+        CHECK(run.result->signal_number == SIGKILL);
+        descendant.check_terminated();
+    }
+
+    SECTION("Zero-grace timeout kills leader and descendant")
+    {
+        CoordinationPipe report;
+        Run              run;
+        auto             operations = std::make_shared<ScriptedOperations>();
+        auto const       base       = Clock::now();
+        operations->now             = base;
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto info              = helper({"group-wait", std::to_string(report.fds[1])});
+        info.timeout           = 5s;
+        info.termination_grace = Duration::zero();
+        REQUIRE(run.process.start(std::move(info)));
+        std::array<pid_t, 2> identities{};
+        read_exact(report.fds[0], identities.data(), sizeof(identities));
+        ProcessTerminationWatch descendant{identities[1]};
+        run.expected_started_state = ProcessState::Stopping;
+        operations->now            = base + 5s;
+        EventLoopTestAccess::fire_timers(*run.loop, *operations->now);
+        run.until([&] { return run.result.has_value(); });
+        CHECK(run.result->kind == ProcessExitKind::TimedOut);
+        descendant.check_terminated();
+    }
+
+    SECTION("Destructor kills and reaps without completion")
+    {
+        auto                   loop = std::make_unique<EventLoop>();
+        ScopedCurrentEventLoop current{loop.get()};
+        CoordinationPipe       report;
+        Object                 receiver;
+        auto                   operations = std::make_shared<ScriptedOperations>();
+        auto*                  process    = new Process;
+        int                    finishes{0};
+        auto                   finished = process->finished.connect(&receiver, [&](ProcessExit const&) { ++finishes; });
+        ProcessTestAccess::set_operations(*process, operations);
+        REQUIRE(process->start(helper({"group-wait", std::to_string(report.fds[1])})));
+        std::array<pid_t, 2> identities{};
+        read_exact(report.fds[0], identities.data(), sizeof(identities));
+        ProcessTerminationWatch descendant{identities[1]};
+        delete process;
+        CHECK(finishes == 0);
+        check_reaped(identities[0]);
+        descendant.check_terminated();
+    }
+}
+
+TEST_CASE("Linux Process retains an exited stopping leader until group grace expires",
+          "[core][process][linux][lifecycle]")
+{
+    for (bool descendant_ignores_term : {false, true}) {
+        CAPTURE(descendant_ignores_term);
+        CoordinationPipe report;
+        Run              run;
+        auto             operations = std::make_shared<ScriptedOperations>();
+        auto const       base       = Clock::now();
+        operations->now             = base;
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto info = helper({"group", std::to_string(report.fds[1]), descendant_ignores_term ? "1" : "0", "0"});
+        info.termination_grace = 10s;
+        REQUIRE(run.process.start(std::move(info)));
+        std::array<pid_t, 2> identities{};
+        read_exact(report.fds[0], identities.data(), sizeof(identities));
+        ProcessTerminationWatch descendant{identities[1]};
+        run.expected_started_state = ProcessState::Stopping;
+        REQUIRE(run.process.stop());
+
+        run.until([&] { return EventLoopTestAccess::active_process_count(*run.loop) == 0; }, EventFlag::Watchers);
+        CHECK(run.process.state() == ProcessState::Stopping);
+        CHECK(run.process.process_id() == identities[0]);
+        CHECK(EventLoopTestAccess::active_process_count(*run.loop) == 0);
+        observe_exit(identities[0]);
+        CHECK(run.finishes == 0);
+        CHECK(group_signal_count(*operations, SIGKILL) == 0);
+        if (!descendant_ignores_term) {
+            char marker{};
+            read_exact(report.fds[0], &marker, 1);
+            CHECK(marker == 'C');
+        }
+
+        operations->now = base + 10s;
+        EventLoopTestAccess::fire_timers(*run.loop, *operations->now);
+        run.until([&] { return run.result.has_value(); });
+        CHECK(run.result->kind == ProcessExitKind::Cancelled);
+        CHECK(run.result->exit_code == 42);
+        CHECK(group_signal_count(*operations, SIGKILL) == 1);
+        CHECK(std::ranges::count(operations->wait_options, 0) == 1);
+        descendant.check_terminated();
+    }
+}
+
+TEST_CASE("Linux Process bounds post-reap output retained by escaped descendants",
+          "[core][process][linux][lifecycle][output]")
+{
+    constexpr std::size_t budget{std::size_t{256} * 1024};
+    for (std::size_t channel = 0; channel < 2; ++channel) {
+        for (bool continuous : {false, true}) {
+            CAPTURE(channel, continuous);
+            CoordinationPipe report;
+            auto             backend = std::make_unique<FakeEventLoopBackend>();
+            auto*            fake    = backend.get();
+            Run              run{std::move(backend)};
+            auto             operations = std::make_shared<OutputOperations>();
+            ProcessTestAccess::set_operations(run.process, operations);
+            REQUIRE(run.process.start(
+                helper({"escape", std::to_string(report.fds[1]), std::to_string(channel), continuous ? "1" : "0"})));
+            pid_t escaped{-1};
+            read_exact(report.fds[0], &escaped, sizeof(escaped));
+            REQUIRE(escaped > 0);
+            ProcessTerminationWatch descendant{escaped};
+
+            observe_exit(operations->observed_pid);
+            fake->ready_events = {
+                {.kind = ReadyEventKind::Process, .ident = operations->observed_pid}
+            };
+            REQUIRE(run.loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
+            CHECK(run.process.state() == ProcessState::Finishing);
+            CHECK_FALSE(run.process.process_id());
+            CHECK(run.finishes == 0);
+            auto const bytes_before = operations->read_bytes[channel];
+            auto const stale        = EventLoopTestAccess::fd_callback(*run.loop, operations->output_fds[channel]);
+            REQUIRE(stale);
+
+            EventLoopTestAccess::fire_timers(*run.loop, TimePoint::max());
+            REQUIRE(run.result);
+            CHECK(run.result->kind == ProcessExitKind::Exited);
+            CHECK(run.result->exit_code == 37);
+            CHECK(run.result->stdout_lost == (channel == 0));
+            CHECK(run.result->stderr_lost == (channel == 1));
+            CHECK(operations->read_bytes[channel] - bytes_before <= budget);
+            auto const reads = operations->read_calls;
+            stale(operations->output_fds[channel], FdEvent::Read);
+            REQUIRE(run.loop->process_events(EventFlag::Events, 0) != ProcessEventsResult::Failed);
+            CHECK(operations->read_calls == reads);
+
+            REQUIRE((::kill(escaped, SIGKILL) == 0 || errno == ESRCH));
+            descendant.check_terminated();
+        }
+    }
+}
+
+TEST_CASE("Linux Process keeps a reentrant post-reap deadline within the active output budget",
+          "[core][process][linux][lifecycle][output]")
+{
+    constexpr std::size_t budget{std::size_t{256} * 1024};
+    CoordinationPipe      report;
+    auto                  backend = std::make_unique<FakeEventLoopBackend>();
+    auto*                 fake    = backend.get();
+    Run                   run{std::move(backend)};
+    auto                  operations = std::make_shared<OutputOperations>();
+    ProcessTestAccess::set_operations(run.process, operations);
+    REQUIRE(run.process.start(helper({"escape", std::to_string(report.fds[1]), "0", "0"})));
+
+    pid_t escaped{-1};
+    read_exact(report.fds[0], &escaped, sizeof(escaped));
+    REQUIRE(escaped > 0);
+    ProcessTerminationWatch descendant{escaped};
+    observe_exit(operations->observed_pid);
+    fake->ready_events = {
+        {.kind = ReadyEventKind::Process, .ident = operations->observed_pid}
+    };
+    REQUIRE(run.loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
+    REQUIRE(run.process.state() == ProcessState::Finishing);
+
+    operations->synthetic_remaining[0] = 2 * budget;
+    auto const signals_before          = operations->signal_calls.size();
+    bool       deadline_fired{false};
+    auto       reenter = run.process.standard_output.connect(&run.receiver, [&](ByteBuffer const&) {
+        if (deadline_fired) {
+            return;
+        }
+
+        deadline_fired = true;
+        CHECK(run.process.state() == ProcessState::Finishing);
+        CHECK_FALSE(run.process.process_id());
+        auto stopped = run.process.stop();
+        CHECK_FALSE(stopped);
+        if (!stopped) {
+            CHECK(stopped.error().code == "core.process.invalid_state");
+        }
+        CHECK(operations->signal_calls.size() == signals_before);
+        EventLoopTestAccess::fire_timers(*run.loop, TimePoint::max());
+    });
+
+    auto const fd             = operations->output_fds[0];
+    auto const stale          = EventLoopTestAccess::fd_callback(*run.loop, fd);
+    auto const wakeups_before = fake->wakeup_calls;
+    REQUIRE(stale);
+    fake->ready_events = {
+        {.ident = fd, .events = FdEvent::Read}
+    };
+    REQUIRE(run.loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
+
+    REQUIRE(deadline_fired);
+    REQUIRE(run.result);
+    CHECK(run.bytes[0].size() == budget);
+    CHECK(operations->synthetic_remaining[0] == budget);
+    CHECK(fake->wakeup_calls == wakeups_before);
+    CHECK(operations->signal_calls.size() == signals_before);
+    CHECK(run.result->stdout_lost);
+    CHECK_FALSE(run.result->stderr_lost);
+    auto const reads = operations->read_calls;
+    stale(fd, FdEvent::Read);
+    REQUIRE(run.loop->process_events(EventFlag::Events, 0) != ProcessEventsResult::Failed);
+    CHECK(operations->read_calls == reads);
+
+    REQUIRE((::kill(escaped, SIGKILL) == 0 || errno == ESRCH));
+    descendant.check_terminated();
+}
+
+TEST_CASE("Linux Process destruction in Finishing never signals the former process group",
+          "[core][process][linux][lifecycle]")
+{
+    CoordinationPipe       report;
+    auto                   backend = std::make_unique<FakeEventLoopBackend>();
+    auto*                  fake    = backend.get();
+    auto                   loop    = EventLoopTestAccess::make_event_loop(std::move(backend));
+    ScopedCurrentEventLoop current{loop.get()};
+    Object                 receiver;
+    auto                   operations = std::make_shared<OutputOperations>();
+    auto*                  process    = new Process;
+    int                    finishes{0};
+    auto                   finished = process->finished.connect(&receiver, [&](ProcessExit const&) { ++finishes; });
+    ProcessTestAccess::set_operations(*process, operations);
+    REQUIRE(process->start(helper({"escape", std::to_string(report.fds[1]), "1", "0"})));
+
+    pid_t escaped{-1};
+    read_exact(report.fds[0], &escaped, sizeof(escaped));
+    REQUIRE(escaped > 0);
+    ProcessTerminationWatch descendant{escaped};
+    observe_exit(operations->observed_pid);
+    fake->ready_events = {
+        {.kind = ReadyEventKind::Process, .ident = operations->observed_pid}
+    };
+    REQUIRE(loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
+    CHECK(process->state() == ProcessState::Finishing);
+    CHECK_FALSE(process->process_id());
+    CHECK(finishes == 0);
+
+    auto const signals_before = operations->signal_calls.size();
+    delete process;
+    CHECK(operations->signal_calls.size() == signals_before);
+    CHECK(finishes == 0);
+
+    REQUIRE((::kill(escaped, SIGKILL) == 0 || errno == ESRCH));
+    descendant.check_terminated();
 }
 
 TEST_CASE("Linux Process streams binary channels beyond pipe capacity and preserves both tails",

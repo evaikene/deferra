@@ -2,6 +2,7 @@
 
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 
 namespace jb::core::priv {
 auto ProcessOperations::open_null(int flags) noexcept -> int
@@ -40,5 +41,25 @@ auto ProcessOperations::release_gate(int fd, pid_t /*pid*/) -> ssize_t
 auto ProcessOperations::read_output(int fd, void* buffer, std::size_t size) noexcept -> ssize_t
 {
     return ::read(fd, buffer, size);
+}
+
+auto ProcessOperations::monotonic_now() noexcept -> TimePoint
+{
+    return Clock::now();
+}
+
+auto ProcessOperations::signal_group(pid_t group_id, int signal) noexcept -> int
+{
+    return ::kill(-group_id, signal);
+}
+
+auto ProcessOperations::signal_process(pid_t process_id, int signal) noexcept -> int
+{
+    return ::kill(process_id, signal);
+}
+
+auto ProcessOperations::wait_process(pid_t process_id, int* status, int options) noexcept -> pid_t
+{
+    return ::waitpid(process_id, status, options);
 }
 } // namespace jb::core::priv
