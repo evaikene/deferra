@@ -3,6 +3,7 @@
 #include "process_request_priv.hpp"
 
 #include <cerrno>
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -49,6 +50,29 @@ void check_child_stage(ProcessChildOptions const& options, int fd, ProcessChildS
 {
     if (options.fail_stage == stage) {
         fail_child(fd, stage, EIO);
+    }
+}
+
+void close_inherited_descriptors(ProcessChildPlan const& plan) noexcept
+{
+    check_child_stage(plan.options, 3, ProcessChildStage::DescriptorCleanup);
+
+    // Keep only stdin, stdout, stderr, and the close-on-exec status channel. A kernel without close_range uses the
+    // finite bound captured before _Fork(); no descriptor discovery or allocation enters the child path.
+    if (plan.options.close_range) {
+        if (plan.options.close_range(4, std::numeric_limits<unsigned int>::max()) == 0) {
+            return;
+        }
+        if (errno != ENOSYS) {
+            fail_child(3, ProcessChildStage::DescriptorCleanup, errno);
+        }
+    }
+
+    for (unsigned int fd = 4; fd < plan.descriptor_limit; ++fd) {
+        if (::close(static_cast<int>(fd)) == 0 || errno == EBADF || errno == EINTR) {
+            continue;
+        }
+        fail_child(3, ProcessChildStage::DescriptorCleanup, errno);
     }
 }
 } // namespace
@@ -105,12 +129,20 @@ auto process_child_error(ProcessChildError record) -> Error
         case ProcessChildStage::Descriptors:
             stage = "child.descriptors";
             break;
+        case ProcessChildStage::DescriptorCleanup:
+            stage = "child.descriptor_cleanup";
+            break;
         case ProcessChildStage::Signals:
             stage = "child.signals";
             break;
         case ProcessChildStage::Directory:
             code  = "core.process.chdir_failed";
             stage = "child.chdir";
+            break;
+        case ProcessChildStage::Hardening:
+            code     = "core.process.security_failed";
+            category = ErrorCategory::PermissionDenied;
+            stage    = "child.hardening";
             break;
         case ProcessChildStage::Identity:
             code     = "core.process.security_failed";
@@ -186,15 +218,32 @@ auto prepare_process_descriptors(ProcessDescriptors& descriptors, ProcessOperati
     return Result<void, Error>::success();
 }
 
-auto prepare_process_child(PreparedProcessRequest const& request, ProcessChildOptions options)
+auto prepare_process_child(PreparedProcessRequest const& request, ProcessOperations& operations)
     -> Result<ProcessChildPlan, Error>
 {
+    auto const options = operations.child_options();
+
     ProcessChildPlan plan;
-    plan.options          = options;
-    plan.argv             = request.argv().data();
-    plan.envp             = request.envp().data();
-    plan.directory        = request.working_directory().c_str();
-    plan.require_non_root = request.require_non_root();
+    plan.options                = options;
+    plan.argv                   = request.argv().data();
+    plan.envp                   = request.envp().data();
+    plan.directory              = request.working_directory().c_str();
+    plan.require_non_root       = request.require_non_root();
+    plan.prevent_privilege_gain = request.prevent_privilege_gain();
+    if (plan.prevent_privilege_gain && !options.enable_privilege_hardening) {
+        return Result<ProcessChildPlan, Error>::failure(
+            process_error("core.process.security_unsupported", ErrorCategory::Unsupported, "hardening.unsupported"));
+    }
+
+    // The ENOSYS fallback cannot discover a safe descriptor bound after _Fork(), so freeze the live parent view with
+    // the other plan data while ordinary library operations remain available.
+    if (operations.descriptor_close_limit(plan.descriptor_limit) != 0) {
+        auto const error = errno;
+        return Result<ProcessChildPlan, Error>::failure(process_error("core.process.resource_setup_failed",
+                                                                      ErrorCategory::ResourceExhausted,
+                                                                      "parent.descriptor_limit",
+                                                                      error));
+    }
     for (auto const& candidate : request.candidates()) {
         plan.candidates.push_back(candidate.c_str());
     }
@@ -257,7 +306,8 @@ auto prepare_process_child(PreparedProcessRequest const& request, ProcessChildOp
         ::close(fd);
     }
     ::close(descriptors.status_write);
-    // Unrelated inherited-descriptor cleanup belongs to Stage 6.6, not this source normalization step.
+    close_inherited_descriptors(plan);
+
     if (plan.options.signal_before_reset != 0) {
         ::kill(::getpid(), plan.options.signal_before_reset);
     }
@@ -273,6 +323,13 @@ auto prepare_process_child(PreparedProcessRequest const& request, ProcessChildOp
     }
     if (::chdir(plan.directory) != 0) {
         fail_child(3, ProcessChildStage::Directory, errno);
+    }
+    if (plan.prevent_privilege_gain) {
+        // The request is strict: prove that the platform latched its protection before identity validation and exec.
+        check_child_stage(plan.options, 3, ProcessChildStage::Hardening);
+        if (plan.options.enable_privilege_hardening() != 0) {
+            fail_child(3, ProcessChildStage::Hardening, errno);
+        }
     }
     if (plan.options.signal_before_exec != 0) {
         ::kill(::getpid(), plan.options.signal_before_exec);

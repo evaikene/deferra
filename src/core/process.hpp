@@ -99,9 +99,8 @@ struct ProcessExit {
 /// argv/environment storage including NULs and pointer arrays is capped at 256 KiB and the runtime argument limit;
 /// expanded PATH candidate storage has a separate 256 KiB limit. No shell or ambient PATH lookup is performed.
 /// All errors use core.process.* codes and fixed safe details, excluding user-supplied strings and output.
-/// @note Linux launch, timeout/stop escalation, process-group cleanup, bounded output streaming, and the post-reap
-/// output deadline are supported. Inherited-descriptor cleanup and privilege-gain prevention arrive in Stage 6.6;
-/// requests requiring privilege-gain prevention currently reject before spawning.
+/// @note Linux launch includes inherited-descriptor cleanup and strict privilege-gain prevention, together with
+/// timeout/stop escalation, process-group cleanup, bounded output streaming, and the post-reap output deadline.
 /// Other platforms retain core.process.monitor_unsupported until their backend stage.
 class Process final : public Object {
 public:
