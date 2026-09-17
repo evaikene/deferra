@@ -22,7 +22,6 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -416,6 +415,20 @@ void observe_exit(pid_t pid)
     REQUIRE(result == 0);
 }
 
+/// @throws Catch::TestFailureException if the child does not reach its injected stopped state.
+void observe_stop(pid_t pid)
+{
+    siginfo_t info{};
+    int       result;
+    do {
+        result = ::waitid(P_PID, static_cast<id_t>(pid), &info, WSTOPPED | WNOWAIT);
+    } while (result < 0 && errno == EINTR);
+
+    REQUIRE(result == 0);
+    CHECK(info.si_code == CLD_STOPPED);
+    CHECK(info.si_status == SIGSTOP);
+}
+
 /// @throws Catch::TestFailureException when deterministic helper coordination does not arrive before the watchdog.
 void read_exact(int fd, void* destination, std::size_t size)
 {
@@ -433,16 +446,60 @@ void read_exact(int fd, void* destination, std::size_t size)
     }
 }
 
-/// @throws Catch::TestFailureException when a killed helper descendant is not reaped by its new parent.
-void check_process_gone(pid_t pid)
-{
-    auto const deadline = Clock::now() + 3s;
-    while (::kill(pid, 0) == 0 && Clock::now() < deadline) {
-        std::this_thread::yield();
+/// Identity-stable observation of a helper descendant that this test process cannot reap.
+class ProcessTerminationWatch final {
+public:
+    /// @throws Catch::TestFailureException when the PID is invalid or cannot be watched.
+    explicit ProcessTerminationWatch(pid_t pid)
+        : _pid(pid)
+    {
+        REQUIRE(pid > 0);
+
+        EpollProcessOperations operations;
+        _fd = operations.open_pidfd(pid);
+        if (_fd >= 0) {
+            return;
+        }
+
+        auto const error = errno;
+        UNSCOPED_INFO("pidfd_open(" << pid << ") failed with errno " << error);
+        REQUIRE(error == ESRCH);
     }
-    CHECK(::kill(pid, 0) == -1);
-    CHECK(errno == ESRCH);
-}
+
+    ~ProcessTerminationWatch()
+    {
+        if (_fd >= 0) {
+            ::close(_fd);
+        }
+    }
+
+    ProcessTerminationWatch(ProcessTerminationWatch const&)                    = delete;
+    auto operator=(ProcessTerminationWatch const&) -> ProcessTerminationWatch& = delete;
+
+    /// @throws Catch::TestFailureException when the process does not terminate within the watchdog interval.
+    void check_terminated() const
+    {
+        if (_fd < 0) {
+            return;
+        }
+
+        pollfd item{.fd = _fd, .events = POLLIN, .revents = 0};
+        int    ready;
+        do {
+            ready = ::poll(&item, 1, 3000);
+        } while (ready < 0 && errno == EINTR);
+
+        if (ready < 0) {
+            UNSCOPED_INFO("poll(pidfd for " << _pid << ") failed with errno " << errno);
+        }
+        REQUIRE(ready == 1);
+        CHECK((item.revents & POLLIN) != 0);
+    }
+
+private:
+    pid_t _pid;
+    int   _fd{-1};
+};
 
 auto group_signal_count(ScriptedOperations const& operations, int signal) -> std::size_t
 {
@@ -1216,6 +1273,7 @@ TEST_CASE("Linux Process timeout starts at the accepted launch deadline", "[core
         info.timeout           = 5s;
         info.termination_grace = Duration::zero();
         REQUIRE(run.process.start(std::move(info)));
+        observe_stop(operations->observed_pid);
         run.expected_started_state = ProcessState::Stopping;
         operations->now            = base + 5s;
         EventLoopTestAccess::fire_timers(*run.loop, *operations->now);
@@ -1276,10 +1334,11 @@ TEST_CASE("Linux Process owns same-group descendants through every leader outcom
         REQUIRE(run.process.start(helper({"group-exit", std::to_string(report.fds[1])})));
         std::array<pid_t, 2> identities{};
         read_exact(report.fds[0], identities.data(), sizeof(identities));
+        ProcessTerminationWatch descendant{identities[1]};
         run.until([&] { return run.result.has_value(); });
         CHECK(run.result->kind == ProcessExitKind::Exited);
         CHECK(run.result->exit_code == 37);
-        check_process_gone(identities[1]);
+        descendant.check_terminated();
         auto const kill = std::ranges::find(operations->lifecycle_calls, 'K');
         auto const wait = std::ranges::find(operations->lifecycle_calls, 'W');
         REQUIRE(kill != operations->lifecycle_calls.end());
@@ -1298,12 +1357,13 @@ TEST_CASE("Linux Process owns same-group descendants through every leader outcom
         REQUIRE(run.process.start(std::move(info)));
         std::array<pid_t, 2> identities{};
         read_exact(report.fds[0], identities.data(), sizeof(identities));
+        ProcessTerminationWatch descendant{identities[1]};
         run.expected_started_state = ProcessState::Stopping;
         REQUIRE(run.process.stop());
         run.until([&] { return run.result.has_value(); });
         CHECK(run.result->kind == ProcessExitKind::Cancelled);
         CHECK(run.result->signal_number == SIGKILL);
-        check_process_gone(identities[1]);
+        descendant.check_terminated();
     }
 
     SECTION("Zero-grace timeout kills leader and descendant")
@@ -1320,12 +1380,13 @@ TEST_CASE("Linux Process owns same-group descendants through every leader outcom
         REQUIRE(run.process.start(std::move(info)));
         std::array<pid_t, 2> identities{};
         read_exact(report.fds[0], identities.data(), sizeof(identities));
+        ProcessTerminationWatch descendant{identities[1]};
         run.expected_started_state = ProcessState::Stopping;
         operations->now            = base + 5s;
         EventLoopTestAccess::fire_timers(*run.loop, *operations->now);
         run.until([&] { return run.result.has_value(); });
         CHECK(run.result->kind == ProcessExitKind::TimedOut);
-        check_process_gone(identities[1]);
+        descendant.check_terminated();
     }
 
     SECTION("Destructor kills and reaps without completion")
@@ -1342,10 +1403,11 @@ TEST_CASE("Linux Process owns same-group descendants through every leader outcom
         REQUIRE(process->start(helper({"group-wait", std::to_string(report.fds[1])})));
         std::array<pid_t, 2> identities{};
         read_exact(report.fds[0], identities.data(), sizeof(identities));
+        ProcessTerminationWatch descendant{identities[1]};
         delete process;
         CHECK(finishes == 0);
         check_reaped(identities[0]);
-        check_process_gone(identities[1]);
+        descendant.check_terminated();
     }
 }
 
@@ -1365,6 +1427,7 @@ TEST_CASE("Linux Process retains an exited stopping leader until group grace exp
         REQUIRE(run.process.start(std::move(info)));
         std::array<pid_t, 2> identities{};
         read_exact(report.fds[0], identities.data(), sizeof(identities));
+        ProcessTerminationWatch descendant{identities[1]};
         run.expected_started_state = ProcessState::Stopping;
         REQUIRE(run.process.stop());
 
@@ -1388,7 +1451,7 @@ TEST_CASE("Linux Process retains an exited stopping leader until group grace exp
         CHECK(run.result->exit_code == 42);
         CHECK(group_signal_count(*operations, SIGKILL) == 1);
         CHECK(std::ranges::count(operations->wait_options, 0) == 1);
-        check_process_gone(identities[1]);
+        descendant.check_terminated();
     }
 }
 
@@ -1410,6 +1473,7 @@ TEST_CASE("Linux Process bounds post-reap output retained by escaped descendants
             pid_t escaped{-1};
             read_exact(report.fds[0], &escaped, sizeof(escaped));
             REQUIRE(escaped > 0);
+            ProcessTerminationWatch descendant{escaped};
 
             observe_exit(operations->observed_pid);
             fake->ready_events = {
@@ -1436,7 +1500,7 @@ TEST_CASE("Linux Process bounds post-reap output retained by escaped descendants
             CHECK(operations->read_calls == reads);
 
             REQUIRE((::kill(escaped, SIGKILL) == 0 || errno == ESRCH));
-            check_process_gone(escaped);
+            descendant.check_terminated();
         }
     }
 }
@@ -1456,6 +1520,7 @@ TEST_CASE("Linux Process keeps a reentrant post-reap deadline within the active 
     pid_t escaped{-1};
     read_exact(report.fds[0], &escaped, sizeof(escaped));
     REQUIRE(escaped > 0);
+    ProcessTerminationWatch descendant{escaped};
     observe_exit(operations->observed_pid);
     fake->ready_events = {
         {.kind = ReadyEventKind::Process, .ident = operations->observed_pid}
@@ -1506,7 +1571,7 @@ TEST_CASE("Linux Process keeps a reentrant post-reap deadline within the active 
     CHECK(operations->read_calls == reads);
 
     REQUIRE((::kill(escaped, SIGKILL) == 0 || errno == ESRCH));
-    check_process_gone(escaped);
+    descendant.check_terminated();
 }
 
 TEST_CASE("Linux Process destruction in Finishing never signals the former process group",
@@ -1528,6 +1593,7 @@ TEST_CASE("Linux Process destruction in Finishing never signals the former proce
     pid_t escaped{-1};
     read_exact(report.fds[0], &escaped, sizeof(escaped));
     REQUIRE(escaped > 0);
+    ProcessTerminationWatch descendant{escaped};
     observe_exit(operations->observed_pid);
     fake->ready_events = {
         {.kind = ReadyEventKind::Process, .ident = operations->observed_pid}
@@ -1543,7 +1609,7 @@ TEST_CASE("Linux Process destruction in Finishing never signals the former proce
     CHECK(finishes == 0);
 
     REQUIRE((::kill(escaped, SIGKILL) == 0 || errno == ESRCH));
-    check_process_gone(escaped);
+    descendant.check_terminated();
 }
 
 TEST_CASE("Linux Process streams binary channels beyond pipe capacity and preserves both tails",
