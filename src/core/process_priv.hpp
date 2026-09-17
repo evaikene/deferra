@@ -31,10 +31,12 @@ struct Process::Private : priv::ObjectPrivate {
         bool                    terminal{true};
         bool                    continuation_pending{false};
         bool                    draining{false};
+        bool                    final_drain_pending{false};
     };
 
     static constexpr std::size_t kPipeReadChunkBytes{std::size_t{64} * 1024};
     static constexpr std::size_t kPipeReadBudgetBytes{std::size_t{256} * 1024};
+    static constexpr Duration    kPostReapDrainTimeout{std::chrono::seconds{1}};
     std::array<OutputChannel, 2> channels;
 
     std::shared_ptr<priv::ProcessOperations>      operations{std::make_shared<priv::ProcessOperations>()};
@@ -44,22 +46,39 @@ struct Process::Private : priv::ObjectPrivate {
     std::shared_ptr<Anchor>                       process_anchor;
     std::uint64_t                                 generation{0};
     pid_t                                         pid{-1};
-    bool                                          group_established{false};
+    pid_t                                         process_group{-1};
     bool                                          process_watched{false};
     FdWatch                                       status_watch;
     bool                                          status_resolved{false};
     bool                                          gate_released{false};
     bool                                          reaped{false};
+    bool                                          leader_exit_observed{false};
+    bool                                          group_kill_attempted{false};
+    std::optional<ProcessExitKind>                stop_kind;
+    TimerHandle                                   timeout_timer;
+    TimerHandle                                   termination_timer;
+    TimerHandle                                   post_reap_timer;
+    TimePoint                                     termination_deadline;
     priv::ProcessChildError                       child_error;
     std::size_t                                   status_bytes{0};
     ProcessExit                                   exit;
 
     /// @throws std::exception from an injected parent-side test adapter; rolls back before propagation.
     auto launch() -> Result<void, Error>;
+    auto stop(ProcessStopReason reason) -> Result<void, Error>;
     void read_status();
     void output_ready(std::size_t index);
-    void drain_output(std::size_t index);
+    void drain_output(std::size_t index, bool final_drain = false);
+    void invalidate_output_work(std::size_t index);
     void retire_output(std::size_t index);
+    void timeout_expired();
+    void termination_grace_expired();
+    void post_reap_drain_expired();
+    void begin_stopping(ProcessExitKind kind);
+    void attempt_group_kill(char const* stage) noexcept;
+    void reap_child(int options);
+    void enter_finishing(int status);
+    void cancel_timer(TimerHandle& timer) noexcept;
     void child_ready();
     void finish_if_ready();
     void retire_status();

@@ -1,6 +1,7 @@
 #include "process.hpp"
 
 #include "event_loop.hpp"
+#include "logging.hpp"
 #include "process_priv.hpp"
 #include "process_request_priv.hpp"
 
@@ -57,9 +58,14 @@ auto Process::start(ProcessStartInfo start_info) -> Result<void, Error>
                                              .code     = "core.process.event_loop_unavailable",
                                              .message  = "Process requires a valid current owner EventLoop"});
     }
-    // Capture once before preparation; future launch stages retain this exact checked absolute deadline.
+#if defined(__linux__)
+    auto*      data        = d_ptr<Private>();
+    // Capture once before preparation; every later timeout decision uses this exact checked absolute deadline.
+    auto const launch_time = data->operations->monotonic_now();
+#else
     auto const launch_time = Clock::now();
-    auto       prepared    = priv::prepare_process_request(std::move(start_info), launch_time, sysconf(_SC_ARG_MAX));
+#endif
+    auto prepared = priv::prepare_process_request(std::move(start_info), launch_time, sysconf(_SC_ARG_MAX));
     if (!prepared) {
         return Result<void, Error>::failure(prepared.error());
     }
@@ -68,13 +74,7 @@ auto Process::start(ProcessStartInfo start_info) -> Result<void, Error>
         return signal_configuration;
     }
 #if defined(__linux__)
-    auto* data = d_ptr<Private>();
-    // These later-stage features must not be silently accepted without enforcement.
-    if (prepared.value()->deadline()) {
-        return Result<void, Error>::failure(priv::process_error("core.process.monitor_unsupported",
-                                                                ErrorCategory::Unsupported,
-                                                                "timeout.not_implemented"));
-    }
+    // Later-stage hardening must not be silently accepted without enforcement.
     if (prepared.value()->prevent_privilege_gain()) {
         return Result<void, Error>::failure(priv::process_error("core.process.security_unsupported",
                                                                 ErrorCategory::Unsupported,
@@ -90,18 +90,16 @@ auto Process::start(ProcessStartInfo start_info) -> Result<void, Error>
 #endif
 }
 
-auto Process::stop(ProcessStopReason /*reason*/) -> Result<void, Error>
+auto Process::stop(ProcessStopReason reason) -> Result<void, Error>
 {
 #if defined(__linux__)
-    if (d_ptr<Private>()->state != ProcessState::NotRunning) {
-        return Result<void, Error>::failure(priv::process_error("core.process.monitor_unsupported",
-                                                                ErrorCategory::Unsupported,
-                                                                "stop.not_implemented"));
-    }
-#endif
+    return d_ptr<Private>()->stop(reason);
+#else
+    static_cast<void>(reason);
     return Result<void, Error>::failure({.category = ErrorCategory::Conflict,
                                          .code     = "core.process.invalid_state",
                                          .message  = "Process has no accepted operation"});
+#endif
 }
 
 auto Process::state() const noexcept -> ProcessState
@@ -188,7 +186,7 @@ auto Process::Private::launch() -> Result<void, Error>
     if (operations->establish_group(pid) != 0) {
         return reject(priv::process_error("core.process.child_setup_failed", ErrorCategory::Io, "parent.group", errno));
     }
-    group_established = true;
+    process_group = pid;
     // These private dispatch boundaries must not unwind past an accepted one-shot event: doing so could
     // lose reaping/completion permanently. Allocation and slot exceptions are fatal here, not API contracts.
     status_watch =
@@ -241,6 +239,32 @@ auto Process::Private::launch() -> Result<void, Error>
     }
     process_watched = true;
     state           = ProcessState::Starting;
+
+    if (auto const deadline = request->deadline()) {
+        auto const accepted_generation = generation;
+        timeout_timer                  = event_loop->post_at(*deadline, [this, accepted_generation]() noexcept {
+            if (generation == accepted_generation) {
+                timeout_expired();
+            }
+        });
+        if (!timeout_timer) {
+            return reject(
+                priv::process_error("core.process.watch_failed", ErrorCategory::Unavailable, "timer.timeout"));
+        }
+
+        // Ownership and every watch are committed, so expiry here is an accepted asynchronous timeout. Keeping the
+        // gate closed proves the target never executed and makes termination grace unnecessary.
+        if (operations->monotonic_now() >= *deadline) {
+            cancel_timer(timeout_timer);
+            stop_kind = ProcessExitKind::TimedOut;
+            state     = ProcessState::Stopping;
+            priv::close_process_fd(descriptors.gate_parent);
+            attempt_group_kill("timeout.pre_gate_kill");
+            guard.accepted = true;
+            return Result<void, Error>::success();
+        }
+    }
+
     ssize_t sent;
     do {
         sent = operations->release_gate(descriptors.gate_parent, pid);
@@ -256,6 +280,40 @@ auto Process::Private::launch() -> Result<void, Error>
     gate_released = true;
     priv::close_process_fd(descriptors.gate_parent);
     guard.accepted = true;
+    return Result<void, Error>::success();
+}
+
+auto Process::Private::stop(ProcessStopReason reason) -> Result<void, Error>
+{
+    auto const requested_kind =
+        reason == ProcessStopReason::Cancelled ? ProcessExitKind::Cancelled : ProcessExitKind::Interrupted;
+
+    if (state == ProcessState::Stopping || state == ProcessState::Finishing) {
+        if (stop_kind == requested_kind) {
+            return Result<void, Error>::success();
+        }
+        if (stop_kind) {
+            return Result<void, Error>::failure({.category = ErrorCategory::Conflict,
+                                                 .code     = "core.process.stop_conflict",
+                                                 .message  = "A different Process stop cause is already active"});
+        }
+    }
+    if (state != ProcessState::Starting && state != ProcessState::Running) {
+        return Result<void, Error>::failure({.category = ErrorCategory::Conflict,
+                                             .code     = "core.process.invalid_state",
+                                             .message  = "Process cannot be stopped in its current state"});
+    }
+
+    auto const delivered = operations->signal_group(process_group, SIGTERM);
+    auto const error     = errno;
+    if (delivered != 0 && error != ESRCH) {
+        return Result<void, Error>::failure(
+            priv::process_error("core.process.signal_failed", ErrorCategory::Io, "signal.term", error));
+    }
+
+    // Commit the semantic result only after the caller's initial TERM request is accepted. A failed explicit
+    // delivery leaves the operation unchanged and retryable.
+    begin_stopping(requested_kind);
     return Result<void, Error>::success();
 }
 
@@ -285,20 +343,28 @@ void Process::Private::retire_process()
     }
 }
 
-void Process::Private::retire_output(std::size_t index)
+void Process::Private::invalidate_output_work(std::size_t index)
 {
     auto& channel = channels[index];
-    // Removal may retain callbacks, and posted continuations may outlive this run. Neither may regain access.
+    // Removal may retain callbacks, and posted continuations may outlive this run. Neither may regain access after
+    // forced final draining, reset, restart, or destruction.
     if (channel.anchor) {
         channel.anchor->data = nullptr;
         channel.anchor.reset();
     }
     channel.continuation_pending = false;
-    channel.terminal             = true;
     if (channel.watch) {
         static_cast<void>(event_loop->unwatch_fd(channel.watch));
         channel.watch = {};
     }
+}
+
+void Process::Private::retire_output(std::size_t index)
+{
+    auto& channel = channels[index];
+    invalidate_output_work(index);
+    channel.final_drain_pending = false;
+    channel.terminal            = true;
     priv::close_process_fd(descriptors.output_read[index]);
 }
 
@@ -308,12 +374,29 @@ void Process::Private::output_ready(std::size_t index)
     finish_if_ready();
 }
 
-void Process::Private::drain_output(std::size_t index)
+void Process::Private::drain_output(std::size_t index, bool final_drain)
 {
     auto& channel = channels[index];
-    if (channel.terminal || channel.continuation_pending || channel.draining) {
+    if (channel.terminal || (!final_drain && channel.continuation_pending)) {
         return;
     }
+    if (channel.draining) {
+        if (final_drain) {
+            // A direct output slot may run the deadline reentrantly. Retire all future entry points immediately;
+            // the active callback will use only the remainder of its existing budget, then force this terminal.
+            invalidate_output_work(index);
+            channel.final_drain_pending = true;
+        }
+        return;
+    }
+
+    if (final_drain) {
+        // The deadline retires native and queued entry points before the last direct read. A queued continuation may
+        // remain in EventLoop storage, but its expired weak anchor makes it permanently inert.
+        invalidate_output_work(index);
+        channel.final_drain_pending = false;
+    }
+
     channel.draining = true;
     // A coalesced output event can precede launch-channel dispatch. Resolve it before exposing any target bytes.
     read_status();
@@ -346,8 +429,16 @@ void Process::Private::drain_output(std::size_t index)
         retire_output(index);
         break;
     }
-    channel.draining = false;
-    if (!channel.terminal && total == kPipeReadBudgetBytes) {
+    channel.draining            = false;
+    auto const force_terminal   = final_drain || channel.final_drain_pending;
+    channel.final_drain_pending = false;
+    if (force_terminal && !channel.terminal) {
+        // Reaching the hard budget did not prove EOF. Close without an extra read so the final callback remains
+        // strictly bounded, and preserve every byte already delivered within that budget.
+        (index == 0 ? exit.stdout_lost : exit.stderr_lost) = true;
+        retire_output(index);
+    }
+    else if (!channel.terminal && total == kPipeReadBudgetBytes) {
         // Edge readiness need not recur while unread bytes remain. Coalesce with native callbacks until delivery;
         // each continuation consumes only one budget and queues any further work for a later Object event cycle.
         channel.continuation_pending = true;
@@ -412,14 +503,109 @@ void Process::Private::read_status()
     retire_status();
 }
 
-void Process::Private::child_ready()
+void Process::Private::cancel_timer(TimerHandle& timer) noexcept
 {
-    // Resolve even a coalesced immediate exit's launch channel before any finished signal.
-    read_status();
+    if (timer) {
+        event_loop->cancel_timer(timer);
+        timer = {};
+    }
+}
+
+void Process::Private::attempt_group_kill(char const* stage) noexcept
+{
+    if (group_kill_attempted || process_group <= 0) {
+        return;
+    }
+
+    group_kill_attempted = true;
+    auto const delivered = operations->signal_group(process_group, SIGKILL);
+    auto const error     = errno;
+    if (delivered != 0 && error != ESRCH) {
+        // Accepted lifecycle work has no synchronous caller to fail. Keep waiting for the owned leader and log only
+        // the fixed operation stage plus the native code; request data must never enter diagnostics.
+        log_error("Process {} failed with native error {}", stage, error);
+    }
+}
+
+void Process::Private::begin_stopping(ProcessExitKind kind)
+{
+    stop_kind = kind;
+    state     = ProcessState::Stopping;
+    cancel_timer(timeout_timer);
+
+    auto const grace = request->termination_grace();
+    if (grace == Duration::zero()) {
+        attempt_group_kill("termination.kill");
+        return;
+    }
+
+    auto const now                 = operations->monotonic_now();
+    // The validated grace is small, but keep synthetic test clocks and unusual steady-clock epochs overflow-safe.
+    termination_deadline           = now > TimePoint::max() - grace ? TimePoint::max() : now + grace;
+    auto const accepted_generation = generation;
+    termination_timer              = event_loop->post_at(termination_deadline, [this, accepted_generation]() noexcept {
+        if (generation == accepted_generation) {
+            termination_grace_expired();
+        }
+    });
+    if (!termination_timer) {
+        log_error("Process termination timer could not be armed; escalating immediately");
+        attempt_group_kill("termination.timer_unavailable");
+    }
+}
+
+void Process::Private::timeout_expired()
+{
+    timeout_timer = {};
+    if (state != ProcessState::Starting && state != ProcessState::Running) {
+        return;
+    }
+
+    auto const delivered = operations->signal_group(process_group, SIGTERM);
+    auto const error     = errno;
+    if (delivered != 0 && error != ESRCH) {
+        // Automatic timeout cannot return an operational error. Preserve TimedOut and continue to KILL escalation.
+        log_error("Process timeout TERM failed with native error {}", error);
+    }
+    begin_stopping(ProcessExitKind::TimedOut);
+}
+
+void Process::Private::termination_grace_expired()
+{
+    termination_timer = {};
+    if (state != ProcessState::Stopping || group_kill_attempted) {
+        return;
+    }
+
+    attempt_group_kill("termination.kill");
+    if (leader_exit_observed) {
+        // Process readiness already proved that this wait cannot block. Retaining the leader until now protected the
+        // numeric process-group identity while descendants received their full TERM grace.
+        reap_child(0);
+    }
+}
+
+void Process::Private::post_reap_drain_expired()
+{
+    post_reap_timer = {};
+    if (state != ProcessState::Finishing || !reaped) {
+        return;
+    }
+
+    for (std::size_t i = 0; i < channels.size(); ++i) {
+        if (!channels[i].terminal) {
+            drain_output(i, true);
+        }
+    }
+    finish_if_ready();
+}
+
+void Process::Private::reap_child(int options)
+{
     int   status{};
     pid_t waited;
     do {
-        waited = ::waitpid(pid, &status, WNOHANG);
+        waited = operations->wait_process(pid, &status, options);
     } while (waited < 0 && errno == EINTR);
     if (waited == 0) {
         return;
@@ -428,23 +614,75 @@ void Process::Private::child_ready()
         // Outside code reaping our child violates the public exclusive-reaping contract.
         std::terminate();
     }
+    enter_finishing(status);
+}
+
+void Process::Private::enter_finishing(int status)
+{
     retire_process();
-    pid               = -1;
-    group_established = false;
-    reaped            = true;
-    state             = ProcessState::Finishing;
+    cancel_timer(timeout_timer);
+    cancel_timer(termination_timer);
+
+    // Invalidate both numeric identities before output can invoke user code. From Finishing onward, no path may
+    // signal the former process group even when a direct output slot re-enters stop() or requests destruction.
+    pid                  = -1;
+    process_group        = -1;
+    reaped               = true;
+    leader_exit_observed = false;
+    state                = ProcessState::Finishing;
+    exit.exit_code.reset();
+    exit.signal_number.reset();
     if (WIFEXITED(status)) {
-        exit.kind      = ProcessExitKind::Exited;
         exit.exit_code = WEXITSTATUS(status);
     }
     else {
-        exit.kind          = ProcessExitKind::Signaled;
         exit.signal_number = WTERMSIG(status);
     }
-    // Identity is already invalid and state is Finishing before output can re-enter the public API.
+
     drain_output(0);
     drain_output(1);
+    if (!channels[0].terminal || !channels[1].terminal) {
+        auto const now = operations->monotonic_now();
+        auto const deadline =
+            now > TimePoint::max() - kPostReapDrainTimeout ? TimePoint::max() : now + kPostReapDrainTimeout;
+        auto const accepted_generation = generation;
+        post_reap_timer                = event_loop->post_at(deadline, [this, accepted_generation]() noexcept {
+            if (generation == accepted_generation) {
+                post_reap_drain_expired();
+            }
+        });
+        if (!post_reap_timer) {
+            log_error("Process post-reap output timer could not be armed; applying the bounded final drain now");
+            post_reap_drain_expired();
+            return;
+        }
+    }
     finish_if_ready();
+}
+
+void Process::Private::child_ready()
+{
+    // Resolve even a coalesced immediate exit's launch channel before any finished signal.
+    read_status();
+
+    if (state == ProcessState::Stopping && termination_timer && !group_kill_attempted &&
+        operations->monotonic_now() < termination_deadline) {
+        // Preserve the exited leader as an owned zombie. This prevents PID/PGID reuse and lets same-group
+        // descendants use every remaining instant of the configured TERM grace.
+        leader_exit_observed = true;
+        retire_process();
+        drain_output(0);
+        drain_output(1);
+        return;
+    }
+
+    if (termination_timer) {
+        cancel_timer(termination_timer);
+    }
+    // Natural exit and expired/zero grace both clean the complete group before reaping the leader. The unreaped
+    // leader keeps the PGID protected until after this attempt.
+    attempt_group_kill("leader_exit.kill");
+    reap_child(WNOHANG);
 }
 
 void Process::Private::finish_if_ready()
@@ -452,10 +690,20 @@ void Process::Private::finish_if_ready()
     if (!reaped || !status_resolved || !channels[0].terminal || !channels[1].terminal) {
         return;
     }
-    if (exit.start_error) {
+
+    if (stop_kind) {
+        // The first accepted cancellation/timeout cause remains semantic even when TERM produces an ordinary exit or
+        // races with a child-side setup failure. The observed wait status remains as bounded diagnostic metadata.
+        exit.kind = *stop_kind;
+        exit.start_error.reset();
+    }
+    else if (exit.start_error) {
         exit.kind = ProcessExitKind::StartFailed;
         exit.exit_code.reset();
         exit.signal_number.reset();
+    }
+    else {
+        exit.kind = exit.exit_code ? ProcessExitKind::Exited : ProcessExitKind::Signaled;
     }
     auto result = std::move(exit);
     // Reaping alone cannot discard tail bytes. Both EOF/loss terminals are established; retire before restart.
@@ -465,34 +713,81 @@ void Process::Private::finish_if_ready()
 
 void Process::Private::cleanup() noexcept
 {
-    retire_status();
-    retire_process();
-    for (std::size_t i = 0; i < channels.size(); ++i) {
-        retire_output(i);
+    // No native removal, timer cancellation, descriptor close, or signal attempt may leave a callable path back into
+    // this run. Establish that invariant for every registration before beginning teardown.
+    if (status_anchor) {
+        status_anchor->data = nullptr;
+        status_anchor.reset();
     }
+    if (process_anchor) {
+        process_anchor->data = nullptr;
+        process_anchor.reset();
+    }
+    for (auto& channel : channels) {
+        if (channel.anchor) {
+            channel.anchor->data = nullptr;
+            channel.anchor.reset();
+        }
+        channel.continuation_pending = false;
+        channel.final_drain_pending  = false;
+    }
+
+    cancel_timer(timeout_timer);
+    cancel_timer(termination_timer);
+    cancel_timer(post_reap_timer);
+
+    if (status_watch) {
+        static_cast<void>(event_loop->unwatch_fd(status_watch));
+        status_watch = {};
+    }
+    if (process_watched) {
+        static_cast<void>(event_loop->unwatch_process(pid));
+        process_watched = false;
+    }
+    for (auto& channel : channels) {
+        if (channel.watch) {
+            static_cast<void>(event_loop->unwatch_fd(channel.watch));
+            channel.watch = {};
+        }
+    }
+
     priv::close_process_fd(descriptors.gate_parent);
     if (pid > 0) {
-        // Rejection/deferred destruction must not leak the direct child. Full descendant/grace policy is Stage 6.5.
-        if (group_established) {
-            ::kill(-pid, SIGKILL);
+        // Rejection and destruction are fail-safe cleanup, not normal completion. Signal only while the unreaped
+        // identity is still owned; Finishing has already cleared both identifiers.
+        if (process_group > 0) {
+            static_cast<void>(operations->signal_group(process_group, SIGKILL));
         }
-        ::kill(pid, SIGKILL);
+        static_cast<void>(operations->signal_process(pid, SIGKILL));
+    }
+
+    priv::close_process_fd(descriptors.status_read);
+    for (std::size_t i = 0; i < channels.size(); ++i) {
+        channels[i].terminal = true;
+        priv::close_process_fd(descriptors.output_read[i]);
+    }
+
+    if (pid > 0) {
         pid_t waited;
         do {
-            waited = ::waitpid(pid, nullptr, 0);
+            waited = operations->wait_process(pid, nullptr, 0);
         } while (waited < 0 && errno == EINTR);
         pid = -1;
     }
     descriptors.close_all();
-    group_established = false;
+    process_group = -1;
     request.reset();
-    status_resolved = false;
-    gate_released   = false;
-    reaped          = false;
-    child_error     = {};
-    status_bytes    = 0;
-    exit            = {};
-    state           = ProcessState::NotRunning;
+    status_resolved      = false;
+    gate_released        = false;
+    reaped               = false;
+    leader_exit_observed = false;
+    group_kill_attempted = false;
+    stop_kind.reset();
+    termination_deadline = {};
+    child_error          = {};
+    status_bytes         = 0;
+    exit                 = {};
+    state                = ProcessState::NotRunning;
 }
 
 void priv::ProcessTestAccess::set_operations(Process& process, std::shared_ptr<ProcessOperations> operations) noexcept

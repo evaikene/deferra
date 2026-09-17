@@ -8,6 +8,7 @@
 #include <charconv>
 #include <chrono>
 #include <csignal> // IWYU pragma: keep Provides POSIX signal sets and dispositions.
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <string_view>
@@ -197,6 +198,160 @@ auto continuous_output(int mask) noexcept -> int
         }
     }
 }
+
+volatile sig_atomic_t term_received{0};
+
+void record_term(int /*signal*/) noexcept
+{
+    term_received = 1;
+}
+
+auto install_term_handler(bool ignore) noexcept -> bool
+{
+    struct sigaction action{};
+    action.sa_handler = ignore ? SIG_IGN : record_term;
+    return ::sigemptyset(&action.sa_mask) == 0 && ::sigaction(SIGTERM, &action, nullptr) == 0;
+}
+
+auto write_all(int fd, void const* data, std::size_t size) noexcept -> bool
+{
+    auto const* bytes   = static_cast<char const*>(data);
+    std::size_t written = 0;
+    while (written < size) {
+        auto const count = ::write(fd, bytes + written, size - written);
+        if (count > 0) {
+            written += static_cast<std::size_t>(count);
+        }
+        else if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        else {
+            return false;
+        }
+    }
+    return true;
+}
+
+auto wait_for_term() noexcept -> bool
+{
+    while (term_received == 0) {
+        if (::pause() < 0 && errno != EINTR) {
+            return false;
+        }
+    }
+    return true;
+}
+
+auto term_target(bool ignore) noexcept -> int
+{
+    if (!install_term_handler(ignore) || !write_all(STDOUT_FILENO, "R", 1)) {
+        return 69;
+    }
+    if (ignore) {
+        for (;;) {
+            ::pause();
+        }
+    }
+    if (!wait_for_term() || !write_all(STDOUT_FILENO, "T", 1)) {
+        return 68;
+    }
+    return 42;
+}
+
+enum class DescendantBehavior : std::uint8_t {
+    IgnoreTerm,
+    HandleTerm,
+};
+
+auto descendant_group(int                report_fd,
+                      bool               leader_handles_term,
+                      DescendantBehavior descendant_behavior,
+                      bool               leader_exits_naturally) noexcept -> int
+{
+    if (!install_term_handler(!leader_handles_term)) {
+        return 67;
+    }
+
+    int ready[2];
+    if (::pipe(ready) != 0) {
+        return 66;
+    }
+    auto const child = ::fork();
+    if (child < 0) {
+        return 65;
+    }
+    if (child == 0) {
+        ::close(ready[0]);
+        auto const ignore = descendant_behavior == DescendantBehavior::IgnoreTerm;
+        if (!install_term_handler(ignore) || !write_all(ready[1], "R", 1)) {
+            ::_exit(64);
+        }
+        ::close(ready[1]);
+        if (ignore) {
+            for (;;) {
+                ::pause();
+            }
+        }
+        if (!wait_for_term() || !write_all(report_fd, "C", 1)) {
+            ::_exit(63);
+        }
+        ::_exit(0);
+    }
+
+    ::close(ready[1]);
+    auto const child_ready = wait_permission(ready[0]);
+    ::close(ready[0]);
+    std::array<pid_t, 2> const identities{::getpid(), child};
+    if (!child_ready || !write_all(report_fd, identities.data(), sizeof(identities))) {
+        return 62;
+    }
+    if (leader_exits_naturally) {
+        return 37;
+    }
+    if (leader_handles_term) {
+        return wait_for_term() ? 42 : 61;
+    }
+    for (;;) {
+        ::pause();
+    }
+}
+
+auto escaped_writer(int report_fd, int channel, bool continuous) noexcept -> int
+{
+    int ready[2];
+    if (::pipe(ready) != 0) {
+        return 60;
+    }
+    auto const child = ::fork();
+    if (child < 0) {
+        return 59;
+    }
+    if (child == 0) {
+        ::close(ready[0]);
+        if (::setsid() < 0) {
+            ::_exit(58);
+        }
+        ::close(channel == 0 ? STDERR_FILENO : STDOUT_FILENO);
+        if (!write_all(ready[1], "R", 1)) {
+            ::_exit(57);
+        }
+        ::close(ready[1]);
+        if (continuous) {
+            ::_exit(continuous_output(1 << channel));
+        }
+        for (;;) {
+            ::pause();
+        }
+    }
+
+    ::close(ready[1]);
+    auto const child_ready = wait_permission(ready[0]);
+    ::close(ready[0]);
+    if (!child_ready || !write_all(report_fd, &child, sizeof(child))) {
+        return 56;
+    }
+    return 37;
+}
 } // namespace
 
 auto main(int argc, char** argv) -> int
@@ -251,6 +406,22 @@ auto main(int argc, char** argv) -> int
     }
     if (mode == "continuous" && argc == 3 && number(argv[2]) >= 1 && number(argv[2]) <= 3) {
         return continuous_output(number(argv[2]));
+    }
+    if (mode == "term" && argc == 3 && (number(argv[2]) == 0 || number(argv[2]) == 1)) {
+        return term_target(number(argv[2]) != 0);
+    }
+    if (mode == "group" && argc == 5) {
+        auto const behavior = number(argv[3]) == 0 ? DescendantBehavior::HandleTerm : DescendantBehavior::IgnoreTerm;
+        return descendant_group(number(argv[2]), true, behavior, number(argv[4]) != 0);
+    }
+    if (mode == "group-wait" && argc == 3) {
+        return descendant_group(number(argv[2]), false, DescendantBehavior::IgnoreTerm, false);
+    }
+    if (mode == "group-exit" && argc == 3) {
+        return descendant_group(number(argv[2]), false, DescendantBehavior::IgnoreTerm, true);
+    }
+    if (mode == "escape" && argc == 5 && (number(argv[3]) == 0 || number(argv[3]) == 1)) {
+        return escaped_writer(number(argv[2]), number(argv[3]), number(argv[4]) != 0);
     }
     if (mode == "early" && argc == 4 && (number(argv[2]) == 0 || number(argv[2]) == 1)) {
         auto const closed_channel = number(argv[2]);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "error.hpp"
+#include "event_loop_types.hpp"
 #include "result.hpp"
 
 #include <array>
@@ -59,6 +60,14 @@ public:
     virtual auto release_gate(int fd, pid_t pid) -> ssize_t;
     /// Parent-only output read seam; the child never calls a virtual operation.
     virtual auto read_output(int fd, void* buffer, std::size_t size) noexcept -> ssize_t;
+    /// Parent-only monotonic clock seam for deterministic lifecycle tests.
+    virtual auto monotonic_now() noexcept -> TimePoint;
+    /// Parent-only process-group signal seam; @p group_id is always a positive PGID.
+    virtual auto signal_group(pid_t group_id, int signal) noexcept -> int;
+    /// Parent-only direct-child signal seam used before group establishment and during fail-safe cleanup.
+    virtual auto signal_process(pid_t process_id, int signal) noexcept -> int;
+    /// Parent-only wait seam; Process remains the exclusive reaping owner.
+    virtual auto wait_process(pid_t process_id, int* status, int options) noexcept -> pid_t;
 
     virtual auto child_options() noexcept -> ProcessChildOptions { return {}; }
 };
