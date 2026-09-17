@@ -101,6 +101,46 @@ cmake -S . -B .bld -G Ninja \
 cmake --build .bld
 ```
 
+### Containerized Linux builds
+
+Ready-made development images avoid reinstalling Linux dependencies for every
+local validation run. Each environment keeps a separate incremental build tree
+under the repository root; these `.bld-*` directories are ignored by Git.
+
+Build an image once, then configure, build, and test with it:
+
+```sh
+tools/container image ubuntu
+tools/container configure ubuntu
+tools/container build ubuntu
+tools/container test ubuntu
+
+tools/container image alpine
+tools/container configure alpine
+tools/container build alpine
+tools/container test alpine
+```
+
+The wrapper mounts the source tree read-only at its existing absolute path and
+mounts only `.bld-ubuntu-2404` or `.bld-alpine-322` read-write. Containers run
+with the invoking user's UID and GID, so persistent build output remains owned
+by that user. The stable absolute path also keeps generated
+`compile_commands.json` entries usable by host tools.
+
+Use `run` for an arbitrary command or `debug` when a debugger or tracer needs
+`SYS_PTRACE`:
+
+```sh
+tools/container run alpine cmake --build .bld-alpine-322 --target process-linux-test
+tools/container debug alpine gdb --args .bld-alpine-322/test/process-linux-test
+```
+
+The wrapper deliberately does not add an init process, preserving container
+PID 1 behavior relevant to the Linux process tests. Rebuild an image when its
+Dockerfile changes, and recreate that environment's build tree after material
+compiler or system-library changes. These local images complement rather than
+replace the clean Ubuntu and Alpine jobs in GitHub Actions.
+
 ## Run the daemon
 
 Start `jobud` with its required local socket and SQLite database paths:

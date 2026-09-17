@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage()
+{
+    printf '%s\n' \
+        "Usage: tools/container ACTION ENVIRONMENT [ARGUMENT ...]" \
+        "" \
+        "Actions:" \
+        "  image      Build the environment image." \
+        "  configure  Configure its persistent Debug build tree." \
+        "  build      Incrementally build that tree." \
+        "  test       Run CTest in that tree." \
+        "  run        Run an arbitrary command in the normal container." \
+        "  debug      Run a command with SYS_PTRACE available." \
+        "" \
+        "Environments:" \
+        "  ubuntu, ubuntu-24.04" \
+        "  alpine, alpine-3.22"
+}
+
+fail()
+{
+    printf 'tools/container: %s\n' "$1" >&2
+    exit 2
+}
+
+if (( $# < 2 )); then
+    usage >&2
+    exit 2
+fi
+
+action=$1
+environment=$2
+shift 2
+
+script_directory=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd -P)
+
+case "$environment" in
+    ubuntu | ubuntu-24.04)
+        image=deferra-dev:ubuntu-24.04
+        dockerfile=$repository_root/containers/Dockerfile.ubuntu-24.04
+        build_directory=.bld-ubuntu-2404
+        ;;
+    alpine | alpine-3.22)
+        image=deferra-dev:alpine-3.22
+        dockerfile=$repository_root/containers/Dockerfile.alpine-3.22
+        build_directory=.bld-alpine-322
+        ;;
+    *)
+        fail "unknown environment '$environment'"
+        ;;
+esac
+
+if [[ $action == image ]]; then
+    exec docker build --file "$dockerfile" --tag "$image" "$@" "$repository_root/containers"
+fi
+
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+    fail "image '$image' is missing; run 'tools/container image $environment' first"
+fi
+
+build_path=$repository_root/$build_directory
+mkdir -p "$build_path"
+
+run_container()
+{
+    local ptrace=$1
+    shift
+
+    local docker_arguments=(
+        --rm
+        --user "$(id -u):$(id -g)"
+        --mount "type=bind,src=$repository_root,dst=$repository_root,readonly"
+        --mount "type=bind,src=$build_path,dst=$build_path"
+        --workdir "$repository_root"
+    )
+
+    if [[ -t 0 && -t 1 ]]; then
+        docker_arguments+=(--interactive --tty)
+    fi
+    if [[ $ptrace == true ]]; then
+        docker_arguments+=(--cap-add=SYS_PTRACE)
+    fi
+
+    exec docker run "${docker_arguments[@]}" "$image" "$@"
+}
+
+case "$action" in
+    configure)
+        run_container false \
+            cmake -S . -B "$build_directory" -G Ninja -DCMAKE_BUILD_TYPE=Debug "$@"
+        ;;
+    build)
+        run_container false cmake --build "$build_directory" "$@"
+        ;;
+    test)
+        run_container false ctest --test-dir "$build_directory/test" --output-on-failure "$@"
+        ;;
+    run)
+        (( $# > 0 )) || fail "the run action requires a command"
+        run_container false "$@"
+        ;;
+    debug)
+        (( $# > 0 )) || fail "the debug action requires a command"
+        run_container true "$@"
+        ;;
+    *)
+        fail "unknown action '$action'"
+        ;;
+esac
