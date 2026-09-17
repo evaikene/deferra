@@ -130,6 +130,26 @@ auto wait_permission(int fd) noexcept -> bool
     return count == 1;
 }
 
+auto open_coordination_channel(char const* path, int flags) noexcept -> int
+{
+    int fd;
+    do {
+        fd = ::open(path, flags | O_CLOEXEC);
+    } while (fd < 0 && errno == EINTR);
+    return fd;
+}
+
+auto wait_for_permission_path(char const* path) noexcept -> bool
+{
+    auto const fd = open_coordination_channel(path, O_RDONLY);
+    if (fd < 0) {
+        return false;
+    }
+    auto const permitted = wait_permission(fd);
+    ::close(fd);
+    return permitted;
+}
+
 // Each stream has its own position-dependent pattern, including NUL. Partial writes retain that position.
 auto write_pattern(int fd, std::size_t offset, std::size_t size, std::size_t channel) noexcept -> ssize_t
 {
@@ -232,6 +252,58 @@ auto write_all(int fd, void const* data, std::size_t size) noexcept -> bool
     return true;
 }
 
+auto report_no_new_privileges() noexcept -> int
+{
+    auto const fd = ::open("/proc/self/status", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return 55;
+    }
+
+    std::array<char, std::size_t{16} * 1024> status{};
+    std::size_t                              size{0};
+    while (size < status.size()) {
+        auto const count = ::read(fd, status.data() + size, status.size() - size);
+        if (count > 0) {
+            size += static_cast<std::size_t>(count);
+        }
+        else if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        else {
+            break;
+        }
+    }
+    ::close(fd);
+
+    auto const contents = std::string_view{status.data(), size};
+    auto const label    = contents.find("NoNewPrivs:");
+    if (label == std::string_view::npos) {
+        return 54;
+    }
+    auto value = label + std::string_view{"NoNewPrivs:"}.size();
+    while (value < contents.size() && (contents[value] == ' ' || contents[value] == '\t')) {
+        ++value;
+    }
+    if (value == contents.size() || contents[value] != '1') {
+        return 53;
+    }
+
+    constexpr std::string_view observation{"NoNewPrivs: 1\n"};
+    return write_all(STDOUT_FILENO, observation.data(), observation.size()) ? 0 : 52;
+}
+
+auto confirm_descriptors_closed(int argc, char** argv) noexcept -> int
+{
+    for (int index = 2; index < argc; ++index) {
+        auto const fd = number(argv[index]);
+        errno         = 0;
+        if (fd < 0 || ::fcntl(fd, F_GETFD) != -1 || errno != EBADF) {
+            return 51;
+        }
+    }
+    return argc > 2 ? 0 : 50;
+}
+
 auto wait_for_term() noexcept -> bool
 {
     while (term_received == 0) {
@@ -263,11 +335,15 @@ enum class DescendantBehavior : std::uint8_t {
     HandleTerm,
 };
 
-auto descendant_group(int                report_fd,
+auto descendant_group(char const*        report_path,
                       bool               leader_handles_term,
                       DescendantBehavior descendant_behavior,
                       bool               leader_exits_naturally) noexcept -> int
 {
+    auto const report_fd = open_coordination_channel(report_path, O_WRONLY);
+    if (report_fd < 0) {
+        return 55;
+    }
     if (!install_term_handler(!leader_handles_term)) {
         return 67;
     }
@@ -316,8 +392,12 @@ auto descendant_group(int                report_fd,
     }
 }
 
-auto escaped_writer(int report_fd, int channel, bool continuous) noexcept -> int
+auto escaped_writer(char const* report_path, int channel, bool continuous) noexcept -> int
 {
+    auto const report_fd = open_coordination_channel(report_path, O_WRONLY);
+    if (report_fd < 0) {
+        return 55;
+    }
     int ready[2];
     if (::pipe(ready) != 0) {
         return 60;
@@ -399,7 +479,13 @@ auto main(int argc, char** argv) -> int
         return inspect(argc, argv);
     }
     if (mode == "wait" && argc == 3) {
-        return wait_permission(number(argv[2])) ? 0 : 96;
+        return wait_for_permission_path(argv[2]) ? 0 : 96;
+    }
+    if (mode == "descriptors-closed") {
+        return confirm_descriptors_closed(argc, argv);
+    }
+    if (mode == "no-new-privileges" && argc == 2) {
+        return report_no_new_privileges();
     }
     if (mode == "output" && argc == 4 && number(argv[2]) >= 0 && number(argv[3]) >= 0) {
         return output({static_cast<std::size_t>(number(argv[2])), static_cast<std::size_t>(number(argv[3]))});
@@ -412,23 +498,23 @@ auto main(int argc, char** argv) -> int
     }
     if (mode == "group" && argc == 5) {
         auto const behavior = number(argv[3]) == 0 ? DescendantBehavior::HandleTerm : DescendantBehavior::IgnoreTerm;
-        return descendant_group(number(argv[2]), true, behavior, number(argv[4]) != 0);
+        return descendant_group(argv[2], true, behavior, number(argv[4]) != 0);
     }
     if (mode == "group-wait" && argc == 3) {
-        return descendant_group(number(argv[2]), false, DescendantBehavior::IgnoreTerm, false);
+        return descendant_group(argv[2], false, DescendantBehavior::IgnoreTerm, false);
     }
     if (mode == "group-exit" && argc == 3) {
-        return descendant_group(number(argv[2]), false, DescendantBehavior::IgnoreTerm, true);
+        return descendant_group(argv[2], false, DescendantBehavior::IgnoreTerm, true);
     }
     if (mode == "escape" && argc == 5 && (number(argv[3]) == 0 || number(argv[3]) == 1)) {
-        return escaped_writer(number(argv[2]), number(argv[3]), number(argv[4]) != 0);
+        return escaped_writer(argv[2], number(argv[3]), number(argv[4]) != 0);
     }
     if (mode == "early" && argc == 4 && (number(argv[2]) == 0 || number(argv[2]) == 1)) {
         auto const closed_channel = number(argv[2]);
         auto const open_channel   = 1 - closed_channel;
         ::close(closed_channel + 1);
         if (write_pattern(open_channel + 1, 0, 1, static_cast<std::size_t>(open_channel)) != 1 ||
-            !wait_permission(number(argv[3]))) {
+            !wait_for_permission_path(argv[3])) {
             return 71;
         }
         return write_pattern(open_channel + 1, 1, 4096, static_cast<std::size_t>(open_channel)) == 4096 ? 37 : 70;

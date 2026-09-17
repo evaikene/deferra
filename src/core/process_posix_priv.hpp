@@ -27,8 +27,10 @@ enum class ProcessChildStage : std::uint8_t {
     Gate,
     Group,
     Descriptors,
+    DescriptorCleanup,
     Signals,
     Directory,
+    Hardening,
     Identity,
     Exec
 };
@@ -42,6 +44,8 @@ struct ProcessChildError {
 /// Child syscall seam and fixed fault observations, copied before creation. No allocating callable enters the child.
 struct ProcessChildOptions {
     uid_t (*effective_uid)(){::geteuid};
+    int (*close_range)(unsigned int, unsigned int) noexcept {nullptr};
+    int (*enable_privilege_hardening)() noexcept {nullptr};
     ProcessChildStage fail_stage{ProcessChildStage::None};
     int               signal_before_reset{0};
     int               signal_before_exec{0};
@@ -68,8 +72,11 @@ public:
     virtual auto signal_process(pid_t process_id, int signal) noexcept -> int;
     /// Parent-only wait seam; Process remains the exclusive reaping owner.
     virtual auto wait_process(pid_t process_id, int* status, int options) noexcept -> pid_t;
+    /// Computes an exclusive fallback bound covering both live descriptors and the current allocation ceiling.
+    virtual auto descriptor_close_limit(unsigned int& limit) noexcept -> int;
 
-    virtual auto child_options() noexcept -> ProcessChildOptions { return {}; }
+    /// Freezes direct child-callable operations before creation; no virtual dispatch enters the child branch.
+    virtual auto child_options() noexcept -> ProcessChildOptions;
 };
 
 /// All owned descriptors are above 3 before child creation. Destruction never invokes user code.
@@ -100,7 +107,10 @@ struct ProcessChildPlan {
     sigset_t                 blocked{};
     sigset_t                 target_mask{};
     struct sigaction         default_action{};
+    /// Exclusive parent-observed upper bound for the ENOSYS close fallback.
+    unsigned int             descriptor_limit{4};
     bool                     require_non_root{false};
+    bool                     prevent_privilege_gain{false};
     ProcessChildOptions      options;
 };
 
@@ -109,7 +119,7 @@ auto process_error(char const* code, ErrorCategory category, char const* stage, 
 auto process_child_error(ProcessChildError record) -> Error;
 /// The descriptor bundle retains ownership of partially completed setup.
 auto prepare_process_descriptors(ProcessDescriptors& descriptors, ProcessOperations& operations) -> Result<void, Error>;
-auto prepare_process_child(PreparedProcessRequest const& request, ProcessChildOptions options)
+auto prepare_process_child(PreparedProcessRequest const& request, ProcessOperations& operations)
     -> Result<ProcessChildPlan, Error>;
 [[noreturn]] void execute_process_child(ProcessDescriptors const& descriptors, ProcessChildPlan const& plan) noexcept;
 

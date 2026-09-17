@@ -74,12 +74,6 @@ auto Process::start(ProcessStartInfo start_info) -> Result<void, Error>
         return signal_configuration;
     }
 #if defined(__linux__)
-    // Later-stage hardening must not be silently accepted without enforcement.
-    if (prepared.value()->prevent_privilege_gain()) {
-        return Result<void, Error>::failure(priv::process_error("core.process.security_unsupported",
-                                                                ErrorCategory::Unsupported,
-                                                                "hardening.not_implemented"));
-    }
     data->request = std::move(prepared).value();
     return data->launch();
 #else
@@ -136,7 +130,7 @@ auto Process::Private::launch() -> Result<void, Error>
     } guard{.data = *this};
 
     auto reject      = [](Error error) { return Result<void, Error>::failure(std::move(error)); };
-    auto plan_result = priv::prepare_process_child(*request, operations->child_options());
+    auto plan_result = priv::prepare_process_child(*request, *operations);
     if (!plan_result) {
         return reject(plan_result.error());
     }

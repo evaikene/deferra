@@ -15,6 +15,7 @@
 #include <csignal> // IWYU pragma: keep Provides POSIX signal sets and dispositions.
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -29,7 +30,9 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sys/epoll.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -157,6 +160,11 @@ public:
         ShortSend,
         DeadChild
     };
+
+    ScriptedOperations()
+        : options{ProcessOperations::child_options()}
+    {}
+
     Failure                  failure{Failure::None};
     ProcessChildOptions      options;
     pid_t                    observed_pid{-1};
@@ -518,37 +526,108 @@ auto matches_pattern(ByteBuffer const& bytes, std::size_t channel, std::size_t o
     return true;
 }
 
-/// Coordination fds deliberately remain inherited until Stage 6.6 replaces that existing helper seam.
-struct CoordinationPipe {
-    std::array<int, 2> fds{-1, -1};
-
-    /// @throws Catch::TestFailureException when the coordination pipe cannot be created.
-    CoordinationPipe()
+/// The target opens this FIFO by path after exec, so deterministic test coordination does not weaken close-from.
+class PostExecChannel final {
+public:
+    /// @throws Catch::TestFailureException when the private FIFO cannot be created or opened.
+    PostExecChannel()
+        : _path{_directory.path() / "channel"}
     {
-        REQUIRE(::pipe(fds.data()) == 0);
-        for (auto& fd : fds) {
-            if (fd > 3) {
+        REQUIRE(::mkfifo(_path.c_str(), 0600) == 0);
+        _fd = ::open(_path.c_str(), O_RDWR | O_CLOEXEC);
+        REQUIRE(_fd >= 0);
+    }
+
+    ~PostExecChannel()
+    {
+        if (_fd >= 0) {
+            ::close(_fd);
+        }
+    }
+
+    PostExecChannel(PostExecChannel const&)                    = delete;
+    auto operator=(PostExecChannel const&) -> PostExecChannel& = delete;
+
+    [[nodiscard]] auto path() const -> std::string { return _path.string(); }
+
+    [[nodiscard]] auto descriptor() const noexcept -> int { return _fd; }
+
+    /// @throws Catch::TestFailureException when the expected target report does not arrive.
+    void read(void* destination, std::size_t size) const { read_exact(_fd, destination, size); }
+
+    /// @throws Catch::TestFailureException when target permission cannot be delivered.
+    void permit() const { REQUIRE(::write(_fd, "x", 1) == 1); }
+
+private:
+    jb::test::TemporaryDirectory _directory;
+    std::filesystem::path        _path;
+    int                          _fd{-1};
+};
+
+/// Deliberately non-CLOEXEC descriptors used to prove Process closes unrelated inherited state.
+class InheritedPipe final {
+public:
+    /// @throws Catch::TestFailureException when the pipe cannot be created above the reserved status descriptor.
+    explicit InheritedPipe(int minimum_descriptor = 4)
+    {
+        REQUIRE(::pipe(_fds.data()) == 0);
+        for (auto& fd : _fds) {
+            if (fd >= minimum_descriptor) {
                 continue;
             }
-
-            // Process reserves fd 3 for its close-on-exec status channel. Keep this deliberately inherited test
-            // seam above that mapping so helper coordination is independent of the invoking shell's open fds.
-            auto const normalized = ::fcntl(fd, F_DUPFD, 4);
+            auto const normalized = ::fcntl(fd, F_DUPFD, minimum_descriptor);
             REQUIRE(normalized >= 0);
             ::close(fd);
             fd = normalized;
         }
     }
 
-    ~CoordinationPipe()
+    ~InheritedPipe()
     {
-        for (auto fd : fds) {
+        for (auto fd : _fds) {
             ::close(fd);
         }
     }
 
-    CoordinationPipe(CoordinationPipe const&)                    = delete;
-    auto operator=(CoordinationPipe const&) -> CoordinationPipe& = delete;
+    InheritedPipe(InheritedPipe const&)                    = delete;
+    auto operator=(InheritedPipe const&) -> InheritedPipe& = delete;
+
+    [[nodiscard]] auto arguments() const -> std::vector<std::string>
+    {
+        return {"descriptors-closed", std::to_string(_fds[0]), std::to_string(_fds[1])};
+    }
+
+private:
+    std::array<int, 2> _fds{-1, -1};
+};
+
+/// Restores the process-wide descriptor limit even when a test assertion aborts its section.
+class DescriptorLimitScope final {
+public:
+    /// @throws Catch::TestFailureException when the original limit cannot be observed.
+    DescriptorLimitScope() { REQUIRE(::getrlimit(RLIMIT_NOFILE, &_original) == 0); }
+
+    ~DescriptorLimitScope()
+    {
+        if (::setrlimit(RLIMIT_NOFILE, &_original) != 0) {
+            std::terminate();
+        }
+    }
+
+    DescriptorLimitScope(DescriptorLimitScope const&)                    = delete;
+    auto operator=(DescriptorLimitScope const&) -> DescriptorLimitScope& = delete;
+
+    /// @throws Catch::TestFailureException when the requested soft limit cannot be installed.
+    void lower_soft_to(rlim_t limit)
+    {
+        REQUIRE(limit < _original.rlim_cur);
+        auto lowered     = _original;
+        lowered.rlim_cur = limit;
+        REQUIRE(::setrlimit(RLIMIT_NOFILE, &lowered) == 0);
+    }
+
+private:
+    rlimit _original{};
 };
 
 class SignalScope final {
@@ -595,6 +674,24 @@ void record_signal(int /*signal*/) noexcept
 auto root_identity() noexcept -> uid_t
 {
     return 0;
+}
+
+auto unavailable_close_range(unsigned int /*first*/, unsigned int /*last*/) noexcept -> int
+{
+    errno = ENOSYS;
+    return -1;
+}
+
+auto failed_close_range(unsigned int /*first*/, unsigned int /*last*/) noexcept -> int
+{
+    errno = EIO;
+    return -1;
+}
+
+auto failed_privilege_hardening() noexcept -> int
+{
+    errno = EPERM;
+    return -1;
 }
 } // namespace
 
@@ -696,6 +793,51 @@ TEST_CASE("Linux Process installs exact argv environment cwd and clean target si
     sigset_t after{};
     REQUIRE(::pthread_sigmask(SIG_SETMASK, nullptr, &after) == 0);
     CHECK(::sigismember(&after, SIGUSR1) == 1);
+}
+
+TEST_CASE("Linux Process closes unrelated descriptors through native and bounded fallback paths",
+          "[core][process][linux][security]")
+{
+    for (bool force_fallback : {false, true}) {
+        CAPTURE(force_fallback);
+        Run           run;
+        InheritedPipe inherited;
+        auto          operations = std::make_shared<ScriptedOperations>();
+        if (force_fallback) {
+            operations->options.close_range = unavailable_close_range;
+        }
+        ProcessTestAccess::set_operations(run.process, operations);
+
+        auto const result = run.execute(helper(inherited.arguments()));
+        CHECK(result.kind == ProcessExitKind::Exited);
+        CHECK(result.exit_code == 0);
+    }
+
+    SECTION("fallback reaches live descriptors above a lowered allocation limit")
+    {
+        DescriptorLimitScope limits;
+        InheritedPipe        inherited{100};
+        limits.lower_soft_to(64);
+
+        Run  run;
+        auto operations                 = std::make_shared<ScriptedOperations>();
+        operations->options.close_range = unavailable_close_range;
+        ProcessTestAccess::set_operations(run.process, operations);
+
+        auto const result = run.execute(helper(inherited.arguments()));
+        CHECK(result.kind == ProcessExitKind::Exited);
+        CHECK(result.exit_code == 0);
+    }
+
+    Run  run;
+    auto operations                 = std::make_shared<ScriptedOperations>();
+    operations->options.close_range = failed_close_range;
+    ProcessTestAccess::set_operations(run.process, operations);
+    auto const result = run.execute();
+    REQUIRE(result.start_error);
+    CHECK(result.start_error->code == "core.process.child_setup_failed");
+    CHECK(result.start_error->detail == "child.descriptor_cleanup:" + std::to_string(EIO));
+    CHECK(run.starts == 0);
 }
 
 TEST_CASE("Linux Process normalizes closed conventional descriptors and bypasses atfork handlers",
@@ -817,7 +959,10 @@ TEST_CASE("Linux Process child failures map safe setup and authoritative identit
     Run  run;
     auto operations = std::make_shared<ScriptedOperations>();
     ProcessTestAccess::set_operations(run.process, operations);
-    for (auto stage : {ProcessChildStage::Group, ProcessChildStage::Descriptors, ProcessChildStage::Signals}) {
+    for (auto stage : {ProcessChildStage::Group,
+                       ProcessChildStage::Descriptors,
+                       ProcessChildStage::DescriptorCleanup,
+                       ProcessChildStage::Signals}) {
         operations->options.fail_stage = stage;
         auto const starts              = run.starts;
         auto       result              = run.execute();
@@ -1103,20 +1248,19 @@ TEST_CASE("Linux Process direct lifecycle slots defer destruction without leakin
             process->delete_later();
             slot_returned = true;
         };
-        auto start  = process->started.connect(&receiver, [&] {
+        auto            start  = process->started.connect(&receiver, [&] {
             if (on_started) {
                 schedule();
             }
         });
-        auto finish = process->finished.connect(&receiver, [&](ProcessExit const&) {
+        auto            finish = process->finished.connect(&receiver, [&](ProcessExit const&) {
             if (!on_started) {
                 schedule();
             }
         });
         // A blocked helper keeps direct-child ownership active when started schedules deletion.
-        int  gate[2];
-        REQUIRE(::pipe(gate) == 0);
-        auto accepted = process->start(on_started ? helper({"wait", std::to_string(gate[0])}) : helper());
+        PostExecChannel gate;
+        auto            accepted = process->start(on_started ? helper({"wait", gate.path()}) : helper());
         REQUIRE(accepted);
         auto const pid      = static_cast<pid_t>(*process->process_id());
         auto const deadline = Clock::now() + 3s;
@@ -1128,25 +1272,59 @@ TEST_CASE("Linux Process direct lifecycle slots defer destruction without leakin
         if (!destroyed) {
             delete process;
         }
-        ::close(gate[0]);
-        ::close(gate[1]);
         check_reaped(pid);
     }
 }
 
-TEST_CASE("Linux Process rejects unenforced privilege hardening before native setup", "[core][process][linux]")
+TEST_CASE("Linux Process enforces and safely reports strict privilege hardening", "[core][process][linux][security]")
 {
-    Run  run;
-    auto operations = std::make_shared<ScriptedOperations>();
-    ProcessTestAccess::set_operations(run.process, operations);
-    auto info                   = helper();
-    info.prevent_privilege_gain = true;
-    auto result                 = run.process.start(std::move(info));
-    REQUIRE_FALSE(result);
-    CHECK(result.error().category == ErrorCategory::Unsupported);
-    CHECK(operations->fork_calls == 0);
-    CHECK(run.starts == 0);
-    CHECK(run.finishes == 0);
+    SECTION("target observes Linux no-new-privileges")
+    {
+        Run  run;
+        auto info                   = helper({"no-new-privileges"});
+        info.prevent_privilege_gain = true;
+        auto const result           = run.execute(std::move(info));
+        CHECK(result.kind == ProcessExitKind::Exited);
+        CHECK(result.exit_code == 0);
+        CHECK(std::ranges::equal(run.bytes[0], as_bytes("NoNewPrivs: 1\n")));
+    }
+
+    SECTION("unsupported strict hardening rejects before native setup")
+    {
+        Run  run;
+        auto operations                                = std::make_shared<ScriptedOperations>();
+        operations->options.enable_privilege_hardening = nullptr;
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto info                   = helper();
+        info.prevent_privilege_gain = true;
+        auto result                 = run.process.start(std::move(info));
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == "core.process.security_unsupported");
+        CHECK(result.error().category == ErrorCategory::Unsupported);
+        CHECK(result.error().detail == "hardening.unsupported:0");
+        CHECK(operations->fork_calls == 0);
+        CHECK(run.starts == 0);
+        CHECK(run.finishes == 0);
+    }
+
+    SECTION("available hardening failure prevents target execution")
+    {
+        Run                          run;
+        auto                         operations = std::make_shared<ScriptedOperations>();
+        jb::test::TemporaryDirectory directory;
+        auto const                   marker            = directory.path() / "executed";
+        operations->options.enable_privilege_hardening = failed_privilege_hardening;
+        ProcessTestAccess::set_operations(run.process, operations);
+        auto info                   = helper({"marker", marker.string()});
+        info.prevent_privilege_gain = true;
+        auto const result           = run.execute(std::move(info));
+        REQUIRE(result.start_error);
+        CHECK(result.start_error->code == "core.process.security_failed");
+        CHECK(result.start_error->category == ErrorCategory::PermissionDenied);
+        CHECK(result.start_error->detail == "child.hardening:" + std::to_string(EPERM));
+        CHECK_FALSE(std::filesystem::exists(marker));
+        CHECK(run.starts == 0);
+    }
 }
 
 TEST_CASE("Linux Process cancellation preserves its first cause and escalates after complete grace",
@@ -1327,13 +1505,13 @@ TEST_CASE("Linux Process owns same-group descendants through every leader outcom
 {
     SECTION("Natural leader exit kills the group before reap")
     {
-        CoordinationPipe report;
-        Run              run;
-        auto             operations = std::make_shared<ScriptedOperations>();
+        PostExecChannel report;
+        Run             run;
+        auto            operations = std::make_shared<ScriptedOperations>();
         ProcessTestAccess::set_operations(run.process, operations);
-        REQUIRE(run.process.start(helper({"group-exit", std::to_string(report.fds[1])})));
+        REQUIRE(run.process.start(helper({"group-exit", report.path()})));
         std::array<pid_t, 2> identities{};
-        read_exact(report.fds[0], identities.data(), sizeof(identities));
+        report.read(identities.data(), sizeof(identities));
         ProcessTerminationWatch descendant{identities[1]};
         run.until([&] { return run.result.has_value(); });
         CHECK(run.result->kind == ProcessExitKind::Exited);
@@ -1348,15 +1526,15 @@ TEST_CASE("Linux Process owns same-group descendants through every leader outcom
 
     SECTION("Zero-grace cancellation kills leader and descendant")
     {
-        CoordinationPipe report;
-        Run              run;
-        auto             operations = std::make_shared<ScriptedOperations>();
+        PostExecChannel report;
+        Run             run;
+        auto            operations = std::make_shared<ScriptedOperations>();
         ProcessTestAccess::set_operations(run.process, operations);
-        auto info              = helper({"group-wait", std::to_string(report.fds[1])});
+        auto info              = helper({"group-wait", report.path()});
         info.termination_grace = Duration::zero();
         REQUIRE(run.process.start(std::move(info)));
         std::array<pid_t, 2> identities{};
-        read_exact(report.fds[0], identities.data(), sizeof(identities));
+        report.read(identities.data(), sizeof(identities));
         ProcessTerminationWatch descendant{identities[1]};
         run.expected_started_state = ProcessState::Stopping;
         REQUIRE(run.process.stop());
@@ -1368,18 +1546,18 @@ TEST_CASE("Linux Process owns same-group descendants through every leader outcom
 
     SECTION("Zero-grace timeout kills leader and descendant")
     {
-        CoordinationPipe report;
-        Run              run;
-        auto             operations = std::make_shared<ScriptedOperations>();
-        auto const       base       = Clock::now();
-        operations->now             = base;
+        PostExecChannel report;
+        Run             run;
+        auto            operations = std::make_shared<ScriptedOperations>();
+        auto const      base       = Clock::now();
+        operations->now            = base;
         ProcessTestAccess::set_operations(run.process, operations);
-        auto info              = helper({"group-wait", std::to_string(report.fds[1])});
+        auto info              = helper({"group-wait", report.path()});
         info.timeout           = 5s;
         info.termination_grace = Duration::zero();
         REQUIRE(run.process.start(std::move(info)));
         std::array<pid_t, 2> identities{};
-        read_exact(report.fds[0], identities.data(), sizeof(identities));
+        report.read(identities.data(), sizeof(identities));
         ProcessTerminationWatch descendant{identities[1]};
         run.expected_started_state = ProcessState::Stopping;
         operations->now            = base + 5s;
@@ -1393,16 +1571,16 @@ TEST_CASE("Linux Process owns same-group descendants through every leader outcom
     {
         auto                   loop = std::make_unique<EventLoop>();
         ScopedCurrentEventLoop current{loop.get()};
-        CoordinationPipe       report;
+        PostExecChannel        report;
         Object                 receiver;
         auto                   operations = std::make_shared<ScriptedOperations>();
         auto*                  process    = new Process;
         int                    finishes{0};
         auto                   finished = process->finished.connect(&receiver, [&](ProcessExit const&) { ++finishes; });
         ProcessTestAccess::set_operations(*process, operations);
-        REQUIRE(process->start(helper({"group-wait", std::to_string(report.fds[1])})));
+        REQUIRE(process->start(helper({"group-wait", report.path()})));
         std::array<pid_t, 2> identities{};
-        read_exact(report.fds[0], identities.data(), sizeof(identities));
+        report.read(identities.data(), sizeof(identities));
         ProcessTerminationWatch descendant{identities[1]};
         delete process;
         CHECK(finishes == 0);
@@ -1416,17 +1594,17 @@ TEST_CASE("Linux Process retains an exited stopping leader until group grace exp
 {
     for (bool descendant_ignores_term : {false, true}) {
         CAPTURE(descendant_ignores_term);
-        CoordinationPipe report;
-        Run              run;
-        auto             operations = std::make_shared<ScriptedOperations>();
-        auto const       base       = Clock::now();
-        operations->now             = base;
+        PostExecChannel report;
+        Run             run;
+        auto            operations = std::make_shared<ScriptedOperations>();
+        auto const      base       = Clock::now();
+        operations->now            = base;
         ProcessTestAccess::set_operations(run.process, operations);
-        auto info = helper({"group", std::to_string(report.fds[1]), descendant_ignores_term ? "1" : "0", "0"});
+        auto info              = helper({"group", report.path(), descendant_ignores_term ? "1" : "0", "0"});
         info.termination_grace = 10s;
         REQUIRE(run.process.start(std::move(info)));
         std::array<pid_t, 2> identities{};
-        read_exact(report.fds[0], identities.data(), sizeof(identities));
+        report.read(identities.data(), sizeof(identities));
         ProcessTerminationWatch descendant{identities[1]};
         run.expected_started_state = ProcessState::Stopping;
         REQUIRE(run.process.stop());
@@ -1440,7 +1618,7 @@ TEST_CASE("Linux Process retains an exited stopping leader until group grace exp
         CHECK(group_signal_count(*operations, SIGKILL) == 0);
         if (!descendant_ignores_term) {
             char marker{};
-            read_exact(report.fds[0], &marker, 1);
+            report.read(&marker, 1);
             CHECK(marker == 'C');
         }
 
@@ -1462,16 +1640,16 @@ TEST_CASE("Linux Process bounds post-reap output retained by escaped descendants
     for (std::size_t channel = 0; channel < 2; ++channel) {
         for (bool continuous : {false, true}) {
             CAPTURE(channel, continuous);
-            CoordinationPipe report;
-            auto             backend = std::make_unique<FakeEventLoopBackend>();
-            auto*            fake    = backend.get();
-            Run              run{std::move(backend)};
-            auto             operations = std::make_shared<OutputOperations>();
+            PostExecChannel report;
+            auto            backend = std::make_unique<FakeEventLoopBackend>();
+            auto*           fake    = backend.get();
+            Run             run{std::move(backend)};
+            auto            operations = std::make_shared<OutputOperations>();
             ProcessTestAccess::set_operations(run.process, operations);
-            REQUIRE(run.process.start(
-                helper({"escape", std::to_string(report.fds[1]), std::to_string(channel), continuous ? "1" : "0"})));
+            REQUIRE(
+                run.process.start(helper({"escape", report.path(), std::to_string(channel), continuous ? "1" : "0"})));
             pid_t escaped{-1};
-            read_exact(report.fds[0], &escaped, sizeof(escaped));
+            report.read(&escaped, sizeof(escaped));
             REQUIRE(escaped > 0);
             ProcessTerminationWatch descendant{escaped};
 
@@ -1509,16 +1687,16 @@ TEST_CASE("Linux Process keeps a reentrant post-reap deadline within the active 
           "[core][process][linux][lifecycle][output]")
 {
     constexpr std::size_t budget{std::size_t{256} * 1024};
-    CoordinationPipe      report;
+    PostExecChannel       report;
     auto                  backend = std::make_unique<FakeEventLoopBackend>();
     auto*                 fake    = backend.get();
     Run                   run{std::move(backend)};
     auto                  operations = std::make_shared<OutputOperations>();
     ProcessTestAccess::set_operations(run.process, operations);
-    REQUIRE(run.process.start(helper({"escape", std::to_string(report.fds[1]), "0", "0"})));
+    REQUIRE(run.process.start(helper({"escape", report.path(), "0", "0"})));
 
     pid_t escaped{-1};
-    read_exact(report.fds[0], &escaped, sizeof(escaped));
+    report.read(&escaped, sizeof(escaped));
     REQUIRE(escaped > 0);
     ProcessTerminationWatch descendant{escaped};
     observe_exit(operations->observed_pid);
@@ -1577,7 +1755,7 @@ TEST_CASE("Linux Process keeps a reentrant post-reap deadline within the active 
 TEST_CASE("Linux Process destruction in Finishing never signals the former process group",
           "[core][process][linux][lifecycle]")
 {
-    CoordinationPipe       report;
+    PostExecChannel        report;
     auto                   backend = std::make_unique<FakeEventLoopBackend>();
     auto*                  fake    = backend.get();
     auto                   loop    = EventLoopTestAccess::make_event_loop(std::move(backend));
@@ -1588,10 +1766,10 @@ TEST_CASE("Linux Process destruction in Finishing never signals the former proce
     int                    finishes{0};
     auto                   finished = process->finished.connect(&receiver, [&](ProcessExit const&) { ++finishes; });
     ProcessTestAccess::set_operations(*process, operations);
-    REQUIRE(process->start(helper({"escape", std::to_string(report.fds[1]), "1", "0"})));
+    REQUIRE(process->start(helper({"escape", report.path(), "1", "0"})));
 
     pid_t escaped{-1};
-    read_exact(report.fds[0], &escaped, sizeof(escaped));
+    report.read(&escaped, sizeof(escaped));
     REQUIRE(escaped > 0);
     ProcessTerminationWatch descendant{escaped};
     observe_exit(operations->observed_pid);
@@ -1684,18 +1862,18 @@ TEST_CASE("Linux Process rolls back each partial output pipe and watch setup", "
 TEST_CASE("Linux Process keeps the other channel alive after early EOF", "[core][process][linux][output]")
 {
     for (std::size_t closed = 0; closed < 2; ++closed) {
-        CoordinationPipe gate;
-        Run              run;
-        auto             operations = std::make_shared<OutputOperations>();
+        PostExecChannel gate;
+        Run             run;
+        auto            operations = std::make_shared<OutputOperations>();
         ProcessTestAccess::set_operations(run.process, operations);
-        REQUIRE(run.process.start(helper({"early", std::to_string(closed), std::to_string(gate.fds[0])})));
+        REQUIRE(run.process.start(helper({"early", std::to_string(closed), gate.path()})));
         auto const pid  = operations->observed_pid;
         auto const open = 1 - closed;
         run.until([&] { return operations->eof[closed] && run.bytes[open].size() == 1; });
         CHECK_FALSE(operations->eof[open]);
         CHECK(run.finishes == 0);
         CHECK(run.process.state() == ProcessState::Running);
-        REQUIRE(::write(gate.fds[1], "x", 1) == 1);
+        gate.permit();
         run.until([&] { return run.finishes == 1; });
         CHECK(run.result->exit_code == 37);
         CHECK(run.bytes[closed].empty());
@@ -1824,15 +2002,15 @@ TEST_CASE("Linux Process endless native writers yield to timers descriptors and 
                 fake->ready_events.push_back({.ident = item.fd, .events = FdEvent::Read});
             }
         }
-        CoordinationPipe unrelated;
-        bool             descriptor_ready{false};
-        bool             timer_ready{false};
-        bool             child_finished{false};
-        auto watch = run.loop->watch_fd(unrelated.fds[0], FdEvent::Read, FdTriggerMode::Edge, [&](int, FdEvents) {
+        PostExecChannel unrelated;
+        bool            descriptor_ready{false};
+        bool            timer_ready{false};
+        bool            child_finished{false};
+        auto watch = run.loop->watch_fd(unrelated.descriptor(), FdEvent::Read, FdTriggerMode::Edge, [&](int, FdEvents) {
             descriptor_ready = true;
         });
         REQUIRE(watch);
-        REQUIRE(::write(unrelated.fds[1], "x", 1) == 1);
+        unrelated.permit();
         Process other;
         auto    finish = other.finished.connect(&run.receiver, [&](ProcessExit const& exit) {
             CHECK(exit.exit_code == 37);
@@ -1841,7 +2019,7 @@ TEST_CASE("Linux Process endless native writers yield to timers descriptors and 
         REQUIRE(other.start(helper()));
         auto const other_pid = static_cast<pid_t>(*other.process_id());
         observe_exit(other_pid);
-        fake->ready_events.push_back({.ident = unrelated.fds[0], .events = FdEvent::Read});
+        fake->ready_events.push_back({.ident = unrelated.descriptor(), .events = FdEvent::Read});
         fake->ready_events.push_back({.kind = ReadyEventKind::Process, .ident = other_pid});
         auto timer = run.loop->post_at(Clock::now(), [&] { timer_ready = true; });
         REQUIRE(timer);
@@ -2002,7 +2180,7 @@ TEST_CASE("Linux Process output slots defer deletion across a bounded drain and 
         fake->remove_fd_result      = false;
         auto                   loop = EventLoopTestAccess::make_event_loop(std::move(backend));
         ScopedCurrentEventLoop current{loop.get()};
-        CoordinationPipe       gate;
+        PostExecChannel        gate;
         Object                 receiver;
         auto const             descriptors = descriptor_count();
         auto*                  process     = new Process;
@@ -2026,7 +2204,7 @@ TEST_CASE("Linux Process output slots defer deletion across a bounded drain and 
                                },
                                ConnectionType::Direct);
         auto finish  = process->finished.connect(&receiver, [&](ProcessExit const&) { ++finishes; });
-        REQUIRE(process->start(helper({"wait", std::to_string(gate.fds[0])})));
+        REQUIRE(process->start(helper({"wait", gate.path()})));
         auto const pid = operations->observed_pid;
         pollfd     status{.fd = operations->status_fd, .events = POLLIN, .revents = 0};
         REQUIRE(::poll(&status, 1, 3000) == 1);
