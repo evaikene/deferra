@@ -1,6 +1,6 @@
-/** @file rpc.hpp
- * @brief Marks the JobU RPC module during its Phase 0 skeleton stage.
- */
+/// @file rpc.hpp
+/// @brief Marks the JobU RPC module during its Phase 0 skeleton stage.
+///
 #pragma once
 
 #include <cstdint>

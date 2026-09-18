@@ -1,11 +1,11 @@
-/**
- * @file io_device.hpp
- * @brief Defines the common lifecycle, error, and signal contract for byte-oriented devices.
- *
- * Concrete devices implement the byte operations and report activity through the shared
- * signals. In particular, `closed` lets transport-independent users observe the end of an
- * open device lifecycle without knowing its concrete type.
- */
+///
+/// @file io_device.hpp
+/// @brief Defines the common lifecycle, error, and signal contract for byte-oriented devices.
+///
+/// Concrete devices implement the byte operations and report activity through the shared
+/// signals. In particular, `closed` lets transport-independent users observe the end of an
+/// open device lifecycle without knowing its concrete type.
+///
 #pragma once
 
 #include "object.hpp"

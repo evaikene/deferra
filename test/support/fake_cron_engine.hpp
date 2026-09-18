@@ -1,6 +1,6 @@
-/** @file fake_cron_engine.hpp
- * @brief Defines a deterministic cron engine for owner-thread tests.
- */
+/// @file fake_cron_engine.hpp
+/// @brief Defines a deterministic cron engine for owner-thread tests.
+///
 #pragma once
 
 #include "cron.hpp"
@@ -14,12 +14,12 @@
 
 namespace jb::test {
 
-/** Test-only CronEngine with configured occurrence sequences and call recording.
- *
- * Tests configure exact expression/timezone pairs. Validation fails for an unconfigured pair, and next_after()
- * returns the first configured occurrence strictly after its supplied lower bound. Optional injected errors override
- * those behaviors.
- */
+/// Test-only CronEngine with configured occurrence sequences and call recording.
+///
+/// Tests configure exact expression/timezone pairs. Validation fails for an unconfigured pair, and next_after()
+/// returns the first configured occurrence strictly after its supplied lower bound. Optional injected errors override
+/// those behaviors.
+///
 class FakeCronEngine final : public jobu::CronEngine {
 public:
     struct NextCall {

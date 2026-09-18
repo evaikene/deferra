@@ -1,6 +1,6 @@
-/** @file attribute.hpp
- * @brief Defines JobU attribute names, values, definitions, and registry contracts.
- */
+/// @file attribute.hpp
+/// @brief Defines JobU attribute names, values, definitions, and registry contracts.
+///
 #pragma once
 
 #include "byte_buffer.hpp"

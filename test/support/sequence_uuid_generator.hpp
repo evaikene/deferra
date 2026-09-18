@@ -1,6 +1,6 @@
-/** @file sequence_uuid_generator.hpp
- * @brief Defines a deterministic finite UUID generator for tests.
- */
+/// @file sequence_uuid_generator.hpp
+/// @brief Defines a deterministic finite UUID generator for tests.
+///
 #pragma once
 
 #include "uuid.hpp"
@@ -11,10 +11,10 @@
 
 namespace jb::test {
 
-/** Single-threaded UUID generator that returns a configured finite sequence.
- *
- * Use this collaborator in service tests that need stable resource identities and explicit exhaustion behavior.
- */
+/// Single-threaded UUID generator that returns a configured finite sequence.
+///
+/// Use this collaborator in service tests that need stable resource identities and explicit exhaustion behavior.
+///
 class SequenceUuidGenerator final : public core::UuidGenerator {
 public:
     /// Creates a generator by taking ownership of the values returned in order.

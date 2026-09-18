@@ -1,6 +1,6 @@
-/** @file process.hpp
- * @brief Defines asynchronous local process execution with explicit arguments and environment.
- */
+/// @file process.hpp
+/// @brief Defines asynchronous local process execution with explicit arguments and environment.
+///
 #pragma once
 
 #include "byte_buffer.hpp"

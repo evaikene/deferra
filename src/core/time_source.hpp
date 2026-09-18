@@ -1,6 +1,6 @@
-/** @file time_source.hpp
- * @brief Defines injectable wall-clock and monotonic time sources.
- */
+/// @file time_source.hpp
+/// @brief Defines injectable wall-clock and monotonic time sources.
+///
 #pragma once
 
 #include "event_loop_types.hpp"

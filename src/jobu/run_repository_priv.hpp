@@ -17,9 +17,9 @@ class Database;
 
 namespace jb::jobu::detail {
 
-/** Non-owning fields for inserting the known initial schedule-owned run.
- * The caller must keep both JSON views alive until insert_schedule_owned() returns.
- */
+/// Non-owning fields for inserting the known initial schedule-owned run.
+/// The caller must keep both JSON views alive until insert_schedule_owned() returns.
+///
 struct ScheduleOwnedRunInsert {
     jb::core::Uuid         id;
     jb::core::Uuid         job_id;
@@ -44,9 +44,9 @@ struct RunSnapshot {
     jb::core::JsonValue    payload;
 };
 
-/** Non-owning serialized fields for refreshing one pending schedule-owned run.
- * The caller must keep both JSON views alive until refresh_unstarted_schedule_owned() returns.
- */
+/// Non-owning serialized fields for refreshing one pending schedule-owned run.
+/// The caller must keep both JSON views alive until refresh_unstarted_schedule_owned() returns.
+///
 struct ScheduleOwnedRunUpdate {
     JobRevision            job_revision{1};
     jb::core::Uuid         queue_id;

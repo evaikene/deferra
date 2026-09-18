@@ -1,6 +1,6 @@
-/** @file error.hpp
- * @brief Defines the project-owned error value used across public module boundaries.
- */
+/// @file error.hpp
+/// @brief Defines the project-owned error value used across public module boundaries.
+///
 #pragma once
 
 #include <cstdint>

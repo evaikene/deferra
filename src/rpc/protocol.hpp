@@ -1,6 +1,6 @@
-/** @file protocol.hpp
- * @brief Defines public JSON-RPC values, handler contracts, and application-error conversion.
- */
+/// @file protocol.hpp
+/// @brief Defines public JSON-RPC values, handler contracts, and application-error conversion.
+///
 #pragma once
 
 #include "error.hpp"
@@ -15,11 +15,11 @@
 
 namespace jb::rpc {
 
-/** Marks an explicitly null JSON-RPC request identifier.
- *
- * This differs from an absent request identifier: absence denotes a notification, while this marker denotes a request
- * whose `id` member is JSON null.
- */
+/// Marks an explicitly null JSON-RPC request identifier.
+///
+/// This differs from an absent request identifier: absence denotes a notification, while this marker denotes a request
+/// whose `id` member is JSON null.
+///
 struct NullRequestId {
     /// Compares two stateless null request identifiers.
     /// @param other Null request identifier to compare.
@@ -27,11 +27,11 @@ struct NullRequestId {
     auto operator==(NullRequestId const& other) const -> bool = default;
 };
 
-/** Owns a JSON-RPC request identifier.
- *
- * Signed integers, unsigned integers, strings, and explicit JSON null remain distinct. An absent identifier is
- * represented separately with `std::optional<RequestId>` by the private envelope layer.
- */
+/// Owns a JSON-RPC request identifier.
+///
+/// Signed integers, unsigned integers, strings, and explicit JSON null remain distinct. An absent identifier is
+/// represented separately with `std::optional<RequestId>` by the private envelope layer.
+///
 using RequestId = std::variant<NullRequestId, std::int64_t, std::uint64_t, std::string>;
 
 /// Standard JSON-RPC error codes plus the JobU application-error code.
@@ -97,21 +97,21 @@ struct RequestContext {
 /// Owning success value or represented RPC error returned synchronously by a method handler.
 using MethodResult = jb::core::Result<jb::core::JsonValue, RpcError>;
 
-/** Synchronous method callback invoked by the RPC server.
- *
- * The request context and optional parameters are borrowed for the duration of the call. The returned result owns its
- * JSON value or RPC error. Handlers must not retain references to either argument.
- */
+/// Synchronous method callback invoked by the RPC server.
+///
+/// The request context and optional parameters are borrowed for the duration of the call. The returned result owns its
+/// JSON value or RPC error. Handlers must not retain references to either argument.
+///
 using MethodHandler = std::function<MethodResult(RequestContext const&, std::optional<jb::core::JsonValue> const&)>;
 
-/** Converts a project error to the stable JobU application-error representation.
- *
- * The returned error has numeric code `-32000`, preserves the user-safe message, and contains a data object with only
- * the lower-case category and stable error code. `jb::core::Error::detail` is never transmitted.
- *
- * @param error Project-owned error to convert.
- * @return Owning JSON-RPC application error safe to send to a peer.
- */
+/// Converts a project error to the stable JobU application-error representation.
+///
+/// The returned error has numeric code `-32000`, preserves the user-safe message, and contains a data object with only
+/// the lower-case category and stable error code. `jb::core::Error::detail` is never transmitted.
+///
+/// @param error Project-owned error to convert.
+/// @return Owning JSON-RPC application error safe to send to a peer.
+///
 [[nodiscard]] auto application_error(jb::core::Error const& error) -> RpcError;
 
 } // namespace jb::rpc

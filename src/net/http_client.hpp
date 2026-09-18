@@ -1,6 +1,6 @@
-/** @file http_client.hpp
- * @brief Defines the project-owned asynchronous HTTP client contract.
- */
+/// @file http_client.hpp
+/// @brief Defines the project-owned asynchronous HTTP client contract.
+///
 #pragma once
 
 #include "byte_buffer.hpp"

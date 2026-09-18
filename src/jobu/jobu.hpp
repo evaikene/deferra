@@ -1,6 +1,6 @@
-/** @file jobu.hpp
- * @brief Marks the JobU domain module during its Phase 0 skeleton stage.
- */
+/// @file jobu.hpp
+/// @brief Marks the JobU domain module during its Phase 0 skeleton stage.
+///
 #pragma once
 
 #include <cstdint>

@@ -1,6 +1,6 @@
-/** @file result.hpp
- * @brief Defines an explicit value-or-error result type for operational failures.
- */
+/// @file result.hpp
+/// @brief Defines an explicit value-or-error result type for operational failures.
+///
 #pragma once
 
 #include <memory>

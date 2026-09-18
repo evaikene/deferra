@@ -1,6 +1,6 @@
-/** @file driver.hpp
- * @brief Defines the backend-driver contract used by generic database objects.
- */
+/// @file driver.hpp
+/// @brief Defines the backend-driver contract used by generic database objects.
+///
 #pragma once
 
 #include "error.hpp"
@@ -26,11 +26,11 @@ enum class TransactionMode : std::uint8_t {
     Exclusive,
 };
 
-/** Abstracts one backend connection for the generic Database API.
- *
- * Backend authors derive from Driver and keep all native connection state in the implementation. Application code
- * selects a backend by constructing its concrete driver and transferring ownership to Database.
- */
+/// Abstracts one backend connection for the generic Database API.
+///
+/// Backend authors derive from Driver and keep all native connection state in the implementation. Application code
+/// selects a backend by constructing its concrete driver and transferring ownership to Database.
+///
 class Driver {
 public:
     /// Destroys a backend driver through its interface.
