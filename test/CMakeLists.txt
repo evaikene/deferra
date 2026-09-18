@@ -318,6 +318,31 @@ if(TARGET jobu-sqlite)
     )
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+    # Linux mixed-runner scheduling through the real Process and HTTP executors.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(TARGET "cli-scheduler-integration-test")
+        add_executable(${TARGET}
+            cli-scheduler-integration-test.cpp
+            support/http_test_server.cpp
+            support/temporary_directory.cpp
+        )
+        target_link_libraries(${TARGET}
+            PRIVATE
+                jobu-sqlite
+                jobu-cli
+                jobu-http
+                net-http
+                SQLite3::SQLite3
+                OpenSSL::SSL
+                OpenSSL::Crypto
+                Catch2::Catch2WithMain
+        )
+        target_compile_definitions(${TARGET} PRIVATE PROCESS_TEST_HELPER="$<TARGET_FILE:process-test-helper>")
+        add_dependencies(${TARGET} process-test-helper)
+        add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+        set_tests_properties(${TARGET} PROPERTIES TIMEOUT 60)
+    endif()
+
     # JobU SQLite-backed queue management service test
     set(TARGET "jobu-queue-management-test")
     add_executable(${TARGET}
