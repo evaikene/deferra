@@ -405,7 +405,7 @@ struct CliAttemptExecutor::Private : jb::core::priv::ObjectPrivate {
                                                             "jobu.cli.unsupported_type",
                                                             "The CLI executor supports only CLI attempts"));
         }
-        if (!completion || request.key.attempt_number == 0) {
+        if (!completion || request.key.run_id.is_nil() || request.key.attempt_number == 0) {
             return ExecutorResult<>::failure(executor_error(jb::core::ErrorCategory::InvalidArgument,
                                                             "jobu.cli.invalid_start",
                                                             "The CLI attempt start input is invalid"));

@@ -310,6 +310,15 @@ TEST_CASE("CLI attempt executor rejects invalid starts without retaining callbac
         CHECK(result.error().code == "jobu.cli.invalid_start");
     }
 
+    SECTION("nil run ID")
+    {
+        auto request       = start_request();
+        request.key.run_id = {};
+        auto result        = fixture.executor->start(std::move(request), callback);
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == "jobu.cli.invalid_start");
+    }
+
     SECTION("empty completion handler")
     {
         auto result = fixture.executor->start(start_request(), {});
