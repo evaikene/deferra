@@ -1,5 +1,6 @@
 #include "job_validation_priv.hpp"
 
+#include "cli_job_payload_priv.hpp"
 #include "http_job_payload_priv.hpp"
 #include "json.hpp"
 #include "text_validation_priv.hpp"
@@ -12,33 +13,6 @@ namespace jb::jobu::detail {
 namespace {
 
 constexpr std::size_t kMaximumJobNameBytes = 256;
-
-auto member(jb::core::JsonValue::Object const& object, std::string_view name) -> jb::core::JsonValue const*
-{
-    auto const iterator = object.find(name);
-    return iterator == object.end() ? nullptr : &iterator->second;
-}
-
-auto structurally_valid_cli(jb::core::JsonValue::Object const& object) -> JobPayloadIssue
-{
-    auto const* command = member(object, "command");
-    if (command == nullptr || !command->is_string() || command->as_string().empty()) {
-        return JobPayloadIssue::MissingCommand;
-    }
-    auto const* arguments = member(object, "arguments");
-    if (arguments == nullptr) {
-        return JobPayloadIssue::None;
-    }
-    if (!arguments->is_array()) {
-        return JobPayloadIssue::InvalidArguments;
-    }
-    for (auto const& argument : arguments->as_array()) {
-        if (!argument.is_string()) {
-            return JobPayloadIssue::InvalidArguments;
-        }
-    }
-    return JobPayloadIssue::None;
-}
 
 } // anonymous namespace
 
@@ -58,8 +32,10 @@ auto job_payload_structure_issue(JobType type, jb::core::JsonValue const& payloa
     }
 
     switch (type) {
-        case JobType::Cli:
-            return structurally_valid_cli(payload.as_object());
+        case JobType::Cli: {
+            auto decoded = decode_cli_job_payload(payload);
+            return decoded ? JobPayloadIssue::None : decoded.error();
+        }
         case JobType::Http: {
             auto decoded = decode_http_job_payload(payload);
             return decoded ? JobPayloadIssue::None : decoded.error();
@@ -99,8 +75,20 @@ auto job_payload_issue_text(JobPayloadIssue issue) noexcept -> std::string_view
             return "not_object";
         case JobPayloadIssue::MissingCommand:
             return "missing_command";
+        case JobPayloadIssue::InvalidCommand:
+            return "invalid_command";
         case JobPayloadIssue::InvalidArguments:
             return "invalid_arguments";
+        case JobPayloadIssue::InvalidWorkingDirectory:
+            return "invalid_working_directory";
+        case JobPayloadIssue::InvalidEnvironment:
+            return "invalid_environment";
+        case JobPayloadIssue::InvalidPath:
+            return "invalid_path";
+        case JobPayloadIssue::PreparedRequestTooLarge:
+            return "prepared_request_too_large";
+        case JobPayloadIssue::InvalidExpectedExitCodes:
+            return "invalid_expected_exit_codes";
         case JobPayloadIssue::MissingUrl:
             return "missing_url";
         case JobPayloadIssue::InvalidUrl:

@@ -344,7 +344,7 @@ TEST_CASE("real HTTP scheduling commits attempts before network observation and 
     http_jobs.push_back(fixture.create_http_job(wide, "/wide-1"));
     http_jobs.push_back(fixture.create_http_job(wide, "/wide-2"));
     http_jobs.push_back(fixture.create_http_job(wide, "/wide-3"));
-    auto const cli = fixture.create_cli_job(narrow, "remains-pending");
+    auto const cli = fixture.create_cli_job(narrow, "/remains-pending");
 
     // This direct-service fixture does not connect the management signal to the scheduler; process only the explicit
     // scheduler timer so curl drive tasks remain pending while the durable running boundary is inspected.

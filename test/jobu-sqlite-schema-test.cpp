@@ -106,7 +106,7 @@ INSERT INTO jobu_jobs(
     priority, attributes_json, payload_json, created_at_us, updated_at_us, deleted_at_us
 ) VALUES (
     X'202122232425262728292A2B2C2D2E2F', X'000102030405060708090A0B0C0D0E0F', 1, 'example', 'active',
-    'cli', 'once', 10, NULL, NULL, 0, '{"version":1,"values":{}}', '{"command":"true"}', 0, 0, NULL
+    'cli', 'once', 10, NULL, NULL, 0, '{"version":1,"values":{}}', '{"command":"/true"}', 0, 0, NULL
 ))sql");
 }
 
@@ -119,7 +119,7 @@ INSERT INTO jobu_runs(
 ) VALUES (
     X'303132333435363738393A3B3C3D3E3F', X'202122232425262728292A2B2C2D2E2F', 1,
     X'000102030405060708090A0B0C0D0E0F', 'scheduled', 1, 10, 10, NULL, NULL, 'cli', 0,
-    '{"version":1,"values":{}}', '{"command":"true"}', 'scheduled', NULL
+    '{"version":1,"values":{}}', '{"command":"/true"}', 'scheduled', NULL
 ))sql");
 }
 

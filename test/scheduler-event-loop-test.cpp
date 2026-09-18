@@ -79,7 +79,7 @@ auto json_string(std::string value) -> JsonValue
 auto payload(JobType type) -> JsonValue
 {
     auto result = JsonValue{};
-    result.data = type == JobType::Cli ? JsonValue::Object{{"command", json_string("test")}}
+    result.data = type == JobType::Cli ? JsonValue::Object{{"command", json_string("/test")}}
                                        : JsonValue::Object{{"url", json_string("https://example.test")}};
     return result;
 }
