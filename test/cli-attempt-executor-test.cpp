@@ -8,19 +8,36 @@
 #include "support/fake_process_adapter.hpp"
 #include "uuid.hpp"
 
+#if defined(__linux__)
+#  include "event_loop_backend_epoll_priv.hpp"
+#  include "process_posix_priv.hpp"
+#  include "support/temporary_directory.hpp"
+#endif
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#if defined(__linux__)
+#  include <fcntl.h>
+#  include <poll.h>
+#  include <sys/stat.h>
+#  include <unistd.h>
+#endif
 
 using namespace jb::core;
 using namespace jb::jobu;
@@ -172,21 +189,240 @@ auto exited(int code, bool stdout_lost = false, bool stderr_lost = false) -> Pro
     };
 }
 
+#if defined(__linux__)
+struct RealCliPayload {
+    std::string                          command{PROCESS_TEST_HELPER};
+    std::vector<std::string>             arguments;
+    std::optional<std::filesystem::path> working_directory;
+    JsonValue::Object                    environment;
+    std::vector<std::uint64_t>           expected_exit_codes{0U};
+};
+
+auto real_cli_payload(RealCliPayload input) -> JsonValue
+{
+    auto arguments = JsonValue::Array{};
+    arguments.reserve(input.arguments.size());
+    for (auto& argument : input.arguments) {
+        arguments.push_back(json_string(std::move(argument)));
+    }
+
+    auto expected_exit_codes = JsonValue::Array{};
+    expected_exit_codes.reserve(input.expected_exit_codes.size());
+    for (auto code : input.expected_exit_codes) {
+        expected_exit_codes.push_back(json_uint(code));
+    }
+
+    auto payload = JsonValue::Object{
+        {"arguments",           json_array(std::move(arguments))          },
+        {"command",             json_string(std::move(input.command))     },
+        {"expected_exit_codes", json_array(std::move(expected_exit_codes))},
+    };
+    if (input.working_directory) {
+        payload.emplace("working_directory", json_string(input.working_directory->string()));
+    }
+    if (!input.environment.empty()) {
+        payload.emplace("environment", json_object(std::move(input.environment)));
+    }
+    return json_object(std::move(payload));
+}
+
+auto real_start_request(AttemptNumber attempt_number, RealCliPayload payload, AttributeSet const& overrides = {})
+    -> AttemptStartRequest
+{
+    return start_request(attempt_number, overrides, real_cli_payload(std::move(payload)));
+}
+
+auto helper_start_request(AttemptNumber              attempt_number,
+                          std::vector<std::string>   arguments,
+                          AttributeSet const&        overrides           = {},
+                          std::vector<std::uint64_t> expected_exit_codes = {0U}) -> AttemptStartRequest
+{
+    auto payload                = RealCliPayload{};
+    payload.arguments           = std::move(arguments);
+    payload.expected_exit_codes = std::move(expected_exit_codes);
+    return real_start_request(attempt_number, std::move(payload), overrides);
+}
+
+struct RealExecutorFixture {
+    TestApplication    application;
+    CliAttemptExecutor executor{CliAttemptExecutorOptions{.allow_root = true}};
+
+    /// @throws Catch::TestFailureException when native readiness fails or the watchdog expires.
+    void until(std::function<bool()> const& predicate)
+    {
+        auto const deadline = Clock::now() + 5s;
+        while (!predicate() && Clock::now() < deadline) {
+            REQUIRE(application.application.process_events(EventFlag::All, 10) != ProcessEventsResult::Failed);
+        }
+        REQUIRE(predicate());
+    }
+
+    /// @throws Catch::TestFailureException when the attempt is rejected or does not complete exactly once.
+    auto execute(AttemptStartRequest request) -> AttemptCompletion
+    {
+        auto completion     = std::optional<AttemptCompletion>{};
+        auto callback_count = std::size_t{0};
+        auto accepted       = executor.start(std::move(request), [&](AttemptCompletion result) {
+            ++callback_count;
+            completion = std::move(result);
+        });
+        if (!accepted) {
+            UNSCOPED_INFO("start error: " << accepted.error().code << " " << accepted.error().detail);
+        }
+        REQUIRE(accepted);
+        CHECK(callback_count == 0U);
+
+        until([&] { return completion.has_value(); });
+        CHECK(callback_count == 1U);
+        until([&] { return executor.children().empty(); });
+        REQUIRE(application.application.process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+        CHECK(callback_count == 1U);
+        return std::move(*completion);
+    }
+};
+
+auto reported_root_identity() noexcept -> uid_t
+{
+    return 0;
+}
+
+class RootChildIdentityOperations final : public jb::core::priv::ProcessOperations {
+public:
+    auto child_options() noexcept -> jb::core::priv::ProcessChildOptions override
+    {
+        auto options          = ProcessOperations::child_options();
+        options.effective_uid = reported_root_identity;
+        return options;
+    }
+};
+
+/// The target opens this FIFO after exec, making helper readiness independent of elapsed time.
+class PostExecReport {
+public:
+    PostExecReport()
+        : _path{_directory.path() / "report"}
+    {
+        REQUIRE(::mkfifo(_path.c_str(), 0600) == 0);
+        _descriptor = ::open(_path.c_str(), O_RDWR | O_CLOEXEC);
+        REQUIRE(_descriptor >= 0);
+    }
+
+    ~PostExecReport()
+    {
+        if (_descriptor >= 0) {
+            ::close(_descriptor);
+        }
+    }
+
+    PostExecReport(PostExecReport const&)                    = delete;
+    auto operator=(PostExecReport const&) -> PostExecReport& = delete;
+
+    [[nodiscard]] auto path() const -> std::string { return _path.string(); }
+
+    /// @throws Catch::TestFailureException when the helper report does not arrive before the watchdog.
+    void read(void* destination, std::size_t size) const
+    {
+        auto*       bytes    = static_cast<char*>(destination);
+        std::size_t received = 0;
+        while (received < size) {
+            pollfd item{.fd = _descriptor, .events = POLLIN, .revents = 0};
+            REQUIRE(::poll(&item, 1, 5000) == 1);
+            auto const count = ::read(_descriptor, bytes + received, size - received);
+            if (count < 0 && errno == EINTR) {
+                continue;
+            }
+            REQUIRE(count > 0);
+            received += static_cast<std::size_t>(count);
+        }
+    }
+
+private:
+    TemporaryDirectory    _directory;
+    std::filesystem::path _path;
+    int                   _descriptor{-1};
+};
+
+/// Identity-stable observation for a helper process that may be reaped by Process or adopted elsewhere.
+class ProcessTerminationWatch final {
+public:
+    explicit ProcessTerminationWatch(pid_t process_id)
+        : _process_id{process_id}
+    {
+        REQUIRE(process_id > 0);
+        jb::core::priv::EpollProcessOperations operations;
+        _descriptor = operations.open_pidfd(process_id);
+        REQUIRE(_descriptor >= 0);
+    }
+
+    ~ProcessTerminationWatch()
+    {
+        if (_descriptor >= 0) {
+            ::close(_descriptor);
+        }
+    }
+
+    ProcessTerminationWatch(ProcessTerminationWatch const&)                    = delete;
+    auto operator=(ProcessTerminationWatch const&) -> ProcessTerminationWatch& = delete;
+
+    /// @throws Catch::TestFailureException when the watched identity remains alive past the watchdog.
+    void check_terminated() const
+    {
+        pollfd item{.fd = _descriptor, .events = POLLIN, .revents = 0};
+        int    ready;
+        do {
+            ready = ::poll(&item, 1, 5000);
+        } while (ready < 0 && errno == EINTR);
+
+        if (ready < 0) {
+            UNSCOPED_INFO("poll(pidfd for " << _process_id << ") failed with errno " << errno);
+        }
+        REQUIRE(ready == 1);
+        CHECK((item.revents & POLLIN) != 0);
+    }
+
+private:
+    pid_t _process_id;
+    int   _descriptor{-1};
+};
+
+auto captured_pattern(std::size_t total, std::size_t limit, std::size_t channel) -> ByteBuffer
+{
+    auto full = ByteBuffer{};
+    full.reserve(total);
+    for (std::size_t offset = 0; offset < total; ++offset) {
+        full.push_back(static_cast<std::byte>((offset + (channel * 73U)) % 251U));
+    }
+    if (total <= limit) {
+        return full;
+    }
+
+    auto const prefix = (limit + 1U) / 2U;
+    auto const suffix = limit / 2U;
+    auto       result = ByteBuffer{full.begin(), full.begin() + static_cast<std::ptrdiff_t>(prefix)};
+    result.insert(result.end(), full.end() - static_cast<std::ptrdiff_t>(suffix), full.end());
+    return result;
+}
+#endif
+
 } // anonymous namespace
 
 TEST_CASE("CLI attempt executor exposes Object ownership and dynamic availability", "[jobu][cli][executor]")
 {
-    SECTION("public construction remains unavailable before Process integration")
+    SECTION("public construction follows platform Process and identity availability")
     {
         TestApplication    application;
         CliAttemptExecutor executor;
 
+#if defined(__linux__)
+        CHECK(executor.is_available(JobType::Cli) == (::geteuid() != 0));
+#else
         CHECK_FALSE(executor.is_available(JobType::Cli));
-        CHECK_FALSE(executor.is_available(JobType::Http));
         auto rejected = executor.start(start_request(), [](AttemptCompletion const&) {});
         REQUIRE_FALSE(rejected);
         CHECK(rejected.error().code == "jobu.cli.start_failed");
         CHECK(rejected.error().detail == "core.process.monitor_unsupported");
+#endif
+        CHECK_FALSE(executor.is_available(JobType::Http));
     }
 
     SECTION("private fake construction follows type loop and identity policy")
@@ -624,3 +860,265 @@ TEST_CASE("CLI attempt executor destruction cleans active operations and suppres
     stale->finished(first_id, exited(0));
     CHECK(callback_count == 0U);
 }
+
+#if defined(__linux__)
+TEST_CASE("CLI production adapter executes explicit Process requests", "[jobu][cli][executor][linux]")
+{
+    RealExecutorFixture fixture;
+    TemporaryDirectory  directory;
+
+    for (AttemptNumber attempt_number : {AttemptNumber{1}, AttemptNumber{2}}) {
+        auto const attempt_text = std::to_string(attempt_number);
+        auto       payload      = RealCliPayload{};
+        payload.arguments       = {
+            "inspect-jobu",
+            "",
+            "-option",
+            directory.path().string(),
+            job_id().to_string(),
+            run_id().to_string(),
+            attempt_text,
+        };
+        payload.working_directory = directory.path();
+        payload.environment.emplace("PROCESS_MARKER", json_string("literal $x = value"));
+
+        auto completion = fixture.execute(real_start_request(attempt_number, std::move(payload)));
+        CHECK(completion.outcome == AttemptOutcome::Succeeded);
+        CHECK(completion.key == AttemptKey{.run_id = run_id(), .attempt_number = attempt_number});
+    }
+
+    auto const helper_path = std::filesystem::path{PROCESS_TEST_HELPER};
+    auto       path_lookup = RealCliPayload{};
+    path_lookup.command    = helper_path.filename().string();
+    path_lookup.arguments  = {"exit", "0"};
+    path_lookup.environment.emplace("PATH", json_string(helper_path.parent_path().string()));
+    CHECK(fixture.execute(real_start_request(3, std::move(path_lookup))).outcome == AttemptOutcome::Succeeded);
+
+    auto capture_output = AttributeSet{
+        {"output.capture",      {.data = std::string{"always"}}},
+        {"output.stdout_limit", {.data = std::int64_t{64}}     },
+    };
+    auto no_new_privileges = fixture.execute(helper_start_request(4, {"no-new-privileges"}, capture_output));
+    REQUIRE(no_new_privileges.output);
+    REQUIRE(no_new_privileges.output->primary);
+    CHECK(byte_text(no_new_privileges.output->primary->bytes) == "NoNewPrivs: 1\n");
+}
+
+TEST_CASE("CLI production adapter enforces the child-side non-root policy", "[jobu][cli][executor][linux]")
+{
+    TestApplication    application;
+    TemporaryDirectory directory;
+    auto               process_operations = std::make_shared<RootChildIdentityOperations>();
+    auto               parent_identity    = std::make_unique<FakeEffectiveIdentityProbe>(1000U);
+    auto executor = CliAttemptExecutorTestAccess::create_with_system_process_adapter({},
+                                                                                     std::move(parent_identity),
+                                                                                     std::move(process_operations));
+
+    REQUIRE(executor->is_available(JobType::Cli));
+
+    auto marker         = directory.path() / "target-executed";
+    auto completion     = std::optional<AttemptCompletion>{};
+    auto callback_count = std::size_t{0};
+    auto request        = helper_start_request(1, {"marker", marker.string()}, {}, {37U});
+
+    auto accepted = executor->start(std::move(request), [&](AttemptCompletion result) {
+        ++callback_count;
+        completion = std::move(result);
+    });
+    if (!accepted) {
+        UNSCOPED_INFO("start error: " << accepted.error().code << " " << accepted.error().detail);
+    }
+    REQUIRE(accepted);
+    CHECK_FALSE(completion);
+
+    auto const deadline = Clock::now() + 5s;
+    while (!completion && Clock::now() < deadline) {
+        REQUIRE(application.application.process_events(EventFlag::All, 10) != ProcessEventsResult::Failed);
+    }
+
+    REQUIRE(completion);
+    CHECK(callback_count == 1U);
+    CHECK(completion->outcome == AttemptOutcome::Failed);
+    CHECK(completion->failure_disposition == FailureDisposition::Terminal);
+    CHECK(result_string(*completion, "outcome") == "start_failure");
+    CHECK(result_string(*completion, "error_code") == "core.process.security_failed");
+    CHECK_FALSE(std::filesystem::exists(marker));
+
+    auto const cleanup_deadline = Clock::now() + 5s;
+    while (!executor->children().empty() && Clock::now() < cleanup_deadline) {
+        REQUIRE(application.application.process_events(EventFlag::All, 10) != ProcessEventsResult::Failed);
+    }
+    REQUIRE(executor->children().empty());
+    REQUIRE(application.application.process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+    CHECK(callback_count == 1U);
+}
+
+TEST_CASE("CLI production adapter maps real Process terminal outcomes safely", "[jobu][cli][executor][linux]")
+{
+    RealExecutorFixture fixture;
+
+    auto success = fixture.execute(helper_start_request(1, {"exit", "0"}));
+    CHECK(success.outcome == AttemptOutcome::Succeeded);
+
+    auto expected_nonzero = fixture.execute(helper_start_request(2, {"exit", "7"}, AttributeSet{}, {7U}));
+    CHECK(expected_nonzero.outcome == AttemptOutcome::Succeeded);
+    CHECK(result_string(expected_nonzero, "outcome") == "success");
+
+    auto retryable = fixture.execute(helper_start_request(3, {"exit", "2"}));
+    CHECK(retryable.outcome == AttemptOutcome::Failed);
+    CHECK(retryable.failure_disposition == FailureDisposition::Retryable);
+    CHECK(result_string(retryable, "outcome") == "unexpected_exit");
+
+    auto terminal_attributes = AttributeSet{
+        {"cli.retry_exit_codes", {.data = string_list({})}},
+    };
+    auto terminal = fixture.execute(helper_start_request(4, {"exit", "2"}, terminal_attributes));
+    CHECK(terminal.outcome == AttemptOutcome::Failed);
+    CHECK(terminal.failure_disposition == FailureDisposition::Terminal);
+
+    auto signalled = fixture.execute(helper_start_request(5, {"signal", std::to_string(SIGTERM)}));
+    CHECK(signalled.outcome == AttemptOutcome::Failed);
+    CHECK(signalled.failure_disposition == FailureDisposition::Retryable);
+    CHECK(result_string(signalled, "outcome") == "signal");
+
+    constexpr std::string_view sensitive_marker{"private-marker-command"};
+    auto                       start_failure_payload = RealCliPayload{};
+    start_failure_payload.command                    = "/private-marker-command-does-not-exist";
+    start_failure_payload.environment.emplace("PRIVATE_MARKER_ENV", json_string("private-marker-value"));
+    auto start_failure = fixture.execute(real_start_request(6, std::move(start_failure_payload)));
+    CHECK(start_failure.outcome == AttemptOutcome::Failed);
+    CHECK(start_failure.failure_disposition == FailureDisposition::Terminal);
+    CHECK(result_string(start_failure, "outcome") == "start_failure");
+    CHECK(result_string(start_failure, "error_code") == "core.process.exec_failed");
+    auto serialized = serialize_json(start_failure.result);
+    REQUIRE(serialized);
+    CHECK(serialized->find(sensitive_marker) == std::string::npos);
+    CHECK(serialized->find("private-marker-value") == std::string::npos);
+
+    auto timeout_attributes = AttributeSet{
+        {"cli.termination_grace", {.data = Duration::zero()}},
+        {"job.timeout",           {.data = 100ms}           },
+    };
+    auto timed_out = fixture.execute(helper_start_request(7, {"term", "1"}, timeout_attributes));
+    CHECK(timed_out.outcome == AttemptOutcome::Failed);
+    CHECK(timed_out.failure_disposition == FailureDisposition::Retryable);
+    CHECK(result_string(timed_out, "outcome") == "timeout");
+}
+
+TEST_CASE("CLI production adapter preserves real output capture policy", "[jobu][cli][executor][linux]")
+{
+    RealExecutorFixture fixture;
+
+    auto always_attributes = AttributeSet{
+        {"output.capture",      {.data = std::string{"always"}}},
+        {"output.stderr_limit", {.data = std::int64_t{6}}      },
+        {"output.stdout_limit", {.data = std::int64_t{7}}      },
+    };
+    auto captured = fixture.execute(helper_start_request(1, {"output", "12", "11"}, always_attributes, {37U}));
+    REQUIRE(captured.output);
+    REQUIRE(captured.output->primary);
+    REQUIRE(captured.output->diagnostic);
+    CHECK(captured.output->primary->bytes == captured_pattern(12U, 7U, 0U));
+    CHECK(captured.output->primary->total_bytes == 12U);
+    CHECK(captured.output->primary->truncated);
+    CHECK(captured.output->diagnostic->bytes == captured_pattern(11U, 6U, 1U));
+    CHECK(captured.output->diagnostic->total_bytes == 11U);
+    CHECK(captured.output->diagnostic->truncated);
+
+    auto none_attributes = AttributeSet{
+        {"output.capture", {.data = std::string{"none"}}},
+    };
+    auto discarded = fixture.execute(helper_start_request(2, {"output", "5", "4"}, none_attributes));
+    CHECK_FALSE(discarded.output);
+    auto const& discarded_stdout = discarded.result.as_object().at("stdout").as_object();
+    auto const& discarded_stderr = discarded.result.as_object().at("stderr").as_object();
+    CHECK(discarded_stdout.at("captured_bytes").as_uint() == 0U);
+    CHECK(discarded_stdout.at("total_bytes").as_uint() == 5U);
+    CHECK(discarded_stdout.at("truncated").as_bool());
+    CHECK(discarded_stderr.at("captured_bytes").as_uint() == 0U);
+    CHECK(discarded_stderr.at("total_bytes").as_uint() == 4U);
+    CHECK(discarded_stderr.at("truncated").as_bool());
+
+    auto on_error_attributes = AttributeSet{
+        {"output.capture",      {.data = std::string{"on_error"}}},
+        {"output.stderr_limit", {.data = std::int64_t{8}}        },
+        {"output.stdout_limit", {.data = std::int64_t{8}}        },
+    };
+    auto on_error_success = fixture.execute(helper_start_request(3, {"output", "5", "4"}, on_error_attributes, {37U}));
+    CHECK(on_error_success.outcome == AttemptOutcome::Succeeded);
+    CHECK_FALSE(on_error_success.output);
+
+    auto on_error_failure = fixture.execute(helper_start_request(4, {"output", "5", "4"}, on_error_attributes));
+    CHECK(on_error_failure.outcome == AttemptOutcome::Failed);
+    REQUIRE(on_error_failure.output);
+    REQUIRE(on_error_failure.output->primary);
+    REQUIRE(on_error_failure.output->diagnostic);
+    CHECK(on_error_failure.output->primary->bytes == captured_pattern(5U, 8U, 0U));
+    CHECK(on_error_failure.output->diagnostic->bytes == captured_pattern(4U, 8U, 1U));
+}
+
+TEST_CASE("CLI production adapter cancels and destroys complete Process groups", "[jobu][cli][executor][linux]")
+{
+    SECTION("cancellation retains completion until leader and descendant terminate")
+    {
+        RealExecutorFixture fixture;
+        PostExecReport      report;
+        auto                attributes = AttributeSet{
+            {"cli.termination_grace", {.data = Duration::zero()}},
+            {"job.timeout",           {.data = 30s}             },
+        };
+        auto completion     = std::optional<AttemptCompletion>{};
+        auto callback_count = std::size_t{0};
+        auto request        = helper_start_request(1, {"group-wait", report.path()}, attributes);
+
+        REQUIRE(fixture.executor.start(std::move(request), [&](AttemptCompletion result) {
+            ++callback_count;
+            completion = std::move(result);
+        }));
+        CHECK(callback_count == 0U);
+
+        std::array<pid_t, 2> identities{};
+        report.read(identities.data(), sizeof(identities));
+        ProcessTerminationWatch leader{identities[0]};
+        ProcessTerminationWatch descendant{identities[1]};
+        REQUIRE(fixture.executor.children().size() == 1U);
+
+        REQUIRE(fixture.executor.cancel(start_request().key));
+        CHECK(callback_count == 0U);
+        fixture.until([&] { return completion.has_value(); });
+        CHECK(callback_count == 1U);
+        CHECK(completion->outcome == AttemptOutcome::Cancelled);
+        CHECK(result_string(*completion, "outcome") == "cancelled");
+        fixture.until([&] { return fixture.executor.children().empty(); });
+        leader.check_terminated();
+        descendant.check_terminated();
+    }
+
+    SECTION("executor destruction immediately kills descendants and suppresses completion")
+    {
+        TestApplication application;
+        PostExecReport  report;
+        auto            executor = std::make_unique<CliAttemptExecutor>(CliAttemptExecutorOptions{.allow_root = true});
+        auto            attributes = AttributeSet{
+            {"cli.termination_grace", {.data = 30s}},
+            {"job.timeout",           {.data = 30s}},
+        };
+        auto callback_count = std::size_t{0};
+        auto request        = helper_start_request(1, {"group-wait", report.path()}, attributes);
+
+        REQUIRE(executor->start(std::move(request), [&](AttemptCompletion const&) { ++callback_count; }));
+        std::array<pid_t, 2> identities{};
+        report.read(identities.data(), sizeof(identities));
+        ProcessTerminationWatch leader{identities[0]};
+        ProcessTerminationWatch descendant{identities[1]};
+        REQUIRE(executor->children().size() == 1U);
+
+        executor.reset();
+        CHECK(callback_count == 0U);
+        leader.check_terminated();
+        descendant.check_terminated();
+        REQUIRE(application.application.process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+        CHECK(callback_count == 0U);
+    }
+}
+#endif

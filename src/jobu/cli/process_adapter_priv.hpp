@@ -10,6 +10,10 @@
 #include <functional>
 #include <memory>
 
+namespace jb::core::priv {
+class ProcessOperations;
+}
+
 namespace jb::jobu::cli::detail {
 
 using ProcessOperationId = std::uint64_t;
@@ -57,6 +61,19 @@ public:
     [[nodiscard]] virtual auto effective_user_id() const noexcept -> std::uint64_t = 0;
 };
 
+/** Creates the platform production adapter after the executor owner is fully constructed.
+ * @return A Linux Process-backed adapter, or null until the current platform backend is integrated.
+ */
+[[nodiscard]] auto make_system_process_adapter(CliAttemptExecutor& owner) -> std::unique_ptr<ProcessAdapter>;
+
+#if defined(__linux__)
+/** Creates the production adapter with parent-side Process operations injected before each launch. */
+[[nodiscard]] auto
+make_system_process_adapter_for_test(CliAttemptExecutor&                                owner,
+                                     std::shared_ptr<jb::core::priv::ProcessOperations> process_operations)
+    -> std::unique_ptr<ProcessAdapter>;
+#endif
+
 [[nodiscard]] auto make_system_identity_probe() -> std::unique_ptr<EffectiveIdentityProbe>;
 
 /** Private construction access for deterministic executor-only tests. */
@@ -65,6 +82,15 @@ struct CliAttemptExecutorTestAccess {
                                      std::unique_ptr<ProcessAdapter>         adapter,
                                      std::unique_ptr<EffectiveIdentityProbe> identity)
         -> std::unique_ptr<CliAttemptExecutor>;
+
+#if defined(__linux__)
+    /** Creates an executor with the production adapter and injected child-identity/process operations. */
+    [[nodiscard]] static auto
+    create_with_system_process_adapter(CliAttemptExecutorOptions                          options,
+                                       std::unique_ptr<EffectiveIdentityProbe>            identity,
+                                       std::shared_ptr<jb::core::priv::ProcessOperations> process_operations)
+        -> std::unique_ptr<CliAttemptExecutor>;
+#endif
 };
 
 } // namespace jb::jobu::cli::detail

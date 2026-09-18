@@ -31,9 +31,10 @@ struct CliAttemptExecutorOptions {
  * executor, which must then be heap allocated. Construct, use, and destroy the executor on its owner thread.
  * Destruction suppresses retained callbacks before requesting immediate cleanup of every active operation.
  *
- * CLI availability requires a valid current owner EventLoop, an installed process adapter, and either a non-root
- * effective identity or the explicit unsafe override. The public constructor intentionally has no production process
- * adapter until the real Process integration stage, so it reports CLI unavailable in Stage 6.10.
+ * CLI availability requires a valid current owner EventLoop, an installed platform Process adapter, and either a
+ * non-root effective identity or the explicit unsafe override. The Linux adapter owns every accepted Process as an
+ * Object child and suppresses completion delivery while executor destruction kills and reaps active process groups.
+ * Platforms whose Process backend is not yet integrated report CLI unavailable.
  *
  * @par Stable error codes
  * `jobu.cli.unsupported_type` rejects non-CLI work; `jobu.cli.invalid_start` rejects an empty callback or invalid key;

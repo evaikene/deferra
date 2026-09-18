@@ -160,6 +160,11 @@ add_executable(${TARGET}
     support/fake_process_adapter.cpp
 )
 target_link_libraries(${TARGET} PRIVATE jobu-cli Catch2::Catch2WithMain)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(${TARGET} PRIVATE support/temporary_directory.cpp)
+    target_compile_definitions(${TARGET} PRIVATE PROCESS_TEST_HELPER="$<TARGET_FILE:process-test-helper>")
+    add_dependencies(${TARGET} process-test-helper)
+endif()
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # Test support test

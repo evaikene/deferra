@@ -542,7 +542,11 @@ struct CliAttemptExecutor::Private : jb::core::priv::ObjectPrivate {
 
 CliAttemptExecutor::CliAttemptExecutor(CliAttemptExecutorOptions options, jb::core::Object* parent)
     : CliAttemptExecutor(std::make_unique<Private>(options, nullptr, detail::make_system_identity_probe()), parent)
-{}
+{
+    // Production Process children may borrow this executor only after Object owns the private block and bind_owner()
+    // has established the back-reference used by receiver-aware signal delivery.
+    d_ptr<Private>()->adapter = detail::make_system_process_adapter(*this);
+}
 
 CliAttemptExecutor::CliAttemptExecutor(std::unique_ptr<Private> data, jb::core::Object* parent)
     : Object(*data, parent)
@@ -585,5 +589,25 @@ auto detail::CliAttemptExecutorTestAccess::create(CliAttemptExecutorOptions     
         new CliAttemptExecutor{std::move(data), nullptr}
     };
 }
+
+#if defined(__linux__)
+auto detail::CliAttemptExecutorTestAccess::create_with_system_process_adapter(
+    CliAttemptExecutorOptions                          options,
+    std::unique_ptr<EffectiveIdentityProbe>            identity,
+    std::shared_ptr<jb::core::priv::ProcessOperations> process_operations) -> std::unique_ptr<CliAttemptExecutor>
+{
+    if (!identity) {
+        identity = make_system_identity_probe();
+    }
+
+    auto data     = std::make_unique<CliAttemptExecutor::Private>(options, nullptr, std::move(identity));
+    auto executor = std::unique_ptr<CliAttemptExecutor>{
+        new CliAttemptExecutor{std::move(data), nullptr}
+    };
+    executor->d_ptr<CliAttemptExecutor::Private>()->adapter =
+        make_system_process_adapter_for_test(*executor, std::move(process_operations));
+    return executor;
+}
+#endif
 
 } // namespace jb::jobu::cli

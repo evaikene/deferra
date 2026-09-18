@@ -120,6 +120,34 @@ auto inspect(int argc, char** argv) noexcept -> int
     return 0;
 }
 
+auto inspect_jobu(int argc, char** argv) noexcept -> int
+{
+    if (argc != 8 || std::strcmp(argv[2], "") != 0 || std::strcmp(argv[3], "-option") != 0) {
+        return 49;
+    }
+
+    char cwd[4096];
+    if (::getcwd(cwd, sizeof(cwd)) == nullptr || std::strcmp(cwd, argv[4]) != 0) {
+        return 48;
+    }
+
+    auto const* marker  = ::getenv("PROCESS_MARKER");
+    auto const* job_id  = ::getenv("JOBU_JOB_ID");
+    auto const* run_id  = ::getenv("JOBU_RUN_ID");
+    auto const* attempt = ::getenv("JOBU_ATTEMPT");
+    if (marker == nullptr || std::strcmp(marker, "literal $x = value") != 0 || job_id == nullptr ||
+        std::strcmp(job_id, argv[5]) != 0 || run_id == nullptr || std::strcmp(run_id, argv[6]) != 0 ||
+        attempt == nullptr || std::strcmp(attempt, argv[7]) != 0) {
+        return 47;
+    }
+
+    std::size_t environment_size{0};
+    for (auto const* const* entry = ::environ; *entry != nullptr; ++entry) {
+        ++environment_size;
+    }
+    return environment_size == 4U ? 0 : 46;
+}
+
 auto wait_permission(int fd) noexcept -> bool
 {
     char    permission{};
@@ -477,6 +505,9 @@ auto main(int argc, char** argv) -> int
     }
     if (mode == "inspect") {
         return inspect(argc, argv);
+    }
+    if (mode == "inspect-jobu") {
+        return inspect_jobu(argc, argv);
     }
     if (mode == "wait" && argc == 3) {
         return wait_for_permission_path(argv[2]) ? 0 : 96;
