@@ -11,6 +11,7 @@ target_include_directories(${TARGET}
 
 target_sources(${TARGET}
     PRIVATE
+        attempt_executor_group.cpp
         attribute.cpp
         attribute_codec_priv.cpp
         attribute_codec_priv.hpp
@@ -73,6 +74,7 @@ target_sources(${TARGET}
     PUBLIC
         attempt.hpp
         attempt_executor.hpp
+        attempt_executor_group.hpp
         attribute.hpp
         attribute_registry.hpp
         cron.hpp
