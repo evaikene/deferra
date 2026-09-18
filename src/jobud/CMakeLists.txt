@@ -8,7 +8,7 @@ configure_file(
     @ONLY
 )
 
-add_executable(${TARGET} main.cpp)
+add_executable(${TARGET} main.cpp startup_priv.cpp composition_priv.cpp)
 
 target_include_directories(${TARGET}
     PRIVATE
@@ -21,5 +21,6 @@ target_link_libraries(${TARGET}
     PRIVATE
         jobu-sqlite
         jobu-http
+        jobu-cli
         net-http
 )

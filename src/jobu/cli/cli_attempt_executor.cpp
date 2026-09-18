@@ -576,6 +576,23 @@ auto CliAttemptExecutor::cancel(AttemptKey const& key) -> ExecutorResult<>
     return d_ptr<Private>()->cancel(key);
 }
 
+auto detail::CliAttemptExecutorFactory::create(CliAttemptExecutorOptions               options,
+                                               std::unique_ptr<EffectiveIdentityProbe> identity)
+    -> std::unique_ptr<CliAttemptExecutor>
+{
+    if (!identity) {
+        identity = make_system_identity_probe();
+    }
+    auto data     = std::make_unique<CliAttemptExecutor::Private>(options, nullptr, std::move(identity));
+    auto executor = std::unique_ptr<CliAttemptExecutor>{
+        new CliAttemptExecutor{std::move(data), nullptr}
+    };
+
+    // Receiver-aware Process connections require the fully constructed Object and its bound private owner.
+    executor->d_ptr<CliAttemptExecutor::Private>()->adapter = make_system_process_adapter(*executor);
+    return executor;
+}
+
 auto detail::CliAttemptExecutorTestAccess::create(CliAttemptExecutorOptions               options,
                                                   std::unique_ptr<ProcessAdapter>         adapter,
                                                   std::unique_ptr<EffectiveIdentityProbe> identity)

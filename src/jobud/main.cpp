@@ -1,11 +1,12 @@
+#include "composition_priv.hpp"
 #include "jobu_version_priv.hpp"
+#include "startup_priv.hpp"
 
 #include "application.hpp"
+#include "attempt_executor_group.hpp"
 #include "attribute_registry.hpp"
-#include "command_line_parser.hpp"
 #include "cron.hpp"
 #include "database.hpp"
-#include "http/http_attempt_executor.hpp"
 #include "http/system_http_client.hpp"
 #include "local_server.hpp"
 #include "logging.hpp"
@@ -23,14 +24,9 @@
 
 #include <fmt/format.h>
 
-#include <array>
-#include <charconv>
-#include <cstdint>
 #include <cstdio> // IWYU pragma: keep for stderr and stdout
 #include <cstdlib>
-#include <filesystem>
 #include <memory>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -38,87 +34,11 @@
 
 namespace {
 
-struct StartupOptions {
-    std::filesystem::path                socket_path;
-    std::filesystem::path                database_path;
-    std::uint32_t                        http_concurrency{16};
-    std::optional<std::string>           http_proxy;
-    std::optional<std::filesystem::path> http_ca_bundle;
-};
-
-auto parse_positive_uint32(std::string_view value) -> std::optional<std::uint32_t>
-{
-    auto parsed = std::uint32_t{};
-    auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
-    if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || parsed == 0U) {
-        return std::nullopt;
-    }
-    return parsed;
-}
-
-auto parse_startup_options(int argc, char* argv[]) -> std::optional<StartupOptions>
-{
-    using namespace jb::core;
-
-    constexpr std::array options{
-        CommandLineOption{.long_name = "socket",           .value_mode = CommandLineValueMode::Required},
-        CommandLineOption{.long_name = "database",         .value_mode = CommandLineValueMode::Required},
-        CommandLineOption{.long_name = "http-concurrency", .value_mode = CommandLineValueMode::Required},
-        CommandLineOption{.long_name = "http-proxy",       .value_mode = CommandLineValueMode::Required},
-        CommandLineOption{.long_name = "http-ca-bundle",   .value_mode = CommandLineValueMode::Required},
-    };
-    CommandLineParser parser{argc, argv, options};
-
-    auto socket_path      = std::optional<std::filesystem::path>{};
-    auto database_path    = std::optional<std::filesystem::path>{};
-    auto http_concurrency = std::optional<std::uint32_t>{};
-    auto http_proxy       = std::optional<std::string>{};
-    auto http_ca_bundle   = std::optional<std::filesystem::path>{};
-    for (auto const& argument : parser) {
-        if (argument.kind() != CommandLineArgumentKind::Option || !argument.known() || argument.missing_value() ||
-            !argument.value() || argument.value()->empty()) {
-            return std::nullopt;
-        }
-
-        if (argument.name() == "socket" && !socket_path) {
-            socket_path = std::filesystem::path{std::string{*argument.value()}};
-        }
-        else if (argument.name() == "database" && !database_path) {
-            database_path = std::filesystem::path{std::string{*argument.value()}};
-        }
-        else if (argument.name() == "http-concurrency" && !http_concurrency) {
-            http_concurrency = parse_positive_uint32(*argument.value());
-            if (!http_concurrency) {
-                return std::nullopt;
-            }
-        }
-        else if (argument.name() == "http-proxy" && !http_proxy) {
-            http_proxy = std::string{*argument.value()};
-        }
-        else if (argument.name() == "http-ca-bundle" && !http_ca_bundle) {
-            http_ca_bundle = std::filesystem::path{std::string{*argument.value()}};
-        }
-        else {
-            return std::nullopt;
-        }
-    }
-
-    if (!socket_path || !database_path) {
-        return std::nullopt;
-    }
-    return StartupOptions{
-        .socket_path      = std::move(*socket_path),
-        .database_path    = std::move(*database_path),
-        .http_concurrency = http_concurrency.value_or(16U),
-        .http_proxy       = std::move(http_proxy),
-        .http_ca_bundle   = std::move(http_ca_bundle),
-    };
-}
-
 void print_usage()
 {
     fmt::print(stderr,
                "Usage: jobud --socket <filesystem-path> --database <sqlite-file> "
+               "[--cli-concurrency <positive-integer>] [--allow-root-cli] "
                "[--http-concurrency <positive-integer>] [--http-proxy <http-or-https-url>] "
                "[--http-ca-bundle <filesystem-path>]\n");
 }
@@ -137,7 +57,7 @@ auto main(int argc, char* argv[]) -> int
         return EXIT_SUCCESS;
     }
 
-    auto const startup = parse_startup_options(argc, argv);
+    auto const startup = jb::jobud::detail::parse_startup_options(argc, argv);
     if (!startup) {
         print_usage();
         return EXIT_FAILURE;
@@ -176,16 +96,26 @@ auto main(int argc, char* argv[]) -> int
         return EXIT_FAILURE;
     }
 
-    // Declaration order keeps borrowed collaborators alive until their consumers are destroyed in reverse order.
-    auto                                http_client = std::move(created_http_client).value();
-    jb::jobu::http::HttpAttemptExecutor http_executor{*http_client, time_source};
-    Scheduler                           scheduler{database,
-                                                  attribute_registry,
-                                                  cron,
-                                                  uuid_generator,
-                                                  time_source,
-                                                  http_executor,
-                                                  {.http_concurrency = startup->http_concurrency}};
+    // Reverse destruction stops Scheduler first, then destroys group-owned runners while the HTTP client is alive.
+    // This scope cleanup does not install Phase 7's daemon signal handling or rewrite durable running attempts.
+    auto                 http_client = std::move(created_http_client).value();
+    AttemptExecutorGroup executors;
+    auto                 registered =
+        jb::jobud::detail::register_attempt_executors(executors, *http_client, time_source, startup->allow_root_cli);
+    if (!registered) {
+        log_error("Unable to register the JobU attempt executors: {} ({})",
+                  registered.error().message,
+                  registered.error().code);
+        return EXIT_FAILURE;
+    }
+
+    Scheduler         scheduler{database,
+                                attribute_registry,
+                                cron,
+                                uuid_generator,
+                                time_source,
+                                executors,
+                                jb::jobud::detail::scheduler_options(*startup)};
     ManagementService management_service{database, attribute_registry, cron, uuid_generator, time_source};
     LocalServer       local_server;
     Server            rpc_server;
@@ -203,7 +133,7 @@ auto main(int argc, char* argv[]) -> int
 
     auto info = SystemInfo{
         .daemon_version = std::string{jb::jobu::detail::project_version},
-        .api_version    = {.major = 1, .minor = 1},
+        .api_version    = {.major = 1, .minor = 2},
         .capabilities   = std::move(capabilities),
     };
     if (!register_system_info_method(rpc_server, std::move(info))) {

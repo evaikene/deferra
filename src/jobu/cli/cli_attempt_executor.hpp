@@ -12,7 +12,8 @@ namespace jb::jobu::cli {
 
 namespace detail {
 struct CliAttemptExecutorTestAccess;
-}
+struct CliAttemptExecutorFactory;
+} // namespace detail
 
 /// Configures process-identity policy for CLI attempts.
 struct CliAttemptExecutorOptions {
@@ -90,6 +91,7 @@ public:
 
 private:
     friend struct detail::CliAttemptExecutorTestAccess;
+    friend struct detail::CliAttemptExecutorFactory;
     struct Private;
 
     /// Retains allocation ownership until Object construction succeeds.
