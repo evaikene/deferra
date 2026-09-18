@@ -527,6 +527,18 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JobU executable smoke tests
 if(TARGET jobud)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(jobud-startup-test
+            jobud-startup-test.cpp
+            ../src/jobud/startup_priv.cpp
+            ../src/jobud/composition_priv.cpp
+            support/fake_http_client.cpp
+            support/temporary_directory.cpp
+        )
+        target_include_directories(jobud-startup-test PRIVATE ../src/jobud)
+        target_link_libraries(jobud-startup-test PRIVATE jobu-sqlite jobu-http jobu-cli Catch2::Catch2WithMain)
+        add_test(NAME jobud-startup-test COMMAND $<TARGET_FILE:jobud-startup-test>)
+    endif()
     add_test(NAME jobud-version COMMAND $<TARGET_FILE:jobud> --version)
     add_test(NAME jobud-usage COMMAND $<TARGET_FILE:jobud>)
     add_test(NAME jobud-missing-database COMMAND $<TARGET_FILE:jobud> --socket unused.sock)

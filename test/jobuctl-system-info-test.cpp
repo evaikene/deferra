@@ -114,7 +114,7 @@ auto fail(std::string_view message) -> int
 auto expected_system_info(std::string_view version) -> std::string
 {
     return fmt::format("Daemon version: {}\n"
-                       "API version: 1.1\n"
+                       "API version: 1.2\n"
                        "Capabilities:\n"
                        "  job.create\n"
                        "  job.delete\n"

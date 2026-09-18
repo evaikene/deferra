@@ -464,6 +464,32 @@ auto main(int argc, char* argv[]) -> int
         return fail("jobud accepted invalid HTTP concurrency options");
     }
 
+    // These errors must be rejected by argument parsing, before either persistent resource is opened.
+    auto const invalid_cli_options = std::vector<std::vector<std::string>>{
+        {"--cli-concurrency", "0"},
+        {"--cli-concurrency", "4294967296"},
+        {"--cli-concurrency", "1", "--cli-concurrency", "2"},
+        {"--cli-concurrency"},
+        {"--cli-concurrency", "1x"},
+        {"--cli-concurrency", "-1"},
+        {"--cli-concurrency="},
+        {"--allow-root-cli", "--allow-root-cli"},
+        {"--allow-root-cli=true"},
+        {"--allow-root-cli=false"},
+        {"--allow-root-cli="},
+        {"--allow-root-cli", "true"},
+        {"--unknown-option"},
+    };
+    for (std::size_t index = 0; index < invalid_cli_options.size(); ++index) {
+        auto const name = "invalid-cli-" + std::to_string(index);
+        if (!rejects_usage(jobud,
+                           directory.path() / (name + ".sock"),
+                           directory.path() / (name + ".sqlite"),
+                           invalid_cli_options[index])) {
+            return fail("jobud accepted invalid CLI startup options or opened resources before rejection");
+        }
+    }
+
     if (!rejects_client_options(jobud,
                                 directory.path() / "proxy.sock",
                                 directory.path() / "proxy.sqlite",

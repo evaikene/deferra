@@ -76,6 +76,14 @@ make_system_process_adapter_for_test(CliAttemptExecutor&                        
 
 [[nodiscard]] auto make_system_identity_probe() -> std::unique_ptr<EffectiveIdentityProbe>;
 
+/// Private daemon construction seam; retains live identity checks with the production Process adapter.
+struct CliAttemptExecutorFactory {
+    /// A null probe selects the system identity. The returned executor is unparented and exclusively owned.
+    [[nodiscard]] static auto create(CliAttemptExecutorOptions               options,
+                                     std::unique_ptr<EffectiveIdentityProbe> identity)
+        -> std::unique_ptr<CliAttemptExecutor>;
+};
+
 /// Private construction access for deterministic executor-only tests.
 struct CliAttemptExecutorTestAccess {
     [[nodiscard]] static auto create(CliAttemptExecutorOptions               options,
