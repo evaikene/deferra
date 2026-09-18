@@ -1,6 +1,6 @@
-/** @file transaction.hpp
- * @brief Defines the move-only RAII guard for generic database transactions.
- */
+/// @file transaction.hpp
+/// @brief Defines the move-only RAII guard for generic database transactions.
+///
 #pragma once
 
 #include "database.hpp"
@@ -14,12 +14,12 @@ namespace detail {
 struct TransactionAccess;
 } // namespace detail
 
-/** Owns one guarded top-level transaction and rolls it back when scope exits without successful completion.
- *
- * Create a guard with begin(), then call commit() or rollback() explicitly when appropriate. Declare the guard before
- * Query objects in the same scope so those queries are destroyed before automatic rollback during stack unwinding. The
- * referenced Database must outlive the guard.
- */
+/// Owns one guarded top-level transaction and rolls it back when scope exits without successful completion.
+///
+/// Create a guard with begin(), then call commit() or rollback() explicitly when appropriate. Declare the guard before
+/// Query objects in the same scope so those queries are destroyed before automatic rollback during stack unwinding. The
+/// referenced Database must outlive the guard.
+///
 class Transaction final {
 public:
     /// Creates an inactive transaction guard.

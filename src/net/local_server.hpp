@@ -1,7 +1,7 @@
-/**
- * @file local_server.hpp
- * @brief Provides an event-loop-driven server for local filesystem byte streams.
- */
+///
+/// @file local_server.hpp
+/// @brief Provides an event-loop-driven server for local filesystem byte streams.
+///
 #pragma once
 
 #include "io_device.hpp"

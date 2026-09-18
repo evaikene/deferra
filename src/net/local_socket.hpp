@@ -1,7 +1,7 @@
-/**
- * @file local_socket.hpp
- * @brief Provides an event-loop-driven local filesystem byte-stream device.
- */
+///
+/// @file local_socket.hpp
+/// @brief Provides an event-loop-driven local filesystem byte-stream device.
+///
 #pragma once
 
 #include "io_device.hpp"

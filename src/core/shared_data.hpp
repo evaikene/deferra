@@ -1,40 +1,40 @@
 #pragma once
 
-/**
- * @file shared_data.hpp
- * @brief Provides reference-counted data with explicit detach semantics.
- *
- * Derive a payload from `SharedData` and manage it with
- * `ExplicitlySharedDataPointer<T>`. Copies of the pointer share the same
- * payload, so mutations are visible through every pointer until one of them
- * explicitly calls `detach()`:
- *
- * \code{.cpp}
- * struct Payload : jb::core::SharedData {
- *     int value{};
- * };
- *
- * auto first = jb::core::make_explicitly_shared<Payload>();
- * first->value = 1;
- *
- * auto second = first;
- * second.detach();
- * second->value = 2;
- *
- * // first->value is 1; second->value is 2.
- * \endcode
- *
- * `detach()` copies the concrete payload when the pointer is shared and makes
- * the calling pointer its unique owner. It is not automatic copy-on-write:
- * callers must invoke it before mutating data that should no longer be shared.
- * The payload type must therefore be copy-constructible when `detach()` is
- * used.
- *
- * `ExplicitlySharedDataPointer<T>` owns the pointer supplied to its raw-pointer
- * constructor or `reset()` call and deletes the payload when the last owner is
- * destroyed. The supplied pointer must be a newly owned allocation and must
- * not already be managed by another `ExplicitlySharedDataPointer`.
- */
+///
+/// @file shared_data.hpp
+/// @brief Provides reference-counted data with explicit detach semantics.
+///
+/// Derive a payload from `SharedData` and manage it with
+/// `ExplicitlySharedDataPointer<T>`. Copies of the pointer share the same
+/// payload, so mutations are visible through every pointer until one of them
+/// explicitly calls `detach()`:
+///
+/// \code{.cpp}
+/// struct Payload : jb::core::SharedData {
+///     int value{};
+/// };
+///
+/// auto first = jb::core::make_explicitly_shared<Payload>();
+/// first->value = 1;
+///
+/// auto second = first;
+/// second.detach();
+/// second->value = 2;
+///
+/// // first->value is 1; second->value is 2.
+/// \endcode
+///
+/// `detach()` copies the concrete payload when the pointer is shared and makes
+/// the calling pointer its unique owner. It is not automatic copy-on-write:
+/// callers must invoke it before mutating data that should no longer be shared.
+/// The payload type must therefore be copy-constructible when `detach()` is
+/// used.
+///
+/// `ExplicitlySharedDataPointer<T>` owns the pointer supplied to its raw-pointer
+/// constructor or `reset()` call and deletes the payload when the last owner is
+/// destroyed. The supplied pointer must be a newly owned allocation and must
+/// not already be managed by another `ExplicitlySharedDataPointer`.
+///
 
 #include <atomic>
 #include <cassert>

@@ -1,7 +1,7 @@
-/**
- * @file tcp_socket.hpp
- * @brief Provides an event-loop-driven TCP byte-stream device.
- */
+///
+/// @file tcp_socket.hpp
+/// @brief Provides an event-loop-driven TCP byte-stream device.
+///
 #pragma once
 
 #include "io_device.hpp"

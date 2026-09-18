@@ -1,6 +1,6 @@
-/** @file byte_buffer.hpp
- * @brief Defines project-owned containers and views for arbitrary binary data.
- */
+/// @file byte_buffer.hpp
+/// @brief Defines project-owned containers and views for arbitrary binary data.
+///
 #pragma once
 
 #include <cstddef>

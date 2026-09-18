@@ -1,6 +1,6 @@
-/** @file fake_database_driver.hpp
- * @brief Defines deterministic database-driver state and implementations for generic database tests.
- */
+/// @file fake_database_driver.hpp
+/// @brief Defines deterministic database-driver state and implementations for generic database tests.
+///
 #pragma once
 
 #include "driver.hpp"

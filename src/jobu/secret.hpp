@@ -1,6 +1,6 @@
-/** @file secret.hpp
- * @brief Defines the public metadata-only view of a JobU secret.
- */
+/// @file secret.hpp
+/// @brief Defines the public metadata-only view of a JobU secret.
+///
 #pragma once
 
 #include "time_source.hpp"
@@ -9,11 +9,11 @@
 
 namespace jb::jobu {
 
-/** Public metadata for a named secret.
- *
- * Secret bytes are intentionally absent and remain private repository input/output. They must not appear in public
- * read values, errors, logs, RPC results, or command output.
- */
+/// Public metadata for a named secret.
+///
+/// Secret bytes are intentionally absent and remain private repository input/output. They must not appear in public
+/// read values, errors, logs, RPC results, or command output.
+///
 struct SecretMetadata {
     /// Canonical secret name.
     std::string            name;

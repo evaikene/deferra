@@ -1,6 +1,6 @@
-/** @file fake_time_source.hpp
- * @brief Defines deterministic wall and monotonic time support for tests.
- */
+/// @file fake_time_source.hpp
+/// @brief Defines deterministic wall and monotonic time support for tests.
+///
 #pragma once
 
 #include "time_source.hpp"

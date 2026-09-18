@@ -1,6 +1,6 @@
-/** @file event_loop.hpp
- * @brief Owner-thread task, timer, object-event, and native readiness dispatch.
- */
+/// @file event_loop.hpp
+/// @brief Owner-thread task, timer, object-event, and native readiness dispatch.
+///
 #pragma once
 
 #include "error.hpp"

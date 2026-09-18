@@ -1,6 +1,6 @@
-/** @file job.hpp
- * @brief Defines persistent JobU job definitions and schedule values.
- */
+/// @file job.hpp
+/// @brief Defines persistent JobU job definitions and schedule values.
+///
 #pragma once
 
 #include "attribute.hpp"
@@ -38,10 +38,10 @@ struct OnceSchedule {
     jb::core::UtcTimePoint planned_at;
 };
 
-/** Recurring schedule evaluated in one IANA timezone.
- *
- * Management creation validates both fields through its borrowed CronEngine before persisting the definition.
- */
+/// Recurring schedule evaluated in one IANA timezone.
+///
+/// Management creation validates both fields through its borrowed CronEngine before persisting the definition.
+///
 struct CronSchedule {
     /// Five-field cron expression interpreted using JobU's documented calendar rules.
     std::string expression;
@@ -52,11 +52,11 @@ struct CronSchedule {
 /// Schedule representation stored by a job definition.
 using JobSchedule = std::variant<OnceSchedule, CronSchedule>;
 
-/** Persistent job definition managed through optimistic revisions.
- *
- * Attributes are complete and materialized when the definition is persisted. Payload is an owning project JSON
- * object whose runner-specific structural validation is performed by management operations.
- */
+/// Persistent job definition managed through optimistic revisions.
+///
+/// Attributes are complete and materialized when the definition is persisted. Payload is an owning project JSON
+/// object whose runner-specific structural validation is performed by management operations.
+///
 struct JobDefinition {
     /// Stable definition identity.
     jb::core::Uuid                        id;

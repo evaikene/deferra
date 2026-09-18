@@ -1,6 +1,6 @@
-/** @file driver_query.hpp
- * @brief Defines the backend query interface consumed by the generic Query API.
- */
+/// @file driver_query.hpp
+/// @brief Defines the backend query interface consumed by the generic Query API.
+///
 #pragma once
 
 #include "error.hpp"
@@ -16,10 +16,10 @@ namespace jb::db {
 
 class Query;
 
-/** Describes the cursor and mutation outcome produced by query execution.
- *
- * DriverQuery implementations return this owning metadata so generic Query state never references backend buffers.
- */
+/// Describes the cursor and mutation outcome produced by query execution.
+///
+/// DriverQuery implementations return this owning metadata so generic Query state never references backend buffers.
+///
 struct ExecutionInfo {
     /// Whether execution produced a record cursor.
     bool         produces_records{false};
@@ -29,11 +29,11 @@ struct ExecutionInfo {
     Record       record_metadata;
 };
 
-/** Performs backend-specific prepared-query operations for generic Query.
- *
- * Backend authors derive from DriverQuery and expose instances only through Driver::create_query(). Application code
- * uses the higher-level Query API rather than calling this interface directly.
- */
+/// Performs backend-specific prepared-query operations for generic Query.
+///
+/// Backend authors derive from DriverQuery and expose instances only through Driver::create_query(). Application code
+/// uses the higher-level Query API rather than calling this interface directly.
+///
 class DriverQuery {
 public:
     /// Destroys a backend query and its native statement through the interface.

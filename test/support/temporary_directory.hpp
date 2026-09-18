@@ -1,6 +1,6 @@
-/** @file temporary_directory.hpp
- * @brief Defines a move-only RAII directory helper for tests.
- */
+/// @file temporary_directory.hpp
+/// @brief Defines a move-only RAII directory helper for tests.
+///
 #pragma once
 
 #include <filesystem>

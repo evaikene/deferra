@@ -1,6 +1,6 @@
-/** @file uuid.hpp
- * @brief Defines UUID values and an injectable, monotonic UUIDv7 generator.
- */
+/// @file uuid.hpp
+/// @brief Defines UUID values and an injectable, monotonic UUIDv7 generator.
+///
 #pragma once
 
 #include "error.hpp"

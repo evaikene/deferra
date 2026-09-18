@@ -1,6 +1,6 @@
-/** @file record.hpp
- * @brief Defines owning database fields and forward-query records.
- */
+/// @file record.hpp
+/// @brief Defines owning database fields and forward-query records.
+///
 #pragma once
 
 #include "value.hpp"
@@ -12,10 +12,10 @@
 
 namespace jb::db {
 
-/** Stores one database field name and its backend-independent value.
- *
- * Query backends construct Fields while application code reads their immutable name and value.
- */
+/// Stores one database field name and its backend-independent value.
+///
+/// Query backends construct Fields while application code reads their immutable name and value.
+///
 class Field {
 public:
     /// Creates a field by taking ownership of its name and value.
@@ -40,11 +40,11 @@ private:
     Value       _value;
 };
 
-/** Owns the ordered fields for one query row or a query's field metadata.
- *
- * Use indexed access when column order is known or case-insensitive named access for stable column aliases. Records are
- * read-only values and do not generate SQL.
- */
+/// Owns the ordered fields for one query row or a query's field metadata.
+///
+/// Use indexed access when column order is known or case-insensitive named access for stable column aliases. Records
+/// are read-only values and do not generate SQL.
+///
 class Record {
 public:
     /// Creates an empty record.

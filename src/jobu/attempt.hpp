@@ -1,6 +1,6 @@
-/** @file attempt.hpp
- * @brief Defines durable JobU attempt identity, timing, state, and outcome values.
- */
+/// @file attempt.hpp
+/// @brief Defines durable JobU attempt identity, timing, state, and outcome values.
+///
 #pragma once
 
 #include "json.hpp"
@@ -30,11 +30,11 @@ enum class AttemptOutcome : std::uint8_t {
     Cancelled,   ///< Execution was cancelled explicitly before or after it started.
 };
 
-/** One durable execution attempt within a run.
- *
- * The composite identity is run_id plus a positive attempt_number. Phase 3 provides this value for repository fixture
- * round trips; production management operations do not create attempts.
- */
+/// One durable execution attempt within a run.
+///
+/// The composite identity is run_id plus a positive attempt_number. Phase 3 provides this value for repository fixture
+/// round trips; production management operations do not create attempts.
+///
 struct JobAttempt {
     /// Parent run identity.
     jb::core::Uuid                        run_id;

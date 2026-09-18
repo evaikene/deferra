@@ -1,6 +1,6 @@
-/** @file value.hpp
- * @brief Defines backend-independent database values and byte-preserving construction helpers.
- */
+/// @file value.hpp
+/// @brief Defines backend-independent database values and byte-preserving construction helpers.
+///
 #pragma once
 
 #include "byte_buffer.hpp"
@@ -12,10 +12,10 @@
 
 namespace jb::db {
 
-/** Represents SQL null independently of empty text and blob values.
- *
- * Store this alternative in a Value when a parameter or field must represent SQL NULL.
- */
+/// Represents SQL null independently of empty text and blob values.
+///
+/// Store this alternative in a Value when a parameter or field must represent SQL NULL.
+///
 struct Null {
     /// Compares two SQL null markers.
     /// @param other Null marker to compare.
@@ -23,10 +23,10 @@ struct Null {
     auto operator==(Null const& other) const -> bool = default;
 };
 
-/** Owning value accepted and returned by database drivers.
- *
- * Repositories explicitly select the required alternative; the database layer performs no implicit conversions.
- */
+/// Owning value accepted and returned by database drivers.
+///
+/// Repositories explicitly select the required alternative; the database layer performs no implicit conversions.
+///
 using Value = std::variant<Null, std::int64_t, double, std::string, jb::core::ByteBuffer>;
 
 /// Creates an owning text database value without changing its bytes.

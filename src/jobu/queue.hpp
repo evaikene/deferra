@@ -1,6 +1,6 @@
-/** @file queue.hpp
- * @brief Defines the persistent JobU queue domain value.
- */
+/// @file queue.hpp
+/// @brief Defines the persistent JobU queue domain value.
+///
 #pragma once
 
 #include "attribute.hpp"
@@ -28,12 +28,12 @@ enum class RecoveryPolicy : std::uint8_t {
     RetryInterrupted, ///< Retry interrupted work when its attempt policy permits.
 };
 
-/** Persistent queue configuration and lifecycle state.
- *
- * A missing history_retention inherits the daemon policy, zero means unlimited retention, and a positive value is a
- * queue-specific duration. Deleted queues expose their original user-facing name; any internal uniqueness rewrite is
- * a private storage detail.
- */
+/// Persistent queue configuration and lifecycle state.
+///
+/// A missing history_retention inherits the daemon policy, zero means unlimited retention, and a positive value is a
+/// queue-specific duration. Deleted queues expose their original user-facing name; any internal uniqueness rewrite is
+/// a private storage detail.
+///
 struct Queue {
 
     /// Default scheduler weight for newly constructed queues.

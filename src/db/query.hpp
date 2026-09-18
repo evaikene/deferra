@@ -1,6 +1,6 @@
-/** @file query.hpp
- * @brief Defines the forward-only generic prepared-query API used by application repositories.
- */
+/// @file query.hpp
+/// @brief Defines the forward-only generic prepared-query API used by application repositories.
+///
 #pragma once
 
 #include "database.hpp"
@@ -14,12 +14,12 @@
 
 namespace jb::db {
 
-/** Owns generic prepared-query state while delegating native work to a DriverQuery.
- *
- * Construct a Query with a Database that will outlive it. Prepare SQL, bind every placeholder explicitly, execute, and
- * advance result rows with next(). The query is forward-only; finish() retains SQL and bindings for reuse, while
- * clear() discards all prepared state.
- */
+/// Owns generic prepared-query state while delegating native work to a DriverQuery.
+///
+/// Construct a Query with a Database that will outlive it. Prepare SQL, bind every placeholder explicitly, execute, and
+/// advance result rows with next(). The query is forward-only; finish() retains SQL and bindings for reuse, while
+/// clear() discards all prepared state.
+///
 class Query final {
 public:
     /// Creates an unprepared query and immediately registers its lifetime with a database.

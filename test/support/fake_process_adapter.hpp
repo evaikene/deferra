@@ -1,6 +1,6 @@
-/** @file fake_process_adapter.hpp
- * @brief Defines deterministic process-adapter and effective-identity seams for CLI executor tests.
- */
+/// @file fake_process_adapter.hpp
+/// @brief Defines deterministic process-adapter and effective-identity seams for CLI executor tests.
+///
 #pragma once
 
 #include "cli/process_adapter_priv.hpp"
@@ -32,7 +32,7 @@ struct FakeProcessAdapterObservation {
     std::vector<jobu::cli::detail::ProcessOperationId> shutdown;
 };
 
-/** Test-only adapter whose owner thread explicitly drives every operation event. */
+/// Test-only adapter whose owner thread explicitly drives every operation event.
 class FakeProcessAdapter final : public jobu::cli::detail::ProcessAdapter {
 public:
     FakeProcessAdapter();
@@ -82,7 +82,7 @@ private:
     std::vector<std::shared_ptr<PendingOperation>> _pending;
 };
 
-/** Mutable deterministic effective-identity source. */
+/// Mutable deterministic effective-identity source.
 class FakeEffectiveIdentityProbe final : public jobu::cli::detail::EffectiveIdentityProbe {
 public:
     explicit FakeEffectiveIdentityProbe(std::uint64_t effective_user_id = 1000U) noexcept;

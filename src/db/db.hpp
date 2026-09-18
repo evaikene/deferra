@@ -1,6 +1,6 @@
-/** @file db.hpp
- * @brief Marks the JobU database module during its Phase 0 skeleton stage.
- */
+/// @file db.hpp
+/// @brief Marks the JobU database module during its Phase 0 skeleton stage.
+///
 #pragma once
 
 #include <cstdint>

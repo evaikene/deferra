@@ -1,6 +1,6 @@
-/** @file sqlite_driver.hpp
- * @brief Defines explicit application selection and configuration of the file-backed SQLite driver.
- */
+/// @file sqlite_driver.hpp
+/// @brief Defines explicit application selection and configuration of the file-backed SQLite driver.
+///
 #pragma once
 
 #include "driver.hpp"
@@ -13,10 +13,10 @@
 
 namespace jb::db::sqlite {
 
-/** Selects SQLite write-durability behavior for a WAL database.
- *
- * Choose Normal for the usual performance/safety balance or Full when commits must be synchronized before returning.
- */
+/// Selects SQLite write-durability behavior for a WAL database.
+///
+/// Choose Normal for the usual performance/safety balance or Full when commits must be synchronized before returning.
+///
 enum class Durability : std::uint8_t {
     /// Uses SQLite `synchronous=NORMAL` behavior.
     Normal,
@@ -24,11 +24,11 @@ enum class Durability : std::uint8_t {
     Full,
 };
 
-/** Configures one file-backed SQLite connection.
- *
- * Set database_file to a normal filesystem path. The driver rejects empty paths, SQLite URI forms, and `:memory:`;
- * creates or opens the file; and holds a non-blocking adjacent `.lock` file while open.
- */
+/// Configures one file-backed SQLite connection.
+///
+/// Set database_file to a normal filesystem path. The driver rejects empty paths, SQLite URI forms, and `:memory:`;
+/// creates or opens the file; and holds a non-blocking adjacent `.lock` file while open.
+///
 struct Options {
     /// Database file to create or open. Its parent directory must already exist.
     std::filesystem::path     database_file;
@@ -38,12 +38,12 @@ struct Options {
     Durability                durability{Durability::Normal};
 };
 
-/** Implements the generic database driver contract using one private file-backed SQLite connection.
- *
- * Construct Driver with Options, transfer it to jb::db::Database, and use the generic Database, Query, Record, Value,
- * and Transaction APIs. The driver enables WAL and foreign keys, applies the requested timeout and durability, and
- * prevents a second JobU connection from owning the same file through an adjacent process lock.
- */
+/// Implements the generic database driver contract using one private file-backed SQLite connection.
+///
+/// Construct Driver with Options, transfer it to jb::db::Database, and use the generic Database, Query, Record, Value,
+/// and Transaction APIs. The driver enables WAL and foreign keys, applies the requested timeout and durability, and
+/// prevents a second JobU connection from owning the same file through an adjacent process lock.
+///
 class Driver final : public jb::db::Driver {
 public:
     /// Creates a closed SQLite driver by taking ownership of its configuration.

@@ -1,6 +1,6 @@
-/** @file run.hpp
- * @brief Defines immutable execution snapshots and lifecycle state for JobU runs.
- */
+/// @file run.hpp
+/// @brief Defines immutable execution snapshots and lifecycle state for JobU runs.
+///
 #pragma once
 
 #include "job.hpp"
@@ -29,11 +29,11 @@ enum class RunState : std::uint8_t {
     Cancelled,   ///< Cancelled without further execution.
 };
 
-/** One durable occurrence of a job definition.
- *
- * The runner type, priority, attributes, and payload form an immutable execution snapshot. A manual occurrence is
- * separate from the definition's schedule-owned occurrence and retains its own immutable snapshot.
- */
+/// One durable occurrence of a job definition.
+///
+/// The runner type, priority, attributes, and payload form an immutable execution snapshot. A manual occurrence is
+/// separate from the definition's schedule-owned occurrence and retains its own immutable snapshot.
+///
 struct JobRun {
     /// Stable run identity.
     jb::core::Uuid                        id;

@@ -1,6 +1,6 @@
-/** @file database.hpp
- * @brief Defines the move-only generic database connection owned by application code.
- */
+/// @file database.hpp
+/// @brief Defines the move-only generic database connection owned by application code.
+///
 #pragma once
 
 #include "driver.hpp"
@@ -14,13 +14,13 @@ namespace jb::db {
 class Query;
 class Transaction;
 
-/** Owns one backend Driver and enforces generic connection lifetime and thread-affinity rules.
- *
- * Construct a Database with a concrete backend driver, call open(), then create Query objects that reference it. Use
- * transaction(), commit(), and rollback() for directly managed transactions, or Transaction::begin() for scoped
- * rollback. Queries and transaction guards must be destroyed before closing, moving, or destroying their Database. A
- * default-constructed Database is an invalid handle useful as a moved-from or deferred-selection value.
- */
+/// Owns one backend Driver and enforces generic connection lifetime and thread-affinity rules.
+///
+/// Construct a Database with a concrete backend driver, call open(), then create Query objects that reference it. Use
+/// transaction(), commit(), and rollback() for directly managed transactions, or Transaction::begin() for scoped
+/// rollback. Queries and transaction guards must be destroyed before closing, moving, or destroying their Database. A
+/// default-constructed Database is an invalid handle useful as a moved-from or deferred-selection value.
+///
 class Database final {
 public:
     /// Creates an invalid database with no driver.
@@ -38,12 +38,12 @@ public:
     /// @param other Database that would otherwise be copied.
     Database(Database const& other) = delete;
 
-    /** Transfers an idle database connection from another object.
-     * @param other Database to transfer from.
-     * @warning The transfer requires no live Query objects or Transaction guard and, for an open database, the owning
-     *          thread. If the requirement is not met, this object remains invalid and other records the corresponding
-     *          error.
-     */
+    /// Transfers an idle database connection from another object.
+    /// @param other Database to transfer from.
+    /// @warning The transfer requires no live Query objects or Transaction guard and, for an open database, the owning
+    ///          thread. If the requirement is not met, this object remains invalid and other records the corresponding
+    ///          error.
+    ///
     Database(Database&& other) noexcept;
 
     /// Prevents replacing a connection because that could hide close failures.
