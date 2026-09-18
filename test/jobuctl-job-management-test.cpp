@@ -555,7 +555,9 @@ auto inspect_database(std::filesystem::path const& database_path,
         return false;
     }
 
-    auto const cli_payload  = fmt::format(R"({{"arguments":["-c","{}"],"command":"/bin/sh"}})", cli_payload_marker);
+    auto const cli_payload = fmt::format(
+        R"({{"arguments":["-c","{}"],"command":"/bin/sh","environment":{{"EMPTY":"","REMOVE":null,"VALUE":"one=two"}},"expected_exit_codes":[0,7],"working_directory":"/"}})",
+        cli_payload_marker);
     auto const http_payload = fmt::format(R"({{"method":"GET","url":"{}"}})", http_url);
     auto valid = inspect_job(database, cli_job_id, cli_queue_id, cli_revision, "deleted", "cancelled", cli_payload) &&
                  inspect_job(database, http_job_id, http_queue_id, 1, "active", "scheduled", http_payload);
@@ -654,6 +656,28 @@ auto main(int argc, char* argv[]) -> int
         return fail("jobuctl accepted invalid job command arguments");
     }
 
+    for (auto const& options : {
+             std::initializer_list<std::string_view>{"job",
+                                                     "create", "--queue-name",
+                                                     "source", "--type",
+                                                     "cli", "--at",
+                                                     "2030-01-01T00:00:00Z", "--command",
+                                                     "/bin/true", "--env",
+                                                     "NAME=value", "--unset-env",
+                                                     "NAME"},
+             std::initializer_list<std::string_view>{"job",
+                                                     "create", "--queue-name",
+                                                     "source", "--type",
+                                                     "cli", "--at",
+                                                     "2030-01-01T00:00:00Z", "--command",
+                                                     "/bin/true", "--working-directory",
+                                                     "relative"},
+    }) {
+        if (!rejects_before_connect(argv[2], socket_path, options)) {
+            return fail("jobuctl accepted invalid CLI creation fields");
+        }
+    }
+
     auto http_sentinel = HttpSentinel::create();
     if (!http_sentinel) {
         return fail("unable to create the HTTP execution sentinel");
@@ -700,6 +724,18 @@ auto main(int argc, char* argv[]) -> int
                                     "-c",
                                     "--arg",
                                     marker_command,
+                                    "--working-directory",
+                                    "/",
+                                    "--env",
+                                    "EMPTY=",
+                                    "--env",
+                                    "VALUE=one=two",
+                                    "--unset-env",
+                                    "REMOVE",
+                                    "--expected-exit-code",
+                                    "0",
+                                    "--expected-exit-code",
+                                    "7",
                                     "--name",
                                     "cli-job",
                                     "--priority",
@@ -731,6 +767,18 @@ auto main(int argc, char* argv[]) -> int
                                      "-c",
                                      "--arg",
                                      marker_command,
+                                     "--working-directory",
+                                     "/",
+                                     "--env",
+                                     "EMPTY=",
+                                     "--env",
+                                     "VALUE=one=two",
+                                     "--unset-env",
+                                     "REMOVE",
+                                     "--expected-exit-code",
+                                     "0",
+                                     "--expected-exit-code",
+                                     "7",
                                      "--name",
                                      "cli-job",
                                      "--priority",
