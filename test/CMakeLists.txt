@@ -144,6 +144,15 @@ add_executable(${TARGET} cli-capture-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU CLI attempt executor and deterministic fake-process test
+set(TARGET "cli-attempt-executor-test")
+add_executable(${TARGET}
+    cli-attempt-executor-test.cpp
+    support/fake_process_adapter.cpp
+)
+target_link_libraries(${TARGET} PRIVATE jobu-cli Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Test support test
 set(TARGET "test-support-test")
 add_executable(${TARGET}
@@ -372,6 +381,12 @@ endforeach()
 set(TARGET "jobu-http-public-header-test")
 add_executable(${TARGET} jobu-http-public-header-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu-http)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# JobU CLI attempt executor public header must compile as the first include.
+set(TARGET "jobu-cli-public-header-test")
+add_executable(${TARGET} jobu-cli-public-header-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu-cli)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # RPC public header boundary test
