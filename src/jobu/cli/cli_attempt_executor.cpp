@@ -590,4 +590,24 @@ auto detail::CliAttemptExecutorTestAccess::create(CliAttemptExecutorOptions     
     };
 }
 
+#if defined(__linux__)
+auto detail::CliAttemptExecutorTestAccess::create_with_system_process_adapter(
+    CliAttemptExecutorOptions                          options,
+    std::unique_ptr<EffectiveIdentityProbe>            identity,
+    std::shared_ptr<jb::core::priv::ProcessOperations> process_operations) -> std::unique_ptr<CliAttemptExecutor>
+{
+    if (!identity) {
+        identity = make_system_identity_probe();
+    }
+
+    auto data     = std::make_unique<CliAttemptExecutor::Private>(options, nullptr, std::move(identity));
+    auto executor = std::unique_ptr<CliAttemptExecutor>{
+        new CliAttemptExecutor{std::move(data), nullptr}
+    };
+    executor->d_ptr<CliAttemptExecutor::Private>()->adapter =
+        make_system_process_adapter_for_test(*executor, std::move(process_operations));
+    return executor;
+}
+#endif
+
 } // namespace jb::jobu::cli

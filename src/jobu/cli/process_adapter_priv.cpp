@@ -6,6 +6,10 @@
 
 #include <unistd.h>
 
+#if defined(__linux__)
+#  include "process_posix_priv.hpp"
+#endif
+
 namespace jb::jobu::cli::detail {
 
 namespace {
@@ -83,8 +87,10 @@ private:
 
 class SystemProcessAdapter final : public ProcessAdapter {
 public:
-    explicit SystemProcessAdapter(CliAttemptExecutor& owner)
+    explicit SystemProcessAdapter(CliAttemptExecutor&                                owner,
+                                  std::shared_ptr<jb::core::priv::ProcessOperations> process_operations = {})
         : _owner{owner}
+        , _process_operations{std::move(process_operations)}
     {}
 
     [[nodiscard]] auto start(jb::core::ProcessStartInfo start_info, ProcessEventSink sink)
@@ -105,7 +111,12 @@ public:
 
         // Guard the parented Process until the operation handle can assume immediate-cleanup responsibility.
         auto process = std::make_unique<jb::core::Process>(&_owner);
-        auto state   = std::make_shared<SystemProcessOperationState>(SystemProcessOperationState{
+        if (_process_operations) {
+            // The private seam changes only parent-prepared operations. Process freezes child-callable identity state
+            // before creation, so the real production launch path remains under test.
+            jb::core::priv::ProcessTestAccess::set_operations(*process, _process_operations);
+        }
+        auto state = std::make_shared<SystemProcessOperationState>(SystemProcessOperationState{
             .id      = operation_id,
             .process = process.get(),
             .sink    = std::move(sink),
@@ -144,9 +155,10 @@ public:
     }
 
 private:
-    CliAttemptExecutor& _owner;
-    ProcessOperationId  _next_operation_id{1};
-    bool                _identity_exhausted{false};
+    CliAttemptExecutor&                                _owner;
+    std::shared_ptr<jb::core::priv::ProcessOperations> _process_operations;
+    ProcessOperationId                                 _next_operation_id{1};
+    bool                                               _identity_exhausted{false};
 };
 #endif
 
@@ -169,6 +181,15 @@ auto make_system_process_adapter(CliAttemptExecutor& owner) -> std::unique_ptr<P
     return nullptr;
 #endif
 }
+
+#if defined(__linux__)
+auto make_system_process_adapter_for_test(CliAttemptExecutor&                                owner,
+                                          std::shared_ptr<jb::core::priv::ProcessOperations> process_operations)
+    -> std::unique_ptr<ProcessAdapter>
+{
+    return std::make_unique<SystemProcessAdapter>(owner, std::move(process_operations));
+}
+#endif
 
 auto make_system_identity_probe() -> std::unique_ptr<EffectiveIdentityProbe>
 {

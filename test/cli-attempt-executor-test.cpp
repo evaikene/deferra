@@ -10,6 +10,7 @@
 
 #if defined(__linux__)
 #  include "event_loop_backend_epoll_priv.hpp"
+#  include "process_posix_priv.hpp"
 #  include "support/temporary_directory.hpp"
 #endif
 
@@ -277,6 +278,21 @@ struct RealExecutorFixture {
         REQUIRE(application.application.process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
         CHECK(callback_count == 1U);
         return std::move(*completion);
+    }
+};
+
+auto reported_root_identity() noexcept -> uid_t
+{
+    return 0;
+}
+
+class RootChildIdentityOperations final : public jb::core::priv::ProcessOperations {
+public:
+    auto child_options() noexcept -> jb::core::priv::ProcessChildOptions override
+    {
+        auto options          = ProcessOperations::child_options();
+        options.effective_uid = reported_root_identity;
+        return options;
     }
 };
 
@@ -886,6 +902,55 @@ TEST_CASE("CLI production adapter executes explicit Process requests", "[jobu][c
     REQUIRE(no_new_privileges.output);
     REQUIRE(no_new_privileges.output->primary);
     CHECK(byte_text(no_new_privileges.output->primary->bytes) == "NoNewPrivs: 1\n");
+}
+
+TEST_CASE("CLI production adapter enforces the child-side non-root policy", "[jobu][cli][executor][linux]")
+{
+    TestApplication    application;
+    TemporaryDirectory directory;
+    auto               process_operations = std::make_shared<RootChildIdentityOperations>();
+    auto               parent_identity    = std::make_unique<FakeEffectiveIdentityProbe>(1000U);
+    auto executor = CliAttemptExecutorTestAccess::create_with_system_process_adapter({},
+                                                                                     std::move(parent_identity),
+                                                                                     std::move(process_operations));
+
+    REQUIRE(executor->is_available(JobType::Cli));
+
+    auto marker         = directory.path() / "target-executed";
+    auto completion     = std::optional<AttemptCompletion>{};
+    auto callback_count = std::size_t{0};
+    auto request        = helper_start_request(1, {"marker", marker.string()}, {}, {37U});
+
+    auto accepted = executor->start(std::move(request), [&](AttemptCompletion result) {
+        ++callback_count;
+        completion = std::move(result);
+    });
+    if (!accepted) {
+        UNSCOPED_INFO("start error: " << accepted.error().code << " " << accepted.error().detail);
+    }
+    REQUIRE(accepted);
+    CHECK_FALSE(completion);
+
+    auto const deadline = Clock::now() + 5s;
+    while (!completion && Clock::now() < deadline) {
+        REQUIRE(application.application.process_events(EventFlag::All, 10) != ProcessEventsResult::Failed);
+    }
+
+    REQUIRE(completion);
+    CHECK(callback_count == 1U);
+    CHECK(completion->outcome == AttemptOutcome::Failed);
+    CHECK(completion->failure_disposition == FailureDisposition::Terminal);
+    CHECK(result_string(*completion, "outcome") == "start_failure");
+    CHECK(result_string(*completion, "error_code") == "core.process.security_failed");
+    CHECK_FALSE(std::filesystem::exists(marker));
+
+    auto const cleanup_deadline = Clock::now() + 5s;
+    while (!executor->children().empty() && Clock::now() < cleanup_deadline) {
+        REQUIRE(application.application.process_events(EventFlag::All, 10) != ProcessEventsResult::Failed);
+    }
+    REQUIRE(executor->children().empty());
+    REQUIRE(application.application.process_events(EventFlag::All, 0) != ProcessEventsResult::Failed);
+    CHECK(callback_count == 1U);
 }
 
 TEST_CASE("CLI production adapter maps real Process terminal outcomes safely", "[jobu][cli][executor][linux]")
