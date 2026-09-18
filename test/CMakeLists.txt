@@ -144,6 +144,15 @@ add_executable(${TARGET} cli-capture-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Generic owned attempt executor routing test
+set(TARGET "attempt-executor-group-test")
+add_executable(${TARGET}
+    attempt-executor-group-test.cpp
+    support/fake_attempt_executor.cpp
+)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # JobU CLI attempt executor and deterministic fake-process test
 set(TARGET "cli-attempt-executor-test")
 add_executable(${TARGET}
@@ -358,6 +367,7 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 foreach(JOBU_DOMAIN_HEADER IN ITEMS
         attempt
         attempt-executor
+        attempt-executor-group
         attribute-registry
         cron
         job
