@@ -148,7 +148,9 @@ auto attribute_document(StandardAttributeRegistry const& registry,
     if (legacy) {
         REQUIRE(attributes->erase("retry.jitter") == 1U);
         REQUIRE(attributes->erase("retry.multiplier") == 1U);
-        for (auto const* name : {"http.follow_redirects",
+        for (auto const* name : {"cli.retry_exit_codes",
+                                 "cli.termination_grace",
+                                 "http.follow_redirects",
                                  "http.idempotency_key",
                                  "http.max_redirects",
                                  "http.retry_errors",

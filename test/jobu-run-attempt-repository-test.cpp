@@ -294,7 +294,9 @@ TEST_CASE("Run repository upgrades Phase 3 snapshots with later defaults", "[job
     auto legacy_attributes = run.attributes;
     REQUIRE(legacy_attributes.erase("retry.jitter") == 1U);
     REQUIRE(legacy_attributes.erase("retry.multiplier") == 1U);
-    for (auto const* name : {"http.follow_redirects",
+    for (auto const* name : {"cli.retry_exit_codes",
+                             "cli.termination_grace",
+                             "http.follow_redirects",
                              "http.idempotency_key",
                              "http.max_redirects",
                              "http.retry_errors",
@@ -321,6 +323,10 @@ TEST_CASE("Run repository upgrades Phase 3 snapshots with later defaults", "[job
     REQUIRE(found);
     REQUIRE(found->has_value());
     REQUIRE((*found)->attributes.size() == fixture.registry.definitions().size());
+    auto const& retry_exit_codes = std::get<AttributeValue::List>((*found)->attributes.at("cli.retry_exit_codes").data);
+    REQUIRE(retry_exit_codes.size() == 1U);
+    CHECK(std::get<std::string>(retry_exit_codes[0].data) == "0-255");
+    CHECK(std::get<Duration>((*found)->attributes.at("cli.termination_grace").data) == 5s);
     CHECK(std::get<std::int64_t>((*found)->attributes.at("retry.max_attempts").data) == 4);
     CHECK(std::get<double>((*found)->attributes.at("retry.jitter").data) == 0.0);
     CHECK(std::get<double>((*found)->attributes.at("retry.multiplier").data) == 2.0);

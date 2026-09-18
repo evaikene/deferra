@@ -19,7 +19,8 @@ namespace jb::jobu {
  *
  * Definitions and the pointers returned by find() remain valid for the lifetime of the registry. The registry is
  * immutable after construction and may be read concurrently when callers otherwise satisfy their own synchronization
- * requirements.
+ * requirements. CLI retry selectors use canonical exit codes or non-overlapping ranges, and CLI termination grace is
+ * bounded to the Process contract.
  */
 class StandardAttributeRegistry final : public AttributeRegistry {
 public:
@@ -58,7 +59,7 @@ public:
         -> jb::core::Result<void, jb::core::Error>;
 
 private:
-    std::array<AttributeDefinition, 19> _definitions;
+    std::array<AttributeDefinition, 21> _definitions;
 };
 
 /** Materializes the effective attributes for one job.
