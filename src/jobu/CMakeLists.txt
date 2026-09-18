@@ -101,6 +101,7 @@ target_link_libraries(${TARGET}
 )
 
 add_subdirectory(http)
+add_subdirectory(cli)
 
 if(TARGET db-sqlite)
     add_subdirectory(sqlite)
