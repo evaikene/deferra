@@ -504,6 +504,15 @@ auto captured_output() -> jb::jobu::AttemptOutput
     };
 }
 
+auto exact_output_channel(std::size_t retained_bytes) -> jb::jobu::AttemptOutputChannel
+{
+    return {
+        .bytes       = ByteBuffer(retained_bytes, std::byte{0x41}),
+        .total_bytes = retained_bytes,
+        .truncated   = false,
+    };
+}
+
 void check_captured_output(AttemptRepository& attempts, AttemptKey const& key)
 {
     auto output = attempts.find_output(key.run_id, key.attempt_number);
@@ -2072,6 +2081,82 @@ TEST_CASE("Scheduler core rejects invalid executor completion protocol and fails
         auto output = fixture.attempts.find_output(key.run_id, key.attempt_number);
         REQUIRE(output);
         CHECK_FALSE(output->has_value());
+    }
+}
+
+TEST_CASE("Scheduler core enforces the Phase 6 diagnostic retention ceiling",
+          "[jobu][scheduler][core][completion][output][sqlite]")
+{
+    constexpr auto maximum_diagnostic = std::size_t{64} * 1024U * 1024U;
+
+    SECTION("exact limit")
+    {
+        CoreFixture        fixture;
+        RawAttemptExecutor executor;
+        auto const         queue_id = id(148);
+        insert_queue(fixture.database, queue_id, 1);
+        auto const attributes = attribute_document(fixture.registry, "reschedule", 3, Duration::zero(), "always");
+        insert_scheduled(fixture, queue_id, 149, JobType::Cli, 0, 100, 100, attributes);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+        };
+
+        REQUIRE(core.process_cycle());
+        auto const key       = executor.requests.front().key;
+        auto       completed = success(key);
+        completed.output     = jb::jobu::AttemptOutput{
+            .diagnostic = exact_output_channel(maximum_diagnostic),
+        };
+        executor.emit(std::move(completed));
+
+        REQUIRE(core.process_cycle());
+        auto attempt = fixture.attempts.find(key.run_id, key.attempt_number);
+        REQUIRE(attempt);
+        REQUIRE(attempt->has_value());
+        CHECK(attempt->value().state == AttemptState::Completed);
+        CHECK(attempt->value().outcome == AttemptOutcome::Succeeded);
+    }
+
+    SECTION("one byte over limit")
+    {
+        CoreFixture        fixture;
+        RawAttemptExecutor executor;
+        auto const         queue_id = id(148);
+        insert_queue(fixture.database, queue_id, 1);
+        auto const attributes = attribute_document(fixture.registry, "reschedule", 3, Duration::zero(), "always");
+        insert_scheduled(fixture, queue_id, 149, JobType::Cli, 0, 100, 100, attributes);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            executor,
+            {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+        };
+
+        REQUIRE(core.process_cycle());
+        auto const key     = executor.requests.front().key;
+        auto       invalid = success(key);
+        invalid.output     = jb::jobu::AttemptOutput{
+            .diagnostic = exact_output_channel(maximum_diagnostic + 1U),
+        };
+        executor.emit(std::move(invalid));
+
+        auto failed = core.process_cycle();
+        REQUIRE_FALSE(failed);
+        CHECK(failed.error().code == "jobu.executor.invalid_completion");
+        CHECK(failed.error().detail == "reason=diagnostic_too_large");
+        auto attempt = fixture.attempts.find(key.run_id, key.attempt_number);
+        REQUIRE(attempt);
+        REQUIRE(attempt->has_value());
+        CHECK(attempt->value().state == AttemptState::Running);
     }
 }
 

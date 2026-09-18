@@ -37,7 +37,7 @@ using CoreResult = jb::core::Result<T, jb::core::Error>;
 constexpr std::size_t      kMaximumRepositoryPageRows    = 1000U;
 constexpr std::size_t      kMaximumCompletionResultBytes = std::size_t{256} * 1024U;
 constexpr std::size_t      kMaximumPrimaryOutputBytes    = std::size_t{64} * 1024U * 1024U;
-constexpr std::size_t      kMaximumDiagnosticOutputBytes = std::size_t{4} * 1024U * 1024U;
+constexpr std::size_t      kMaximumDiagnosticOutputBytes = std::size_t{64} * 1024U * 1024U;
 constexpr std::string_view kCancellationResultJson       = R"({"reason":"cancelled"})";
 
 struct CapacityState {

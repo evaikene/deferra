@@ -17,6 +17,8 @@ target_sources(${TARGET}
         attribute_registry.cpp
         attempt_repository_priv.cpp
         attempt_repository_priv.hpp
+        cli_capture_priv.cpp
+        cli_capture_priv.hpp
         cli_exit_policy_priv.cpp
         cli_exit_policy_priv.hpp
         cli_job_payload_priv.cpp
