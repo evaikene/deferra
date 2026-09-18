@@ -542,7 +542,11 @@ struct CliAttemptExecutor::Private : jb::core::priv::ObjectPrivate {
 
 CliAttemptExecutor::CliAttemptExecutor(CliAttemptExecutorOptions options, jb::core::Object* parent)
     : CliAttemptExecutor(std::make_unique<Private>(options, nullptr, detail::make_system_identity_probe()), parent)
-{}
+{
+    // Production Process children may borrow this executor only after Object owns the private block and bind_owner()
+    // has established the back-reference used by receiver-aware signal delivery.
+    d_ptr<Private>()->adapter = detail::make_system_process_adapter(*this);
+}
 
 CliAttemptExecutor::CliAttemptExecutor(std::unique_ptr<Private> data, jb::core::Object* parent)
     : Object(*data, parent)

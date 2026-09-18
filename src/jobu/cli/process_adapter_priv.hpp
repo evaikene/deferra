@@ -57,6 +57,11 @@ public:
     [[nodiscard]] virtual auto effective_user_id() const noexcept -> std::uint64_t = 0;
 };
 
+/** Creates the platform production adapter after the executor owner is fully constructed.
+ * @return A Linux Process-backed adapter, or null until the current platform backend is integrated.
+ */
+[[nodiscard]] auto make_system_process_adapter(CliAttemptExecutor& owner) -> std::unique_ptr<ProcessAdapter>;
+
 [[nodiscard]] auto make_system_identity_probe() -> std::unique_ptr<EffectiveIdentityProbe>;
 
 /** Private construction access for deterministic executor-only tests. */
