@@ -45,6 +45,10 @@ jobs:
     name: Alpine 3.22
     runs-on: ubuntu-24.04
     container: alpine:3.22
+    env:
+      # This disposable root container explicitly exercises unsafe root CLI execution.
+      # The fixture also launches a separate daemon without the override to prove denial.
+      JOBU_TEST_ALLOW_ROOT_CLI: "1"
 
     steps:
       # GitHub's JavaScript actions need a glibc compatibility layer on musl.

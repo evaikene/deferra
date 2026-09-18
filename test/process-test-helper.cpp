@@ -1,4 +1,5 @@
 #include "event_loop.hpp"
+#include "json.hpp"
 #include "process.hpp"
 #include "support/fake_event_loop_backend.hpp"
 
@@ -11,7 +12,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #include <fcntl.h>
 #include <poll.h>
@@ -280,6 +283,55 @@ auto write_all(int fd, void const* data, std::size_t size) noexcept -> bool
     return true;
 }
 
+// Report the actual target context so daemon tests can compare it with the durable job/run identities.
+auto inspect_daemon(int argc, char** argv) -> int
+{
+    using jb::core::JsonValue;
+    char cwd[4096];
+    if (::getcwd(cwd, sizeof(cwd)) == nullptr) {
+        return 48;
+    }
+    JsonValue::Array arguments;
+    for (int index = 2; index < argc; ++index) {
+        arguments.push_back({.data = std::string{argv[index]}});
+    }
+    JsonValue::Object environment;
+    for (auto const* const* entry = ::environ; *entry != nullptr; ++entry) {
+        auto const value     = std::string_view{*entry};
+        auto const separator = value.find('=');
+        if (separator == std::string_view::npos) {
+            return 47;
+        }
+        environment.emplace(value.substr(0, separator), JsonValue{.data = std::string{value.substr(separator + 1)}});
+    }
+    char           input{};
+    auto const     report = jb::core::serialize_json({
+        .data = JsonValue::Object{
+                                  {"arguments", {.data = std::move(arguments)}},
+                                  {"cwd", {.data = std::string{cwd}}},
+                                  {"environment", {.data = std::move(environment)}},
+                                  {"stdin_eof", {.data = ::read(STDIN_FILENO, &input, 1) == 0}},
+                                  }
+    });
+    constexpr char diagnostic[]{'e', '\0', 'r', '\n'};
+    return report && write_all(STDOUT_FILENO, report->data(), report->size()) &&
+                   write_all(STDERR_FILENO, diagnostic, sizeof(diagnostic))
+             ? 37
+             : 46;
+}
+
+// Separate report and release FIFOs prevent the helper from consuming its own readiness acknowledgement.
+auto daemon_wait(char const* report_path, char const* release_path) noexcept -> int
+{
+    auto const fd       = open_coordination_channel(report_path, O_WRONLY);
+    auto const pid      = ::getpid();
+    auto const reported = fd >= 0 && write_all(fd, &pid, sizeof(pid));
+    if (fd >= 0) {
+        ::close(fd);
+    }
+    return reported && wait_for_permission_path(release_path) ? 0 : 45;
+}
+
 auto report_no_new_privileges() noexcept -> int
 {
     auto const fd = ::open("/proc/self/status", O_RDONLY | O_CLOEXEC);
@@ -505,6 +557,12 @@ auto main(int argc, char** argv) -> int
     }
     if (mode == "inspect") {
         return inspect(argc, argv);
+    }
+    if (mode == "inspect-daemon") {
+        return inspect_daemon(argc, argv);
+    }
+    if (mode == "daemon-wait" && argc == 4) {
+        return daemon_wait(argv[2], argv[3]);
     }
     if (mode == "inspect-jobu") {
         return inspect_jobu(argc, argv);

@@ -818,3 +818,22 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
         endif()
     endif()
 endif()
+
+# Real Linux daemon CLI execution; the root override requires an explicit isolated-test opt-in.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
+    set(TARGET "jobud-cli-integration-test")
+    add_executable(${TARGET}
+        jobud-cli-integration-test.cpp
+        support/http_test_server.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET} PRIVATE core net rpc SQLite3::SQLite3
+        OpenSSL::SSL OpenSSL::Crypto Catch2::Catch2WithMain)
+    target_compile_definitions(${TARGET} PRIVATE
+        JOBUD_EXECUTABLE="$<TARGET_FILE:jobud>"
+        JOBUCTL_EXECUTABLE="$<TARGET_FILE:jobuctl>"
+        PROCESS_TEST_HELPER="$<TARGET_FILE:process-test-helper>")
+    add_dependencies(${TARGET} jobud jobuctl process-test-helper)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+    set_tests_properties(${TARGET} PROPERTIES TIMEOUT 90)
+endif()
