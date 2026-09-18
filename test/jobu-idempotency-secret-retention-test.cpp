@@ -129,7 +129,7 @@ void insert_job(Database& database, Uuid const& job_id, Uuid const& queue_id, bo
         "INSERT INTO jobu_jobs(id, queue_id, revision, name, state, type, schedule_kind, scheduled_at_us, "
         "cron_expression, cron_timezone, priority, attributes_json, payload_json, created_at_us, updated_at_us, "
         "deleted_at_us) VALUES(:id, :queue_id, 1, NULL, :state, 'cli', 'once', 0, NULL, NULL, 0, "
-        "'{\"version\":1,\"values\":{}}', '{\"command\":\"true\"}', 0, :updated_at, :deleted_at)"));
+        "'{\"version\":1,\"values\":{}}', '{\"command\":\"/true\"}', 0, :updated_at, :deleted_at)"));
     REQUIRE(query.bind_value(":id", uuid_to_storage(job_id)));
     REQUIRE(query.bind_value(":queue_id", uuid_to_storage(queue_id)));
     REQUIRE(query.bind_value(":state", make_text(deleted ? "deleted" : "active")));
@@ -149,7 +149,7 @@ void insert_terminal_run(Database&    database,
         "INSERT INTO jobu_runs(id, job_id, job_revision, queue_id, origin, schedule_owned, planned_at_us, "
         "runnable_at_us, started_at_us, completed_at_us, type, priority, attributes_json, payload_json, state, "
         "result_json) VALUES(:id, :job_id, 1, :queue_id, 'scheduled', 1, 0, 0, 1, :completed_at, 'cli', 0, "
-        "'{\"version\":1,\"values\":{}}', '{\"command\":\"true\"}', 'succeeded', '{}')"));
+        "'{\"version\":1,\"values\":{}}', '{\"command\":\"/true\"}', 'succeeded', '{}')"));
     REQUIRE(query.bind_value(":id", uuid_to_storage(run_id)));
     REQUIRE(query.bind_value(":job_id", uuid_to_storage(job_id)));
     REQUIRE(query.bind_value(":queue_id", uuid_to_storage(queue_id)));

@@ -535,7 +535,7 @@ TEST_CASE("Job create idempotency replay does not require fresh UUIDs", "[jobu][
         .name            = "replay",
         .type            = JobType::Cli,
         .schedule        = once_at(UtcTimePoint{20s}),
-        .payload         = cli_payload("true"),
+        .payload         = cli_payload("/true"),
         .idempotency_key = "job-key",
     };
 
@@ -572,7 +572,7 @@ TEST_CASE("Job management lists filtered keyset pages and controls deleted visib
     REQUIRE(service.create_job({.queue    = std::string{"first"},
                                 .type     = JobType::Cli,
                                 .schedule = once_at(UtcTimePoint{1s}),
-                                .payload  = cli_payload("one")}));
+                                .payload  = cli_payload("/one")}));
     REQUIRE(service.create_job({.queue    = std::string{"first"},
                                 .type     = JobType::Http,
                                 .schedule = once_at(UtcTimePoint{2s}),
@@ -580,7 +580,7 @@ TEST_CASE("Job management lists filtered keyset pages and controls deleted visib
     REQUIRE(service.create_job({.queue    = std::string{"second"},
                                 .type     = JobType::Cli,
                                 .schedule = once_at(UtcTimePoint{3s}),
-                                .payload  = cli_payload("three")}));
+                                .payload  = cli_payload("/three")}));
 
     auto page = service.list_jobs({.page = {.limit = 2}});
     REQUIRE(page);
@@ -656,20 +656,20 @@ TEST_CASE("Job management rejects invalid requests before durable creation", "[j
                       .queue    = queue_id,
                       .name     = std::string{"bad\x01name", 8},
                       .schedule = schedule,
-                      .payload  = cli_payload("true")
+                      .payload  = cli_payload("/true")
     }),
                   ErrorCategory::InvalidArgument,
                   "jobu.job.invalid_name");
     require_error(
         service.create_job(
-            {.queue = queue_id, .name = std::string(257, 'x'), .schedule = schedule, .payload = cli_payload("true")}),
+            {.queue = queue_id, .name = std::string(257, 'x'), .schedule = schedule, .payload = cli_payload("/true")}),
         ErrorCategory::InvalidArgument,
         "jobu.job.invalid_name");
     require_error(service.create_job({
                       .queue    = queue_id,
                       .name     = std::string{"bad\xC3", 4},
                       .schedule = schedule,
-                      .payload  = cli_payload("true")
+                      .payload  = cli_payload("/true")
     }),
                   ErrorCategory::InvalidArgument,
                   "jobu.job.invalid_name");
@@ -683,7 +683,7 @@ TEST_CASE("Job management rejects invalid requests before durable creation", "[j
         service.create_job({
             .queue    = queue_id,
             .schedule = schedule,
-            .payload  = json_object({{"arguments", json_string("not-array")}, {"command", json_string("x")}}
+            .payload  = json_object({{"arguments", json_string("not-array")}, {"command", json_string("/x")}}
                )
     }),
         ErrorCategory::InvalidArgument,
@@ -693,12 +693,18 @@ TEST_CASE("Job management rejects invalid requests before durable creation", "[j
                       .schedule = schedule,
                       .payload  = json_object({
                                                {"arguments", json_array({json_bool(true)})},
-                                               {"command", json_string("x")},
+                                               {"command", json_string("/x")},
                                                }
                          ),
     }),
                   ErrorCategory::InvalidArgument,
                   "jobu.job.invalid_payload");
+    auto unsafe_cli_error = require_error(
+        service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("private-command-marker")}),
+        ErrorCategory::InvalidArgument,
+        "jobu.job.invalid_payload");
+    CHECK(unsafe_cli_error.detail == "reason=invalid_path");
+    CHECK(unsafe_cli_error.detail.find("private-command-marker") == std::string::npos);
     require_error(service.create_job({
                       .queue    = queue_id,
                       .type     = JobType::Http,
@@ -737,7 +743,7 @@ TEST_CASE("Job management rejects invalid requests before durable creation", "[j
                   "jobu.job.invalid_payload");
     require_error(
         service.create_job(
-            {.queue = queue_id, .type = static_cast<JobType>(99), .schedule = schedule, .payload = cli_payload("x")}),
+            {.queue = queue_id, .type = static_cast<JobType>(99), .schedule = schedule, .payload = cli_payload("/x")}),
         ErrorCategory::InvalidArgument,
         "jobu.job.invalid_payload");
     require_error(service.create_job({.queue    = queue_id,
@@ -746,27 +752,27 @@ TEST_CASE("Job management rejects invalid requests before durable creation", "[j
                   ErrorCategory::ResourceExhausted,
                   "jobu.protocol.value_too_large");
     require_error(service.create_job(
-                      {.queue = queue_id, .schedule = schedule, .payload = cli_payload("x"), .idempotency_key = ""}),
+                      {.queue = queue_id, .schedule = schedule, .payload = cli_payload("/x"), .idempotency_key = ""}),
                   ErrorCategory::InvalidArgument,
                   "jobu.idempotency.invalid_key");
     require_error(service.create_job({.queue      = queue_id,
                                       .schedule   = schedule,
                                       .attributes = {{"unknown", {.data = true}}},
-                                      .payload    = cli_payload("x")}),
+                                      .payload    = cli_payload("/x")}),
                   ErrorCategory::InvalidArgument,
                   "jobu.attribute.unknown");
 
-    require_error(
-        service.create_job(
-            {.queue = uuid("00000000-0000-7000-8000-000000000099"), .schedule = schedule, .payload = cli_payload("x")}),
-        ErrorCategory::NotFound,
-        "jobu.queue.not_found");
+    require_error(service.create_job({.queue    = uuid("00000000-0000-7000-8000-000000000099"),
+                                      .schedule = schedule,
+                                      .payload  = cli_payload("/x")}),
+                  ErrorCategory::NotFound,
+                  "jobu.queue.not_found");
     execute(fixture.database, "UPDATE jobu_queues SET state = 'suspending' WHERE name = 'jobs'");
-    require_error(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("x")}),
+    require_error(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("/x")}),
                   ErrorCategory::Conflict,
                   "jobu.queue.state_conflict");
     execute(fixture.database, "UPDATE jobu_queues SET state = 'suspended' WHERE name = 'jobs'");
-    auto suspended = service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("x")});
+    auto suspended = service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("/x")});
     REQUIRE(suspended);
 
     require_error(service.list_jobs({.page = {.limit = 0}}),
@@ -795,10 +801,10 @@ TEST_CASE("Job creation rolls back the definition when schedule-run insertion fa
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "jobs"}));
     REQUIRE(service.create_job(
-        {.queue = queue_id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("first")}));
+        {.queue = queue_id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("/first")}));
 
     require_error(service.create_job(
-                      {.queue = queue_id, .schedule = once_at(UtcTimePoint{2s}), .payload = cli_payload("second")}),
+                      {.queue = queue_id, .schedule = once_at(UtcTimePoint{2s}), .payload = cli_payload("/second")}),
                   ErrorCategory::Conflict,
                   "db.constraint.unique");
     require_error(service.get_job(rolled_back_job), ErrorCategory::NotFound, "jobu.job.not_found");
@@ -826,7 +832,7 @@ TEST_CASE("Job creation rejects oversized materialized attribute snapshots", "[j
     auto oversized_error = require_error(service.create_job({.queue      = queue_id,
                                                              .schedule   = once_at(UtcTimePoint{1s}),
                                                              .attributes = std::move(job_attributes),
-                                                             .payload    = cli_payload("true")}),
+                                                             .payload    = cli_payload("/true")}),
                                          ErrorCategory::ResourceExhausted,
                                          "jobu.protocol.value_too_large");
     CHECK(oversized_error.message == "Job attribute document exceeds its size limit");
@@ -855,7 +861,7 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
         .schedule   = once_at(UtcTimePoint{5s}),
         .priority   = 1,
         .attributes = max_attempts(4),
-        .payload    = cli_payload("before"),
+        .payload    = cli_payload("/before"),
     });
     REQUIRE(created);
     REQUIRE(service.update_queue({.queue = queue_id, .defaults = updated_queue_defaults()}));
@@ -950,9 +956,9 @@ TEST_CASE("Job lifecycle persists revisions draining suspension and idempotent n
     REQUIRE(service.create_job({.queue    = queue_id,
                                 .name     = "immediate",
                                 .schedule = once_at(UtcTimePoint{20s}),
-                                .payload  = cli_payload("immediate")}));
+                                .payload  = cli_payload("/immediate")}));
     REQUIRE(service.create_job(
-        {.queue = queue_id, .name = "busy", .schedule = once_at(UtcTimePoint{30s}), .payload = cli_payload("busy")}));
+        {.queue = queue_id, .name = "busy", .schedule = once_at(UtcTimePoint{30s}), .payload = cli_payload("/busy")}));
 
     detail::RunRepository runs{fixture.database, fixture.registry};
     auto                  original_run = runs.find_schedule_owned(immediate_job);
@@ -1068,8 +1074,8 @@ TEST_CASE("Job lifecycle rolls back revision exhaustion and rejects deleted defi
     };
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "jobs"}));
-    REQUIRE(
-        service.create_job({.queue = queue_id, .schedule = once_at(UtcTimePoint{20s}), .payload = cli_payload("job")}));
+    REQUIRE(service.create_job(
+        {.queue = queue_id, .schedule = once_at(UtcTimePoint{20s}), .payload = cli_payload("/job")}));
 
     execute(fixture.database,
             "UPDATE jobu_jobs SET revision = 9223372036854775806 WHERE id = "
@@ -1135,7 +1141,7 @@ TEST_CASE("Job move preserves definitions and terminal history across guarded ta
                                        .schedule   = once_at(UtcTimePoint{30s}),
                                        .priority   = 7,
                                        .attributes = max_attempts(7),
-                                       .payload    = cli_payload("move", {"one"})});
+                                       .payload    = cli_payload("/move", {"one"})});
     REQUIRE(created);
     auto historical = service.create_job({.queue      = source_queue,
                                           .name       = "history",
@@ -1261,15 +1267,15 @@ TEST_CASE("Job deletion cancels pending work cleans references and enforces prer
     REQUIRE(service.create_job({.queue    = queue_id,
                                 .name     = "delete",
                                 .schedule = once_at(UtcTimePoint{20s}),
-                                .payload  = cli_payload("delete")}));
+                                .payload  = cli_payload("/delete")}));
     REQUIRE(service.create_job({.queue    = queue_id,
                                 .name     = "running",
                                 .schedule = once_at(UtcTimePoint{30s}),
-                                .payload  = cli_payload("running")}));
+                                .payload  = cli_payload("/running")}));
     REQUIRE(service.create_job({.queue    = queue_id,
                                 .name     = "exhausted",
                                 .schedule = once_at(UtcTimePoint{40s}),
-                                .payload  = cli_payload("exhausted")}));
+                                .payload  = cli_payload("/exhausted")}));
 
     require_error(service.delete_job({.job_id = deleted_job}),
                   ErrorCategory::InvalidArgument,
@@ -1367,8 +1373,8 @@ TEST_CASE("Job update validates revisions state and replacement fields", "[jobu]
     };
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "jobs"}));
-    REQUIRE(
-        service.create_job({.queue = queue_id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("true")}));
+    REQUIRE(service.create_job(
+        {.queue = queue_id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("/true")}));
 
     require_error(service.update_job({.job_id = job_id, .priority = 1}),
                   ErrorCategory::InvalidArgument,
@@ -1429,11 +1435,11 @@ TEST_CASE("Job update rolls back when attempts prevent snapshot refresh", "[jobu
     REQUIRE(service.create_job({.queue    = queue_id,
                                 .name     = "pending",
                                 .schedule = once_at(UtcTimePoint{1s}),
-                                .payload  = cli_payload("pending")}));
+                                .payload  = cli_payload("/pending")}));
     REQUIRE(service.create_job({.queue    = queue_id,
                                 .name     = "started",
                                 .schedule = once_at(UtcTimePoint{2s}),
-                                .payload  = cli_payload("started")}));
+                                .payload  = cli_payload("/started")}));
 
     detail::AttemptRepository attempts{fixture.database};
     REQUIRE(attempts.insert_attempt({
@@ -1476,8 +1482,8 @@ TEST_CASE("Job management rejects malformed persisted definitions", "[jobu][job]
     };
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "jobs"}));
-    REQUIRE(
-        service.create_job({.queue = queue_id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("true")}));
+    REQUIRE(service.create_job(
+        {.queue = queue_id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("/true")}));
 
     execute(
         fixture.database,
@@ -1487,8 +1493,16 @@ TEST_CASE("Job management rejects malformed persisted definitions", "[jobu][job]
     CHECK(stored_error.detail.find("stored-secret") == std::string::npos);
     require_error(service.list_jobs({}), ErrorCategory::Internal, "jobu.storage.invariant");
 
+    execute(
+        fixture.database,
+        R"(UPDATE jobu_jobs SET type = 'cli', payload_json = '{"command":"stored-command-secret"}' WHERE id IS NOT NULL)");
+    stored_error = require_error(service.get_job(job_id), ErrorCategory::Internal, "jobu.storage.invariant");
+    CHECK(stored_error.detail == "reason=invalid_path");
+    CHECK(stored_error.detail.find("stored-command-secret") == std::string::npos);
+    require_error(service.list_jobs({}), ErrorCategory::Internal, "jobu.storage.invariant");
+
     execute(fixture.database,
-            R"(UPDATE jobu_jobs SET type = 'cli', payload_json = '{"command":"true"}', name = char(1))");
+            R"(UPDATE jobu_jobs SET type = 'cli', payload_json = '{"command":"/true"}', name = char(1))");
     require_error(service.get_job(job_id), ErrorCategory::Internal, "jobu.storage.invariant");
 }
 
@@ -1510,7 +1524,7 @@ TEST_CASE("Job methods report invalid daemon defaults consistently", "[jobu][job
                                       fixture.time,
                                       {{"unknown", {.data = true}}}};
     require_error(invalid_service.create_job(
-                      {.queue = queue->id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("true")}),
+                      {.queue = queue->id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("/true")}),
                   ErrorCategory::InvalidArgument,
                   "jobu.attribute.unknown");
     require_error(invalid_service.get_job(uuid("00000000-0000-7000-8000-000000000099")),
@@ -1551,7 +1565,7 @@ TEST_CASE("Job mutations signal fresh replayed and lifecycle success", "[jobu][j
     auto const request = CreateJobRequest{
         .queue           = source_queue,
         .schedule        = once_at(UtcTimePoint{20s}),
-        .payload         = cli_payload("signal"),
+        .payload         = cli_payload("/signal"),
         .idempotency_key = "signal-key",
     };
 

@@ -17,6 +17,8 @@ target_sources(${TARGET}
         attribute_registry.cpp
         attempt_repository_priv.cpp
         attempt_repository_priv.hpp
+        cli_job_payload_priv.cpp
+        cli_job_payload_priv.hpp
         cron.cpp
         cron_expression_priv.cpp
         cron_expression_priv.hpp

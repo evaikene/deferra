@@ -79,7 +79,7 @@ auto cli_payload(std::string command) -> JsonValue
 {
     auto result = JsonValue{};
     result.data = JsonValue::Object{
-        {"command", json_string(std::move(command))}
+        {"command", json_string("/fixture/" + std::move(command))}
     };
     return result;
 }

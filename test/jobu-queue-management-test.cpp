@@ -411,7 +411,7 @@ TEST_CASE("Queue lifecycle persists draining suspension resume and idempotent no
     REQUIRE(service.create_queue({.name = "busy"}));
     REQUIRE(service.create_job({.queue    = busy_queue,
                                 .schedule = OnceSchedule{.planned_at = UtcTimePoint{1s}},
-                                .payload  = cli_payload("busy")}));
+                                .payload  = cli_payload("/busy")}));
 
     fixture.time.advance(1s);
     auto immediate = service.suspend_queue(std::string{"immediate"});
@@ -536,15 +536,15 @@ TEST_CASE("Queue deletion atomically deletes contained work and releases its nam
     REQUIRE(service.create_job({.queue    = deleted_queue,
                                 .name     = "pending",
                                 .schedule = OnceSchedule{.planned_at = UtcTimePoint{20s}},
-                                .payload  = cli_payload("pending")}));
+                                .payload  = cli_payload("/pending")}));
     REQUIRE(service.create_job({.queue    = deleted_queue,
                                 .name     = "terminal",
                                 .schedule = OnceSchedule{.planned_at = UtcTimePoint{30s}},
-                                .payload  = cli_payload("terminal")}));
+                                .payload  = cli_payload("/terminal")}));
     REQUIRE(service.create_job({.queue    = other_queue,
                                 .name     = "other",
                                 .schedule = OnceSchedule{.planned_at = UtcTimePoint{40s}},
-                                .payload  = cli_payload("other")}));
+                                .payload  = cli_payload("/other")}));
     execute(fixture.database,
             "UPDATE jobu_runs SET state = 'succeeded', started_at_us = 500000, completed_at_us = 1000000, "
             "result_json = '{}' WHERE id = X'00000000000070008000000000000305'");
@@ -662,7 +662,7 @@ TEST_CASE("Queue deletion rejects running work and rolls back bulk conflicts", "
     REQUIRE(service.create_queue({.name = "running"}));
     REQUIRE(service.create_job({.queue    = running_queue,
                                 .schedule = OnceSchedule{.planned_at = UtcTimePoint{20s}},
-                                .payload  = cli_payload("running")}));
+                                .payload  = cli_payload("/running")}));
     execute(fixture.database,
             "UPDATE jobu_runs SET state = 'running', started_at_us = 1000000 WHERE id = "
             "X'00000000000070008000000000000313'");
@@ -685,11 +685,11 @@ TEST_CASE("Queue deletion rejects running work and rolls back bulk conflicts", "
     REQUIRE(service.create_job({.queue    = exhausted_queue,
                                 .name     = "exhausted",
                                 .schedule = OnceSchedule{.planned_at = UtcTimePoint{30s}},
-                                .payload  = cli_payload("exhausted")}));
+                                .payload  = cli_payload("/exhausted")}));
     REQUIRE(service.create_job({.queue    = exhausted_queue,
                                 .name     = "ordinary",
                                 .schedule = OnceSchedule{.planned_at = UtcTimePoint{40s}},
-                                .payload  = cli_payload("ordinary")}));
+                                .payload  = cli_payload("/ordinary")}));
     REQUIRE(service.suspend_queue(exhausted_queue));
     execute(fixture.database,
             "UPDATE jobu_jobs SET revision = 9223372036854775807 WHERE id = "
@@ -720,7 +720,7 @@ TEST_CASE("Queue deletion rejects running work and rolls back bulk conflicts", "
     REQUIRE(service.create_queue({.name = "guarded"}));
     REQUIRE(service.create_job({.queue    = guarded_queue,
                                 .schedule = OnceSchedule{.planned_at = UtcTimePoint{50s}},
-                                .payload  = cli_payload("guarded")}));
+                                .payload  = cli_payload("/guarded")}));
     REQUIRE(service.suspend_queue(guarded_queue));
     execute(fixture.database,
             "INSERT INTO jobu_secret_refs(secret_name, job_id, field_path) VALUES "

@@ -122,7 +122,7 @@ void insert_job(Database&                   database,
 {
     auto stored_payload = payload_json;
     if (stored_payload.empty()) {
-        stored_payload = type == JobType::Cli ? std::string_view{R"({"command":"test"})"}
+        stored_payload = type == JobType::Cli ? std::string_view{R"({"command":"/test"})"}
                                               : std::string_view{R"({"url":"https://example.test"})"};
     }
     auto revision = revision_to_storage(job_revision);
@@ -2310,7 +2310,7 @@ TEST_CASE("Scheduler core runs a service-created manual retry before releasing i
                          {"retry.initial_delay", {.data = std::chrono::duration_cast<Duration>(10us)}},
                          {"retry.max_attempts", {.data = std::int64_t{2}}},
                          },
-        .payload = cli_payload("manual"),
+        .payload = cli_payload("/manual"),
     }));
     auto suspended = service.suspend_job(job_id);
     REQUIRE(suspended);
@@ -2387,7 +2387,7 @@ TEST_CASE("Scheduler core delays a service-created manual run until its queue re
     fixture.executor.set_available(JobType::Cli, true);
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "suspended"}));
-    REQUIRE(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("manual")}));
+    REQUIRE(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("/manual")}));
     auto suspended = service.suspend_queue(queue_id);
     REQUIRE(suspended);
     CHECK(suspended->state == QueueState::Suspended);
@@ -2429,7 +2429,7 @@ TEST_CASE("Scheduler core admits manual work through weighted fairness and queue
     fixture.cron.set_occurrences(schedule, {at(300)});
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "manual", .weight = 1, .concurrency_limit = 1}));
-    REQUIRE(service.create_job({.queue = manual_queue, .schedule = schedule, .payload = cli_payload("manual")}));
+    REQUIRE(service.create_job({.queue = manual_queue, .schedule = schedule, .payload = cli_payload("/manual")}));
     REQUIRE(service.run_now({.job_id = job_id}));
     insert_queue(fixture.database, other_queue, 2, 2);
     insert_scheduled(fixture, other_queue, 10, JobType::Cli);
