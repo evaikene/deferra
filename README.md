@@ -10,8 +10,8 @@ SQLite provides persistence.
 > [!IMPORTANT]
 > JobU is under active development and is not ready for production use. The
 > repository currently provides SQLite persistence, local IPC and JSON-RPC,
-> deterministic scheduling, and real asynchronous HTTP execution through the
-> scheduler composed in `jobud`. Command-line job execution is still planned.
+> deterministic scheduling, and real asynchronous CLI and HTTP execution through
+> the scheduler composed in `jobud` on Linux.
 
 ## Components
 
@@ -28,10 +28,11 @@ The current source tree is built and tested on:
 - Alpine Linux 3.22
 - macOS with Apple Clang and Homebrew dependencies
 
-Linux is the primary development platform and supports the current HTTP
-scheduler, local IPC, JSON-RPC, daemon, and control-client functionality. macOS
-supports the existing local service functionality, while complete HTTP and
-daemon verification remains planned. Windows is not a v1 runtime target.
+Linux is the primary development platform and supports CLI and HTTP scheduling,
+local IPC, JSON-RPC, the daemon, and the control client. macOS supports the
+existing HTTP and local service functionality; its Process backend and CLI
+scheduler/daemon verification remain pending in Phase 6 stages 6.17–6.18.
+Windows is not a v1 runtime target.
 
 ## Requirements
 
@@ -39,6 +40,21 @@ The build requires CMake 3.20 or newer, a C++20 compiler, fmt, SQLite, libcurl
 7.85 or newer, nlohmann/json, Catch2 3.x and OpenSSL for tests, and Ninja or
 another CMake-supported build tool. The private system HTTP backend verifies its
 linked libcurl runtime before `jobud` enters its event loop.
+
+Linux command execution requires a libc providing `_Fork()` (checked at
+configure time), kernel pidfd support, and `PR_SET_NO_NEW_PRIVS`. A container
+uses its host kernel and must permit these operations. There is no waiter
+thread or polling fallback for unavailable process watches. The Ubuntu 24.04
+and Alpine 3.22 CI jobs build and run the SQLite-enabled suite, including the
+Linux daemon CLI test; no additional package is required for CLI execution.
+
+The daemon CLI test runs ordinary execution cases as a non-root user. Real
+root-denial coverage runs only when the test itself is root. Root execution
+with the unsafe override additionally requires `JOBU_TEST_ALLOW_ROOT_CLI=1`;
+set it only inside a disposable, isolated test environment. Alpine CI opts in
+inside its job container and checks the warning and real helper execution.
+Non-root runs report the real-root case as skipped; injected identity tests
+provide separate policy coverage, not evidence of a root daemon launch.
 
 ### Ubuntu 24.04
 
@@ -157,8 +173,56 @@ HTTP scheduling accepts these optional daemon settings:
   JobU ignores proxy environment variables.
 - `--http-ca-bundle PATH` selects an explicit certificate-authority bundle.
 
-HTTP jobs verify certificate trust and host identity by default. CLI job
-definitions can be managed, but their execution remains planned.
+HTTP jobs verify certificate trust and host identity by default.
+
+CLI jobs execute asynchronously alongside HTTP jobs. `--cli-concurrency N`
+sets the global CLI limit (default `4`), independently of the HTTP limit;
+each queue's concurrency limit covers both runner types together. CLI
+execution is denied when the daemon runs as root unless the unsafe
+`--allow-root-cli` flag is supplied. Prefer a dedicated unprivileged account.
+The override logs a warning and grants targets the daemon's root privileges;
+`NoNewPrivs` does not remove privileges already held.
+
+For example, create a queue and a one-shot command (replace the timestamp
+with the desired UTC time):
+
+```sh
+.bld/src/jobuctl/jobuctl --socket /tmp/jobud.sock queue create commands
+.bld/src/jobuctl/jobuctl --socket /tmp/jobud.sock job create \
+    --queue-name commands --type cli --at 2030-01-01T12:00:00Z \
+    --command /usr/bin/printf --arg '%s\n' --arg 'hello from JobU' \
+    --working-directory / --env LANG=C --unset-env HOME --expected-exit-code 0
+```
+
+Commands and arguments are passed as an argv array, with no implicit shell
+parsing or expansion. Use an absolute executable path, or supply an explicit
+payload `PATH` through `--env PATH=/usr/bin:/bin` for a bare command name.
+PATH entries must be nonempty absolute directories. The working directory
+defaults to `/`, and stdin immediately reaches EOF.
+
+The environment starts empty and receives only explicit `--env NAME=VALUE`
+entries plus `JOBU_JOB_ID`, `JOBU_RUN_ID`, and `JOBU_ATTEMPT`. `--env NAME=`
+sets an empty value. Repeat `--env`, `--unset-env`, and `--expected-exit-code`
+as needed; duplicate names/codes and set/unset conflicts are rejected.
+Expected exit codes default to `[0]`. Environment values are ordinary,
+API-visible job data, not protected secrets.
+
+Stdout and stderr are drained separately, including binary bytes. Retention
+is bounded and keeps the first and last bytes when a limit is exceeded.
+The default capture policy retains output on errors. The existing JSON/RPC
+attribute model supports `output.capture`, `output.stdout_limit`,
+`output.stderr_limit`, `job.timeout`, `cli.termination_grace`, and
+`cli.retry_exit_codes`; a general attribute editor is not yet in `jobuctl`.
+Timeout and scheduler cancellation terminate the attempt's process group,
+with TERM followed by KILL after the configured grace period.
+
+Recovery and coordinated daemon signal/shutdown handling remain Phase 7
+work. Process/executor destruction kills active targets, but ordinary daemon
+signal termination does not guarantee that these destructors run. Incomplete
+attempts retain durable running state and startup currently refuses recovery.
+Phase 8 owns protected secret resolution, public cancellation, and run/output
+management commands. The existing API is version 1.2 with the same management
+method set.
 
 ## AI-supported development experiment
 
