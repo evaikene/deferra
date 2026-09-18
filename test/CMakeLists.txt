@@ -554,6 +554,16 @@ set_tests_properties(jobuctl-usage PROPERTIES
     WILL_FAIL TRUE
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # The real client talks to a controlled local peer; Process launch currently has a Linux backend only.
+    add_executable(jobuctl-cli-creation-test jobuctl-cli-creation-test.cpp support/temporary_directory.cpp)
+    target_link_libraries(jobuctl-cli-creation-test PRIVATE jobu Catch2::Catch2WithMain)
+    target_compile_definitions(jobuctl-cli-creation-test PRIVATE JOBUCTL_EXECUTABLE="$<TARGET_FILE:jobuctl>")
+    add_dependencies(jobuctl-cli-creation-test jobuctl)
+    add_test(NAME jobuctl-cli-creation-test COMMAND $<TARGET_FILE:jobuctl-cli-creation-test>)
+    set_tests_properties(jobuctl-cli-creation-test PROPERTIES TIMEOUT 60)
+endif()
+
 # Signal test
 set(TARGET "signal-test")
 add_executable(${TARGET} signal-test.cpp)

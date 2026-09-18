@@ -1,5 +1,7 @@
 #include "jobu_version_priv.hpp"
 
+#include "job_validation_priv.hpp"
+
 #include "application.hpp"
 #include "attribute_registry.hpp"
 #include "client.hpp"
@@ -17,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bitset>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -102,6 +105,10 @@ constexpr std::array command_line_options{
     CommandLineOption{.long_name = "at", .value_mode = CommandLineValueMode::Required},
     CommandLineOption{.long_name = "command", .value_mode = CommandLineValueMode::Required},
     CommandLineOption{.long_name = "arg", .value_mode = CommandLineValueMode::Required},
+    CommandLineOption{.long_name = "working-directory", .value_mode = CommandLineValueMode::Required},
+    CommandLineOption{.long_name = "env", .value_mode = CommandLineValueMode::Required},
+    CommandLineOption{.long_name = "unset-env", .value_mode = CommandLineValueMode::Required},
+    CommandLineOption{.long_name = "expected-exit-code", .value_mode = CommandLineValueMode::Required},
     CommandLineOption{.long_name = "url", .value_mode = CommandLineValueMode::Required},
     CommandLineOption{.long_name = "method", .value_mode = CommandLineValueMode::Required},
     CommandLineOption{.long_name = "priority", .value_mode = CommandLineValueMode::Required},
@@ -503,6 +510,58 @@ auto make_job_id_command(std::filesystem::path                socket_path,
     };
 }
 
+struct CliCreationOptions {
+    std::optional<std::string> working_directory;
+    JsonValue::Object          environment;
+    JsonValue::Array           expected_exit_codes;
+    std::bitset<256>           seen_exit_codes;
+
+    auto supplied() const -> bool { return working_directory || !environment.empty() || !expected_exit_codes.empty(); }
+};
+
+auto is_cli_creation_option(std::string_view name) -> bool
+{
+    return name == "working-directory" || name == "env" || name == "unset-env" || name == "expected-exit-code";
+}
+
+auto add_cli_creation_option(CliCreationOptions& options, std::string_view name, std::string_view value)
+    -> std::optional<std::string>
+{
+    if (name == "working-directory") {
+        if (options.working_directory) {
+            return "--working-directory may be supplied only once";
+        }
+        options.working_directory = std::string{value};
+        return std::nullopt;
+    }
+
+    if (name == "expected-exit-code") {
+        auto const code = parse_unsigned(value, 0, 255);
+        if (!code || options.seen_exit_codes.test(*code)) {
+            return "--expected-exit-code requires a unique integer from 0 through 255";
+        }
+        options.seen_exit_codes.set(*code);
+        options.expected_exit_codes.push_back(JsonValue{.data = *code});
+        return std::nullopt;
+    }
+
+    // Keep one namespace for assignments and removals so neither can silently overwrite the other.
+    auto entry = JsonValue{.data = JsonNull{}};
+    auto key   = value;
+    if (name == "env") {
+        auto const separator = value.find('=');
+        if (separator == std::string_view::npos) {
+            return "--env requires NAME=VALUE";
+        }
+        key        = value.substr(0, separator);
+        entry.data = std::string{value.substr(separator + 1U)};
+    }
+    if (!options.environment.emplace(std::string{key}, std::move(entry)).second) {
+        return "environment names must be unique across --env and --unset-env";
+    }
+    return std::nullopt;
+}
+
 auto parse_job_create(std::filesystem::path                socket_path,
                       std::span<CommandLineArgument const> arguments,
                       StandardAttributeRegistry const&     registry) -> ParseResult
@@ -517,6 +576,7 @@ auto parse_job_create(std::filesystem::path                socket_path,
     auto http_method      = std::optional<std::string>{};
     auto idempotency_key  = std::optional<std::string>{};
     auto arguments_json   = JsonValue::Array{};
+    auto cli_options      = CliCreationOptions{};
     auto type_seen        = false;
     auto at_seen          = false;
     auto name_seen        = false;
@@ -548,6 +608,13 @@ auto parse_job_create(std::filesystem::path                socket_path,
                                                    : option_value(argument);
         if (!value) {
             return parse_failure("job create has an invalid option");
+        }
+
+        if (is_cli_creation_option(argument.name())) {
+            if (auto error = add_cli_creation_option(cli_options, argument.name(), *value)) {
+                return parse_failure(std::move(*error));
+            }
+            continue;
         }
 
         if (argument.name() == "type" && !type_seen) {
@@ -628,9 +695,19 @@ auto parse_job_create(std::filesystem::path                socket_path,
         if (!arguments_json.empty()) {
             payload.emplace("arguments", JsonValue{.data = std::move(arguments_json)});
         }
+        // Omit absent fields so the daemon remains responsible for payload defaults.
+        if (cli_options.working_directory) {
+            payload.emplace("working_directory", JsonValue{.data = std::move(*cli_options.working_directory)});
+        }
+        if (!cli_options.environment.empty()) {
+            payload.emplace("environment", JsonValue{.data = std::move(cli_options.environment)});
+        }
+        if (!cli_options.expected_exit_codes.empty()) {
+            payload.emplace("expected_exit_codes", JsonValue{.data = std::move(cli_options.expected_exit_codes)});
+        }
     }
     else {
-        if (!url || command || !arguments_json.empty()) {
+        if (!url || command || !arguments_json.empty() || cli_options.supplied()) {
             return parse_failure("HTTP job creation requires --url and rejects CLI options");
         }
         payload.emplace("method", JsonValue{.data = http_method.value_or("GET")});
@@ -647,6 +724,14 @@ auto parse_job_create(std::filesystem::path                socket_path,
         .payload         = JsonValue{.data = std::move(payload)},
         .idempotency_key = std::move(idempotency_key),
     };
+    // The request encoder checks the wire shape, not CLI policy. Reuse management's complete validation before IPC.
+    if (request.type == JobType::Cli) {
+        auto validated = detail::validate_and_serialize_job_payload(request.type, request.payload);
+        if (!validated) {
+            return parse_failure(
+                fmt::format("invalid CLI payload: {}", detail::job_payload_issue_text(validated.error())));
+        }
+    }
     auto params = create_job_request_to_json(request, registry);
     if (!params) {
         return parse_failure(params.error().message);
@@ -930,9 +1015,42 @@ auto parse_job_delete(std::filesystem::path socket_path, std::span<CommandLineAr
     };
 }
 
+auto preserve_cli_argument_tokens(int argc, char* argv[]) -> std::vector<std::string>
+{
+    // These option names used to be unknown and could follow --arg literally. Protect that one raw token before
+    // descriptor parsing can recognize it as an option and consume the token after it as its own value.
+    auto tokens = std::vector<std::string>{};
+    tokens.reserve(static_cast<std::size_t>(argc));
+    auto positional_only = false;
+    for (auto index = 0; index < argc; ++index) {
+        auto const token = std::string_view{argv[index]};
+        if (!positional_only && token == "--arg" && index + 1 < argc) {
+            auto const next = std::string_view{argv[index + 1]};
+            if (next.starts_with("--")) {
+                auto const name = next.substr(2);
+                if (is_cli_creation_option(name.substr(0, name.find('=')))) {
+                    tokens.push_back("--arg=" + std::string{next});
+                    ++index;
+                    continue;
+                }
+            }
+        }
+        positional_only = positional_only || token == "--";
+        tokens.emplace_back(token);
+    }
+    return tokens;
+}
+
 auto parse_command_line(int argc, char* argv[], StandardAttributeRegistry const& registry) -> ParseResult
 {
-    CommandLineParser parser{argc, argv, command_line_options};
+    auto tokens          = preserve_cli_argument_tokens(argc, argv);
+    auto normalized_argv = std::vector<char const*>{};
+    normalized_argv.reserve(tokens.size());
+    for (auto const& token : tokens) {
+        normalized_argv.push_back(token.c_str());
+    }
+
+    CommandLineParser parser{static_cast<int>(normalized_argv.size()), normalized_argv.data(), command_line_options};
     auto const&       arguments = parser.arguments();
     if (arguments.size() < 3U) {
         return parse_failure("expected --socket PATH followed by a command");
@@ -1033,6 +1151,8 @@ void print_usage()
                "  jobuctl --socket PATH queue delete (--id UUID | --name NAME)\n"
                "  jobuctl --socket PATH job create (--queue-id UUID | --queue-name NAME)\n"
                "      --type cli --at UTC --command PATH [--arg VALUE ...]\n"
+               "      [--working-directory PATH] [--env NAME=VALUE ...] [--unset-env NAME ...]\n"
+               "      [--expected-exit-code 0..255 ...]\n"
                "      [--name NAME] [--priority N] [--idempotency-key KEY]\n"
                "  jobuctl --socket PATH job create (--queue-id UUID | --queue-name NAME)\n"
                "      --type http --at UTC --url URL [--method METHOD]\n"
