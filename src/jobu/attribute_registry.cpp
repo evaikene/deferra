@@ -1,5 +1,6 @@
 #include "attribute_registry.hpp"
 
+#include "cli_exit_policy_priv.hpp"
 #include "http_job_payload_priv.hpp"
 
 #include <chrono>
@@ -467,6 +468,18 @@ StandardAttributeRegistry::StandardAttributeRegistry()
     : _definitions{
           {
            {
+                  .name             = "cli.retry_exit_codes",
+                  .type             = AttributeType::List,
+                  .scopes           = standard_scopes(),
+                  .built_in_default = {.data = AttributeValue::List{{.data = std::string{"0-255"}}}},
+                  .description      = "Unexpected CLI exit codes eligible for retry",
+              }, {
+                  .name             = "cli.termination_grace",
+                  .type             = AttributeType::Duration,
+                  .scopes           = standard_scopes(),
+                  .built_in_default = {.data = std::chrono::duration_cast<jb::core::Duration>(std::chrono::seconds{5})},
+                  .description      = "Grace period between CLI termination and forced process-group cleanup",
+              }, {
                   .name             = "http.follow_redirects",
                   .type             = AttributeType::Boolean,
                   .scopes           = standard_scopes(),
@@ -625,7 +638,19 @@ auto StandardAttributeRegistry::validate(std::string_view name, AttributeValue c
     }
 
     using namespace std::chrono;
-    if (name == "http.max_redirects") {
+    if (name == "cli.retry_exit_codes") {
+        auto const& selectors = std::get<AttributeValue::List>(value.data);
+        if (!detail::decode_cli_retry_exit_codes(selectors)) {
+            return AttributeResult::failure(invalid_value());
+        }
+    }
+    else if (name == "cli.termination_grace") {
+        auto const duration = std::get<jb::core::Duration>(value.data);
+        if (duration < jb::core::Duration::zero() || duration > duration_cast<jb::core::Duration>(minutes{5})) {
+            return AttributeResult::failure(invalid_value());
+        }
+    }
+    else if (name == "http.max_redirects") {
         auto const maximum = std::get<std::int64_t>(value.data);
         if (maximum < 0 || maximum > 20) {
             return AttributeResult::failure(invalid_value());

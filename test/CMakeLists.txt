@@ -132,6 +132,12 @@ add_executable(${TARGET} cli-job-payload-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU CLI exit-code selector and normalized retry membership test
+set(TARGET "cli-exit-policy-test")
+add_executable(${TARGET} cli-exit-policy-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Test support test
 set(TARGET "test-support-test")
 add_executable(${TARGET}

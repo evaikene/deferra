@@ -267,19 +267,25 @@ auto attribute_document(JsonValue::Object values) -> JsonValue
 TEST_CASE("Standard attributes expose the specified definitions and defaults", "[jobu][attribute][materialization]")
 {
     StandardAttributeRegistry                  registry;
-    constexpr std::array<std::string_view, 19> expected_names{
+    constexpr std::array<std::string_view, 21> expected_names{
+        // CLI execution policy.
+        "cli.retry_exit_codes",
+        "cli.termination_grace",
+        // HTTP execution policy.
         "http.follow_redirects",
         "http.idempotency_key",
         "http.max_redirects",
         "http.retry_errors",
         "http.retry_statuses",
         "http.tls_verify",
+        // Shared execution and output policy.
         "job.timeout",
         "output.capture",
         "output.http_body_limit",
         "output.http_headers_limit",
         "output.stderr_limit",
         "output.stdout_limit",
+        // Shared retry scheduling policy.
         "retry.initial_delay",
         "retry.jitter",
         "retry.max_attempts",
@@ -301,6 +307,9 @@ TEST_CASE("Standard attributes expose the specified definitions and defaults", "
     auto materialized = materialize_attributes(registry, {}, {}, {});
     REQUIRE(materialized);
     REQUIRE(materialized->size() == expected_names.size());
+    CHECK(same_list(std::get<AttributeValue::List>(materialized->at("cli.retry_exit_codes").data),
+                    string_list({"0-255"})));
+    CHECK(std::get<Duration>(materialized->at("cli.termination_grace").data) == 5s);
     CHECK_FALSE(std::get<bool>(materialized->at("http.follow_redirects").data));
     CHECK_FALSE(std::get<bool>(materialized->at("http.idempotency_key").data));
     CHECK(std::get<std::int64_t>(materialized->at("http.max_redirects").data) == 5);
@@ -340,6 +349,25 @@ TEST_CASE("Standard attributes enforce every field constraint", "[jobu][attribut
     auto                      validate = [&registry](std::string_view name, AttributeValue const& value) {
         return registry.validate(name, value, AttributeScope::Job);
     };
+
+    CHECK(validate("cli.retry_exit_codes", {.data = string_list({})}));
+    CHECK(validate("cli.retry_exit_codes", {.data = string_list({"0", "2-4", "5", "255"})}));
+    CHECK_FALSE(validate("cli.retry_exit_codes", {.data = string_list({"1-3", "3-5"})}));
+    CHECK_FALSE(validate("cli.retry_exit_codes", {.data = string_list({"01"})}));
+    CHECK_FALSE(validate("cli.retry_exit_codes",
+                         {
+                             .data = AttributeValue::List{{.data = std::string{"1"}}, {.data = false}}
+    }));
+
+    CHECK(validate("cli.termination_grace", {.data = 0s}));
+    CHECK(validate("cli.termination_grace", {.data = 5min}));
+    CHECK_FALSE(validate("cli.termination_grace", {.data = -1ns}));
+    CHECK_FALSE(validate("cli.termination_grace", {.data = 5min + 1ns}));
+
+    for (auto const scope : {AttributeScope::DaemonDefault, AttributeScope::QueueDefault, AttributeScope::Job}) {
+        CHECK(registry.validate("cli.retry_exit_codes", {.data = string_list({"1-3"})}, scope));
+        CHECK(registry.validate("cli.termination_grace", {.data = 30s}, scope));
+    }
 
     CHECK(validate("http.follow_redirects", {.data = true}));
     CHECK(validate("http.idempotency_key", {.data = true}));
@@ -503,6 +531,27 @@ TEST_CASE("Phase 5 HTTP attributes round trip through public management JSON", "
     CHECK(same_set(*decoded, values));
 }
 
+TEST_CASE("Phase 6 CLI attributes round trip through public management JSON", "[jobu][attribute][json][cli]")
+{
+    StandardAttributeRegistry registry;
+    AttributeSet              values{
+        {"cli.retry_exit_codes",  {.data = string_list({"1", "3-5"})}},
+        {"cli.termination_grace", {.data = 42s}                      },
+    };
+
+    auto encoded = attribute_set_to_json(values, registry, AttributeScope::Job);
+    REQUIRE(encoded);
+    auto const& object = encoded->as_object();
+    REQUIRE(object.at("cli.retry_exit_codes").as_array().size() == 2U);
+    CHECK(object.at("cli.retry_exit_codes").as_array()[0].as_string() == "1");
+    CHECK(object.at("cli.retry_exit_codes").as_array()[1].as_string() == "3-5");
+    CHECK(object.at("cli.termination_grace").as_int() == 42000);
+
+    auto decoded = attribute_set_from_json(*encoded, registry, AttributeScope::Job);
+    REQUIRE(decoded);
+    CHECK(same_set(*decoded, values));
+}
+
 TEST_CASE("Attribute materialization applies deterministic precedence and cross-field validation",
           "[jobu][attribute][materialization]")
 {
@@ -598,7 +647,9 @@ TEST_CASE("Materialized Phase 4 snapshots acquire all Phase 5 HTTP defaults",
     auto decoded =
         decode_attribute_document(registry, *document, AttributeScope::Job, AttributeDocumentMode::Materialized);
     REQUIRE(decoded);
-    REQUIRE(decoded->size() == 19U);
+    REQUIRE(decoded->size() == 21U);
+    CHECK(same_list(std::get<AttributeValue::List>(decoded->at("cli.retry_exit_codes").data), string_list({"0-255"})));
+    CHECK(std::get<Duration>(decoded->at("cli.termination_grace").data) == 5s);
     CHECK_FALSE(std::get<bool>(decoded->at("http.follow_redirects").data));
     CHECK_FALSE(std::get<bool>(decoded->at("http.idempotency_key").data));
     CHECK(std::get<std::int64_t>(decoded->at("http.max_redirects").data) == 5);
@@ -613,8 +664,73 @@ TEST_CASE("Materialized Phase 4 snapshots acquire all Phase 5 HTTP defaults",
     auto partial = decode_attribute_document(registry, *document, AttributeScope::Job, AttributeDocumentMode::Partial);
     REQUIRE(partial);
     CHECK(partial->size() == 11U);
+    CHECK_FALSE(partial->contains("cli.retry_exit_codes"));
+    CHECK_FALSE(partial->contains("cli.termination_grace"));
     CHECK_FALSE(partial->contains("http.follow_redirects"));
     CHECK_FALSE(partial->contains("output.http_body_limit"));
+}
+
+TEST_CASE("Materialized pre-Stage-6.8 snapshots acquire both CLI defaults",
+          "[jobu][attribute][materialization][compatibility]")
+{
+    constexpr std::string_view pre_stage_6_8_snapshot = R"({
+        "values": {
+            "http.follow_redirects": {"type": "boolean", "value": false},
+            "http.idempotency_key": {"type": "boolean", "value": false},
+            "http.max_redirects": {"type": "integer", "value": 5},
+            "http.retry_errors": {
+                "type": "list",
+                "value": [
+                    {"type": "string", "value": "resolve"},
+                    {"type": "string", "value": "connect"},
+                    {"type": "string", "value": "tls_handshake"},
+                    {"type": "string", "value": "timeout"},
+                    {"type": "string", "value": "send"},
+                    {"type": "string", "value": "receive"}
+                ]
+            },
+            "http.retry_statuses": {
+                "type": "list",
+                "value": [
+                    {"type": "string", "value": "408"},
+                    {"type": "string", "value": "429"},
+                    {"type": "string", "value": "500-599"}
+                ]
+            },
+            "http.tls_verify": {"type": "boolean", "value": true},
+            "job.timeout": {"type": "duration_ns", "value": 120000000000},
+            "output.capture": {"type": "string", "value": "on_error"},
+            "output.http_body_limit": {"type": "integer", "value": 1048576},
+            "output.http_headers_limit": {"type": "integer", "value": 65536},
+            "output.stderr_limit": {"type": "integer", "value": 1048576},
+            "output.stdout_limit": {"type": "integer", "value": 1048576},
+            "retry.initial_delay": {"type": "duration_ns", "value": 0},
+            "retry.jitter": {"type": "number", "value": 0.0},
+            "retry.max_attempts": {"type": "integer", "value": 1},
+            "retry.max_delay": {"type": "duration_ns", "value": 86400000000000},
+            "retry.mode": {"type": "string", "value": "reschedule"},
+            "retry.multiplier": {"type": "number", "value": 2.0},
+            "retry.strategy": {"type": "string", "value": "fixed"}
+        },
+        "version": 1
+    })";
+
+    StandardAttributeRegistry registry;
+    auto                      document = parse_json(pre_stage_6_8_snapshot);
+    REQUIRE(document);
+
+    auto decoded =
+        decode_attribute_document(registry, *document, AttributeScope::Job, AttributeDocumentMode::Materialized);
+    REQUIRE(decoded);
+    REQUIRE(decoded->size() == 21U);
+    CHECK(same_list(std::get<AttributeValue::List>(decoded->at("cli.retry_exit_codes").data), string_list({"0-255"})));
+    CHECK(std::get<Duration>(decoded->at("cli.termination_grace").data) == 5s);
+
+    auto partial = decode_attribute_document(registry, *document, AttributeScope::Job, AttributeDocumentMode::Partial);
+    REQUIRE(partial);
+    CHECK(partial->size() == 19U);
+    CHECK_FALSE(partial->contains("cli.retry_exit_codes"));
+    CHECK_FALSE(partial->contains("cli.termination_grace"));
 }
 
 TEST_CASE("Public attribute JSON is registry directed and round trips natural values", "[jobu][attribute][json]")

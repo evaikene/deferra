@@ -543,7 +543,9 @@ TEST_CASE("Attribute persistence keeps partial documents partial and upgrades Ph
     auto& legacy_values = std::get<JsonValue::Object>(values.data);
     REQUIRE(legacy_values.erase("retry.jitter") == 1U);
     REQUIRE(legacy_values.erase("retry.multiplier") == 1U);
-    for (auto const* name : {"http.follow_redirects",
+    for (auto const* name : {"cli.retry_exit_codes",
+                             "cli.termination_grace",
+                             "http.follow_redirects",
                              "http.idempotency_key",
                              "http.max_redirects",
                              "http.retry_errors",
@@ -561,6 +563,9 @@ TEST_CASE("Attribute persistence keeps partial documents partial and upgrades Ph
                                                    AttributeDocumentMode::Materialized);
     REQUIRE(decoded_older);
     REQUIRE(decoded_older->size() == registry.definitions().size());
+    CHECK(same_attribute_list(std::get<AttributeValue::List>(decoded_older->at("cli.retry_exit_codes").data),
+                              AttributeValue::List{{.data = std::string{"0-255"}}}));
+    CHECK(std::get<Duration>(decoded_older->at("cli.termination_grace").data) == 5s);
     CHECK(std::get<double>(decoded_older->at("retry.jitter").data) == 0.0);
     CHECK(std::get<double>(decoded_older->at("retry.multiplier").data) == 2.0);
     CHECK(std::get<std::int64_t>(decoded_older->at("http.max_redirects").data) == 5);
@@ -569,6 +574,8 @@ TEST_CASE("Attribute persistence keeps partial documents partial and upgrades Ph
         decode_attribute_document(registry, *encoded_complete, AttributeScope::Job, AttributeDocumentMode::Partial);
     REQUIRE(decoded_as_partial);
     REQUIRE(decoded_as_partial->size() == 9U);
+    CHECK_FALSE(decoded_as_partial->contains("cli.retry_exit_codes"));
+    CHECK_FALSE(decoded_as_partial->contains("cli.termination_grace"));
     CHECK_FALSE(decoded_as_partial->contains("retry.jitter"));
     CHECK_FALSE(decoded_as_partial->contains("retry.multiplier"));
 
