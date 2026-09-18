@@ -138,6 +138,12 @@ add_executable(${TARGET} cli-exit-policy-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# JobU CLI bounded output capture test
+set(TARGET "cli-capture-test")
+add_executable(${TARGET} cli-capture-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Test support test
 set(TARGET "test-support-test")
 add_executable(${TARGET}

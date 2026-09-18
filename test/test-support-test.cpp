@@ -454,7 +454,7 @@ TEST_CASE("FakeAttemptExecutor rejects inconsistent or unsafe completion shapes"
 TEST_CASE("FakeAttemptExecutor enforces retained output limits", "[test][attempt-executor][output]")
 {
     constexpr auto maximum_primary    = std::size_t{64} * 1024U * 1024U;
-    constexpr auto maximum_diagnostic = std::size_t{4} * 1024U * 1024U;
+    constexpr auto maximum_diagnostic = std::size_t{64} * 1024U * 1024U;
     auto const     key                = attempt_key("00000000-0000-0000-0000-000000000009");
 
     auto verify = [&](std::optional<jb::jobu::AttemptOutputChannel> primary,

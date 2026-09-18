@@ -64,7 +64,7 @@ struct AttemptStartRequest {
  *
  * `bytes` contains the retained data selected by the runner. `total_bytes` counts the complete observed stream and
  * must be at least `bytes.size()`. `truncated` must be true exactly when the total exceeds the retained size. The
- * scheduler accepts at most 64 MiB in a primary channel and 4 MiB in a diagnostic channel during Phase 5.
+ * scheduler accepts at most 64 MiB in either retained channel during Phase 6.
  */
 struct AttemptOutputChannel {
     /// Owning retained bytes; an empty buffer remains distinct from an absent channel.
@@ -77,8 +77,8 @@ struct AttemptOutputChannel {
 
 /** Owns optional runner-neutral output channels for one attempt completion.
  *
- * `primary` represents an HTTP response body in Phase 5 and stdout for the future CLI runner. `diagnostic` represents
- * raw HTTP response headers in Phase 5 and future stderr. An absent channel means no bytes or metadata were available;
+ * `primary` represents an HTTP response body or CLI stdout. `diagnostic` represents raw HTTP response headers or CLI
+ * stderr. An absent channel means no bytes or metadata were available;
  * a present empty channel records an observed empty stream. `capture_lost` may accompany absent or partial channels
  * when the runner could not retain all requested capture evidence.
  */

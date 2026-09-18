@@ -15,7 +15,7 @@ namespace {
 
 constexpr std::size_t kMaximumResultBytes           = std::size_t{256} * 1024U;
 constexpr std::size_t kMaximumPrimaryOutputBytes    = std::size_t{64} * 1024U * 1024U;
-constexpr std::size_t kMaximumDiagnosticOutputBytes = std::size_t{4} * 1024U * 1024U;
+constexpr std::size_t kMaximumDiagnosticOutputBytes = std::size_t{64} * 1024U * 1024U;
 
 auto test_error(core::ErrorCategory category, std::string code, std::string message, std::string detail = {})
     -> core::Error
