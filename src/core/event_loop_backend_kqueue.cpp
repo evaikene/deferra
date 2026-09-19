@@ -9,8 +9,11 @@
 #  include <atomic>
 #  include <cerrno>
 #  include <cstring>
+#  include <limits>
 #  include <memory>
 #  include <unordered_map>
+#  include <unordered_set>
+#  include <utility>
 
 #  include <fcntl.h>
 #  include <sys/event.h>
@@ -21,6 +24,12 @@ namespace jb::core::priv {
 
 class KqueueBackend final : public Backend {
 public:
+
+#  if defined(__APPLE__)
+    explicit KqueueBackend(std::shared_ptr<KqueueProcessOperations> operations)
+        : _process_operations{std::move(operations)}
+    {}
+#  endif
 
     ~KqueueBackend() override
     {
@@ -121,13 +130,50 @@ public:
         return true;
     }
 
-    auto add_process(std::int64_t /*process_id*/) -> ProcessRegistrationResult override
+    auto add_process(std::int64_t process_id) -> ProcessRegistrationResult override
     {
-        // Native EVFILT_PROC monitoring is introduced at the separate macOS stage.
+#  if defined(__APPLE__)
+        if (!_healthy.load(std::memory_order_relaxed) || process_id <= 0 ||
+            process_id > std::numeric_limits<pid_t>::max()) {
+            return ProcessRegistrationResult::Failed;
+        }
+
+        // Keep logical ownership after EV_ONESHOT delivery: a duplicate must never rearm a delivered watch.
+        auto const [entry, inserted] = _processes.insert(process_id);
+        if (!inserted) {
+            return ProcessRegistrationResult::Added;
+        }
+        if (change_process_filter(process_id, EV_ADD | EV_ONESHOT)) {
+            return ProcessRegistrationResult::Added;
+        }
+
+        _processes.erase(entry);
+        return ProcessRegistrationResult::Failed;
+#  else
+        (void)process_id;
         return ProcessRegistrationResult::Unsupported;
+#  endif
     }
 
-    auto remove_process(std::int64_t /*process_id*/) -> bool override { return true; }
+    auto remove_process(std::int64_t process_id) -> bool override
+    {
+#  if defined(__APPLE__)
+        if (!_healthy.load(std::memory_order_relaxed)) {
+            return false;
+        }
+        auto const entry = _processes.find(process_id);
+        if (entry == _processes.end()) {
+            return true;
+        }
+        if (!change_process_filter(process_id, EV_DELETE)) {
+            return false;
+        }
+        _processes.erase(entry);
+#  else
+        (void)process_id;
+#  endif
+        return true;
+    }
 
     auto poll(ReadyEvent* out, int max_events, int timeout_ms) -> int override
     {
@@ -168,6 +214,16 @@ public:
             if (ev.filter == EVFILT_USER && ev.ident == kWakeIdent) {
                 continue; // wakeup, not a user event
             }
+
+#  if defined(__APPLE__)
+            // PID and fd values occupy independent namespaces. Never coalesce a process exit into fd readiness.
+            if (ev.filter == EVFILT_PROC) {
+                out[written++] = {.kind   = ReadyEventKind::Process,
+                                  .ident  = static_cast<std::int64_t>(ev.ident),
+                                  .events = {}};
+                continue;
+            }
+#  endif
 
             auto     fd = static_cast<int>(ev.ident);
             FdEvents mask;
@@ -224,6 +280,30 @@ private:
     int                                           _kq{-1};
     std::atomic_bool                              _healthy{true};
     std::unordered_map<int, KqueueFdRegistration> _registered;
+
+#  if defined(__APPLE__)
+    std::shared_ptr<KqueueProcessOperations> _process_operations;
+    std::unordered_set<std::int64_t>         _processes;
+
+    auto change_process_filter(std::int64_t process_id, std::uint16_t flags) -> bool
+    {
+        for (;;) {
+            if (_process_operations->control(_kq, process_id, flags) == 0) {
+                return true;
+            }
+            auto const error = errno;
+            if (error == EINTR) {
+                continue;
+            }
+            // Delivery deletes a one-shot native filter before EventLoop asks to remove its logical registration.
+            if ((flags & EV_DELETE) != 0U && error == ENOENT) {
+                return true;
+            }
+            log_error("kevent process filter change failed: {}", error);
+            return false;
+        }
+    }
+#  endif
 
     void close_kqueue()
     {
@@ -291,13 +371,38 @@ private:
     }
 };
 
+#  if defined(__APPLE__)
+auto KqueueProcessOperations::control(int poller, std::int64_t process_id, std::uint16_t flags) -> int
+{
+    struct kevent change;
+    EV_SET(&change, process_id, EVFILT_PROC, flags, NOTE_EXIT, 0, nullptr);
+    return ::kevent(poller, &change, 1, nullptr, 0, nullptr);
+}
+
+auto make_kqueue_backend(std::shared_ptr<KqueueProcessOperations> operations) -> std::unique_ptr<Backend>
+{
+    if (!operations) {
+        return nullptr;
+    }
+    auto backend = std::make_unique<KqueueBackend>(std::move(operations));
+    if (!backend->initialize()) {
+        return nullptr;
+    }
+    return backend;
+}
+#  endif
+
 auto make_backend() -> std::unique_ptr<Backend>
 {
+#  if defined(__APPLE__)
+    return make_kqueue_backend(std::make_shared<KqueueProcessOperations>());
+#  else
     auto backend = std::make_unique<KqueueBackend>();
     if (!backend->initialize()) {
         return nullptr;
     }
     return backend;
+#  endif
 }
 
 } // namespace jb::core::priv
