@@ -99,3 +99,36 @@ TEST_CASE("CLI capture take resets retained and counted state", "[jobu][cli][cap
     CHECK(second.total_bytes == 2U);
     CHECK_FALSE(second.truncated);
 }
+
+TEST_CASE("CLI zero-limit capture counts multiple chunks without retention and resets", "[jobu][cli][capture]")
+{
+    auto capture = CliCaptureBuffer{0};
+    CHECK(capture.retained_size() == 0U);
+    for (auto chunk : {
+             std::string_view{"abc"},
+             std::string_view{"d\0ef", 4},
+             std::string_view{"gh"}
+    }) {
+        append(capture, chunk);
+        CHECK(capture.retained_size() == 0U);
+    }
+
+    auto first = capture.take();
+    CHECK(first.bytes.empty());
+    CHECK(first.total_bytes == 9U);
+    CHECK(first.truncated);
+    CHECK(capture.retained_size() == 0U);
+
+    auto empty = capture.take();
+    CHECK(empty.bytes.empty());
+    CHECK(empty.total_bytes == 0U);
+    CHECK_FALSE(empty.truncated);
+
+    append(capture, "reuse");
+    CHECK(capture.retained_size() == 0U);
+    auto reused = capture.take();
+    CHECK(reused.bytes.empty());
+    CHECK(reused.total_bytes == 5U);
+    CHECK(reused.truncated);
+    CHECK(capture.retained_size() == 0U);
+}

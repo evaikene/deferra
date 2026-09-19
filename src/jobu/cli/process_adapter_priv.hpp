@@ -6,9 +6,11 @@
 #include "process.hpp"
 #include "result.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace jb::core::priv {
 class ProcessOperations;
@@ -84,8 +86,18 @@ struct CliAttemptExecutorFactory {
         -> std::unique_ptr<CliAttemptExecutor>;
 };
 
-/// Private construction access for deterministic executor-only tests.
+/// Payload sizes observed by the private active-retention test probe.
+struct CliRetainedOutputSizes {
+    std::size_t stdout_bytes{0};
+    std::size_t stderr_bytes{0};
+};
+
+/// Private construction and observation access for deterministic executor-only tests.
 struct CliAttemptExecutorTestAccess {
+    /// Queries active buffer retention on the executor owner thread; returns nullopt for an inactive key.
+    [[nodiscard]] static auto retained_output_sizes(CliAttemptExecutor const& executor, AttemptKey const& key)
+        -> std::optional<CliRetainedOutputSizes>;
+
     [[nodiscard]] static auto create(CliAttemptExecutorOptions               options,
                                      std::unique_ptr<ProcessAdapter>         adapter,
                                      std::unique_ptr<EffectiveIdentityProbe> identity)
