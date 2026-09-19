@@ -776,6 +776,7 @@ TEST_CASE("CLI attempt executor maps outcomes and capture modes through existing
 
     auto const& lost = run(9, none_overrides, exited(2, true));
     CHECK(lost.result.as_object().at("capture_lost").as_bool());
+    CHECK_FALSE(lost.output);
 
     // A malformed private-adapter observation is an internal defect, but it must still discharge the accepted
     // completion exactly once with a bounded safe result.
@@ -784,6 +785,110 @@ TEST_CASE("CLI attempt executor maps outcomes and capture modes through existing
     CHECK(internal.failure_disposition == FailureDisposition::Terminal);
     CHECK(result_string(internal, "outcome") == "internal_error");
     CHECK(result_string(internal, "error_code") == "jobu.cli.invalid_result");
+}
+
+TEST_CASE("CLI attempt executor discards disabled capture while active", "[jobu][cli][executor]")
+{
+    ExecutorFixture fixture;
+    auto            overrides = AttributeSet{
+        {"output.capture",      {.data = std::string{"none"}}},
+        {"output.stdout_limit", {.data = std::int64_t{7}}    },
+        {"output.stderr_limit", {.data = std::int64_t{5}}    },
+    };
+    auto       request     = start_request(1, overrides);
+    auto const key         = request.key;
+    auto       completions = std::vector<AttemptCompletion>{};
+    REQUIRE(fixture.executor->start(std::move(request), [&](AttemptCompletion completion) {
+        completions.push_back(std::move(completion));
+    }));
+    auto const operation_id = fixture.observation->starts.back().id;
+
+    auto check_discarded = [&] {
+        auto sizes = CliAttemptExecutorTestAccess::retained_output_sizes(*fixture.executor, key);
+        REQUIRE(sizes);
+        CHECK(sizes->stdout_bytes == 0U);
+        CHECK(sizes->stderr_bytes == 0U);
+        CHECK(completions.empty());
+    };
+    check_discarded();
+
+    SECTION("multiple binary chunks exceed both configured limits")
+    {
+        // Observe every delivery while the operation remains active; final JSON alone hides retention.
+        for (auto chunk : {
+                 std::string_view{"ab"},
+                 std::string_view{"012\0"
+                                  "456789", 10}
+        }) {
+            REQUIRE(fixture.adapter->emit_standard_output(operation_id, as_bytes(chunk)));
+            check_discarded();
+        }
+        for (auto chunk : {
+                 std::string_view{"xyz"},
+                 std::string_view{"ab\0cdefg", 8}
+        }) {
+            REQUIRE(fixture.adapter->emit_standard_error(operation_id, as_bytes(chunk)));
+            check_discarded();
+        }
+
+        REQUIRE(fixture.adapter->finish(operation_id, exited(0)));
+        REQUIRE(completions.size() == 1U);
+        auto const& result = completions.front().result.as_object();
+        CHECK(result.at("stdout").as_object().at("total_bytes").as_uint() == 12U);
+        CHECK(result.at("stderr").as_object().at("total_bytes").as_uint() == 11U);
+        CHECK(result.at("stdout").as_object().at("truncated").as_bool());
+        CHECK(result.at("stderr").as_object().at("truncated").as_bool());
+    }
+
+    SECTION("empty streams retain zero counts without truncation")
+    {
+        REQUIRE(fixture.adapter->finish(operation_id, exited(0)));
+        REQUIRE(completions.size() == 1U);
+        for (auto const* channel : {"stdout", "stderr"}) {
+            auto const& result = completions.front().result.as_object().at(channel).as_object();
+            CHECK(result.at("total_bytes").as_uint() == 0U);
+            CHECK_FALSE(result.at("truncated").as_bool());
+        }
+    }
+
+    REQUIRE(completions.size() == 1U);
+    CHECK_FALSE(completions.front().output);
+    CHECK_FALSE(completions.front().result.as_object().at("capture_lost").as_bool());
+    for (auto const* channel : {"stdout", "stderr"}) {
+        CHECK(completions.front().result.as_object().at(channel).as_object().at("captured_bytes").as_uint() == 0U);
+    }
+    CHECK_FALSE(CliAttemptExecutorTestAccess::retained_output_sizes(*fixture.executor, key));
+}
+
+TEST_CASE("CLI attempt executor observes bounded enabled capture while active", "[jobu][cli][executor]")
+{
+    ExecutorFixture fixture;
+    auto            request     = start_request(1,
+                                                {
+                                                    {"output.capture",      {.data = std::string{"always"}}},
+                                                    {"output.stdout_limit", {.data = std::int64_t{7}}      },
+                                                    {"output.stderr_limit", {.data = std::int64_t{5}}      },
+    });
+    auto const      key         = request.key;
+    auto            completions = std::vector<AttemptCompletion>{};
+    REQUIRE(fixture.executor->start(std::move(request), [&](AttemptCompletion completion) {
+        completions.push_back(std::move(completion));
+    }));
+    auto const operation_id = fixture.observation->starts.back().id;
+    REQUIRE(fixture.adapter->emit_standard_output(operation_id, as_bytes("0123456789")));
+    REQUIRE(fixture.adapter->emit_standard_error(operation_id, as_bytes("abcdefgh")));
+
+    // Positive retention proves the observer reads the live buffers and other modes still honor their limits.
+    auto sizes = CliAttemptExecutorTestAccess::retained_output_sizes(*fixture.executor, key);
+    REQUIRE(sizes);
+    CHECK(sizes->stdout_bytes == 7U);
+    CHECK(sizes->stderr_bytes == 5U);
+    CHECK(completions.empty());
+
+    REQUIRE(fixture.adapter->finish(operation_id, exited(0)));
+    REQUIRE(completions.size() == 1U);
+    REQUIRE(completions.front().output);
+    CHECK_FALSE(CliAttemptExecutorTestAccess::retained_output_sizes(*fixture.executor, key));
 }
 
 TEST_CASE("CLI attempt executor retains completion through cancellation", "[jobu][cli][executor]")

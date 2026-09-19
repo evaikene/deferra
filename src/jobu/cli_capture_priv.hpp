@@ -32,6 +32,9 @@ public:
     [[nodiscard]] auto append(jb::core::ByteView bytes) -> jb::core::Result<void, jb::core::Error>;
     [[nodiscard]] auto take() -> AttemptOutputChannel;
 
+    /// Returns retained payload bytes without assembling a snapshot.
+    [[nodiscard]] auto retained_size() const noexcept -> std::size_t { return _prefix.size() + _suffix.size(); }
+
 private:
     void append_suffix(jb::core::ByteView bytes);
 

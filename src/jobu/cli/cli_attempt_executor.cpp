@@ -229,8 +229,9 @@ struct CliAttemptExecutor::Private : jb::core::priv::ObjectPrivate {
             , expected_exit_codes{expected_value}
             , retry_exit_codes{std::move(retry_value)}
             , capture_mode{capture_mode_value}
-            , standard_output{stdout_limit}
-            , standard_error{stderr_limit}
+            // Zero retention preserves stream accounting without storing disabled-capture payloads.
+            , standard_output{capture_mode_value == jb::jobu::detail::CliCaptureMode::None ? 0U : stdout_limit}
+            , standard_error{capture_mode_value == jb::jobu::detail::CliCaptureMode::None ? 0U : stderr_limit}
             , completion{std::move(completion_value)}
         {}
 
@@ -591,6 +592,22 @@ auto detail::CliAttemptExecutorFactory::create(CliAttemptExecutorOptions        
     // Receiver-aware Process connections require the fully constructed Object and its bound private owner.
     executor->d_ptr<CliAttemptExecutor::Private>()->adapter = make_system_process_adapter(*executor);
     return executor;
+}
+
+auto detail::CliAttemptExecutorTestAccess::retained_output_sizes(CliAttemptExecutor const& executor,
+                                                                 AttemptKey const&         key)
+    -> std::optional<CliRetainedOutputSizes>
+{
+    auto const* data  = executor.d_ptr<CliAttemptExecutor::Private>();
+    auto const  found = data->active_by_attempt.find(key);
+    if (found == data->active_by_attempt.end()) {
+        return std::nullopt;
+    }
+
+    return CliRetainedOutputSizes{
+        .stdout_bytes = found->second->standard_output.retained_size(),
+        .stderr_bytes = found->second->standard_error.retained_size(),
+    };
 }
 
 auto detail::CliAttemptExecutorTestAccess::create(CliAttemptExecutorOptions               options,
