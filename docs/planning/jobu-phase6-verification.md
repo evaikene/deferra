@@ -1,9 +1,13 @@
-# Phase 6 Stage 6.19 verification record
+# Phase 6 verification record
 
-Recorded 2026-09-19. Linux acceptance and source audits passed. Closure remains
-pending recovery of the native macOS provenance described below and the final
-clean-tree check after user-managed review/commit/merge. No production code,
-tests, build configuration, dependencies, or diagnostic policy changed in 6.19.
+Recorded 2026-09-19. Phase 6 is complete against the merged Stage 6.20 correction
+after Stage 6.21 integrated Linux and focused native macOS validation. Deleted
+Stage 6.17 evidence is accepted without recovery, and the Stage 6.19 merge comparison
+is complete. See the [closure verification addendum](#stage-621-closure-verification).
+
+The sections preceding that addendum preserve historical Stage 6.19 measurements
+and carried Stage 6.18 native results. No production code, tests, build
+configuration, dependencies, or diagnostic policy changed in 6.19 or 6.21.
 
 ## Tested source
 
@@ -189,8 +193,9 @@ SHA-256 d9f497e872713216ff1414a0e8a7a565c5b22134714077fdad5f3c8b874617fd.
 
 The local Stage 6.18 report is available, but the referenced Stage 6.17 Core
 child-path/at-fork audit and original native logs are not present here. No
-remote macOS execution tool is available in this session. Recover those records
-and the tree comparison before claiming independently evidenced final closure.
+remote macOS execution tool was available during Stage 6.19. The user subsequently
+accepted the deleted Stage 6.17 evidence without recovery; missing provenance is
+a historical limitation, not a remaining closure gate.
 The final native full suite revalidated the registered Core tests according to
 the Stage 6.18 report; no new macOS run was performed in 6.19.
 
@@ -201,7 +206,7 @@ host at-fork handlers are outside the Process-controlled post-return safety
 guarantee. Strict privilege-gain prevention remains unsupported on macOS.
 Known zombie-only group EPERM diagnostics remain visible in passing tests.
 
-## Artifacts and remaining closure work
+## Historical artifacts and deferred work
 
 The ignored `.codex/jobu-phase6-stage6.19-validation.md` contains the detailed
 source audit, commands, test counts, and initial probe failures. Generated
@@ -210,14 +215,139 @@ probes, build/CTest logs, caches, dependency versions, and the root harness.
 Native artifacts were recorded on the macOS workspace; their present availability
 has not been checked. Preserve them before removing its .bld directory.
 
-After the missing native provenance is recovered and these documentation
-changes are reviewed and committed by the user, check jj status, record the
-final revision, and compare against the tested source. Documentation-only
-changes need no full rebuild. Any source or build-configuration delta requires
-appropriate renewed validation. Until that check passes, Phase 6 remains open.
+The Stage 6.19 merge comparison is complete. No deleted native evidence recovery
+is pending. The addendum below records closure against the verified merged
+correction. Any subsequent source or build-configuration delta requires
+appropriate renewed validation.
 
 Phase 7 owns recovery and coordinated daemon signals, admission stop, active
 runner termination, and infrastructure shutdown. Default signal termination
 can bypass Object destruction. Phase 8 owns protected secrets, expanded
 history/output/statistics RPC, public Run Now/cancel, and remaining client APIs.
 Literal Phase 6 environment values are persisted job data, not protected secrets.
+
+## Stage 6.21 closure verification
+
+Recorded 2026-09-19 under the [closure design](jobu-phase6-closure-code-design.md).
+These results verify the merged capture correction and are separate from the
+historical 6.19 Linux and carried 6.18 native full-suite results above.
+
+### Correction and Stage 6.20 evidence
+
+The final audit found that `output.capture=none` omitted durable output but still
+retained payload bytes in both active capture buffers. Stage 6.20 selects zero
+effective buffer limits for this mode, continuing normal append/take accounting.
+It preserves exact observed totals, zero captured bytes, nonempty-stream
+truncation, capture-loss metadata, and absent `AttemptOutput`. Other modes keep
+their configured retention and persistence behavior.
+
+Private value-only observers support a deterministic regression that checks
+zero retained bytes after each binary/multi-chunk delivery while the attempt is
+active, then checks exactly-once completion and metadata. A capturing-mode
+control proves the observer sees retained data. Buffer coverage checks zero-limit
+multi-chunk accounting and reset/reuse.
+
+The Stage 6.20 handoff records that the regression failed 6 of 62 assertions with
+the old constructor: stdout retained 2 then 7 bytes and stderr 3 then 5 bytes
+where zero was required. With the fix, the focused three-target Linux run passed.
+All five changed C++ files/headers had clean configured clangd diagnostics;
+formatting and whitespace checks passed. This is carried Stage 6.20 evidence,
+not a repeated before/after experiment or diagnostics scan in Stage 6.21.
+
+### Tested revision and merge comparisons
+
+Both Stage 6.21 hosts tested merged Stage 6.20 / PR #155:
+`fc326b4d63796d363dff14acac26aff6f8416698`, tracked tree
+`d447f1ddd7abc540c0798d0921ec7531efd1c595`. Both checkouts were clean before
+validation. Linux used `/home/enar/src/deferra`; native macOS used
+`/Users/evaikene/src/deferra`.
+
+The complete merged tree equals the Stage 6.20 tested snapshot
+`70d485954d5ca6891939b8d81112d881c0f70442`; the comparison below passed with no
+differences. Stage 6.20 is merged, not merge-pending.
+
+The Stage 6.19 clean-tree gate is also satisfied: comparing its tested Stage
+6.18 source `d637ba65f878f4fa0716d56d730be6b11a35f14a` with the Stage 6.19 merge
+`112da91f37eb1b81baeaed413294e8364d6aa1b2` shows only the four README/planning
+documents changed. Source, tests, and build configuration match. This does not
+claim a new comparison against the unavailable original macOS working-copy
+revision discussed in the carried evidence.
+
+```sh
+git diff --exit-code 70d485954d5ca6891939b8d81112d881c0f70442 fc326b4d63796d363dff14acac26aff6f8416698
+git diff --stat d637ba65f878f4fa0716d56d730be6b11a35f14a 112da91f37eb1b81baeaed413294e8364d6aa1b2
+```
+
+### New validation results
+
+| Environment | Build | Tests |
+| --- | --- | --- |
+| Native Linux, UID 1001 | Existing `.bld`, Debug, SQLite enabled; incremental build reported no work | 114/114 CTest targets passed, 15.03 s; no target skips; one internal real-root daemon case skipped |
+| Native macOS, UID 501 | Existing `.bld`, Debug, SQLite enabled; 14 incremental steps, no compiler/linker warnings or errors | Focused 3/3 CTest targets passed, 1.80 s; no skips |
+
+Linux used kernel `7.2.6-zen2-1-zen`, x86_64, GCC `16.2.1 20260810`, and CMake
+4.4.3. macOS used 26.6.2 (25G83), arm64, Apple Clang 21.0.0
+(`clang-2100.3.34.2`), and CMake 4.4.3. No dependencies were added or upgraded.
+
+Linux commands:
+
+```sh
+cmake --build .bld -j 4
+ctest --test-dir .bld/test --output-on-failure \
+  --output-log /tmp/deferra-stage621-linux-ctest-unrestricted.log
+```
+
+Native macOS commands:
+
+```sh
+cmake --build .bld --target cli-capture-test cli-attempt-executor-test cli-exit-policy-test -j 4
+ctest --test-dir .bld/test --output-on-failure \
+  -R '^(cli-capture-test|cli-attempt-executor-test|cli-exit-policy-test)$' \
+  --output-log /tmp/deferra-stage621-macos-ctest.log
+```
+
+The initial restricted Linux run failed 16/114 targets because process gates
+and socket operations were denied (`parent.gate:1`, `Operation not permitted`).
+The unchanged suite passed in the subsequent unrestricted run recorded above.
+The initial macOS build was denied writes to `.ninja_lock` and object files;
+the unrestricted build and focused tests passed. No source fixes or container
+fallback were required. These environment failures are not passing validation
+and are not included in the acceptance counts.
+
+The native focused run passed 11 cases / 132 assertions for exit policy,
+6 / 95 for capture, and 17 / 765 for the executor. The executor log retains
+`Process leader_exit.kill failed with native error 1` messages consistent with
+the previously recorded native EPERM limitation; its assertions passed. This
+focused run is new evidence for the closure correction, not a new full macOS
+suite, Core diagnostics audit, privileged-root test, or recovery of deleted logs.
+
+Build logs are `/tmp/deferra-stage621-linux-build.log` on Linux and
+`/tmp/deferra-stage621-macos-build-unrestricted.log` on macOS. Detailed successful
+test output is also in each host's `.bld/test/Testing/Temporary/LastTest.log`.
+The initial failed attempts are recorded in
+`/tmp/deferra-stage621-linux-ctest.log` and
+`/tmp/deferra-stage621-macos-build.log` on their respective hosts. These local
+artifacts are temporary; revision, commands, results, and limitations are
+recorded here durably.
+
+No new SQLite-disabled build, privileged-root run, or project-wide clangd scan
+was needed. Stage 6.21 changes only documentation; the earlier diagnostics and
+no-SQLite evidence remain labeled by their original stages.
+
+### Final disposition and remaining boundary
+
+The implementation finding is resolved, the correction is merged, and integrated
+Linux validation passes. Phase 6 is complete against the tested revision recorded
+above, enabling Phase 7 planning. The user accepts deleted Stage 6.17 evidence with no
+pending recovery task; historical platform limitations remain explicit.
+The agreed process-group signaling, direct-child reaping, and bounded output
+cleanup contract is unchanged. No synchronous all-descendants-terminal barrier
+was added or made a closure requirement.
+
+Stage 6.21 validation and evidence recording are complete. This record identifies
+the verified implementation revision; it does not depend on the commit identity
+of the documentation itself. These documentation-only changes leave source,
+tests, and build configuration unchanged. Their commit or merge requires no
+further closure-record update or repeat full suite and does not reopen the
+completed Stage 6.19 gate.
+Phase 7 recovery/coordinated shutdown and Phase 8 API/secrets work remain deferred.
