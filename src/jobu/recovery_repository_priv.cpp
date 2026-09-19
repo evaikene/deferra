@@ -3,9 +3,11 @@
 #include "attempt_repository_priv.hpp"
 #include "domain_storage_priv.hpp"
 #include "job_repository_priv.hpp"
+#include "json.hpp"
 #include "query.hpp"
 #include "queue_repository_priv.hpp"
 #include "run_repository_priv.hpp"
+#include "scheduler_repository_priv.hpp"
 #include "storage_failure_priv.hpp"
 #include "value.hpp"
 
@@ -32,6 +34,25 @@ auto invariant(std::string_view reason) -> jb::core::Error
 auto storage_error(jb::core::Error const& error) -> jb::core::Error
 {
     return sanitized_storage_error(error, StorageOperation::Recovery);
+}
+
+auto interruption_result() -> RecoveryResult<std::string>
+{
+    // Interruption records an unknown external outcome, never a fabricated runner failure.
+    return jb::core::serialize_json({
+        .data = jb::core::JsonValue::Object{
+                                            {"reason", {.data = std::string{"daemon_interrupted"}}},
+                                            {"outcome_unknown", {.data = true}},
+                                            }
+    });
+}
+
+auto expect_one_affected(jb::db::Query const& query, std::string_view reason) -> RecoveryResult<void>
+{
+    if (query.num_rows_affected() != 1) {
+        return RecoveryResult<void>::failure(invariant(reason));
+    }
+    return RecoveryResult<void>::success();
 }
 
 auto invalid_limit() -> jb::core::Error
@@ -315,6 +336,127 @@ RecoveryRepository::RecoveryRepository(jb::db::Database& database, AttributeRegi
     : _database{database}
     , _attributes{attributes}
 {}
+
+auto RecoveryRepository::interrupt_attempt(RecoveryAttemptKey const& key, jb::core::UtcTimePoint recovery_time)
+    -> RecoveryResult<void>
+{
+    // A scan is only a candidate source. Re-read ownership, history and output inside the
+    // caller's transaction before the first write, then verify the selected attempt is still current.
+    auto run = find_run(key.run_id);
+    if (!run) {
+        return RecoveryResult<void>::failure(std::move(run).error());
+    }
+    if (run->state != RunState::Running) {
+        return RecoveryResult<void>::failure(invariant("interruption_run_not_running"));
+    }
+    AttemptRepository attempts{_database};
+    auto              attempt = attempts.find(key.run_id, key.attempt_number);
+    if (!attempt) {
+        return RecoveryResult<void>::failure(lookup_error(attempt));
+    }
+    // find_run established that exactly the latest attempt is Running. An earlier key
+    // must not rewrite completed history, even if it came from a previously valid scan.
+    if (!*attempt || (*attempt)->state != AttemptState::Running) {
+        return RecoveryResult<void>::failure(invariant("interruption_attempt_not_current"));
+    }
+    auto serialized = interruption_result();
+    if (!serialized) {
+        return RecoveryResult<void>::failure(storage_error(serialized.error()));
+    }
+
+    SchedulerRepository scheduler{_database, _attributes};
+    auto                completed = scheduler.complete_attempt(key.run_id,
+                                                               key.attempt_number,
+                                                               recovery_time,
+                                                               AttemptOutcome::Interrupted,
+                                                               *serialized);
+    if (!completed) {
+        return RecoveryResult<void>::failure(storage_error(completed.error()));
+    }
+
+    // Use INSERT, not the normal output replacement API: unexpected capture is evidence
+    // of an invalid durable state. Empty blobs describe lost capture, not observed silence.
+    auto number = attempt_number_to_storage(key.attempt_number);
+    if (!number) {
+        return RecoveryResult<void>::failure(storage_error(number.error()));
+    }
+    jb::db::Query query{_database};
+    auto          result = query.prepare(
+        "INSERT INTO jobu_attempt_output(run_id, attempt_number, stdout_blob, stderr_blob, "
+        "stdout_truncated, stderr_truncated, capture_lost) VALUES(:id, :number, :empty, :empty, 0, 0, 1)");
+    if (result) {
+        result = query.bind_value(":id", uuid_to_storage(key.run_id));
+    }
+    if (result) {
+        result = query.bind_value(":number", *number);
+    }
+    if (result) {
+        result = query.bind_value(":empty", jb::db::make_blob({}));
+    }
+    if (result) {
+        result = query.exec();
+    }
+    if (!result) {
+        return RecoveryResult<void>::failure(storage_error(result.error()));
+    }
+    return expect_one_affected(query, "interruption_output_affected_rows");
+}
+
+auto RecoveryRepository::set_run_interrupted(RecoveryAttemptKey const& key, jb::core::UtcTimePoint recovery_time)
+    -> RecoveryResult<void>
+{
+    auto number = attempt_number_to_storage(key.attempt_number);
+    if (!number) {
+        return RecoveryResult<void>::failure(storage_error(number.error()));
+    }
+    auto completed = timestamp_to_storage(recovery_time);
+    if (!completed) {
+        return RecoveryResult<void>::failure(storage_error(completed.error()));
+    }
+    auto serialized = interruption_result();
+    if (!serialized) {
+        return RecoveryResult<void>::failure(storage_error(serialized.error()));
+    }
+
+    // The attempt/output writes deliberately precede this update. Guard their matching
+    // metadata so a stale key, wrong timestamp, missing capture or repeated call cannot
+    // terminalize a different transition. Only these three run fields may change.
+    jb::db::Query query{_database};
+    auto          result =
+        query.prepare("UPDATE jobu_runs SET state = 'interrupted', completed_at_us = :completed, result_json = :result "
+                      "WHERE id = :id AND state = 'running' AND started_at_us IS NOT NULL "
+                      "AND completed_at_us IS NULL AND result_json IS NULL "
+                      "AND :number = (SELECT MAX(attempt_number) FROM jobu_attempts WHERE run_id = :id) "
+                      "AND NOT EXISTS (SELECT 1 FROM jobu_attempts WHERE run_id = :id AND state <> 'completed') "
+                      "AND EXISTS (SELECT 1 FROM jobu_attempts WHERE run_id = :id AND attempt_number = :number "
+                      "AND state = 'completed' AND outcome = 'interrupted' AND completed_at_us = :completed "
+                      "AND result_json = :result AND due_at_us = jobu_runs.runnable_at_us) "
+                      "AND EXISTS (SELECT 1 FROM jobu_attempt_output WHERE run_id = :id AND attempt_number = :number "
+                      "AND stdout_blob = :empty AND stderr_blob = :empty "
+                      "AND stdout_truncated = 0 AND stderr_truncated = 0 AND capture_lost = 1)");
+    if (result) {
+        result = query.bind_value(":id", uuid_to_storage(key.run_id));
+    }
+    if (result) {
+        result = query.bind_value(":number", *number);
+    }
+    if (result) {
+        result = query.bind_value(":completed", *completed);
+    }
+    if (result) {
+        result = query.bind_value(":result", jb::db::make_text(*serialized));
+    }
+    if (result) {
+        result = query.bind_value(":empty", jb::db::make_blob({}));
+    }
+    if (result) {
+        result = query.exec();
+    }
+    if (!result) {
+        return RecoveryResult<void>::failure(storage_error(result.error()));
+    }
+    return expect_one_affected(query, "interruption_run_affected_rows");
+}
 
 auto RecoveryRepository::find_run(jb::core::Uuid const& id) -> RecoveryResult<JobRun>
 {

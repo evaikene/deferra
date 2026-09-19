@@ -296,6 +296,14 @@ if(TARGET jobu-sqlite)
     target_link_libraries(recovery-repository-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME recovery-repository-test COMMAND $<TARGET_FILE:recovery-repository-test>)
 
+    add_executable(recovery-interruption-test
+        recovery-interruption-test.cpp
+        support/recovery_fixture.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(recovery-interruption-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME recovery-interruption-test COMMAND $<TARGET_FILE:recovery-interruption-test>)
+
     # JobU SQLite-backed scheduler read repository test
     set(TARGET "scheduler-repository-test")
     add_executable(${TARGET}
