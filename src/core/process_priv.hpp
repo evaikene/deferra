@@ -3,7 +3,7 @@
 #include "object_priv.hpp"
 #include "process.hpp"
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #  include "process_posix_priv.hpp"
 #  include "process_request_priv.hpp"
 
@@ -18,7 +18,7 @@ namespace jb::core {
 struct Process::Private : priv::ObjectPrivate {
     Process*     owner{nullptr};
     ProcessState state{ProcessState::NotRunning};
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     /// Each registration gets a new anchor. Retiring a run never makes an old weak callback valid again.
     struct Anchor {
         Private*      data;

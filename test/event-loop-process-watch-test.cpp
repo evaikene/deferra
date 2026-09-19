@@ -15,6 +15,14 @@
 
 #if defined(__linux__)
 #  include "event_loop_backend_epoll_priv.hpp"
+#  include <sys/epoll.h>
+#endif
+#if defined(__APPLE__)
+#  include "event_loop_backend_kqueue_priv.hpp"
+#  include <sys/event.h>
+#endif
+
+#if defined(__linux__) || defined(__APPLE__)
 
 #  include <cerrno>
 #  include <chrono>
@@ -22,7 +30,6 @@
 #  include <fcntl.h>
 #  include <limits>
 #  include <poll.h>
-#  include <sys/epoll.h>
 #  include <sys/socket.h>
 #  include <sys/types.h>
 #  include <sys/wait.h>
@@ -250,7 +257,7 @@ TEST_CASE("Backend poll failure does not dispatch or discard a process callback"
     CHECK(EventLoopTestAccess::unwatch_process(*fake.loop, 42));
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 namespace {
 
 /// Test-only child creation: the child cannot exit normally until the parent releases its gate.
@@ -277,7 +284,19 @@ public:
     auto start() -> bool
     {
         int sockets[2];
-        if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) != 0) {
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) != 0) {
+            return false;
+        }
+        // Configure the test gate before creation on both platforms; failed setup owns no child.
+        bool configured =
+            ::fcntl(sockets[0], F_SETFD, FD_CLOEXEC) == 0 && ::fcntl(sockets[1], F_SETFD, FD_CLOEXEC) == 0;
+#  if defined(__APPLE__)
+        int const enabled{1};
+        configured = configured && ::setsockopt(sockets[0], SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) == 0;
+#  endif
+        if (!configured) {
+            ::close(sockets[0]);
+            ::close(sockets[1]);
             return false;
         }
         _pid = ::fork();
@@ -301,18 +320,22 @@ public:
         char const byte{'x'};
         ssize_t    count;
         do {
+#  if defined(__APPLE__)
+            count = ::send(_gate, &byte, 1, 0);
+#  else
             count = ::send(_gate, &byte, 1, MSG_NOSIGNAL);
+#  endif
         } while (count < 0 && errno == EINTR);
         ::close(_gate);
         _gate = -1;
         return count == 1;
     }
 
-    auto reap(int& status) -> pid_t
+    auto reap(int& status, int options = WNOHANG) -> pid_t
     {
         pid_t result;
         do {
-            result = ::waitpid(_pid, &status, WNOHANG);
+            result = ::waitpid(_pid, &status, options);
         } while (result < 0 && errno == EINTR);
         if (result == _pid) {
             _pid = -1;
@@ -326,6 +349,24 @@ private:
     pid_t _pid{-1};
     int   _gate{-1};
 };
+
+auto pump_until_exit(EventLoop& loop, int const& notifications) -> bool
+{
+    // Elapsed time bounds a broken test; only native exit readiness establishes success.
+    auto const deadline = Clock::now() + std::chrono::seconds{5};
+    while (notifications == 0 && Clock::now() < deadline) {
+        if (loop.process_events(EventFlag::All, 100) == ProcessEventsResult::Failed) {
+            return false;
+        }
+    }
+    return notifications == 1;
+}
+
+} // namespace
+#endif
+
+#if defined(__linux__)
+namespace {
 
 /// Inject only process-watch syscalls; successful operations still use real pidfds and epoll.
 class ScriptedProcessOperations final : public EpollProcessOperations {
@@ -372,18 +413,6 @@ public:
         return EpollProcessOperations::control(poller, operation, fd, event);
     }
 };
-
-auto pump_until_exit(EventLoop& loop, int const& notifications) -> bool
-{
-    // Elapsed time bounds a broken test; only native exit readiness establishes success.
-    auto const deadline = Clock::now() + std::chrono::seconds{5};
-    while (notifications == 0 && Clock::now() < deadline) {
-        if (loop.process_events(EventFlag::All, 100) == ProcessEventsResult::Failed) {
-            return false;
-        }
-    }
-    return notifications == 1;
-}
 
 void check_closed(int fd)
 {
@@ -574,5 +603,231 @@ TEST_CASE("Linux process-watch failures retain no partial native registration",
     check_closed(operations->pidfd);
     // Backend destruction closes its retained pidfd; the fixture still exclusively owns the child.
     CHECK(::kill(child.pid(), 0) == 0);
+}
+#endif
+
+#if defined(__APPLE__)
+namespace {
+
+/// Fail only process-filter changes; successful registration and readiness still use the native kqueue.
+class ScriptedKqueueProcessOperations final : public KqueueProcessOperations {
+public:
+    int add_error{0};
+    int remove_error{0};
+    int interruptions{0};
+    int add_calls{0};
+    int remove_calls{0};
+    int missing_removals{0};
+
+    auto control(int poller, std::int64_t process_id, std::uint16_t flags) -> int override
+    {
+        auto const removing = (flags & EV_DELETE) != 0U;
+        if (removing) {
+            ++remove_calls;
+        }
+        else {
+            ++add_calls;
+            CHECK(flags == (EV_ADD | EV_ONESHOT));
+        }
+        if (interruptions > 0) {
+            --interruptions;
+            errno = EINTR;
+            return -1;
+        }
+        auto const error = removing ? remove_error : add_error;
+        if (error != 0) {
+            errno = error;
+            return -1;
+        }
+        auto const result = KqueueProcessOperations::control(poller, process_id, flags);
+        if (result < 0 && removing && errno == ENOENT) {
+            ++missing_removals;
+        }
+        return result;
+    }
+};
+
+} // namespace
+
+TEST_CASE("Kqueue observes gated child exit without reaping and never rearms a delivered watch",
+          "[core][event-loop][process-watch][macos]")
+{
+    GatedChild child;
+    REQUIRE(child.start());
+    auto const pid        = child.pid();
+    auto       operations = std::make_shared<ScriptedKqueueProcessOperations>();
+    auto       backend    = make_kqueue_backend(operations);
+    REQUIRE(backend);
+    // Keep direct access to verify Backend's duplicate contract as well as EventLoop callback replacement.
+    auto* native = backend.get();
+    auto  loop   = EventLoopTestAccess::make_event_loop(std::move(backend));
+    REQUIRE(loop->is_valid());
+    int notifications{0};
+    REQUIRE(EventLoopTestAccess::watch_process(*loop, pid, [&] {
+        CHECK(ThreadCtx::current() == loop->thread_ctx());
+        ++notifications;
+    }));
+    CHECK(loop->process_events(EventFlag::All, 0) == ProcessEventsResult::Stopped);
+    CHECK(notifications == 0);
+    REQUIRE(child.release());
+    REQUIRE(pump_until_exit(*loop, notifications));
+
+    REQUIRE(native->add_process(pid) == ProcessRegistrationResult::Added);
+    CHECK(operations->add_calls == 1);
+    operations->remove_error = EIO;
+    CHECK_FALSE(EventLoopTestAccess::unwatch_process(*loop, pid));
+    CHECK_FALSE(EventLoopTestAccess::watch_process(*loop, pid, [&] { FAIL("Retained watch was replaced"); }));
+    CHECK(operations->add_calls == 1);
+    CHECK(EventLoopTestAccess::active_process_count(*loop) == 1);
+    bool task_ran{false};
+    REQUIRE(loop->post([&] { task_ran = true; }));
+    for (int poll = 0; poll < 4; ++poll) {
+        CHECK(loop->process_events(EventFlag::All, 0) == ProcessEventsResult::Stopped);
+    }
+    CHECK(task_ran);
+    CHECK(notifications == 1);
+
+    // Native NOTE_EXIT observation leaves exclusive reaping ownership with the caller.
+    int status{};
+    REQUIRE(child.reap(status) == pid);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 37);
+    operations->remove_error = 0;
+    REQUIRE(EventLoopTestAccess::unwatch_process(*loop, pid));
+    CHECK(operations->missing_removals == 1);
+    CHECK(EventLoopTestAccess::active_process_count(*loop) == 0);
+    CHECK(::waitpid(pid, &status, WNOHANG) == -1);
+    CHECK(errno == ECHILD);
+}
+
+TEST_CASE("Kqueue removes and reinstalls a live child watch after a retained removal failure",
+          "[core][event-loop][process-watch][macos]")
+{
+    GatedChild child;
+    REQUIRE(child.start());
+    auto const pid        = child.pid();
+    auto       operations = std::make_shared<ScriptedKqueueProcessOperations>();
+    auto       loop       = EventLoopTestAccess::make_event_loop(make_kqueue_backend(operations));
+    REQUIRE(loop->is_valid());
+    REQUIRE(EventLoopTestAccess::watch_process(*loop, pid, [] { FAIL("Old callback survived replacement"); }));
+    operations->remove_error = EIO;
+    CHECK_FALSE(EventLoopTestAccess::unwatch_process(*loop, pid));
+    operations->remove_error = 0;
+    int notifications{0};
+    REQUIRE(EventLoopTestAccess::watch_process(*loop, pid, [&] {
+        ++notifications;
+        CHECK(EventLoopTestAccess::unwatch_process(*loop, pid));
+    }));
+    CHECK(operations->add_calls == 2);
+    CHECK(operations->missing_removals == 0);
+    REQUIRE(child.release());
+    REQUIRE(pump_until_exit(*loop, notifications));
+    CHECK(operations->missing_removals == 1);
+    int status{};
+    REQUIRE(child.reap(status) == pid);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 37);
+}
+
+TEST_CASE("Kqueue process registration failures are transactional and interrupted changes retry",
+          "[core][event-loop][process-watch][macos]")
+{
+    auto operations = std::make_shared<ScriptedKqueueProcessOperations>();
+    auto backend    = make_kqueue_backend(operations);
+    REQUIRE(backend);
+    CHECK_FALSE(make_kqueue_backend(nullptr));
+    for (auto const pid : {std::int64_t{-1}, std::int64_t{0}, std::numeric_limits<std::int64_t>::max()}) {
+        CHECK(backend->add_process(pid) == ProcessRegistrationResult::Failed);
+    }
+    CHECK(operations->add_calls == 0);
+    GatedChild child;
+    REQUIRE(child.start());
+    for (auto const error : {ESRCH, EPERM, ENOMEM, EINVAL}) {
+        operations->add_error = error;
+        CHECK(backend->add_process(child.pid()) == ProcessRegistrationResult::Failed);
+        CHECK(backend->remove_process(child.pid()));
+        CHECK(operations->remove_calls == 0);
+    }
+    operations->add_error     = 0;
+    operations->interruptions = 1;
+    REQUIRE(backend->add_process(child.pid()) == ProcessRegistrationResult::Added);
+    CHECK(operations->add_calls == 6);
+    operations->interruptions = 1;
+    REQUIRE(backend->remove_process(child.pid()));
+    CHECK(operations->remove_calls == 2);
+    REQUIRE(backend->add_process(child.pid()) == ProcessRegistrationResult::Added);
+    REQUIRE(backend->remove_process(child.pid()));
+    auto const pid = child.pid();
+    REQUIRE(child.release());
+    int status{};
+    REQUIRE(child.reap(status, 0) == pid);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 37);
+    // Observe absence only after exit is established, so this cannot pass just because the child was still running.
+    ReadyEvent event;
+    CHECK(backend->poll(&event, 1, 0) == 0);
+
+    GatedChild retained;
+    REQUIRE(retained.start());
+    REQUIRE(backend->add_process(retained.pid()) == ProcessRegistrationResult::Added);
+    backend.reset();
+    // Destroying the poller releases the watch without killing or reaping its still-gated child.
+    CHECK(retained.reap(status) == 0);
+    REQUIRE(retained.release());
+    REQUIRE(retained.reap(status, 0) > 0);
+    REQUIRE(WIFEXITED(status));
+    CHECK(WEXITSTATUS(status) == 37);
+}
+
+TEST_CASE("Kqueue process exits coexist with native descriptor readiness", "[core][event-loop][process-watch][macos]")
+{
+    GatedChild first;
+    GatedChild second;
+    REQUIRE(first.start());
+    REQUIRE(second.start());
+    auto loop = EventLoopTestAccess::make_event_loop(make_backend());
+    REQUIRE(loop->is_valid());
+    int first_notifications{0};
+    int second_notifications{0};
+    REQUIRE(EventLoopTestAccess::watch_process(*loop, first.pid(), [&] { ++first_notifications; }));
+    REQUIRE(EventLoopTestAccess::watch_process(*loop, second.pid(), [&] { ++second_notifications; }));
+
+    // A socket supplies real fd readiness alongside both process filters, without timing-dependent sleeps.
+    struct SocketPair {
+        int descriptors[2]{-1, -1};
+
+        ~SocketPair()
+        {
+            for (auto fd : descriptors) {
+                if (fd >= 0) {
+                    ::close(fd);
+                }
+            }
+        }
+    } sockets;
+
+    REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, sockets.descriptors) == 0);
+    int     fd_notifications{0};
+    FdWatch watch;
+    watch = loop->watch_fd(sockets.descriptors[0], FdEvent::Read, FdTriggerMode::Edge, [&](int fd, FdEvents events) {
+        CHECK(events.test(FdEvent::Read));
+        char byte{};
+        CHECK(::read(fd, &byte, 1) == 1);
+        CHECK(byte == 'x');
+        ++fd_notifications;
+        CHECK(loop->unwatch_fd(watch));
+    });
+    REQUIRE(watch);
+    REQUIRE(::write(sockets.descriptors[1], "x", 1) == 1);
+    REQUIRE(first.release());
+    REQUIRE(second.release());
+    REQUIRE(pump_until_exit(*loop, first_notifications));
+    REQUIRE(pump_until_exit(*loop, second_notifications));
+    REQUIRE(pump_until_exit(*loop, fd_notifications));
+    CHECK(EventLoopTestAccess::unwatch_process(*loop, first.pid()));
+    CHECK(EventLoopTestAccess::unwatch_process(*loop, second.pid()));
+    int status{};
+    CHECK(first.reap(status) > 0);
+    CHECK(second.reap(status) > 0);
 }
 #endif

@@ -6,7 +6,24 @@
 #include <cstddef>
 #include <cstdint>
 
+#if defined(__APPLE__)
+#  include "event_loop_backend.hpp"
+#  include <memory>
+#endif
+
 namespace jb::core::priv {
+
+#if defined(__APPLE__)
+/// macOS process-filter syscall seam. Overrides preserve errno and failure-without-mutation semantics.
+class KqueueProcessOperations {
+public:
+    virtual ~KqueueProcessOperations() = default;
+    virtual auto control(int poller, std::int64_t process_id, std::uint16_t flags) -> int;
+};
+
+/// Constructs the native backend with owned process-filter injection; null operations or initialization fail closed.
+auto make_kqueue_backend(std::shared_ptr<KqueueProcessOperations> operations) -> std::unique_ptr<Backend>;
+#endif
 
 /// Outcome of a transactional kqueue fd-filter transition.
 enum class KqueueTransitionStatus : std::uint8_t {

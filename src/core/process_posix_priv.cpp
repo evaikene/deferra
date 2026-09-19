@@ -57,8 +57,8 @@ void close_inherited_descriptors(ProcessChildPlan const& plan) noexcept
 {
     check_child_stage(plan.options, 3, ProcessChildStage::DescriptorCleanup);
 
-    // Keep only stdin, stdout, stderr, and the close-on-exec status channel. A kernel without close_range uses the
-    // finite bound captured before _Fork(); no descriptor discovery or allocation enters the child path.
+    // Keep only stdin, stdout, stderr, and the close-on-exec status channel. Without a native close-range operation,
+    // use the finite bound captured before child creation; no descriptor discovery or allocation enters the child path.
     if (plan.options.close_range) {
         if (plan.options.close_range(4, std::numeric_limits<unsigned int>::max()) == 0) {
             return;
@@ -80,7 +80,7 @@ void close_inherited_descriptors(ProcessChildPlan const& plan) noexcept
 void close_process_fd(int& fd) noexcept
 {
     if (fd >= 0) {
-        // Linux releases the descriptor even on EINTR; retrying could close a reused descriptor.
+        // Linux and Darwin release the descriptor even on EINTR; retrying could close a reused descriptor.
         ::close(fd);
         fd = -1;
     }
@@ -235,8 +235,8 @@ auto prepare_process_child(PreparedProcessRequest const& request, ProcessOperati
             process_error("core.process.security_unsupported", ErrorCategory::Unsupported, "hardening.unsupported"));
     }
 
-    // The ENOSYS fallback cannot discover a safe descriptor bound after _Fork(), so freeze the live parent view with
-    // the other plan data while ordinary library operations remain available.
+    // The bounded close loop cannot discover a safe descriptor limit after child creation, so freeze the live parent
+    // view with the other plan data while ordinary library operations remain available.
     if (operations.descriptor_close_limit(plan.descriptor_limit) != 0) {
         auto const error = errno;
         return Result<ProcessChildPlan, Error>::failure(process_error("core.process.resource_setup_failed",
@@ -248,9 +248,9 @@ auto prepare_process_child(PreparedProcessRequest const& request, ProcessOperati
         plan.candidates.push_back(candidate.c_str());
     }
     plan.default_action.sa_handler = SIG_DFL;
-    ::sigemptyset(&plan.default_action.sa_mask);
-    ::sigemptyset(&plan.target_mask);
-    ::sigfillset(&plan.blocked);
+    sigemptyset(&plan.default_action.sa_mask);
+    sigemptyset(&plan.target_mask);
+    sigfillset(&plan.blocked);
     // libc may reserve signal numbers that cannot be queried/reset. Discover those before creation.
     for (int signal = 1; signal < NSIG; ++signal) {
         if (signal == SIGKILL || signal == SIGSTOP) {
@@ -271,7 +271,8 @@ auto prepare_process_child(PreparedProcessRequest const& request, ProcessOperati
 [[noreturn]] void execute_process_child(ProcessDescriptors const& descriptors, ProcessChildPlan const& plan) noexcept
 {
     // Everything referenced here was frozen in the parent. No destructor, allocation, logger, mutex,
-    // application handler, or exception path runs between _Fork() and execve()/_exit().
+    // application handler, or exception path runs in this Process-controlled interval before execve()/_exit().
+    // On macOS, host/runtime at-fork handlers have already run inside public fork() before this function begins.
     ::close(descriptors.status_read);
     for (auto const fd : descriptors.output_read) {
         ::close(fd);

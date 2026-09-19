@@ -149,6 +149,7 @@ protected:
 };
 
 /// Plain line-based logger writing to stderr. Thread-safe via an internal mutex.
+/// Write and flush errors discard output without throwing; fatal-abort behavior still applies.
 ///
 /// This is the default logger used if no other logger is installed, so it is always
 /// available and can be used for early logging before `main()` / `Application` setup.
@@ -160,7 +161,6 @@ public:
     ~ConsoleLogger() override = default;
 
     void log(LogMessage const& msg) override;
-
 };
 
 /// Returns the currently installed global logger (never nullptr).

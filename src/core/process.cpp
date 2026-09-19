@@ -11,7 +11,7 @@
 #include <type_traits>
 #include <utility>
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #  include <algorithm>
 #  include <cassert>
 #  include <cerrno>
@@ -40,7 +40,7 @@ Process::Process(std::unique_ptr<Private> data, Object* parent)
 
 Process::~Process()
 {
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     d_ptr<Private>()->cleanup();
 #endif
 }
@@ -58,7 +58,7 @@ auto Process::start(ProcessStartInfo start_info) -> Result<void, Error>
                                              .code     = "core.process.event_loop_unavailable",
                                              .message  = "Process requires a valid current owner EventLoop"});
     }
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     auto*      data        = d_ptr<Private>();
     // Capture once before preparation; every later timeout decision uses this exact checked absolute deadline.
     auto const launch_time = data->operations->monotonic_now();
@@ -73,7 +73,7 @@ auto Process::start(ProcessStartInfo start_info) -> Result<void, Error>
     if (!signal_configuration) {
         return signal_configuration;
     }
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     data->request = std::move(prepared).value();
     return data->launch();
 #else
@@ -86,7 +86,7 @@ auto Process::start(ProcessStartInfo start_info) -> Result<void, Error>
 
 auto Process::stop(ProcessStopReason reason) -> Result<void, Error>
 {
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     return d_ptr<Private>()->stop(reason);
 #else
     static_cast<void>(reason);
@@ -103,7 +103,7 @@ auto Process::state() const noexcept -> ProcessState
 
 auto Process::process_id() const noexcept -> std::optional<std::int64_t>
 {
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     auto const pid = d_ptr<Private const>()->pid;
     if (pid > 0) {
         return pid;
@@ -112,7 +112,7 @@ auto Process::process_id() const noexcept -> std::optional<std::int64_t>
     return std::nullopt;
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 auto Process::Private::launch() -> Result<void, Error>
 {
     // Roll back rejected and exceptional setup alike, without catching or translating allocation failures.

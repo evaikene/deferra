@@ -62,16 +62,19 @@ void ConsoleLogger::log(LogMessage const& msg)
     std::tm    tm{};
     localtime(secs, tm);
 
+    auto const line = fmt::format("{:%Y-%m-%d %H:%M:%S}.{:03} [{:<5}] {}:{} - {}\n",
+                                  tm,
+                                  ms,
+                                  log_level_name(msg.level),
+                                  basename(msg.location.file_name()),
+                                  msg.location.line(),
+                                  msg.message);
+
+    // Diagnostics must not turn an unavailable stderr into an exception during noexcept cleanup. Format separately
+    // so allocation failures retain their normal behavior, then make the serialized output attempt best-effort.
     std::lock_guard lock{console_mutex()};
-    fmt::print(stderr,
-               "{:%Y-%m-%d %H:%M:%S}.{:03} [{:<5}] {}:{} - {}\n",
-               tm,
-               ms,
-               log_level_name(msg.level),
-               basename(msg.location.file_name()),
-               msg.location.line(),
-               msg.message);
-    std::fflush(stderr);
+    static_cast<void>(std::fwrite(line.data(), 1, line.size(), stderr));
+    static_cast<void>(std::fflush(stderr));
 
     if (msg.level == LogLevel::Fatal && _abort_on_fatal_error) {
         std::abort();
