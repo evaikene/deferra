@@ -1,6 +1,6 @@
 # JobU Phase 6 Code-Level Design
 
-Status: implementation merged; final verification recorded; closure pending
+Status: completed; merged correction verified and closure evidence recorded
 Baseline: `main` at `11bf10c1c5378af790c55842210091eb53f14e4b`  
 Prepared: 2026-09-03
 
@@ -2124,9 +2124,9 @@ Suggested commit subject: `document Phase 6 verification invariants`
 
 Reconciled 2026-09-19 against the [Stage 6.19 verification record](jobu-phase6-verification.md).
 Checked items have source-audit and Linux runtime evidence, with native Stage 6.18 results carried from its report.
-Native Core diagnostic/audit provenance and the historical macOS tree comparison still need recovery; the related
-items remain open below. Final clean-tree verification after user-managed review/commit/merge is also pending.
-Phase 6 is not yet marked complete.
+The checklist below preserves the Stage 6.19 evidence assessment. Its unchecked provenance items are historical
+limitations accepted by the user, not pending recovery tasks. The Stage 6.19 merge comparison is complete.
+Section 28 records the final audit correction, new validation, and current closure disposition.
 
 - [x] `jb::core::Process` exposes only project/standard types.
 - [x] Process derives from Object and has one Object-owned private block.
@@ -2242,3 +2242,25 @@ and cancel, and the remaining `jobuctl` surface.
 - [Linux `close_range(2)`](https://man7.org/linux/man-pages/man2/close_range.2.html)
 - [Linux `send(2)` and `MSG_NOSIGNAL`](https://man7.org/linux/man-pages/man2/send.2.html)
 - [Apple `kqueue(2)` / `EVFILT_PROC`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/kqueue.2.html)
+
+## 28. Final audit and closure disposition
+
+Recorded 2026-09-19 under the [Phase 6 closure design](jobu-phase6-closure-code-design.md).
+Stage 6.20 / PR #155 merged as `fc326b4d63796d363dff14acac26aff6f8416698` and corrects the final audit's
+disabled-capture retention defect. Mode `none` now uses zero effective buffer limits while retaining byte accounting
+and capture-loss metadata. The active-state regression detects the original defect; other capture modes are unchanged.
+
+The merged tree matches the Stage 6.20 tested snapshot. Stage 6.21 then verified that merged revision with the full
+SQLite-enabled Linux suite (114/114 CTest targets) and three focused native macOS targets (3/3). The
+[verification addendum](jobu-phase6-verification.md#stage-621-closure-verification) records commands, skips,
+incremental build status, historical evidence, and platform limitations separately.
+
+The user accepts the deleted Stage 6.17 evidence without recovery. This acceptance does not claim restored logs or
+new native Core diagnostics. The Stage 6.19 merge comparison is complete and is not reopened by this correction.
+Keep the agreed process-group signaling, direct-child reaping, and bounded output cleanup contract; a synchronous
+all-descendants-terminal barrier remains outside scope.
+
+Phase 6 is complete against the verified merged correction, enabling Phase 7 planning. Stage 6.21 records that
+evidence without changing source, tests, or build configuration. Closure is tied to the tested revision above;
+committing or merging this documentation does not require another closure-record update or full test run.
+Phase 7 recovery/shutdown and Phase 8 API/secrets boundaries in section 26 remain unchanged.

@@ -32,8 +32,11 @@ Linux is the primary development platform and supports CLI and HTTP scheduling,
 local IPC, JSON-RPC, the daemon, and the control client. macOS also supports
 these features, with native Process, CLI executor, mixed scheduler, client,
 and daemon integration coverage. Final clean Linux verification after the
-macOS changes passed. The [Phase 6 verification record](docs/planning/jobu-phase6-verification.md)
-records results and the remaining provenance and clean-tree closure checks.
+macOS changes passed. The merged Phase 6 disabled-capture correction also passed
+integrated Linux and focused native macOS validation. Phase 6 is complete.
+The [closure design](docs/planning/jobu-phase6-closure-code-design.md) and
+[verification addendum](docs/planning/jobu-phase6-verification.md#stage-621-closure-verification)
+record the tested revision, evidence, and accepted historical limitations.
 Windows is not a v1 runtime target.
 
 ## Requirements
