@@ -147,9 +147,9 @@ auto scheduler_run_columns() -> std::string
            "(SELECT COUNT(*) FROM jobu_attempts AS completed_attempts "
            "WHERE completed_attempts.run_id = jobu_runs.id AND completed_attempts.state = 'completed') "
            "AS completed_attempt_count, "
-           "(SELECT COUNT(*) FROM jobu_attempts AS failed_attempts "
-           "WHERE failed_attempts.run_id = jobu_runs.id AND failed_attempts.state = 'completed' "
-           "AND failed_attempts.outcome = 'failed') AS failed_attempt_count, "
+           "(SELECT COUNT(*) FROM jobu_attempts AS retry_history_attempts "
+           "WHERE retry_history_attempts.run_id = jobu_runs.id AND retry_history_attempts.state = 'completed' "
+           "AND retry_history_attempts.outcome IN ('failed', 'interrupted')) AS retry_history_attempt_count, "
            "(SELECT COUNT(*) FROM jobu_attempts AS all_attempts WHERE all_attempts.run_id = jobu_runs.id) "
            "AS total_attempt_count";
 }
@@ -169,7 +169,7 @@ struct SchedulerRun {
     std::uint64_t  active_attempts{0};
     std::uint64_t  running_attempts{0};
     std::uint64_t  completed_attempts{0};
-    std::uint64_t  failed_attempts{0};
+    std::uint64_t  retry_history_attempts{0};
     std::uint64_t  total_attempts{0};
 };
 
@@ -205,9 +205,9 @@ auto decode_scheduler_run(jb::db::Record const&    record,
     if (!completed_attempts) {
         return RepositoryResult<SchedulerRun>::failure(std::move(completed_attempts).error());
     }
-    auto failed_attempts = read_count(record, "failed_attempt_count");
-    if (!failed_attempts) {
-        return RepositoryResult<SchedulerRun>::failure(std::move(failed_attempts).error());
+    auto retry_history_attempts = read_count(record, "retry_history_attempt_count");
+    if (!retry_history_attempts) {
+        return RepositoryResult<SchedulerRun>::failure(std::move(retry_history_attempts).error());
     }
     auto total_attempts = read_count(record, "total_attempt_count");
     if (!total_attempts) {
@@ -225,15 +225,15 @@ auto decode_scheduler_run(jb::db::Record const&    record,
     }
 
     return RepositoryResult<SchedulerRun>::success({
-        .run                = std::move(run).value(),
-        .job_queue_id       = *job_queue_id,
-        .job_state          = *job_state,
-        .queue_state        = *queue_state,
-        .active_attempts    = *active_attempts,
-        .running_attempts   = *running_attempts,
-        .completed_attempts = *completed_attempts,
-        .failed_attempts    = *failed_attempts,
-        .total_attempts     = *total_attempts,
+        .run                    = std::move(run).value(),
+        .job_queue_id           = *job_queue_id,
+        .job_state              = *job_state,
+        .queue_state            = *queue_state,
+        .active_attempts        = *active_attempts,
+        .running_attempts       = *running_attempts,
+        .completed_attempts     = *completed_attempts,
+        .retry_history_attempts = *retry_history_attempts,
+        .total_attempts         = *total_attempts,
     });
 }
 
@@ -293,9 +293,11 @@ auto validate_candidate(SchedulerRun const&           row,
     if (row.run.state == RunState::Scheduled && row.total_attempts != 0) {
         return RepositoryResult<void>::failure(invariant("scheduled_candidate_has_attempt"));
     }
+    // Recovery may leave Interrupted history. Accept its durable retry without making normal
+    // Interrupted completions retryable; only the recovery policy can create that transition.
     if (row.run.state == RunState::RetryWait &&
         (row.completed_attempts == 0 || row.completed_attempts != row.total_attempts ||
-         row.failed_attempts != row.completed_attempts)) {
+         row.retry_history_attempts != row.completed_attempts)) {
         return RepositoryResult<void>::failure(invariant("retry_candidate_attempt_history"));
     }
     return RepositoryResult<void>::success();
@@ -320,7 +322,7 @@ auto capacity_usage(SchedulerRun const& row) -> RepositoryResult<CapacityUsage>
     }
 
     if (row.run.state != RunState::RetryWait || row.active_attempts != 0 || row.completed_attempts == 0 ||
-        row.completed_attempts != row.total_attempts || row.failed_attempts != row.completed_attempts) {
+        row.completed_attempts != row.total_attempts || row.retry_history_attempts != row.completed_attempts) {
         return RepositoryResult<CapacityUsage>::failure(invariant("retry_attempt_relationship"));
     }
     auto policy = retry_policy_from_attributes(row.run.attributes);

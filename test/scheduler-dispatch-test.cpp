@@ -79,7 +79,7 @@ auto dispatch_record(StandardAttributeRegistry const& registry) -> Record
          Field{"active_attempt_count", std::int64_t{0}},
          Field{"running_attempt_count", std::int64_t{0}},
          Field{"completed_attempt_count", std::int64_t{0}},
-         Field{"failed_attempt_count", std::int64_t{0}},
+         Field{"retry_history_attempt_count", std::int64_t{0}},
          Field{"total_attempt_count", std::int64_t{0}},
          Field{"manual_sibling_count", std::int64_t{0}},
          Field{"schedule_sibling_count", std::int64_t{1}},

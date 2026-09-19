@@ -5,6 +5,7 @@
 #include "job.hpp"
 #include "queue.hpp"
 #include "result.hpp"
+#include "retry_policy_priv.hpp"
 #include "run.hpp"
 
 #include <cstddef>
@@ -57,6 +58,12 @@ public:
     /// Absence is an invariant failure; this method neither begins nor commits a transaction.
     [[nodiscard]] auto find_run(jb::core::Uuid const& id) -> jb::core::Result<JobRun, jb::core::Error>;
 
+    /// Revalidates a Running candidate and reads current owners/policy in the caller's transaction.
+    /// Call before interrupt_attempt(), in that same transaction, so numbering, policy and time
+    /// errors precede writes. Uses immutable run attributes; never creates a speculative attempt.
+    [[nodiscard]] auto find_retry_decision(RecoveryAttemptKey const& key, jb::core::UtcTimePoint recovery_time)
+        -> jb::core::Result<RetryDecision, jb::core::Error>;
+
     /// Revalidates a Running run and its latest attempt, then completes that attempt as Interrupted
     /// and inserts empty capture with capture_lost=true. Existing output is an invariant failure.
     /// Requires a caller-owned transaction; this method neither begins nor commits one. On any
@@ -73,6 +80,15 @@ public:
     /// back the whole unit on failure. This primitive does not choose recovery policy or commit.
     [[nodiscard]] auto set_run_interrupted(RecoveryAttemptKey const& key, jb::core::UtcTimePoint recovery_time)
         -> jb::core::Result<void, jb::core::Error>;
+
+    /// Retry branch after interrupt_attempt(), using the due time from find_retry_decision() in
+    /// the same caller-owned transaction. Requires matching Interrupted history/lost capture and
+    /// current nondeleted owners with RetryInterrupted policy. Changes only state and runnable time.
+    /// Preserves first start/snapshot, leaves completion/result unset, and creates no next attempt.
+    /// Add required suspension repairs before commit; roll back the entire unit on any failure.
+    [[nodiscard]] auto set_run_retry_wait(RecoveryAttemptKey const& key,
+                                          jb::core::UtcTimePoint    recovery_time,
+                                          jb::core::UtcTimePoint    due_at) -> jb::core::Result<void, jb::core::Error>;
 
 private:
     jb::db::Database&        _database;

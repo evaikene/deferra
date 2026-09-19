@@ -6,11 +6,13 @@
 #include "json.hpp"
 #include "query.hpp"
 #include "queue_repository_priv.hpp"
+#include "recovery_retry_priv.hpp"
 #include "run_repository_priv.hpp"
 #include "scheduler_repository_priv.hpp"
 #include "storage_failure_priv.hpp"
 #include "value.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -36,6 +38,20 @@ auto storage_error(jb::core::Error const& error) -> jb::core::Error
     return sanitized_storage_error(error, StorageOperation::Recovery);
 }
 
+auto validate_recovery_timestamp(jb::core::UtcTimePoint time) -> RecoveryResult<void>
+{
+    // Storage floors to microseconds. Near the UTC clock's lower boundary that rounding
+    // can produce a value the decoder cannot reopen, even though the input clock value fits.
+    using Microseconds = std::chrono::microseconds;
+    auto const stored  = std::chrono::floor<Microseconds>(time.time_since_epoch());
+    auto const minimum = std::chrono::ceil<Microseconds>(jb::core::UtcTimePoint::min().time_since_epoch());
+    auto const maximum = std::chrono::floor<Microseconds>(jb::core::UtcTimePoint::max().time_since_epoch());
+    if (stored < minimum || stored > maximum) {
+        return RecoveryResult<void>::failure(invariant("timestamp_out_of_range"));
+    }
+    return RecoveryResult<void>::success();
+}
+
 auto interruption_result() -> RecoveryResult<std::string>
 {
     // Interruption records an unknown external outcome, never a fabricated runner failure.
@@ -45,6 +61,22 @@ auto interruption_result() -> RecoveryResult<std::string>
                                             {"outcome_unknown", {.data = true}},
                                             }
     });
+}
+
+auto interrupted_run_where() -> std::string_view
+{
+    // Both branches must match the exact attempt/output transition before changing the run.
+    // In particular, the attempt's original due time still matches the run before RetryWait.
+    return "WHERE id = :id AND state = 'running' AND started_at_us IS NOT NULL "
+           "AND completed_at_us IS NULL AND result_json IS NULL "
+           "AND :number = (SELECT MAX(attempt_number) FROM jobu_attempts WHERE run_id = :id) "
+           "AND NOT EXISTS (SELECT 1 FROM jobu_attempts WHERE run_id = :id AND state <> 'completed') "
+           "AND EXISTS (SELECT 1 FROM jobu_attempts WHERE run_id = :id AND attempt_number = :number "
+           "AND state = 'completed' AND outcome = 'interrupted' AND completed_at_us = :completed "
+           "AND result_json = :result AND due_at_us = jobu_runs.runnable_at_us) "
+           "AND EXISTS (SELECT 1 FROM jobu_attempt_output WHERE run_id = :id AND attempt_number = :number "
+           "AND stdout_blob = :empty AND stderr_blob = :empty "
+           "AND stdout_truncated = 0 AND stderr_truncated = 0 AND capture_lost = 1)";
 }
 
 auto expect_one_affected(jb::db::Query const& query, std::string_view reason) -> RecoveryResult<void>
@@ -337,6 +369,63 @@ RecoveryRepository::RecoveryRepository(jb::db::Database& database, AttributeRegi
     , _attributes{attributes}
 {}
 
+auto RecoveryRepository::find_retry_decision(RecoveryAttemptKey const& key, jb::core::UtcTimePoint recovery_time)
+    -> RecoveryResult<RetryDecision>
+{
+    // Reuse complete candidate validation before looking up the current policy. An old scan
+    // cannot authorize a retry, and deleted-owner Running shapes remain invariant failures.
+    auto run = find_run(key.run_id);
+    if (!run) {
+        return RecoveryResult<RetryDecision>::failure(std::move(run).error());
+    }
+    if (run->state != RunState::Running) {
+        return RecoveryResult<RetryDecision>::failure(invariant("interruption_run_not_running"));
+    }
+    AttemptRepository attempts{_database};
+    auto              attempt = attempts.find(key.run_id, key.attempt_number);
+    if (!attempt) {
+        return RecoveryResult<RetryDecision>::failure(lookup_error(attempt));
+    }
+    if (!*attempt || (*attempt)->state != AttemptState::Running) {
+        return RecoveryResult<RetryDecision>::failure(invariant("interruption_attempt_not_current"));
+    }
+
+    JobRepository   jobs{_database, _attributes};
+    QueueRepository queues{_database, _attributes};
+    auto            job   = jobs.find_by_id(run->job_id, true);
+    auto            queue = queues.find_by_id(run->queue_id, true);
+    if (!job || !queue) {
+        return RecoveryResult<RetryDecision>::failure(!job ? lookup_error(job) : lookup_error(queue));
+    }
+    if (!*job || !*queue) {
+        return RecoveryResult<RetryDecision>::failure(invariant("run_ownership"));
+    }
+    auto decision = recovery_retry_decision(run->attributes,
+                                            {.run_id         = run->id,
+                                             .attempt_number = key.attempt_number,
+                                             .policy         = (*queue)->recovery_policy,
+                                             .job_state      = (*job)->state,
+                                             .queue_state    = (*queue)->state,
+                                             .recovery_time  = recovery_time});
+    if (!decision) {
+        return RecoveryResult<RetryDecision>::failure(storage_error(decision.error()));
+    }
+
+    // Check durable timestamp conversion before the caller completes the attempt. The pure
+    // policy helper checks UTC arithmetic, while storage owns its microsecond representation.
+    auto completed = validate_recovery_timestamp(recovery_time);
+    if (!completed) {
+        return RecoveryResult<RetryDecision>::failure(std::move(completed).error());
+    }
+    if (decision->retry) {
+        auto due = validate_recovery_timestamp(decision->retry->due_at);
+        if (!due) {
+            return RecoveryResult<RetryDecision>::failure(std::move(due).error());
+        }
+    }
+    return decision;
+}
+
 auto RecoveryRepository::interrupt_attempt(RecoveryAttemptKey const& key, jb::core::UtcTimePoint recovery_time)
     -> RecoveryResult<void>
 {
@@ -422,18 +511,9 @@ auto RecoveryRepository::set_run_interrupted(RecoveryAttemptKey const& key, jb::
     // metadata so a stale key, wrong timestamp, missing capture or repeated call cannot
     // terminalize a different transition. Only these three run fields may change.
     jb::db::Query query{_database};
-    auto          result =
-        query.prepare("UPDATE jobu_runs SET state = 'interrupted', completed_at_us = :completed, result_json = :result "
-                      "WHERE id = :id AND state = 'running' AND started_at_us IS NOT NULL "
-                      "AND completed_at_us IS NULL AND result_json IS NULL "
-                      "AND :number = (SELECT MAX(attempt_number) FROM jobu_attempts WHERE run_id = :id) "
-                      "AND NOT EXISTS (SELECT 1 FROM jobu_attempts WHERE run_id = :id AND state <> 'completed') "
-                      "AND EXISTS (SELECT 1 FROM jobu_attempts WHERE run_id = :id AND attempt_number = :number "
-                      "AND state = 'completed' AND outcome = 'interrupted' AND completed_at_us = :completed "
-                      "AND result_json = :result AND due_at_us = jobu_runs.runnable_at_us) "
-                      "AND EXISTS (SELECT 1 FROM jobu_attempt_output WHERE run_id = :id AND attempt_number = :number "
-                      "AND stdout_blob = :empty AND stderr_blob = :empty "
-                      "AND stdout_truncated = 0 AND stderr_truncated = 0 AND capture_lost = 1)");
+    auto          result = query.prepare(
+        "UPDATE jobu_runs SET state = 'interrupted', completed_at_us = :completed, result_json = :result " +
+        std::string{interrupted_run_where()});
     if (result) {
         result = query.bind_value(":id", uuid_to_storage(key.run_id));
     }
@@ -456,6 +536,66 @@ auto RecoveryRepository::set_run_interrupted(RecoveryAttemptKey const& key, jb::
         return RecoveryResult<void>::failure(storage_error(result.error()));
     }
     return expect_one_affected(query, "interruption_run_affected_rows");
+}
+
+auto RecoveryRepository::set_run_retry_wait(RecoveryAttemptKey const& key,
+                                            jb::core::UtcTimePoint    recovery_time,
+                                            jb::core::UtcTimePoint    due_at) -> RecoveryResult<void>
+{
+    auto number = attempt_number_to_storage(key.attempt_number);
+    if (!number) {
+        return RecoveryResult<void>::failure(storage_error(number.error()));
+    }
+    auto completed = timestamp_to_storage(recovery_time);
+    if (!completed) {
+        return RecoveryResult<void>::failure(storage_error(completed.error()));
+    }
+    auto due = timestamp_to_storage(due_at);
+    if (!due) {
+        return RecoveryResult<void>::failure(storage_error(due.error()));
+    }
+    auto serialized = interruption_result();
+    if (!serialized) {
+        return RecoveryResult<void>::failure(storage_error(serialized.error()));
+    }
+    if (due_at < recovery_time) {
+        return RecoveryResult<void>::failure(invariant("retry_before_recovery"));
+    }
+
+    // The caller selected this due time before any writes. Match that transaction's interrupted
+    // attempt/capture and live ownership before advancing only the run's state and runnable time.
+    jb::db::Query query{_database};
+    auto          result = query.prepare("UPDATE jobu_runs SET state = 'retry_wait', runnable_at_us = :due " +
+                                         std::string{interrupted_run_where()} +
+                                         " AND EXISTS (SELECT 1 FROM jobu_jobs WHERE id = jobu_runs.job_id "
+                                         "AND queue_id = jobu_runs.queue_id AND state <> 'deleted') "
+                                         "AND EXISTS (SELECT 1 FROM jobu_queues WHERE id = jobu_runs.queue_id "
+                                         "AND state <> 'deleted' AND recovery_policy = 'retry_interrupted')");
+    if (result) {
+        result = query.bind_value(":id", uuid_to_storage(key.run_id));
+    }
+    if (result) {
+        result = query.bind_value(":number", *number);
+    }
+    if (result) {
+        result = query.bind_value(":completed", *completed);
+    }
+    if (result) {
+        result = query.bind_value(":result", jb::db::make_text(*serialized));
+    }
+    if (result) {
+        result = query.bind_value(":empty", jb::db::make_blob({}));
+    }
+    if (result) {
+        result = query.bind_value(":due", *due);
+    }
+    if (result) {
+        result = query.exec();
+    }
+    if (!result) {
+        return RecoveryResult<void>::failure(storage_error(result.error()));
+    }
+    return expect_one_affected(query, "recovery_retry_run_affected_rows");
 }
 
 auto RecoveryRepository::find_run(jb::core::Uuid const& id) -> RecoveryResult<JobRun>

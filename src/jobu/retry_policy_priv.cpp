@@ -125,20 +125,23 @@ auto stable_fraction(jb::core::Uuid const& run_id, AttemptNumber attempt) noexce
     return static_cast<double>(state >> 11U) * 0x1.0p-53;
 }
 
-auto checked_retry_due_time(jb::core::UtcTimePoint completed_at, jb::core::Duration delay)
+} // anonymous namespace
+
+auto checked_retry_due_time(jb::core::UtcTimePoint from, jb::core::Duration delay)
     -> RetryResult<jb::core::UtcTimePoint>
 {
     using UtcDuration = jb::core::UtcTimePoint::duration;
 
-    auto const converted = std::chrono::duration_cast<UtcDuration>(delay);
-    if (converted < UtcDuration::zero() || std::chrono::duration_cast<jb::core::Duration>(converted) != delay ||
-        completed_at > jb::core::UtcTimePoint::max() - converted) {
+    if (delay < jb::core::Duration::zero()) {
         return RetryResult<jb::core::UtcTimePoint>::failure(retry_time_out_of_range());
     }
-    return RetryResult<jb::core::UtcTimePoint>::success(completed_at + converted);
+    auto const converted = std::chrono::duration_cast<UtcDuration>(delay);
+    if (converted < UtcDuration::zero() || std::chrono::duration_cast<jb::core::Duration>(converted) != delay ||
+        from > jb::core::UtcTimePoint::max() - converted) {
+        return RetryResult<jb::core::UtcTimePoint>::failure(retry_time_out_of_range());
+    }
+    return RetryResult<jb::core::UtcTimePoint>::success(from + converted);
 }
-
-} // anonymous namespace
 
 auto retry_policy_from_attributes(AttributeSet const& attributes) -> RetryResult<RetryPolicy>
 {
