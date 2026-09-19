@@ -27,6 +27,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_tests_properties(process-linux-test PROPERTIES TIMEOUT 30)
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    add_executable(process-macos-test process-macos-test.cpp)
+    target_link_libraries(process-macos-test PRIVATE core Catch2::Catch2WithMain)
+    add_test(NAME process-macos-test COMMAND $<TARGET_FILE:process-macos-test>)
+    set_tests_properties(process-macos-test PROPERTIES TIMEOUT 30)
+endif()
+
 # Object test
 set(TARGET "object-test")
 add_executable(${TARGET} object-test.cpp)

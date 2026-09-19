@@ -70,7 +70,7 @@ struct ProcessStartInfo {
     Duration                 termination_grace{std::chrono::seconds{5}};
     /// Immutable policy requiring a non-root effective identity, authoritatively checked immediately before exec.
     bool                     require_non_root{false};
-    /// Require strict privilege-gain prevention; unsupported platforms reject rather than weaken this policy.
+    /// Require strict privilege-gain prevention; Linux enforces no_new_privs, macOS rejects as security_unsupported.
     bool                     prevent_privilege_gain{false};
 };
 
@@ -99,9 +99,11 @@ struct ProcessExit {
 /// argv/environment storage including NULs and pointer arrays is capped at 256 KiB and the runtime argument limit;
 /// expanded PATH candidate storage has a separate 256 KiB limit. No shell or ambient PATH lookup is performed.
 /// All errors use core.process.* codes and fixed safe details, excluding user-supplied strings and output.
-/// @note Linux launch includes inherited-descriptor cleanup and strict privilege-gain prevention, together with
-/// timeout/stop escalation, process-group cleanup, bounded output streaming, and the post-reap output deadline.
-/// Other platforms retain core.process.monitor_unsupported until their backend stage.
+/// Linux and macOS provide inherited-descriptor cleanup, timeout/stop escalation, process-group cleanup,
+/// bounded output streaming, and the post-reap output deadline. Other platforms reject as monitor_unsupported.
+/// @note Linux uses _Fork(), bypassing application at-fork handlers. macOS uses public fork(): host/runtime
+/// pthread_atfork handlers may run inside fork(), outside Process's control. Only Process-controlled code after
+/// fork() returns in the child is guaranteed async-signal-safe. Embedders own the safety of their at-fork handlers.
 class Process final : public Object {
 public:
     /// Constructs an idle Process and transfers ownership to @p parent when non-null.
