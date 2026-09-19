@@ -21,6 +21,10 @@
 #include <pthread.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#  include <crt_externs.h>
+#endif
+
 namespace {
 auto number(char const* value) noexcept -> int
 {
@@ -29,9 +33,31 @@ auto number(char const* value) noexcept -> int
     return parsed.ec == std::errc{} && *parsed.ptr == '\0' ? result : -1;
 }
 
+#if defined(__APPLE__)
+int atfork_report{-1};
+#endif
+
 void atfork_child() noexcept
 {
+#if defined(__APPLE__)
+    // This synthetic host handler deliberately runs inside public fork(), before Process regains control.
+    // Report using only an async-signal-safe write; the child cleanup must close this inherited endpoint later.
+    if (::write(atfork_report, "x", 1) != 1) {
+        ::_exit(88);
+    }
+#else
+    // Linux _Fork() must bypass host handlers entirely.
     ::_exit(88);
+#endif
+}
+
+auto target_environment() noexcept -> char**
+{
+#if defined(__APPLE__)
+    return *_NSGetEnviron();
+#else
+    return ::environ;
+#endif
 }
 
 auto isolated_launch(char const* executable, int closed, bool missing) -> int
@@ -110,7 +136,7 @@ auto inspect(int argc, char** argv) noexcept -> int
         return 83;
     }
     for (int signal = 1; signal < NSIG; ++signal) {
-        if (::sigismember(&mask, signal) == 1) {
+        if (sigismember(&mask, signal) == 1) {
             return 84;
         }
         if (signal != SIGKILL && signal != SIGSTOP) {
@@ -145,7 +171,7 @@ auto inspect_jobu(int argc, char** argv) noexcept -> int
     }
 
     std::size_t environment_size{0};
-    for (auto const* const* entry = ::environ; *entry != nullptr; ++entry) {
+    for (auto const* const* entry = target_environment(); *entry != nullptr; ++entry) {
         ++environment_size;
     }
     return environment_size == 4U ? 0 : 46;
@@ -261,7 +287,7 @@ auto install_term_handler(bool ignore) noexcept -> bool
 {
     struct sigaction action{};
     action.sa_handler = ignore ? SIG_IGN : record_term;
-    return ::sigemptyset(&action.sa_mask) == 0 && ::sigaction(SIGTERM, &action, nullptr) == 0;
+    return sigemptyset(&action.sa_mask) == 0 && ::sigaction(SIGTERM, &action, nullptr) == 0;
 }
 
 auto write_all(int fd, void const* data, std::size_t size) noexcept -> bool
@@ -296,7 +322,7 @@ auto inspect_daemon(int argc, char** argv) -> int
         arguments.push_back({.data = std::string{argv[index]}});
     }
     JsonValue::Object environment;
-    for (auto const* const* entry = ::environ; *entry != nullptr; ++entry) {
+    for (auto const* const* entry = target_environment(); *entry != nullptr; ++entry) {
         auto const value     = std::string_view{*entry};
         auto const separator = value.find('=');
         if (separator == std::string_view::npos) {
@@ -332,6 +358,7 @@ auto daemon_wait(char const* report_path, char const* release_path) noexcept -> 
     return reported && wait_for_permission_path(release_path) ? 0 : 45;
 }
 
+#if defined(__linux__)
 auto report_no_new_privileges() noexcept -> int
 {
     auto const fd = ::open("/proc/self/status", O_RDONLY | O_CLOEXEC);
@@ -371,6 +398,7 @@ auto report_no_new_privileges() noexcept -> int
     constexpr std::string_view observation{"NoNewPrivs: 1\n"};
     return write_all(STDOUT_FILENO, observation.data(), observation.size()) ? 0 : 52;
 }
+#endif
 
 auto confirm_descriptors_closed(int argc, char** argv) noexcept -> int
 {
@@ -550,10 +578,38 @@ auto main(int argc, char** argv) -> int
         return written == 8 ? 37 : 86;
     }
     if (mode == "atfork") {
+#if defined(__APPLE__)
+        int reports[2];
+        if (::pipe(reports) != 0) {
+            return 97;
+        }
+        // isolated_launch reserves descriptor 3 itself; keep both report endpoints out of that range.
+        for (auto& fd : reports) {
+            if (fd <= 3) {
+                auto const normalized = ::fcntl(fd, F_DUPFD_CLOEXEC, 4);
+                if (normalized < 0) {
+                    return 97;
+                }
+                ::close(fd);
+                fd = normalized;
+            }
+        }
+        atfork_report = reports[1];
+#endif
         if (::pthread_atfork(nullptr, nullptr, atfork_child) != 0) {
             return 97;
         }
-        return isolated_launch(argv[0], 0, false);
+        auto const result = isolated_launch(argv[0], 0, false);
+#if defined(__APPLE__)
+        ::close(reports[1]);
+        char       observation{};
+        auto const count = ::read(reports[0], &observation, 1);
+        ::close(reports[0]);
+        if (count != 1 || observation != 'x') {
+            return 97;
+        }
+#endif
+        return result;
     }
     if (mode == "inspect") {
         return inspect(argc, argv);
@@ -573,9 +629,11 @@ auto main(int argc, char** argv) -> int
     if (mode == "descriptors-closed") {
         return confirm_descriptors_closed(argc, argv);
     }
+#if defined(__linux__)
     if (mode == "no-new-privileges" && argc == 2) {
         return report_no_new_privileges();
     }
+#endif
     if (mode == "output" && argc == 4 && number(argv[2]) >= 0 && number(argv[3]) >= 0) {
         return output({static_cast<std::size_t>(number(argv[2])), static_cast<std::size_t>(number(argv[3]))});
     }

@@ -2,7 +2,13 @@
 
 #include "event_loop.hpp"
 #include "event_loop_backend.hpp"
-#include "event_loop_backend_epoll_priv.hpp"
+#if defined(__linux__)
+#  include "event_loop_backend_epoll_priv.hpp"
+#  include <sys/epoll.h>
+#else
+#  include "event_loop_backend_kqueue_priv.hpp"
+#  include <sys/event.h>
+#endif
 #include "process_posix_priv.hpp"
 #include "support/fake_event_loop_backend.hpp"
 #include "support/temporary_directory.hpp"
@@ -29,7 +35,6 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
-#include <sys/epoll.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -48,8 +53,13 @@ auto helper(std::vector<std::string> arguments = {"exit", "37"}) -> ProcessStart
 
 auto descriptor_count() -> std::size_t
 {
+#if defined(__APPLE__)
+    auto const* path = "/dev/fd";
+#else
+    auto const* path = "/proc/self/fd";
+#endif
     return static_cast<std::size_t>(
-        std::distance(std::filesystem::directory_iterator{"/proc/self/fd"}, std::filesystem::directory_iterator{}));
+        std::distance(std::filesystem::directory_iterator{path}, std::filesystem::directory_iterator{}));
 }
 
 /// @throws Catch::TestFailureException when the test did not obtain a positive owned PID.
@@ -250,7 +260,7 @@ public:
         ++fork_calls;
         sigset_t mask{};
         ::pthread_sigmask(SIG_SETMASK, nullptr, &mask);
-        blocked_at_creation = ::sigismember(&mask, SIGHUP) == 1 && ::sigismember(&mask, SIGUSR1) == 1;
+        blocked_at_creation = sigismember(&mask, SIGHUP) == 1 && sigismember(&mask, SIGUSR1) == 1;
         if (failure == Failure::Fork) {
             errno = EAGAIN;
             return -1;
@@ -280,7 +290,7 @@ public:
         }
         sigset_t mask{};
         ::pthread_sigmask(SIG_SETMASK, nullptr, &mask);
-        restored_at_release = ::sigismember(&mask, SIGHUP) == 0;
+        restored_at_release = sigismember(&mask, SIGHUP) == 0;
         if (loop) {
             watches_before_release = EventLoopTestAccess::fd_callback(*loop, status_fd) &&
                                      EventLoopTestAccess::process_callback(*loop, pid) &&
@@ -463,6 +473,22 @@ public:
     {
         REQUIRE(pid > 0);
 
+#if defined(__APPLE__)
+        _fd = ::kqueue();
+        REQUIRE(_fd >= 0);
+        struct kevent change;
+        EV_SET(&change, pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, nullptr);
+        int registered;
+        do {
+            registered = ::kevent(_fd, &change, 1, nullptr, 0, nullptr);
+        } while (registered < 0 && errno == EINTR);
+        if (registered == 0) {
+            return;
+        }
+        auto const error = errno;
+        ::close(_fd);
+        _fd = -1;
+#else
         EpollProcessOperations operations;
         _fd = operations.open_pidfd(pid);
         if (_fd >= 0) {
@@ -470,7 +496,8 @@ public:
         }
 
         auto const error = errno;
-        UNSCOPED_INFO("pidfd_open(" << pid << ") failed with errno " << error);
+#endif
+        UNSCOPED_INFO("descendant watch for " << pid << " failed with errno " << error);
         REQUIRE(error == ESRCH);
     }
 
@@ -491,6 +518,18 @@ public:
             return;
         }
 
+#if defined(__APPLE__)
+        struct kevent   event;
+        struct timespec timeout{.tv_sec = 3, .tv_nsec = 0};
+        int             ready;
+        do {
+            ready = ::kevent(_fd, nullptr, 0, &event, 1, &timeout);
+        } while (ready < 0 && errno == EINTR);
+        REQUIRE(ready == 1);
+        CHECK(event.filter == EVFILT_PROC);
+        CHECK(event.ident == static_cast<std::uintptr_t>(_pid));
+        CHECK((event.fflags & NOTE_EXIT) != 0);
+#else
         pollfd item{.fd = _fd, .events = POLLIN, .revents = 0};
         int    ready;
         do {
@@ -502,6 +541,7 @@ public:
         }
         REQUIRE(ready == 1);
         CHECK((item.revents & POLLIN) != 0);
+#endif
     }
 
 private:
@@ -660,7 +700,7 @@ void install_handler(int signal, void (*handler)(int))
 {
     struct sigaction action{};
     action.sa_handler = handler;
-    REQUIRE(::sigemptyset(&action.sa_mask) == 0);
+    REQUIRE(sigemptyset(&action.sa_mask) == 0);
     REQUIRE(::sigaction(signal, &action, nullptr) == 0);
 }
 
@@ -695,8 +735,8 @@ auto failed_privilege_hardening() noexcept -> int
 }
 } // namespace
 
-TEST_CASE("Linux Process executes absolute and ordered PATH candidates without missing immediate exits",
-          "[core][process][linux]")
+TEST_CASE("POSIX Process executes absolute and ordered PATH candidates without missing immediate exits",
+          "[core][process][posix]")
 {
     Run        run;
     auto const before = descriptor_count();
@@ -716,7 +756,7 @@ TEST_CASE("Linux Process executes absolute and ordered PATH candidates without m
     CHECK(descriptor_count() == before);
 }
 
-TEST_CASE("Linux Process reports signal and asynchronous exec or directory failures safely", "[core][process][linux]")
+TEST_CASE("POSIX Process reports signal and asynchronous exec or directory failures safely", "[core][process][posix]")
 {
     Run  run;
     auto signaled = run.execute(helper({"signal", std::to_string(SIGTERM)}));
@@ -754,8 +794,8 @@ TEST_CASE("Linux Process reports signal and asynchronous exec or directory failu
     CHECK(missing.start_error->code == "core.process.exec_failed");
 }
 
-TEST_CASE("Linux Process PATH remembers permission denial but continues to a usable candidate",
-          "[core][process][linux]")
+TEST_CASE("POSIX Process PATH remembers permission denial but continues to a usable candidate",
+          "[core][process][posix]")
 {
     jb::test::TemporaryDirectory directory;
     auto                         info       = helper();
@@ -774,29 +814,33 @@ TEST_CASE("Linux Process PATH remembers permission denial but continues to a usa
     CHECK(run.execute(std::move(info)).exit_code == 37);
 }
 
-TEST_CASE("Linux Process installs exact argv environment cwd and clean target signal state", "[core][process][linux]")
+TEST_CASE("POSIX Process installs exact argv environment cwd and clean target signal state", "[core][process][posix]")
 {
     SignalScope hup{SIGHUP};
     SignalScope usr{SIGUSR1};
     install_handler(SIGHUP, record_signal);
     install_handler(SIGUSR1, SIG_IGN);
     sigset_t blocked{};
-    REQUIRE(::sigemptyset(&blocked) == 0);
-    REQUIRE(::sigaddset(&blocked, SIGUSR1) == 0);
+    REQUIRE(sigemptyset(&blocked) == 0);
+    REQUIRE(sigaddset(&blocked, SIGUSR1) == 0);
     REQUIRE(::pthread_sigmask(SIG_BLOCK, &blocked, nullptr) == 0);
     jb::test::TemporaryDirectory directory;
     Run                          run;
-    auto                         info  = helper({"inspect", "", "-option", directory.path().string()});
-    info.working_directory             = directory.path();
-    info.environment["PROCESS_MARKER"] = "literal $x = value";
-    CHECK(run.execute(std::move(info)).exit_code == 0);
+    // getcwd reports the physical path, including macOS's /var -> /private/var resolution.
+    auto const                   physical_directory = std::filesystem::canonical(directory.path());
+    auto                         info               = helper({"inspect", "", "-option", physical_directory.string()});
+    info.working_directory                          = directory.path();
+    info.environment["PROCESS_MARKER"]              = "literal $x = value";
+    auto const result                               = run.execute(std::move(info));
+    CAPTURE(result.exit_code.value_or(-1), result.signal_number.value_or(-1));
+    CHECK(result.exit_code == 0);
     sigset_t after{};
     REQUIRE(::pthread_sigmask(SIG_SETMASK, nullptr, &after) == 0);
-    CHECK(::sigismember(&after, SIGUSR1) == 1);
+    CHECK(sigismember(&after, SIGUSR1) == 1);
 }
 
-TEST_CASE("Linux Process closes unrelated descriptors through native and bounded fallback paths",
-          "[core][process][linux][security]")
+TEST_CASE("POSIX Process closes unrelated descriptors through native and bounded fallback paths",
+          "[core][process][posix][security]")
 {
     for (bool force_fallback : {false, true}) {
         CAPTURE(force_fallback);
@@ -840,23 +884,25 @@ TEST_CASE("Linux Process closes unrelated descriptors through native and bounded
     CHECK(run.starts == 0);
 }
 
-TEST_CASE("Linux Process normalizes closed conventional descriptors and bypasses atfork handlers",
-          "[core][process][linux]")
+TEST_CASE("POSIX Process normalizes closed conventional descriptors and respects the platform atfork contract",
+          "[core][process][posix]")
 {
     Run run;
     for (int mask : {1, 2, 4, 8, 15}) {
         for (bool missing : {false, true}) {
-            CHECK(run.execute(helper({"closed", std::to_string(mask), missing ? "1" : "0"})).exit_code == 0);
+            auto const result = run.execute(helper({"closed", std::to_string(mask), missing ? "1" : "0"}));
+            CAPTURE(mask, missing, result.exit_code.value_or(-1), result.signal_number.value_or(-1));
+            CHECK(result.exit_code == 0);
         }
     }
     CHECK(run.execute(helper({"atfork"})).exit_code == 0);
 }
 
-TEST_CASE("Linux Process gates execution on watch acceptance and restores parent masks", "[core][process][linux]")
+TEST_CASE("POSIX Process gates execution on watch acceptance and restores parent masks", "[core][process][posix]")
 {
     SignalScope mask{SIGHUP};
     sigset_t    empty{};
-    REQUIRE(::sigemptyset(&empty) == 0);
+    REQUIRE(sigemptyset(&empty) == 0);
     REQUIRE(::pthread_sigmask(SIG_SETMASK, &empty, nullptr) == 0);
     Run  run;
     auto operations              = std::make_shared<ScriptedOperations>();
@@ -874,7 +920,7 @@ TEST_CASE("Linux Process gates execution on watch acceptance and restores parent
     CHECK(operations->send_calls == 2);
 }
 
-TEST_CASE("Linux Process rejects parent setup faults without signals descriptors or zombies", "[core][process][linux]")
+TEST_CASE("POSIX Process rejects parent setup faults without signals descriptors or zombies", "[core][process][posix]")
 {
     using Failure = ScriptedOperations::Failure;
     for (auto failure : {Failure::Open,
@@ -906,7 +952,7 @@ TEST_CASE("Linux Process rejects parent setup faults without signals descriptors
         sigset_t after{};
         REQUIRE(::pthread_sigmask(SIG_SETMASK, nullptr, &after) == 0);
         for (int signal = 1; signal < NSIG; ++signal) {
-            CHECK(::sigismember(&before, signal) == ::sigismember(&after, signal));
+            CHECK(sigismember(&before, signal) == sigismember(&after, signal));
         }
         CHECK(run.process.state() == ProcessState::NotRunning);
         CHECK_FALSE(run.process.process_id());
@@ -925,8 +971,8 @@ TEST_CASE("Linux Process rejects parent setup faults without signals descriptors
     }
 }
 
-TEST_CASE("Linux Process unwinds parent setup without releasing the target or retaining ownership",
-          "[core][process][linux]")
+TEST_CASE("POSIX Process unwinds parent setup without releasing the target or retaining ownership",
+          "[core][process][posix]")
 {
     Run  run;
     auto operations         = std::make_shared<ScriptedOperations>();
@@ -954,7 +1000,7 @@ TEST_CASE("Linux Process unwinds parent setup without releasing the target or re
     CHECK(run.execute().exit_code == 37);
 }
 
-TEST_CASE("Linux Process child failures map safe setup and authoritative identity stages", "[core][process][linux]")
+TEST_CASE("POSIX Process child failures map safe setup and authoritative identity stages", "[core][process][posix]")
 {
     Run  run;
     auto operations = std::make_shared<ScriptedOperations>();
@@ -982,8 +1028,8 @@ TEST_CASE("Linux Process child failures map safe setup and authoritative identit
     CHECK(run.execute().exit_code == 37);
 }
 
-TEST_CASE("Linux Process inherited handlers cannot run before reset and pre-exec signal death is observable",
-          "[core][process][linux]")
+TEST_CASE("POSIX Process inherited handlers cannot run before reset and pre-exec signal death is observable",
+          "[core][process][posix]")
 {
     Run  run;
     auto operations = std::make_shared<ScriptedOperations>();
@@ -1005,22 +1051,22 @@ TEST_CASE("Linux Process inherited handlers cannot run before reset and pre-exec
     }
 }
 
-TEST_CASE("Linux Process dead gate neither generates SIGPIPE nor consumes host pending signals",
-          "[core][process][linux]")
+TEST_CASE("POSIX Process dead gate neither generates SIGPIPE nor consumes host pending signals",
+          "[core][process][posix]")
 {
     SignalScope scope{SIGPIPE};
     install_handler(SIGPIPE, record_signal);
     sigset_t pipe_signal{};
-    REQUIRE(::sigemptyset(&pipe_signal) == 0);
-    REQUIRE(::sigaddset(&pipe_signal, SIGPIPE) == 0);
+    REQUIRE(sigemptyset(&pipe_signal) == 0);
+    REQUIRE(sigaddset(&pipe_signal, SIGPIPE) == 0);
     for (int pending_mode : {0, 1, 2}) {
         CAPTURE(pending_mode);
         signal_hits = 0;
         REQUIRE(::pthread_sigmask(pending_mode == 0 ? SIG_UNBLOCK : SIG_BLOCK, &pipe_signal, nullptr) == 0);
         Run  run;
-        auto operations     = std::make_shared<ScriptedOperations>();
-        operations->failure = ScriptedOperations::Failure::DeadChild;
-        auto const owner    = ::pthread_self();
+        auto operations       = std::make_shared<ScriptedOperations>();
+        operations->failure   = ScriptedOperations::Failure::DeadChild;
+        pthread_t const owner = ::pthread_self();
         if (pending_mode == 1) {
             REQUIRE(::pthread_kill(owner, SIGPIPE) == 0);
         }
@@ -1038,7 +1084,7 @@ TEST_CASE("Linux Process dead gate neither generates SIGPIPE nor consumes host p
         CHECK(signal_hits == 0);
         sigset_t pending{};
         REQUIRE(::sigpending(&pending) == 0);
-        CHECK(::sigismember(&pending, SIGPIPE) == (pending_mode == 0 ? 0 : 1));
+        CHECK(sigismember(&pending, SIGPIPE) == (pending_mode == 0 ? 0 : 1));
         if (pending_mode != 0) {
             int signal{};
             // The test consumes only the host signal it deliberately queued, before restoring the original mask.
@@ -1049,7 +1095,7 @@ TEST_CASE("Linux Process dead gate neither generates SIGPIPE nor consumes host p
     }
 }
 
-TEST_CASE("Linux Process rejects watch failure before releasing the child", "[core][process][linux]")
+TEST_CASE("POSIX Process rejects watch failure before releasing the child", "[core][process][posix]")
 {
     jb::test::TemporaryDirectory directory;
     auto const                   marker = directory.path() / "executed";
@@ -1077,8 +1123,8 @@ TEST_CASE("Linux Process rejects watch failure before releasing the child", "[co
     }
 }
 
-TEST_CASE("Linux Process old callbacks stay inert after failed removal restart and destruction",
-          "[core][process][linux]")
+TEST_CASE("POSIX Process old callbacks stay inert after failed removal restart and destruction",
+          "[core][process][posix]")
 {
     auto  backend               = std::make_unique<FakeEventLoopBackend>();
     auto* fake                  = backend.get();
@@ -1169,7 +1215,8 @@ TEST_CASE("Linux Process old callbacks stay inert after failed removal restart a
 }
 
 namespace {
-class RetainedPidfd final : public EpollProcessOperations {
+#if defined(__linux__)
+class RetainedProcessWatch final : public EpollProcessOperations {
 public:
     int removals{0};
 
@@ -1183,13 +1230,33 @@ public:
         return EpollProcessOperations::control(poller, operation, fd, event);
     }
 };
+#else
+class RetainedProcessWatch final : public KqueueProcessOperations {
+public:
+    int removals{0};
+
+    auto control(int poller, std::int64_t pid, std::uint16_t flags) -> int override
+    {
+        if ((flags & EV_DELETE) != 0U) {
+            ++removals;
+            errno = EIO;
+            return -1;
+        }
+        return KqueueProcessOperations::control(poller, pid, flags);
+    }
+};
+#endif
 } // namespace
 
-TEST_CASE("Linux Process retained delivered pidfd does not redispatch or block unrelated work",
-          "[core][process][linux]")
+TEST_CASE("POSIX Process retained delivered watch does not redispatch or block unrelated work",
+          "[core][process][posix]")
 {
-    auto native = std::make_shared<RetainedPidfd>();
-    Run  run{make_epoll_backend(native)};
+    auto native = std::make_shared<RetainedProcessWatch>();
+#if defined(__linux__)
+    Run run{make_epoll_backend(native)};
+#else
+    Run run{make_kqueue_backend(native)};
+#endif
     auto operations = std::make_shared<ScriptedOperations>();
     Task stale;
     operations->before_send = [&] {
@@ -1214,7 +1281,7 @@ TEST_CASE("Linux Process retained delivered pidfd does not redispatch or block u
     CHECK(run.execute().exit_code == 37);
 }
 
-TEST_CASE("Linux Process direct finished slots can restart safely", "[core][process][linux]")
+TEST_CASE("POSIX Process direct finished slots can restart safely", "[core][process][posix]")
 {
     Run  run;
     int  count{0};
@@ -1234,7 +1301,7 @@ TEST_CASE("Linux Process direct finished slots can restart safely", "[core][proc
     CHECK(run.finishes == 3);
 }
 
-TEST_CASE("Linux Process direct lifecycle slots defer destruction without leaking the child", "[core][process][linux]")
+TEST_CASE("POSIX Process direct lifecycle slots defer destruction without leaking the child", "[core][process][posix]")
 {
     for (bool on_started : {false, true}) {
         EventLoop              loop;
@@ -1276,8 +1343,9 @@ TEST_CASE("Linux Process direct lifecycle slots defer destruction without leakin
     }
 }
 
-TEST_CASE("Linux Process enforces and safely reports strict privilege hardening", "[core][process][linux][security]")
+TEST_CASE("POSIX Process enforces and safely reports strict privilege hardening", "[core][process][posix][security]")
 {
+#if defined(__linux__)
     SECTION("target observes Linux no-new-privileges")
     {
         Run  run;
@@ -1288,6 +1356,8 @@ TEST_CASE("Linux Process enforces and safely reports strict privilege hardening"
         CHECK(result.exit_code == 0);
         CHECK(std::ranges::equal(run.bytes[0], as_bytes("NoNewPrivs: 1\n")));
     }
+
+#endif
 
     SECTION("unsupported strict hardening rejects before native setup")
     {
@@ -1327,8 +1397,8 @@ TEST_CASE("Linux Process enforces and safely reports strict privilege hardening"
     }
 }
 
-TEST_CASE("Linux Process cancellation preserves its first cause and escalates after complete grace",
-          "[core][process][linux][lifecycle]")
+TEST_CASE("POSIX Process cancellation preserves its first cause and escalates after complete grace",
+          "[core][process][posix][lifecycle]")
 {
     SECTION("TERM-handling target remains owned until group cleanup")
     {
@@ -1408,7 +1478,7 @@ TEST_CASE("Linux Process cancellation preserves its first cause and escalates af
     }
 }
 
-TEST_CASE("Linux Process timeout starts at the accepted launch deadline", "[core][process][linux][lifecycle]")
+TEST_CASE("POSIX Process timeout starts at the accepted launch deadline", "[core][process][posix][lifecycle]")
 {
     SECTION("Runtime timeout shares TERM-to-KILL escalation")
     {
@@ -1456,9 +1526,14 @@ TEST_CASE("Linux Process timeout starts at the accepted launch deadline", "[core
         operations->now            = base + 5s;
         EventLoopTestAccess::fire_timers(*run.loop, *operations->now);
         run.until([&] { return run.result.has_value(); });
+        CAPTURE(run.result->exit_code.value_or(-1), run.result->signal_number.value_or(-1));
         CHECK(run.starts == 1); // Gate release makes clean EOF observable even though the target never execs.
         CHECK(run.result->kind == ProcessExitKind::TimedOut);
-        CHECK(run.result->signal_number == SIGKILL);
+        // A stopped child may terminate from TERM before the immediate KILL attempt on macOS. The observed native
+        // signal is diagnostic metadata; timeout classification and both group-signal attempts remain mandatory.
+        CHECK((run.result->signal_number == SIGTERM || run.result->signal_number == SIGKILL));
+        CHECK(group_signal_count(*operations, SIGTERM) == 1);
+        CHECK(group_signal_count(*operations, SIGKILL) == 1);
     }
 
     SECTION("Expiry during parent setup accepts a gated timeout without target execution")
@@ -1501,7 +1576,7 @@ TEST_CASE("Linux Process timeout starts at the accepted launch deadline", "[core
     }
 }
 
-TEST_CASE("Linux Process owns same-group descendants through every leader outcome", "[core][process][linux][lifecycle]")
+TEST_CASE("POSIX Process owns same-group descendants through every leader outcome", "[core][process][posix][lifecycle]")
 {
     SECTION("Natural leader exit kills the group before reap")
     {
@@ -1589,8 +1664,8 @@ TEST_CASE("Linux Process owns same-group descendants through every leader outcom
     }
 }
 
-TEST_CASE("Linux Process retains an exited stopping leader until group grace expires",
-          "[core][process][linux][lifecycle]")
+TEST_CASE("POSIX Process retains an exited stopping leader until group grace expires",
+          "[core][process][posix][lifecycle]")
 {
     for (bool descendant_ignores_term : {false, true}) {
         CAPTURE(descendant_ignores_term);
@@ -1633,8 +1708,8 @@ TEST_CASE("Linux Process retains an exited stopping leader until group grace exp
     }
 }
 
-TEST_CASE("Linux Process bounds post-reap output retained by escaped descendants",
-          "[core][process][linux][lifecycle][output]")
+TEST_CASE("POSIX Process bounds post-reap output retained by escaped descendants",
+          "[core][process][posix][lifecycle][output]")
 {
     constexpr std::size_t budget{std::size_t{256} * 1024};
     for (std::size_t channel = 0; channel < 2; ++channel) {
@@ -1683,8 +1758,8 @@ TEST_CASE("Linux Process bounds post-reap output retained by escaped descendants
     }
 }
 
-TEST_CASE("Linux Process keeps a reentrant post-reap deadline within the active output budget",
-          "[core][process][linux][lifecycle][output]")
+TEST_CASE("POSIX Process keeps a reentrant post-reap deadline within the active output budget",
+          "[core][process][posix][lifecycle][output]")
 {
     constexpr std::size_t budget{std::size_t{256} * 1024};
     PostExecChannel       report;
@@ -1752,8 +1827,8 @@ TEST_CASE("Linux Process keeps a reentrant post-reap deadline within the active 
     descendant.check_terminated();
 }
 
-TEST_CASE("Linux Process destruction in Finishing never signals the former process group",
-          "[core][process][linux][lifecycle]")
+TEST_CASE("POSIX Process destruction in Finishing never signals the former process group",
+          "[core][process][posix][lifecycle]")
 {
     PostExecChannel        report;
     auto                   backend = std::make_unique<FakeEventLoopBackend>();
@@ -1790,8 +1865,8 @@ TEST_CASE("Linux Process destruction in Finishing never signals the former proce
     descendant.check_terminated();
 }
 
-TEST_CASE("Linux Process streams binary channels beyond pipe capacity and preserves both tails",
-          "[core][process][linux][output]")
+TEST_CASE("POSIX Process streams binary channels beyond pipe capacity and preserves both tails",
+          "[core][process][posix][output]")
 {
     for (auto sizes : {
              std::array{0,       0      },
@@ -1818,7 +1893,7 @@ TEST_CASE("Linux Process streams binary channels beyond pipe capacity and preser
     }
 }
 
-TEST_CASE("Linux Process rolls back each partial output pipe and watch setup", "[core][process][linux][output]")
+TEST_CASE("POSIX Process rolls back each partial output pipe and watch setup", "[core][process][posix][output]")
 {
     for (int failure = 0; failure < 6; ++failure) {
         CAPTURE(failure);
@@ -1859,7 +1934,7 @@ TEST_CASE("Linux Process rolls back each partial output pipe and watch setup", "
     }
 }
 
-TEST_CASE("Linux Process keeps the other channel alive after early EOF", "[core][process][linux][output]")
+TEST_CASE("POSIX Process keeps the other channel alive after early EOF", "[core][process][posix][output]")
 {
     for (std::size_t closed = 0; closed < 2; ++closed) {
         PostExecChannel gate;
@@ -1883,7 +1958,7 @@ TEST_CASE("Linux Process keeps the other channel alive after early EOF", "[core]
     }
 }
 
-TEST_CASE("Linux Process reap waits for independently controlled output terminals", "[core][process][linux][output]")
+TEST_CASE("POSIX Process reap waits for independently controlled output terminals", "[core][process][posix][output]")
 {
     auto  backend = std::make_unique<FakeEventLoopBackend>();
     auto* fake    = backend.get();
@@ -1929,8 +2004,8 @@ TEST_CASE("Linux Process reap waits for independently controlled output terminal
     CHECK(run.result->exit_code == 37);
 }
 
-TEST_CASE("Linux Process retries interrupted reads and coalesces budget continuations without another edge",
-          "[core][process][linux][output]")
+TEST_CASE("POSIX Process retries interrupted reads and coalesces budget continuations without another edge",
+          "[core][process][posix][output]")
 {
     constexpr std::size_t budget{std::size_t{256} * 1024};
     auto                  backend = std::make_unique<FakeEventLoopBackend>();
@@ -1981,8 +2056,8 @@ TEST_CASE("Linux Process retries interrupted reads and coalesces budget continua
     CHECK(operations->read_calls == calls);
 }
 
-TEST_CASE("Linux Process endless native writers yield to timers descriptors and another child exit",
-          "[core][process][linux][output]")
+TEST_CASE("POSIX Process endless native writers yield to timers descriptors and another child exit",
+          "[core][process][posix][output]")
 {
     constexpr std::size_t budget{std::size_t{256} * 1024};
     for (int mask : {1, 2, 3}) {
@@ -2045,8 +2120,8 @@ TEST_CASE("Linux Process endless native writers yield to timers descriptors and 
     }
 }
 
-TEST_CASE("Linux Process failed continuation enqueue retires only its channel without stranding completion",
-          "[core][process][linux][output]")
+TEST_CASE("POSIX Process failed continuation enqueue retires only its channel without stranding completion",
+          "[core][process][posix][output]")
 {
     constexpr std::size_t budget{std::size_t{256} * 1024};
     for (std::size_t failed = 0; failed < 2; ++failed) {
@@ -2141,8 +2216,8 @@ TEST_CASE("Linux Process failed continuation enqueue retires only its channel wi
     }
 }
 
-TEST_CASE("Linux Process read failure loses only its channel and preserves leader classification",
-          "[core][process][linux][output]")
+TEST_CASE("POSIX Process read failure loses only its channel and preserves leader classification",
+          "[core][process][posix][output]")
 {
     for (std::size_t failed = 0; failed < 2; ++failed) {
         auto  backend = std::make_unique<FakeEventLoopBackend>();
@@ -2170,8 +2245,8 @@ TEST_CASE("Linux Process read failure loses only its channel and preserves leade
     }
 }
 
-TEST_CASE("Linux Process output slots defer deletion across a bounded drain and pending continuation",
-          "[core][process][linux][output]")
+TEST_CASE("POSIX Process output slots defer deletion across a bounded drain and pending continuation",
+          "[core][process][posix][output]")
 {
     constexpr std::size_t budget{std::size_t{256} * 1024};
     for (std::size_t index = 0; index < 2; ++index) {

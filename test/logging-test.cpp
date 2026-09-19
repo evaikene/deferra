@@ -2,11 +2,15 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdio>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <unistd.h>
 
 using namespace jb::core;
 
@@ -254,4 +258,46 @@ TEST_CASE("ConsoleLogger logs without throwing", "[core][logging]")
     msg.timestamp = std::chrono::system_clock::now();
 
     CHECK_NOTHROW(cl.log(msg));
+}
+
+TEST_CASE("ConsoleLogger tolerates closed stderr during cleanup", "[core][logging]")
+{
+    // Restore stderr before Catch reports any failure, including an exception from the logging call.
+    struct StderrGuard {
+        int saved{-1};
+
+        StderrGuard()
+        {
+            std::fflush(stderr);
+            saved = ::dup(STDERR_FILENO);
+            REQUIRE(saved >= 0);
+        }
+
+        ~StderrGuard()
+        {
+            if (::dup2(saved, STDERR_FILENO) < 0) {
+                std::terminate();
+            }
+            ::close(saved);
+            std::clearerr(stderr);
+        }
+    };
+
+    ConsoleLogger console;
+    console.set_abort_on_fatal_error(false);
+    for (auto level : {LogLevel::Error, LogLevel::Fatal}) {
+        LogMessage message;
+        message.level     = level;
+        message.message   = "cleanup with unavailable stderr";
+        message.timestamp = std::chrono::system_clock::now();
+        bool write_failed{false};
+
+        CHECK_NOTHROW([&] {
+            StderrGuard restore;
+            REQUIRE(::close(STDERR_FILENO) == 0);
+            console.log(message);
+            write_failed = std::ferror(stderr) != 0;
+        }());
+        CHECK(write_failed);
+    }
 }
