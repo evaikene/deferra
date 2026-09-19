@@ -173,7 +173,7 @@ add_executable(${TARGET}
     support/fake_process_adapter.cpp
 )
 target_link_libraries(${TARGET} PRIVATE jobu-cli Catch2::Catch2WithMain)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
     target_sources(${TARGET} PRIVATE support/temporary_directory.cpp)
     target_compile_definitions(${TARGET} PRIVATE PROCESS_TEST_HELPER="$<TARGET_FILE:process-test-helper>")
     add_dependencies(${TARGET} process-test-helper)
@@ -331,8 +331,8 @@ if(TARGET jobu-sqlite)
     )
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
-    # Linux mixed-runner scheduling through the real Process and HTTP executors.
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Mixed-runner scheduling through the real POSIX Process and HTTP executors.
+    if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
         set(TARGET "cli-scheduler-integration-test")
         add_executable(${TARGET}
             cli-scheduler-integration-test.cpp
@@ -540,7 +540,7 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JobU executable smoke tests
 if(TARGET jobud)
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
         add_executable(jobud-startup-test
             jobud-startup-test.cpp
             ../src/jobud/startup_priv.cpp
@@ -567,14 +567,18 @@ set_tests_properties(jobuctl-usage PROPERTIES
     WILL_FAIL TRUE
 )
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    # The real client talks to a controlled local peer; Process launch currently has a Linux backend only.
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
+    # The real client talks to a controlled local peer through the native Process backend.
     add_executable(jobuctl-cli-creation-test jobuctl-cli-creation-test.cpp support/temporary_directory.cpp)
     target_link_libraries(jobuctl-cli-creation-test PRIVATE jobu Catch2::Catch2WithMain)
     target_compile_definitions(jobuctl-cli-creation-test PRIVATE JOBUCTL_EXECUTABLE="$<TARGET_FILE:jobuctl>")
     add_dependencies(jobuctl-cli-creation-test jobuctl)
     add_test(NAME jobuctl-cli-creation-test COMMAND $<TARGET_FILE:jobuctl-cli-creation-test>)
     set_tests_properties(jobuctl-cli-creation-test PROPERTIES TIMEOUT 60)
+    if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+        # The default macOS temporary directory can exceed the Unix socket path limit.
+        set_tests_properties(jobuctl-cli-creation-test PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+    endif()
 endif()
 
 # Signal test
@@ -832,15 +836,15 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
     endif()
 endif()
 
-# Real Linux daemon CLI execution; the root override requires an explicit isolated-test opt-in.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
+# Real POSIX daemon CLI execution; the root override requires an explicit isolated-test opt-in.
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
     set(TARGET "jobud-cli-integration-test")
     add_executable(${TARGET}
         jobud-cli-integration-test.cpp
         support/http_test_server.cpp
         support/temporary_directory.cpp
     )
-    target_link_libraries(${TARGET} PRIVATE core net rpc SQLite3::SQLite3
+    target_link_libraries(${TARGET} PRIVATE net rpc SQLite3::SQLite3
         OpenSSL::SSL OpenSSL::Crypto Catch2::Catch2WithMain)
     target_compile_definitions(${TARGET} PRIVATE
         JOBUD_EXECUTABLE="$<TARGET_FILE:jobud>"
@@ -849,4 +853,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
     add_dependencies(${TARGET} jobud jobuctl process-test-helper)
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
     set_tests_properties(${TARGET} PROPERTIES TIMEOUT 90)
+    if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+        set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+    endif()
 endif()

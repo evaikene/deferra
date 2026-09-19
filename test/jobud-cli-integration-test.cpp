@@ -32,10 +32,16 @@
 #include <vector>
 
 #include <fcntl.h>
-#include <poll.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <unistd.h>
+
+#if defined(__APPLE__)
+#  include <libproc.h>
+#  include <sys/event.h>
+#elif defined(__linux__)
+#  include <poll.h>
+#  include <sys/syscall.h>
+#endif
 
 using namespace jb::core;
 using namespace std::chrono_literals;
@@ -101,35 +107,82 @@ private:
     int                   _fd{-1};
 };
 
-/// Stable process identity for both termination assertions and failure-path cleanup.
+/// Native exit observation; macOS helpers self-expire if daemon failure prevents normal timeout cleanup.
 class TargetWatch {
 public:
+    /// @throws Catch::TestFailureException when the live coordinated helper cannot be watched.
     explicit TargetWatch(pid_t pid)
-        : _fd{static_cast<int>(::syscall(SYS_pidfd_open, pid, 0))}
+        : _pid{pid}
     {
+#if defined(__APPLE__)
+        _fd = ::kqueue();
         REQUIRE(_fd >= 0);
+        // Register before releasing the helper. The one-shot exit remains observable after the daemon reaps it.
+        struct kevent change;
+        EV_SET(&change, pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, nullptr);
+        int registered;
+        do {
+            registered = ::kevent(_fd, &change, 1, nullptr, 0, nullptr);
+        } while (registered < 0 && errno == EINTR);
+        if (registered < 0) {
+            auto const error = errno;
+            ::close(_fd);
+            _fd = -1;
+            FAIL("kevent registration failed with errno " << error);
+        }
+#else
+        _fd = static_cast<int>(::syscall(SYS_pidfd_open, _pid, 0));
+        REQUIRE(_fd >= 0);
+#endif
     }
 
     ~TargetWatch()
     {
+#if defined(__linux__)
         // Numeric PIDs may have been reused. A pidfd signal can only affect the original helper.
         static_cast<void>(::syscall(SYS_pidfd_send_signal, _fd, SIGKILL, nullptr, 0));
+#endif
+        // kqueue provides observation, not identity-safe signalling. Helper alarms bound failed-test lifetimes.
         ::close(_fd);
     }
 
     TargetWatch(TargetWatch const&)                    = delete;
     auto operator=(TargetWatch const&) -> TargetWatch& = delete;
 
-    auto terminated() const -> bool
+    /// @throws Catch::TestFailureException when native exit observation fails.
+    auto terminated() -> bool
     {
+        // Retain consumed NOTE_EXIT events while the caller waits for another group member.
+        if (_terminated) {
+            return true;
+        }
+#if defined(__APPLE__)
+        struct kevent   event;
+        struct timespec timeout{};
+        int             ready;
+        do {
+            ready = ::kevent(_fd, nullptr, 0, &event, 1, &timeout);
+        } while (ready < 0 && errno == EINTR);
+        REQUIRE(ready >= 0);
+        if (ready == 1) {
+            REQUIRE(event.filter == EVFILT_PROC);
+            REQUIRE(event.ident == static_cast<std::uintptr_t>(_pid));
+            REQUIRE((event.fflags & NOTE_EXIT) != 0);
+            _terminated = true;
+        }
+#else
         pollfd     descriptor{.fd = _fd, .events = POLLIN, .revents = 0};
         auto const ready = ::poll(&descriptor, 1, 0);
         REQUIRE(ready >= 0);
-        return ready == 1 && (descriptor.revents & POLLIN) != 0;
+        _terminated = ready == 1 && (descriptor.revents & POLLIN) != 0;
+#endif
+        return _terminated;
     }
 
 private:
-    int _fd;
+    pid_t _pid;
+    int   _fd{-1};
+    bool  _terminated{false};
 };
 
 struct DurableAttempt {
@@ -379,12 +432,21 @@ public:
     {
         auto const pid = daemon.process_id();
         REQUIRE(pid);
+#if defined(__APPLE__)
+        // Query the owned, still-running daemon directly; no debugger/task-port entitlement is needed.
+        struct proc_taskinfo info{};
+        auto const           size = ::proc_pidinfo(static_cast<int>(*pid), PROC_PIDTASKINFO, 0, &info, sizeof(info));
+        REQUIRE(size == sizeof(info));
+        REQUIRE(info.pti_threadnum > 0);
+        return static_cast<std::size_t>(info.pti_threadnum);
+#else
         auto const  path = std::filesystem::path{"/proc"} / std::to_string(*pid) / "task";
         std::size_t count{0};
         for ([[maybe_unused]] auto const& entry : std::filesystem::directory_iterator{path}) {
             ++count;
         }
         return count;
+#endif
     }
 
     void responsive()
@@ -478,7 +540,9 @@ TEST_CASE("daemon executes complete jobuctl CLI payload and persists exact conte
     auto       expected = json(R"({"arguments":["","-option","literal $x = value"],"cwd":"","environment":{
         "EMPTY":"","PROCESS_MARKER":"literal $x = value","JOBU_JOB_ID":"","JOBU_RUN_ID":"","JOBU_ATTEMPT":"1"},
         "stdin_eof":true})");
-    std::get<JsonValue::Object>(expected.data).at("cwd") = text(fixture.directory.path().string());
+    // getcwd reports the physical directory even when the requested path uses macOS's /tmp symlink.
+    std::get<JsonValue::Object>(expected.data).at("cwd") =
+        text(std::filesystem::canonical(fixture.directory.path()).string());
     auto& environment = std::get<JsonValue::Object>(std::get<JsonValue::Object>(expected.data).at("environment").data);
     environment.at("JOBU_JOB_ID") = text(value.job_id);
     environment.at("JOBU_RUN_ID") = text(value.run_id);
@@ -532,9 +596,11 @@ TEST_CASE("daemon preserves binary first and last capture and discarded-capture 
                   "stderr":{"captured_bytes":8,"total_bytes":131079,"truncated":true}})");
         CHECK(value.result == expected);
     }
+#if defined(__linux__)
     fixture.cli("hardening", "capture", {"no-new-privileges"});
     auto const hardened = fixture.complete("hardening");
     check_capture(hardened, "NoNewPrivs: 1\n", "", 14, 0);
+#endif
     fixture.responsive();
 }
 
@@ -546,7 +612,10 @@ TEST_CASE("daemon overlaps CLI targets and HTTP with independent global slots", 
     server.enqueue_response({});
     fixture.queue("overlap");
     auto const idle_threads = fixture.thread_count();
+#if defined(__linux__)
     REQUIRE(idle_threads == 1);
+#endif
+    // macOS runtime initialization can create background threads. CLI overlap must not add per-attempt waiters.
     Channel report1{fixture.directory.path() / "report1"};
     Channel report2{fixture.directory.path() / "report2"};
     Channel release1{fixture.directory.path() / "release1"};
@@ -631,7 +700,7 @@ TEST_CASE("daemon timeout kills the helper group before committing completion", 
     DaemonFixture fixture{1};
     fixture.queue("timeout", 1);
     Channel report{fixture.directory.path() / "group"};
-    fixture.cli("timeout", "timeout", {"group-wait", report.path()});
+    fixture.cli("timeout", "timeout", {"daemon-group-wait", report.path()});
     std::optional<std::array<pid_t, 2>> identities;
     fixture.until([&] {
         if (!identities) {

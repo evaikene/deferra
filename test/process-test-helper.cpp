@@ -349,6 +349,8 @@ auto inspect_daemon(int argc, char** argv) -> int
 // Separate report and release FIFOs prevent the helper from consuming its own readiness acknowledgement.
 auto daemon_wait(char const* report_path, char const* release_path) noexcept -> int
 {
+    // A failed daemon test may lose its runner before it can enforce job.timeout. Bound this helper independently.
+    ::alarm(15);
     auto const fd       = open_coordination_channel(report_path, O_WRONLY);
     auto const pid      = ::getpid();
     auto const reported = fd >= 0 && write_all(fd, &pid, sizeof(pid));
@@ -446,8 +448,12 @@ enum class DescendantBehavior : std::uint8_t {
 auto descendant_group(char const*        report_path,
                       bool               leader_handles_term,
                       DescendantBehavior descendant_behavior,
-                      bool               leader_exits_naturally) noexcept -> int
+                      bool               leader_exits_naturally,
+                      unsigned int       watchdog_seconds = 0) noexcept -> int
 {
+    if (watchdog_seconds != 0) {
+        ::alarm(watchdog_seconds);
+    }
     auto const report_fd = open_coordination_channel(report_path, O_WRONLY);
     if (report_fd < 0) {
         return 55;
@@ -465,6 +471,10 @@ auto descendant_group(char const*        report_path,
         return 65;
     }
     if (child == 0) {
+        // Alarms are not inherited across fork. Both members must expire even if the daemon disappears.
+        if (watchdog_seconds != 0) {
+            ::alarm(watchdog_seconds);
+        }
         ::close(ready[0]);
         auto const ignore = descendant_behavior == DescendantBehavior::IgnoreTerm;
         if (!install_term_handler(ignore) || !write_all(ready[1], "R", 1)) {
@@ -649,6 +659,10 @@ auto main(int argc, char** argv) -> int
     }
     if (mode == "group-wait" && argc == 3) {
         return descendant_group(argv[2], false, DescendantBehavior::IgnoreTerm, false);
+    }
+    if (mode == "daemon-group-wait" && argc == 3) {
+        // The daemon's five-second timeout must win; SIGALRM is only failed-fixture cleanup, never success evidence.
+        return descendant_group(argv[2], false, DescendantBehavior::IgnoreTerm, false, 15);
     }
     if (mode == "group-exit" && argc == 3) {
         return descendant_group(argv[2], false, DescendantBehavior::IgnoreTerm, true);

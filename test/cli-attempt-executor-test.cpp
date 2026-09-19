@@ -8,10 +8,15 @@
 #include "support/fake_process_adapter.hpp"
 #include "uuid.hpp"
 
-#if defined(__linux__)
-#  include "event_loop_backend_epoll_priv.hpp"
+#if defined(__linux__) || defined(__APPLE__)
 #  include "process_posix_priv.hpp"
 #  include "support/temporary_directory.hpp"
+#endif
+
+#if defined(__linux__)
+#  include "event_loop_backend_epoll_priv.hpp"
+#elif defined(__APPLE__)
+#  include <sys/event.h>
 #endif
 
 #include <catch2/catch_test_macros.hpp>
@@ -32,7 +37,7 @@
 #include <utility>
 #include <vector>
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #  include <fcntl.h>
 #  include <poll.h>
 #  include <sys/stat.h>
@@ -189,7 +194,7 @@ auto exited(int code, bool stdout_lost = false, bool stderr_lost = false) -> Pro
     };
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 struct RealCliPayload {
     std::string                          command{PROCESS_TEST_HELPER};
     std::vector<std::string>             arguments;
@@ -349,9 +354,27 @@ public:
         : _process_id{process_id}
     {
         REQUIRE(process_id > 0);
+#  if defined(__APPLE__)
+        // Register while the coordinated helper is alive; NOTE_EXIT remains observable after its owner reaps it.
+        _descriptor = ::kqueue();
+        REQUIRE(_descriptor >= 0);
+        struct kevent change;
+        EV_SET(&change, process_id, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, nullptr);
+        int registered;
+        do {
+            registered = ::kevent(_descriptor, &change, 1, nullptr, 0, nullptr);
+        } while (registered < 0 && errno == EINTR);
+        if (registered < 0) {
+            auto const error = errno;
+            ::close(_descriptor);
+            _descriptor = -1;
+            FAIL("kevent registration failed with errno " << error);
+        }
+#  else
         jb::core::priv::EpollProcessOperations operations;
         _descriptor = operations.open_pidfd(process_id);
         REQUIRE(_descriptor >= 0);
+#  endif
     }
 
     ~ProcessTerminationWatch()
@@ -367,6 +390,18 @@ public:
     /// @throws Catch::TestFailureException when the watched identity remains alive past the watchdog.
     void check_terminated() const
     {
+#  if defined(__APPLE__)
+        struct kevent   event;
+        struct timespec timeout{.tv_sec = 5, .tv_nsec = 0};
+        int             ready;
+        do {
+            ready = ::kevent(_descriptor, nullptr, 0, &event, 1, &timeout);
+        } while (ready < 0 && errno == EINTR);
+        REQUIRE(ready == 1);
+        CHECK(event.filter == EVFILT_PROC);
+        CHECK(event.ident == static_cast<std::uintptr_t>(_process_id));
+        CHECK((event.fflags & NOTE_EXIT) != 0);
+#  else
         pollfd item{.fd = _descriptor, .events = POLLIN, .revents = 0};
         int    ready;
         do {
@@ -378,6 +413,7 @@ public:
         }
         REQUIRE(ready == 1);
         CHECK((item.revents & POLLIN) != 0);
+#  endif
     }
 
 private:
@@ -413,7 +449,7 @@ TEST_CASE("CLI attempt executor exposes Object ownership and dynamic availabilit
         TestApplication    application;
         CliAttemptExecutor executor;
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
         CHECK(executor.is_available(JobType::Cli) == (::geteuid() != 0));
 #else
         CHECK_FALSE(executor.is_available(JobType::Cli));
@@ -861,11 +897,14 @@ TEST_CASE("CLI attempt executor destruction cleans active operations and suppres
     CHECK(callback_count == 0U);
 }
 
-#if defined(__linux__)
-TEST_CASE("CLI production adapter executes explicit Process requests", "[jobu][cli][executor][linux]")
+#if defined(__linux__) || defined(__APPLE__)
+TEST_CASE("CLI production adapter executes explicit Process requests", "[jobu][cli][executor][posix]")
 {
     RealExecutorFixture fixture;
     TemporaryDirectory  directory;
+
+    // getcwd() reports the physical path even when the requested temporary directory traverses a macOS symlink.
+    auto const physical_directory = std::filesystem::canonical(directory.path());
 
     for (AttemptNumber attempt_number : {AttemptNumber{1}, AttemptNumber{2}}) {
         auto const attempt_text = std::to_string(attempt_number);
@@ -874,7 +913,7 @@ TEST_CASE("CLI production adapter executes explicit Process requests", "[jobu][c
             "inspect-jobu",
             "",
             "-option",
-            directory.path().string(),
+            physical_directory.string(),
             job_id().to_string(),
             run_id().to_string(),
             attempt_text,
@@ -894,6 +933,7 @@ TEST_CASE("CLI production adapter executes explicit Process requests", "[jobu][c
     path_lookup.environment.emplace("PATH", json_string(helper_path.parent_path().string()));
     CHECK(fixture.execute(real_start_request(3, std::move(path_lookup))).outcome == AttemptOutcome::Succeeded);
 
+#  if defined(__linux__)
     auto capture_output = AttributeSet{
         {"output.capture",      {.data = std::string{"always"}}},
         {"output.stdout_limit", {.data = std::int64_t{64}}     },
@@ -902,9 +942,10 @@ TEST_CASE("CLI production adapter executes explicit Process requests", "[jobu][c
     REQUIRE(no_new_privileges.output);
     REQUIRE(no_new_privileges.output->primary);
     CHECK(byte_text(no_new_privileges.output->primary->bytes) == "NoNewPrivs: 1\n");
+#  endif
 }
 
-TEST_CASE("CLI production adapter enforces the child-side non-root policy", "[jobu][cli][executor][linux]")
+TEST_CASE("CLI production adapter enforces the child-side non-root policy", "[jobu][cli][executor][posix]")
 {
     TestApplication    application;
     TemporaryDirectory directory;
@@ -953,7 +994,7 @@ TEST_CASE("CLI production adapter enforces the child-side non-root policy", "[jo
     CHECK(callback_count == 1U);
 }
 
-TEST_CASE("CLI production adapter maps real Process terminal outcomes safely", "[jobu][cli][executor][linux]")
+TEST_CASE("CLI production adapter maps real Process terminal outcomes safely", "[jobu][cli][executor][posix]")
 {
     RealExecutorFixture fixture;
 
@@ -1005,7 +1046,7 @@ TEST_CASE("CLI production adapter maps real Process terminal outcomes safely", "
     CHECK(result_string(timed_out, "outcome") == "timeout");
 }
 
-TEST_CASE("CLI production adapter preserves real output capture policy", "[jobu][cli][executor][linux]")
+TEST_CASE("CLI production adapter preserves real output capture policy", "[jobu][cli][executor][posix]")
 {
     RealExecutorFixture fixture;
 
@@ -1057,7 +1098,7 @@ TEST_CASE("CLI production adapter preserves real output capture policy", "[jobu]
     CHECK(on_error_failure.output->diagnostic->bytes == captured_pattern(4U, 8U, 1U));
 }
 
-TEST_CASE("CLI production adapter cancels and destroys complete Process groups", "[jobu][cli][executor][linux]")
+TEST_CASE("CLI production adapter cancels and destroys complete Process groups", "[jobu][cli][executor][posix]")
 {
     SECTION("cancellation retains completion until leader and descendant terminate")
     {
