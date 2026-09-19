@@ -55,6 +55,8 @@ target_sources(${TARGET}
         retry_policy_priv.hpp
         recovery_repository_priv.cpp
         recovery_repository_priv.hpp
+        recovery_retry_priv.cpp
+        recovery_retry_priv.hpp
         retention_repository_priv.cpp
         retention_repository_priv.hpp
         run_repository_priv.cpp

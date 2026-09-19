@@ -931,7 +931,7 @@ TEST_CASE("Scheduler repository rejects malformed snapshots and contradictory at
                       "jobu.storage.invariant");
     }
 
-    SECTION("retry-wait run with a non-failed completed attempt")
+    SECTION("retry-wait run with an outcome that cannot precede a retry")
     {
         auto const job_id = id(122);
         auto const run_id = id(123);
@@ -946,10 +946,6 @@ TEST_CASE("Scheduler repository rejects malformed snapshots and contradictory at
         SECTION("succeeded")
         {
             set_attempt_outcome(fixture.database, run_id, AttemptOutcome::Succeeded);
-        }
-        SECTION("interrupted")
-        {
-            set_attempt_outcome(fixture.database, run_id, AttemptOutcome::Interrupted);
         }
         SECTION("cancelled")
         {

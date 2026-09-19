@@ -64,6 +64,11 @@ add_executable(${TARGET} retry-policy-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Recovery-specific retry policy (no backend required).
+add_executable(recovery-retry-policy-test recovery-retry-policy-test.cpp)
+target_link_libraries(recovery-retry-policy-test PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME recovery-retry-policy-test COMMAND $<TARGET_FILE:recovery-retry-policy-test>)
+
 # JobU operation-context storage failure policy (no backend required).
 set(TARGET "storage-failure-test")
 add_executable(${TARGET} storage-failure-test.cpp)
@@ -303,6 +308,16 @@ if(TARGET jobu-sqlite)
     )
     target_link_libraries(recovery-interruption-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME recovery-interruption-test COMMAND $<TARGET_FILE:recovery-interruption-test>)
+
+    # Recovery retry persistence and compatibility with normal dispatch.
+    add_executable(recovery-retry-test
+        recovery-retry-test.cpp
+        support/recovery_fixture.cpp
+        support/fake_attempt_executor.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(recovery-retry-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME recovery-retry-test COMMAND $<TARGET_FILE:recovery-retry-test>)
 
     # JobU SQLite-backed scheduler read repository test
     set(TARGET "scheduler-repository-test")

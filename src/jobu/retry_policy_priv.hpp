@@ -63,6 +63,11 @@ struct RetryDecision {
 [[nodiscard]] auto retry_delay(RetryPolicy const& policy, jb::core::Uuid const& run_id, AttemptNumber next_attempt)
     -> jb::core::Result<jb::core::Duration, jb::core::Error>;
 
+/// Adds a nonnegative retry delay without overflowing or losing precision in the UTC clock.
+/// Normal completion and recovery supply their own time origin and eligibility rules.
+[[nodiscard]] auto checked_retry_due_time(jb::core::UtcTimePoint from, jb::core::Duration delay)
+    -> jb::core::Result<jb::core::UtcTimePoint, jb::core::Error>;
+
 [[nodiscard]] auto retry_decision(AttributeSet const& attributes, RetryCompletion const& completion)
     -> jb::core::Result<RetryDecision, jb::core::Error>;
 
