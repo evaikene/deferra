@@ -16,6 +16,10 @@ namespace jb::db {
 class Database;
 }
 
+namespace jb::jobu {
+class CronEngine;
+}
+
 namespace jb::jobu::detail {
 
 /// Stable lexicographic cursor shared by attempt and output scans.
@@ -35,7 +39,7 @@ struct RecoveryAttemptKey {
 /// must exhaust all five scans for complete row and relationship validation, including
 /// owners with no runs. A filtered
 /// Running page is a repair candidate scan, not proof that the remaining database is valid.
-/// Missing recurring work and drained suspensions remain inputs for later repair stages.
+/// Missing recurring work and drained suspensions are repair candidates, not scan failures.
 class RecoveryRepository final {
 public:
     RecoveryRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept;
@@ -48,7 +52,7 @@ public:
     [[nodiscard]] auto list_outputs(std::size_t limit, std::optional<RecoveryAttemptKey> after = {})
         -> jb::core::Result<std::vector<RecoveryAttemptKey>, jb::core::Error>;
 
-    /// Owner pages also expose missing recurring work and suspending owners to later stages.
+    /// Owner pages expose missing recurring work and suspending owners to repair callers.
     [[nodiscard]] auto list_jobs(std::size_t limit, std::optional<jb::core::Uuid> after_id = {})
         -> jb::core::Result<std::vector<JobDefinition>, jb::core::Error>;
     [[nodiscard]] auto list_queues(std::size_t limit, std::optional<jb::core::Uuid> after_id = {})
@@ -89,6 +93,39 @@ public:
     [[nodiscard]] auto set_run_retry_wait(RecoveryAttemptKey const& key,
                                           jb::core::UtcTimePoint    recovery_time,
                                           jb::core::UtcTimePoint    due_at) -> jb::core::Result<void, jb::core::Error>;
+
+    /// Re-reads a terminal Interrupted run and creates its recurring successor from the current definition.
+    /// Call after set_run_interrupted() in the same transaction. Manual/Once/deleted cases return false;
+    /// a duplicate successor is an error. RetryWait must never use this terminal-only operation.
+    /// Pass max(recovery_time, now sampled immediately before the transaction) as the exclusive bound.
+    /// Returns true for one insertion; no commit is performed and failure requires whole-unit rollback.
+    [[nodiscard]] auto insert_interrupted_successor(jb::core::Uuid const&    run_id,
+                                                    jb::core::UtcTimePoint   lower_bound,
+                                                    CronEngine const&        cron,
+                                                    jb::core::UuidGenerator& uuid_generator)
+        -> jb::core::Result<bool, jb::core::Error>;
+
+    /// Re-reads a definition, its owner and schedule-owned work inside the caller's repair transaction.
+    /// Inserts missing recurring work, including suspended/suspending definitions. Existing nonterminal
+    /// work is preserved exactly; Once/deleted definitions return false. Unexpected conflicts fail.
+    /// Uses the same bound/rollback contract as insert_interrupted_successor(); returns true on insertion.
+    [[nodiscard]] auto repair_missing_successor(jb::core::Uuid const&    job_id,
+                                                jb::core::UtcTimePoint   lower_bound,
+                                                CronEngine const&        cron,
+                                                jb::core::UuidGenerator& uuid_generator)
+        -> jb::core::Result<bool, jb::core::Error>;
+
+    /// Revalidates the owner and completes a drained Suspending state in the caller's transaction.
+    /// Includes owners with no runs. RetryWait does not prevent completion; nothing resumes owners.
+    /// Returns true only when changed, for counting after commit. Failure requires whole-unit rollback.
+    [[nodiscard]] auto complete_drained_job_suspension(jb::core::Uuid const& job_id, jb::core::UtcTimePoint updated_at)
+        -> jb::core::Result<bool, jb::core::Error>;
+
+    /// Queue-only form of suspension repair, with the same transaction/change-result contract.
+    /// Does not require a job: an empty queue can also be drained.
+    [[nodiscard]] auto complete_drained_queue_suspension(jb::core::Uuid const&  queue_id,
+                                                         jb::core::UtcTimePoint updated_at)
+        -> jb::core::Result<bool, jb::core::Error>;
 
 private:
     jb::db::Database&        _database;

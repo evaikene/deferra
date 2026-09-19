@@ -53,6 +53,8 @@ target_sources(${TARGET}
         queue_validation_priv.hpp
         retry_policy_priv.cpp
         retry_policy_priv.hpp
+        recurrence_priv.cpp
+        recurrence_priv.hpp
         recovery_repository_priv.cpp
         recovery_repository_priv.hpp
         recovery_retry_priv.cpp

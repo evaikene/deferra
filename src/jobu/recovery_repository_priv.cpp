@@ -7,6 +7,7 @@
 #include "query.hpp"
 #include "queue_repository_priv.hpp"
 #include "recovery_retry_priv.hpp"
+#include "recurrence_priv.hpp"
 #include "run_repository_priv.hpp"
 #include "scheduler_repository_priv.hpp"
 #include "storage_failure_priv.hpp"
@@ -113,6 +114,58 @@ auto lookup_error(RecoveryResult<T> const& result) -> jb::core::Error
         return storage_error(result.error());
     }
     return invariant("durable_decode");
+}
+
+auto find_queue(jb::db::Database& database, AttributeRegistry const& attributes, jb::core::Uuid const& queue_id)
+    -> RecoveryResult<Queue>
+{
+    QueueRepository queues{database, attributes};
+    auto            queue = queues.find_by_id(queue_id, true);
+    if (!queue) {
+        return RecoveryResult<Queue>::failure(lookup_error(queue));
+    }
+    if (!*queue) {
+        return RecoveryResult<Queue>::failure(invariant("missing_queue"));
+    }
+    return RecoveryResult<Queue>::success(std::move(**queue));
+}
+
+auto find_owned_job(jb::db::Database& database, AttributeRegistry const& attributes, jb::core::Uuid const& job_id)
+    -> RecoveryResult<JobDefinition>
+{
+    JobRepository jobs{database, attributes};
+    auto          job = jobs.find_by_id(job_id, true);
+    if (!job) {
+        return RecoveryResult<JobDefinition>::failure(lookup_error(job));
+    }
+    if (!*job) {
+        return RecoveryResult<JobDefinition>::failure(invariant("missing_job"));
+    }
+    auto queue = find_queue(database, attributes, (*job)->queue_id);
+    if (!queue) {
+        return RecoveryResult<JobDefinition>::failure(std::move(queue).error());
+    }
+    if (queue->state == QueueState::Deleted && (*job)->state != JobState::Deleted) {
+        return RecoveryResult<JobDefinition>::failure(invariant("job_ownership"));
+    }
+    return RecoveryResult<JobDefinition>::success(std::move(**job));
+}
+
+auto repair_result(RecoveryResult<bool> result) -> RecoveryResult<bool>
+{
+    if (result) {
+        return result;
+    }
+    // Shared scheduler/repository operations keep their existing error contracts. At startup
+    // a surprise conflict is corrupt recovery state, never an idempotent "already repaired".
+    auto const& code = result.error().code;
+    if (code == "jobu.run.schedule_conflict") {
+        return RecoveryResult<bool>::failure(invariant("unexpected_successor_conflict"));
+    }
+    if (code == "jobu.storage.invariant") {
+        return RecoveryResult<bool>::failure(invariant("repair_state"));
+    }
+    return RecoveryResult<bool>::failure(storage_error(result.error()));
 }
 
 auto read_count(jb::db::Record const& row, std::string_view field) -> RecoveryResult<std::uint64_t>
@@ -596,6 +649,107 @@ auto RecoveryRepository::set_run_retry_wait(RecoveryAttemptKey const& key,
         return RecoveryResult<void>::failure(storage_error(result.error()));
     }
     return expect_one_affected(query, "recovery_retry_run_affected_rows");
+}
+
+auto RecoveryRepository::insert_interrupted_successor(jb::core::Uuid const&    run_id,
+                                                      jb::core::UtcTimePoint   lower_bound,
+                                                      CronEngine const&        cron,
+                                                      jb::core::UuidGenerator& uuid_generator) -> RecoveryResult<bool>
+{
+    auto valid_time = validate_recovery_timestamp(lower_bound);
+    if (!valid_time) {
+        return RecoveryResult<bool>::failure(std::move(valid_time).error());
+    }
+    auto run = find_run(run_id);
+    if (!run) {
+        return RecoveryResult<bool>::failure(std::move(run).error());
+    }
+    if (run->state != RunState::Interrupted) {
+        return RecoveryResult<bool>::failure(invariant("successor_requires_interrupted_run"));
+    }
+    if (!run->schedule_owned) {
+        return RecoveryResult<bool>::success(false);
+    }
+
+    // Deliberately do not accept an existing successor here: this insertion belongs to the
+    // interruption transaction, unlike independent repair of missing work after a restart.
+    auto job = find_owned_job(_database, _attributes, run->job_id);
+    if (!job) {
+        return RecoveryResult<bool>::failure(std::move(job).error());
+    }
+    return repair_result(
+        insert_recurring_run(_database, _attributes, cron, uuid_generator, std::move(*job), lower_bound));
+}
+
+auto RecoveryRepository::repair_missing_successor(jb::core::Uuid const&    job_id,
+                                                  jb::core::UtcTimePoint   lower_bound,
+                                                  CronEngine const&        cron,
+                                                  jb::core::UuidGenerator& uuid_generator) -> RecoveryResult<bool>
+{
+    auto valid_time = validate_recovery_timestamp(lower_bound);
+    if (!valid_time) {
+        return RecoveryResult<bool>::failure(std::move(valid_time).error());
+    }
+    auto job = find_owned_job(_database, _attributes, job_id);
+    if (!job) {
+        return RecoveryResult<bool>::failure(std::move(job).error());
+    }
+    if (job->state == JobState::Deleted || std::holds_alternative<OnceSchedule>(job->schedule)) {
+        return RecoveryResult<bool>::success(false);
+    }
+
+    // The scan is only a candidate hint. Re-read absence under the same transaction that
+    // inserts the snapshot, leaving Scheduled/RetryWait times and attributes untouched.
+    RunRepository runs{_database, _attributes};
+    auto          existing = runs.find_schedule_owned(job_id);
+    if (!existing) {
+        return RecoveryResult<bool>::failure(lookup_error(existing));
+    }
+    if (*existing) {
+        auto valid = find_run((*existing)->id);
+        if (!valid) {
+            return RecoveryResult<bool>::failure(std::move(valid).error());
+        }
+        return RecoveryResult<bool>::success(false);
+    }
+    auto barriers = validate_barriers(_database, job_id);
+    if (!barriers) {
+        return RecoveryResult<bool>::failure(std::move(barriers).error());
+    }
+    return repair_result(
+        insert_recurring_run(_database, _attributes, cron, uuid_generator, std::move(*job), lower_bound));
+}
+
+auto RecoveryRepository::complete_drained_job_suspension(jb::core::Uuid const&  job_id,
+                                                         jb::core::UtcTimePoint updated_at) -> RecoveryResult<bool>
+{
+    auto valid_time = validate_recovery_timestamp(updated_at);
+    if (!valid_time) {
+        return RecoveryResult<bool>::failure(std::move(valid_time).error());
+    }
+    auto job = find_owned_job(_database, _attributes, job_id);
+    if (!job) {
+        return RecoveryResult<bool>::failure(std::move(job).error());
+    }
+    SchedulerRepository scheduler{_database, _attributes};
+    return repair_result(scheduler.complete_drained_job_suspension(job->queue_id, job_id, updated_at));
+}
+
+auto RecoveryRepository::complete_drained_queue_suspension(jb::core::Uuid const&  queue_id,
+                                                           jb::core::UtcTimePoint updated_at) -> RecoveryResult<bool>
+{
+    auto valid_time = validate_recovery_timestamp(updated_at);
+    if (!valid_time) {
+        return RecoveryResult<bool>::failure(std::move(valid_time).error());
+    }
+    // Validate with recovery's decoding/error contract before invoking the shared writer.
+    // No job lookup: empty queues still need their persisted suspension completed.
+    auto queue = find_queue(_database, _attributes, queue_id);
+    if (!queue) {
+        return RecoveryResult<bool>::failure(std::move(queue).error());
+    }
+    SchedulerRepository scheduler{_database, _attributes};
+    return repair_result(scheduler.complete_drained_queue_suspension(queue_id, updated_at));
 }
 
 auto RecoveryRepository::find_run(jb::core::Uuid const& id) -> RecoveryResult<JobRun>

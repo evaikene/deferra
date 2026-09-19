@@ -122,10 +122,25 @@ public:
                                         RunState               state,
                                         jb::core::UtcTimePoint completed_at,
                                         std::string_view       result_json) -> jb::core::Result<void, jb::core::Error>;
+    /// Completes queue then job suspension in the caller's transaction; roll back the whole unit on failure.
     [[nodiscard]] auto complete_drained_suspensions(jb::core::Uuid const&  queue_id,
                                                     jb::core::Uuid const&  job_id,
                                                     jb::core::UtcTimePoint updated_at)
         -> jb::core::Result<void, jb::core::Error>;
+
+    /// Transaction-local queue drain, including queues without jobs. Returns true only for a state change.
+    /// Requires an existing queue. Running runs prevent completion; pending/retrying work does not.
+    [[nodiscard]] auto complete_drained_queue_suspension(jb::core::Uuid const&  queue_id,
+                                                         jb::core::UtcTimePoint updated_at)
+        -> jb::core::Result<bool, jb::core::Error>;
+
+    /// Transaction-local job drain. Requires an existing job matching the supplied owning queue.
+    /// The caller validates the queue separately. Returns true only for a state/revision change;
+    /// preserves the revision overflow check and requires whole-unit rollback on any failure.
+    [[nodiscard]] auto complete_drained_job_suspension(jb::core::Uuid const&  queue_id,
+                                                       jb::core::Uuid const&  job_id,
+                                                       jb::core::UtcTimePoint updated_at)
+        -> jb::core::Result<bool, jb::core::Error>;
     [[nodiscard]] auto has_any_running_state() -> jb::core::Result<bool, jb::core::Error>;
 
 private:

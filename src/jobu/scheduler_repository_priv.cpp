@@ -1284,56 +1284,79 @@ auto SchedulerRepository::set_run_terminal(jb::core::Uuid const&  run_id,
 
 auto SchedulerRepository::complete_drained_suspensions(jb::core::Uuid const&  queue_id,
                                                        jb::core::Uuid const&  job_id,
-                                                       jb::core::UtcTimePoint updated_at)
-    -> jb::core::Result<void, jb::core::Error>
+                                                       jb::core::UtcTimePoint updated_at) -> RepositoryResult<void>
 {
-    // The completion/cancellation transaction re-reads both owners and advances only suspending states whose running
-    // children have drained, keeping the run, job, and queue transitions atomic.
-    QueueRepository queues{_database, _attributes};
-    auto            queue = queues.find_by_id(queue_id, true);
+    // Preserve queue-before-job ordering in the caller's completion/cancellation transaction.
+    // A later job failure must roll back the earlier queue transition with the run's writes.
+    auto queue = complete_drained_queue_suspension(queue_id, updated_at);
     if (!queue) {
         return RepositoryResult<void>::failure(std::move(queue).error());
     }
+    auto job = complete_drained_job_suspension(queue_id, job_id, updated_at);
+    if (!job) {
+        return RepositoryResult<void>::failure(std::move(job).error());
+    }
+    return RepositoryResult<void>::success();
+}
+
+auto SchedulerRepository::complete_drained_queue_suspension(jb::core::Uuid const&  queue_id,
+                                                            jb::core::UtcTimePoint updated_at) -> RepositoryResult<bool>
+{
+    // Queue-only repair also covers an empty queue with no job/run to drive completion.
+    QueueRepository queues{_database, _attributes};
+    auto            queue = queues.find_by_id(queue_id, true);
+    if (!queue) {
+        return RepositoryResult<bool>::failure(std::move(queue).error());
+    }
     if (!queue->has_value()) {
-        return RepositoryResult<void>::failure(invariant("missing_drain_queue"));
+        return RepositoryResult<bool>::failure(invariant("missing_drain_queue"));
     }
     if (queue->value().state == QueueState::Suspending) {
         RunRepository runs{_database, _attributes};
         auto          running = runs.count_running_for_queue(queue_id);
         if (!running) {
-            return RepositoryResult<void>::failure(std::move(running).error());
+            return RepositoryResult<bool>::failure(std::move(running).error());
         }
         if (*running == 0) {
             auto transitioned = queues.set_state(queue_id, QueueState::Suspending, QueueState::Suspended, updated_at);
             if (!transitioned) {
-                return RepositoryResult<void>::failure(std::move(transitioned).error());
+                return RepositoryResult<bool>::failure(std::move(transitioned).error());
             }
             if (!*transitioned) {
-                return RepositoryResult<void>::failure(invariant("drained_queue_state_changed"));
+                return RepositoryResult<bool>::failure(invariant("drained_queue_state_changed"));
             }
+            return RepositoryResult<bool>::success(true);
         }
     }
 
+    return RepositoryResult<bool>::success(false);
+}
+
+auto SchedulerRepository::complete_drained_job_suspension(jb::core::Uuid const&  queue_id,
+                                                          jb::core::Uuid const&  job_id,
+                                                          jb::core::UtcTimePoint updated_at) -> RepositoryResult<bool>
+{
+    // RetryWait keeps its schedule/barrier but does not keep a suspension draining.
     JobRepository jobs{_database, _attributes};
     auto          job = jobs.find_by_id(job_id, true);
     if (!job) {
-        return RepositoryResult<void>::failure(std::move(job).error());
+        return RepositoryResult<bool>::failure(std::move(job).error());
     }
     if (!job->has_value()) {
-        return RepositoryResult<void>::failure(invariant("missing_drain_job"));
+        return RepositoryResult<bool>::failure(invariant("missing_drain_job"));
     }
     if (job->value().queue_id != queue_id) {
-        return RepositoryResult<void>::failure(invariant("drain_job_queue_mismatch"));
+        return RepositoryResult<bool>::failure(invariant("drain_job_queue_mismatch"));
     }
     if (job->value().state == JobState::Suspending) {
         RunRepository runs{_database, _attributes};
         auto          running = runs.count_running_for_job(job_id);
         if (!running) {
-            return RepositoryResult<void>::failure(std::move(running).error());
+            return RepositoryResult<bool>::failure(std::move(running).error());
         }
         if (*running == 0) {
             if (job->value().revision >= kMaximumPersistedJobRevision) {
-                return RepositoryResult<void>::failure(job_revision_exhausted());
+                return RepositoryResult<bool>::failure(job_revision_exhausted());
             }
             auto const expected_revision = job->value().revision;
             auto const next_revision     = expected_revision + 1;
@@ -1344,14 +1367,15 @@ auto SchedulerRepository::complete_drained_suspensions(jb::core::Uuid const&  qu
                                                           next_revision,
                                                           updated_at);
             if (!transitioned) {
-                return RepositoryResult<void>::failure(std::move(transitioned).error());
+                return RepositoryResult<bool>::failure(std::move(transitioned).error());
             }
             if (!*transitioned) {
-                return RepositoryResult<void>::failure(invariant("drained_job_state_changed"));
+                return RepositoryResult<bool>::failure(invariant("drained_job_state_changed"));
             }
+            return RepositoryResult<bool>::success(true);
         }
     }
-    return RepositoryResult<void>::success();
+    return RepositoryResult<bool>::success(false);
 }
 
 auto SchedulerRepository::has_any_running_state() -> jb::core::Result<bool, jb::core::Error>
