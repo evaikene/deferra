@@ -66,6 +66,8 @@ target_sources(${TARGET}
         scheduler_repository_priv.hpp
         secret_repository_priv.cpp
         secret_repository_priv.hpp
+        storage_failure_priv.cpp
+        storage_failure_priv.hpp
         system_info.cpp
         system_info_rpc.cpp
         text_validation_priv.cpp
