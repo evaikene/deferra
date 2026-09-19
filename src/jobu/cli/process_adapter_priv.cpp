@@ -6,7 +6,7 @@
 
 #include <unistd.h>
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #  include "process_posix_priv.hpp"
 #endif
 
@@ -14,7 +14,7 @@ namespace jb::jobu::cli::detail {
 
 namespace {
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 struct SystemProcessOperationState {
     ProcessOperationId id{0};
     jb::core::Process* process{nullptr};
@@ -174,7 +174,7 @@ public:
 
 auto make_system_process_adapter(CliAttemptExecutor& owner) -> std::unique_ptr<ProcessAdapter>
 {
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     return std::make_unique<SystemProcessAdapter>(owner);
 #else
     static_cast<void>(owner);
@@ -182,7 +182,7 @@ auto make_system_process_adapter(CliAttemptExecutor& owner) -> std::unique_ptr<P
 #endif
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 auto make_system_process_adapter_for_test(CliAttemptExecutor&                                owner,
                                           std::shared_ptr<jb::core::priv::ProcessOperations> process_operations)
     -> std::unique_ptr<ProcessAdapter>

@@ -62,11 +62,11 @@ public:
 };
 
 /// Creates the platform production adapter after the executor owner is fully constructed.
-/// @return A Linux Process-backed adapter, or null until the current platform backend is integrated.
+/// @return A Process-backed adapter on Linux and macOS, or null on unsupported platforms.
 ///
 [[nodiscard]] auto make_system_process_adapter(CliAttemptExecutor& owner) -> std::unique_ptr<ProcessAdapter>;
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 /// Creates the production adapter with parent-side Process operations injected before each launch.
 [[nodiscard]] auto
 make_system_process_adapter_for_test(CliAttemptExecutor&                                owner,
@@ -91,7 +91,7 @@ struct CliAttemptExecutorTestAccess {
                                      std::unique_ptr<EffectiveIdentityProbe> identity)
         -> std::unique_ptr<CliAttemptExecutor>;
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     /// Creates an executor with the production adapter and injected child-identity/process operations.
     [[nodiscard]] static auto
     create_with_system_process_adapter(CliAttemptExecutorOptions                          options,

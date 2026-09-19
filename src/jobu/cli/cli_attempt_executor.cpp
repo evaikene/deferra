@@ -607,7 +607,7 @@ auto detail::CliAttemptExecutorTestAccess::create(CliAttemptExecutorOptions     
     };
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 auto detail::CliAttemptExecutorTestAccess::create_with_system_process_adapter(
     CliAttemptExecutorOptions                          options,
     std::unique_ptr<EffectiveIdentityProbe>            identity,

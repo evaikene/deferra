@@ -11,7 +11,7 @@ SQLite provides persistence.
 > JobU is under active development and is not ready for production use. The
 > repository currently provides SQLite persistence, local IPC and JSON-RPC,
 > deterministic scheduling, and real asynchronous CLI and HTTP execution through
-> the scheduler composed in `jobud` on Linux.
+> the scheduler composed in `jobud` on Linux and macOS.
 
 ## Components
 
@@ -29,9 +29,10 @@ The current source tree is built and tested on:
 - macOS with Apple Clang and Homebrew dependencies
 
 Linux is the primary development platform and supports CLI and HTTP scheduling,
-local IPC, JSON-RPC, the daemon, and the control client. macOS supports the
-existing HTTP and local service functionality; its Process backend and CLI
-scheduler/daemon verification remain pending in Phase 6 stages 6.17–6.18.
+local IPC, JSON-RPC, the daemon, and the control client. macOS also supports
+these features, with native Process, CLI executor, mixed scheduler, client,
+and daemon integration coverage. Final clean Linux verification after the
+macOS changes remains the Phase 6 stage 6.19 closure gate.
 Windows is not a v1 runtime target.
 
 ## Requirements
@@ -48,6 +49,12 @@ thread or polling fallback for unavailable process watches. The Ubuntu 24.04
 and Alpine 3.22 CI jobs build and run the SQLite-enabled suite, including the
 Linux daemon CLI test; no additional package is required for CLI execution.
 
+macOS command execution uses kqueue process watches and public `fork()`.
+Process-controlled child setup is async-signal-safe after `fork()` returns;
+host-registered at-fork handlers remain outside that guarantee. macOS CLI
+execution retains root denial but does not provide Linux NoNewPrivs hardening.
+A strict `Process::prevent_privilege_gain` request fails as unsupported.
+
 The daemon CLI test runs ordinary execution cases as a non-root user. Real
 root-denial coverage runs only when the test itself is root. Root execution
 with the unsafe override additionally requires `JOBU_TEST_ALLOW_ROOT_CLI=1`;
@@ -55,6 +62,8 @@ set it only inside a disposable, isolated test environment. Alpine CI opts in
 inside its job container and checks the warning and real helper execution.
 Non-root runs report the real-root case as skipped; injected identity tests
 provide separate policy coverage, not evidence of a root daemon launch.
+The macOS verification used a non-root account; actual root denial and unsafe
+root-override execution remain unverified on macOS.
 
 ### Ubuntu 24.04
 

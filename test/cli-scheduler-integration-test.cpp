@@ -7,7 +7,6 @@
 #include "byte_buffer.hpp"
 #include "cli/cli_attempt_executor.hpp"
 #include "database.hpp"
-#include "event_loop_backend_epoll_priv.hpp"
 #include "event_loop_types.hpp"
 #include "http/http_attempt_executor.hpp"
 #include "http/system_http_client.hpp"
@@ -22,6 +21,12 @@
 #include "support/http_test_server.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
+
+#if defined(__linux__)
+#  include "event_loop_backend_epoll_priv.hpp"
+#elif defined(__APPLE__)
+#  include <sys/event.h>
+#endif
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -42,7 +47,9 @@
 #include <vector>
 
 #include <fcntl.h>
-#include <poll.h>
+#if defined(__linux__)
+#  include <poll.h>
+#endif
 #include <sqlite3.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -361,14 +368,35 @@ private:
     int                   _fd{-1};
 };
 
-/// A pidfd observes the original helper identity even if its numeric PID is subsequently reused.
+/// A native watch observes helper exit without reaping the scheduler's child or relying on a reused numeric PID.
 class TerminationWatch {
 public:
+    /// @throws Catch::TestFailureException when the coordinated helper cannot be watched.
     explicit TerminationWatch(pid_t pid)
+        : _pid{pid}
     {
-        jb::core::priv::EpollProcessOperations operations;
-        _fd = operations.open_pidfd(pid);
+        REQUIRE(pid > 0);
+#if defined(__APPLE__)
+        // The helper waits for cancellation, so registration precedes exit and the owner's eventual reap.
+        _fd = ::kqueue();
         REQUIRE(_fd >= 0);
+        struct kevent change;
+        EV_SET(&change, pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, nullptr);
+        int registered;
+        do {
+            registered = ::kevent(_fd, &change, 1, nullptr, 0, nullptr);
+        } while (registered < 0 && errno == EINTR);
+        if (registered < 0) {
+            auto const error = errno;
+            ::close(_fd);
+            _fd = -1;
+            FAIL("kevent registration failed with errno " << error);
+        }
+#else
+        jb::core::priv::EpollProcessOperations operations;
+        _fd = operations.open_pidfd(_pid);
+        REQUIRE(_fd >= 0);
+#endif
     }
 
     ~TerminationWatch() { ::close(_fd); }
@@ -376,19 +404,44 @@ public:
     TerminationWatch(TerminationWatch const&)                    = delete;
     auto operator=(TerminationWatch const&) -> TerminationWatch& = delete;
 
-    auto terminated() const -> bool
+    /// @throws Catch::TestFailureException when native exit observation fails.
+    auto terminated() -> bool
     {
+        // A one-shot kqueue event is consumed on read. Retain it while another watched group member is still alive.
+        if (_terminated) {
+            return true;
+        }
+
+#if defined(__APPLE__)
+        struct kevent   event;
+        struct timespec timeout{};
+        int             ready;
+        do {
+            ready = ::kevent(_fd, nullptr, 0, &event, 1, &timeout);
+        } while (ready < 0 && errno == EINTR);
+        REQUIRE(ready >= 0);
+        if (ready == 1) {
+            REQUIRE(event.filter == EVFILT_PROC);
+            REQUIRE(event.ident == static_cast<std::uintptr_t>(_pid));
+            REQUIRE((event.fflags & NOTE_EXIT) != 0);
+            _terminated = true;
+        }
+#else
         pollfd descriptor{.fd = _fd, .events = POLLIN, .revents = 0};
         int    ready;
         do {
             ready = ::poll(&descriptor, 1, 0);
         } while (ready < 0 && errno == EINTR);
         REQUIRE(ready >= 0);
-        return ready == 1 && (descriptor.revents & POLLIN) != 0;
+        _terminated = ready == 1 && (descriptor.revents & POLLIN) != 0;
+#endif
+        return _terminated;
     }
 
 private:
-    int _fd{-1};
+    pid_t _pid;
+    int   _fd{-1};
+    bool  _terminated{false};
 };
 
 struct MixedSchedulerFixture {
