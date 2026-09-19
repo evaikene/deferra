@@ -25,7 +25,7 @@ struct RecoveryAttemptKey {
     auto operator==(RecoveryAttemptKey const&) const -> bool = default;
 };
 
-/// Read-only recovery scans under exclusive database ownership on the database's owner thread.
+/// Recovery storage under exclusive database ownership on the database's owner thread.
 /// Pages own their values and retain no query. Limits are 1..4096; cursors are exclusive.
 /// UUID ordering follows the stored UUID bytes, not display strings or insertion order.
 ///
@@ -56,6 +56,23 @@ public:
     /// Re-reads one run and its relationships, suitable for a caller-owned repair transaction.
     /// Absence is an invariant failure; this method neither begins nor commits a transaction.
     [[nodiscard]] auto find_run(jb::core::Uuid const& id) -> jb::core::Result<JobRun, jb::core::Error>;
+
+    /// Revalidates a Running run and its latest attempt, then completes that attempt as Interrupted
+    /// and inserts empty capture with capture_lost=true. Existing output is an invariant failure.
+    /// Requires a caller-owned transaction; this method neither begins nor commits one. On any
+    /// failure the caller must roll back the entire unit, including writes that already succeeded.
+    /// On success the caller must transition the run before committing; the temporary Running run
+    /// with a Completed attempt is not a valid committed state. No retry policy is selected here.
+    [[nodiscard]] auto interrupt_attempt(RecoveryAttemptKey const& key, jb::core::UtcTimePoint recovery_time)
+        -> jb::core::Result<void, jb::core::Error>;
+
+    /// Terminal branch after interrupt_attempt(), in the same caller-owned transaction and with
+    /// the same timestamp. Requires the matching latest Interrupted attempt and lost-capture row.
+    /// Changes only the Running run's state, completion time and result; duplicate/stale calls fail.
+    /// The caller must add any required recurrence/suspension repairs before committing, or roll
+    /// back the whole unit on failure. This primitive does not choose recovery policy or commit.
+    [[nodiscard]] auto set_run_interrupted(RecoveryAttemptKey const& key, jb::core::UtcTimePoint recovery_time)
+        -> jb::core::Result<void, jb::core::Error>;
 
 private:
     jb::db::Database&        _database;
