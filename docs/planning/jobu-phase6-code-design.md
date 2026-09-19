@@ -1,6 +1,6 @@
 # JobU Phase 6 Code-Level Design
 
-Status: implementation-ready design  
+Status: implementation merged; final verification recorded; closure pending
 Baseline: `main` at `11bf10c1c5378af790c55842210091eb53f14e4b`  
 Prepared: 2026-09-03
 
@@ -2122,79 +2122,85 @@ Suggested commit subject: `document Phase 6 verification invariants`
 
 ## 25. Final acceptance checklist
 
-- [ ] `jb::core::Process` exposes only project/standard types.
-- [ ] Process derives from Object and has one Object-owned private block.
-- [ ] `CliAttemptExecutor` derives from Object and has one Object-owned private block.
-- [ ] Owner back-references are bound only after base construction.
-- [ ] Process uses signals for observable launch-channel resolution, output, and finished reusable events.
-- [ ] Doxygen forbids synchronous sender deletion from every Process signal; `delete_later()` is verified for started,
+Reconciled 2026-09-19 against the [Stage 6.19 verification record](jobu-phase6-verification.md).
+Checked items have source-audit and Linux runtime evidence, with native Stage 6.18 results carried from its report.
+Native Core diagnostic/audit provenance and the historical macOS tree comparison still need recovery; the related
+items remain open below. Final clean-tree verification after user-managed review/commit/merge is also pending.
+Phase 6 is not yet marked complete.
+
+- [x] `jb::core::Process` exposes only project/standard types.
+- [x] Process derives from Object and has one Object-owned private block.
+- [x] `CliAttemptExecutor` derives from Object and has one Object-owned private block.
+- [x] Owner back-references are bound only after base construction.
+- [x] Process uses signals for observable launch-channel resolution, output, and finished reusable events.
+- [x] Doxygen forbids synchronous sender deletion from every Process signal; `delete_later()` is verified for started,
       both output channels, and finished.
-- [ ] Process-to-CLI slots use the executor as receiver.
-- [ ] Attempt and routing completions remain exact callbacks.
-- [ ] Every Process readiness callback is protected by a one-way per-registration anchor invalidated before removal,
+- [x] Process-to-CLI slots use the executor as receiver.
+- [x] Attempt and routing completions remain exact callbacks.
+- [x] Every Process readiness callback is protected by a one-way per-registration anchor invalidated before removal,
       close, reset, restart, or destruction.
-- [ ] Linux child exit uses `EPOLLIN | EPOLLONESHOT` pidfd registration with no rearm, waiter thread, or SIGCHLD
+- [x] Linux child exit uses `EPOLLIN | EPOLLONESHOT` pidfd registration with no rearm, waiter thread, or SIGCHLD
       handler; persistent removal failure cannot repeatedly wake or spin the EventLoop.
 - [ ] macOS uses kqueue `EVFILT_PROC` and passes the complete Stage 6.18 verification.
-- [ ] The target cannot exec before every parent watch is installed.
-- [ ] Linux uses `_Fork()` so application `pthread_atfork()` handlers cannot enter the child; the macOS guarantee is
+- [x] The target cannot exec before every parent watch is installed.
+- [x] Linux uses `_Fork()` so application `pthread_atfork()` handlers cannot enter the child; the macOS guarantee is
       scoped exactly as section 10.6 documents.
-- [ ] The Process-controlled post-creation child path allocates nothing and calls no unsafe user/library code.
-- [ ] Every blockable signal is blocked across process creation, the parent mask is always restored, and every
+- [x] The Process-controlled post-creation child path allocates nothing and calls no unsafe user/library code.
+- [x] Every blockable signal is blocked across process creation, the parent mask is always restored, and every
       catchable child disposition is reset before the clean target mask is installed.
-- [ ] Socket-gate release cannot deliver `SIGPIPE`, inspect or consume host pending signals, and every failed send is a
+- [x] Socket-gate release cannot deliver `SIGPIPE`, inspect or consume host pending signals, and every failed send is a
       complete controlled rejection path.
-- [ ] Closing descriptors 0 through 3 before launch cannot miswire stdio, the gate, or exec-status reporting.
-- [ ] No implicit shell parsing or ambient PATH lookup exists.
-- [ ] Environment starts empty and contains only explicit values plus three JobU metadata entries.
-- [ ] stdin reaches EOF and unrelated descriptors do not leak.
-- [ ] stdout/stderr are separate, binary-safe, drained through EOF or explicit bounded loss, and not accumulated by
+- [x] Closing descriptors 0 through 3 before launch cannot miswire stdio, the gate, or exec-status reporting.
+- [x] No implicit shell parsing or ambient PATH lookup exists.
+- [x] Environment starts empty and contains only explicit values plus three JobU metadata entries.
+- [x] stdin reaches EOF and unrelated descriptors do not leak.
+- [x] stdout/stderr are separate, binary-safe, drained through EOF or explicit bounded loss, and not accumulated by
       Process.
-- [ ] No output callback or final drain exceeds its byte budget; coalesced lifetime-safe continuations preserve
+- [x] No output callback or final drain exceeds its byte budget; coalesced lifetime-safe continuations preserve
       edge-triggered progress without starving timers or other readiness.
-- [ ] `finished` waits for direct-child reaping and both output terminals.
-- [ ] Direct-child reap clears PID/PGID and enters non-signallable `Finishing` before post-reap output or other
+- [x] `finished` waits for direct-child reaping and both output terminals.
+- [x] Direct-child reap clears PID/PGID and enters non-signallable `Finishing` before post-reap output or other
       reentrancy; no later operation can signal the former numeric group.
-- [ ] An escaped descendant retaining an output writer reaches bounded completion with accurate channel-loss flags.
-- [ ] Every attempt has its own process group.
-- [ ] TERM-to-KILL escalation and capacity retention are proven.
-- [ ] Process timeout deadline addition is checked before resource setup; the exact representable boundary succeeds and
+- [x] An escaped descendant retaining an output writer reaches bounded completion with accurate channel-loss flags.
+- [x] Every attempt has its own process group.
+- [x] TERM-to-KILL escalation and capacity retention are proven.
+- [x] Process timeout deadline addition is checked before resource setup; the exact representable boundary succeeds and
       an overflowing duration returns `core.process.invalid_request` without spawning.
-- [ ] A timeout already expired at the final pre-gate check is accepted as `TimedOut`, never releases or executes the
+- [x] A timeout already expired at the final pre-gate check is accepted as `TimedOut`, never releases or executes the
       target, emits no `started`, and completes asynchronously without leaking resources.
-- [ ] `termination_grace` applies to the complete group: an exited stopping leader remains unreaped until the
+- [x] `termination_grace` applies to the complete group: an exited stopping leader remains unreaped until the
       deadline, cooperative descendants receive the remaining grace, and group KILL precedes the retained reap.
-- [ ] Same-group descendants die on cancel, timeout, leader exit, destructor, and future immediate kill.
-- [ ] Process and CLI-executor destruction prove the runner-level shutdown-kill primitive; daemon signal/admission/
+- [x] Same-group descendants die on cancel, timeout, leader exit, destructor, and future immediate kill.
+- [x] Process and CLI-executor destruction prove the runner-level shutdown-kill primitive; daemon signal/admission/
       infrastructure shutdown remains explicitly assigned to Phase 7.
-- [ ] Linux CLI target observes `NoNewPrivs: 1`.
-- [ ] Root CLI execution is denied by default, checked early in the executor, and enforced authoritatively by the child
+- [x] Linux CLI target observes `NoNewPrivs: 1`.
+- [x] Root CLI execution is denied by default, checked early in the executor, and enforced authoritatively by the child
       immediately before `execve()`.
-- [ ] CLI payload defaults and old minimal absolute-command documents are compatible.
-- [ ] Bare commands require an explicit valid payload `PATH` at management time.
-- [ ] PATH entry count and expanded executable-candidate storage are bounded identically in management and Process.
-- [ ] Management's worst-case prepared aggregate calculation guarantees acceptance by Process's deterministic limit.
-- [ ] Expected and retryable exit policy matches section 16.
-- [ ] Output first/last retention and capture-loss semantics match existing persistence validation.
-- [ ] CLI result JSON preserves captured, total, and truncated metadata for stdout and stderr.
-- [ ] CLI result JSON preserves `capture_lost` even when no `AttemptOutput` row is permitted.
-- [ ] Runner-neutral diagnostic retention accepts 64 MiB while HTTP header capture remains capped at 4 MiB.
-- [ ] AttemptExecutorGroup rejects already-parented Object-derived executors and exclusively owns/safely destroys both
+- [x] CLI payload defaults and old minimal absolute-command documents are compatible.
+- [x] Bare commands require an explicit valid payload `PATH` at management time.
+- [x] PATH entry count and expanded executable-candidate storage are bounded identically in management and Process.
+- [x] Management's worst-case prepared aggregate calculation guarantees acceptance by Process's deterministic limit.
+- [x] Expected and retryable exit policy matches section 16.
+- [x] Output first/last retention and capture-loss semantics match existing persistence validation.
+- [x] CLI result JSON preserves captured, total, and truncated metadata for stdout and stderr.
+- [x] CLI result JSON preserves `capture_lost` even when no `AttemptOutput` row is permitted.
+- [x] Runner-neutral diagnostic retention accepts 64 MiB while HTTP header capture remains capped at 4 MiB.
+- [x] AttemptExecutorGroup rejects already-parented Object-derived executors and exclusively owns/safely destroys both
       accepted runner implementations.
-- [ ] CLI and HTTP run concurrently with independent global and combined queue limits.
-- [ ] Durable running state precedes every external CLI effect.
-- [ ] Completion/output/run/retry/recurrence remain one transaction.
-- [ ] Schema remains version 1.
-- [ ] HTTP behavior and results remain unchanged.
-- [ ] The management RPC set remains 15 methods; API version is 1.2.
-- [ ] `jobuctl` does not gate the new CLI creation fields on the daemon API minor version.
-- [ ] Every changed public declaration has useful Doxygen and first-include coverage.
-- [ ] Required non-obvious implementation blocks have rationale comments.
-- [ ] Stable errors distinguish child setup, unsupported hardening, and failed available hardening.
+- [x] CLI and HTTP run concurrently with independent global and combined queue limits.
+- [x] Durable running state precedes every external CLI effect.
+- [x] Completion/output/run/retry/recurrence remain one transaction.
+- [x] Schema remains version 1.
+- [x] HTTP behavior and results remain unchanged.
+- [x] The management RPC set remains 15 methods; API version is 1.2.
+- [x] `jobuctl` does not gate the new CLI creation fields on the daemon API minor version.
+- [x] Every changed public declaration has useful Doxygen and first-include coverage.
+- [x] Required non-obvious implementation blocks have rationale comments.
+- [x] Stable errors distinguish child setup, unsupported hardening, and failed available hardening.
 - [ ] Changed C++ files are diagnostics-clean.
-- [ ] Full SQLite-enabled clean Linux tests pass.
-- [ ] SQLite-disabled configuration builds; no duplicate no-SQLite full CTest is required.
-- [ ] Mandatory macOS Process, scheduler, and daemon evidence is recorded accurately.
+- [x] Full SQLite-enabled clean Linux tests pass.
+- [x] SQLite-disabled configuration builds; no duplicate no-SQLite full CTest is required.
+- [x] Mandatory macOS Process, scheduler, and daemon evidence is recorded accurately.
 
 ## 26. Deferred entry boundaries
 
