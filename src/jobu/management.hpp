@@ -219,10 +219,16 @@ struct RunNowRequest {
 /// Queue/job gets and lists use bounded repository reads without an explicit transaction. Creates, updates, lifecycle
 /// changes, moves, and deletions use one immediate transaction and return only after commit. Errors include stable
 /// `jobu.queue.*`, `jobu.job.*`, `jobu.run.*`, `jobu.schedule.*`, `jobu.attribute.*`, and `jobu.idempotency.*` codes
-/// plus unchanged database errors when no domain mapping applies. Successful mutations synchronously emit
+/// plus database errors when no domain mapping applies. Storage errors retain their stable category/code, while
+/// backend diagnostic text is sanitized. Successful mutations synchronously emit
 /// mutation_committed after commit without starting threads, external work, or event-loop processing. A fresh recurring
 /// create or an update that validates or evaluates a recurring schedule may synchronously load timezone data through
 /// CronEngine.
+///
+/// Every mutation checks admission before validation or database work. stop_mutations() or a fatal storage/invariant
+/// failure irreversibly closes admission; later mutations return Unavailable / `jobu.service.stopping`. The failing
+/// operation returns its own sanitized error and emits failed after its transaction/query guards have unwound.
+/// Read operations remain available and still report corruption/invariant failures through failed.
 ///
 class ManagementService final : public jb::core::Object {
 public:
@@ -255,6 +261,12 @@ public:
     auto operator=(ManagementService const&) -> ManagementService& = delete;
     /// Prevents move assignment of repositories that borrow a fixed Database.
     auto operator=(ManagementService&&) -> ManagementService&      = delete;
+
+    /// Irreversibly rejects subsequent mutations with Unavailable / `jobu.service.stopping`.
+    /// Owner-thread only and idempotent; performs no database work and emits no signal.
+    /// Reads remain available. Fatal storage/invariant failures also close this gate.
+    /// May be called from a failure notification slot to latch runtime admission.
+    void stop_mutations() noexcept;
 
     /// Creates one active queue in an immediate transaction.
     /// @param request Queue configuration consumed after validation. An optional idempotency key durably replays the
@@ -406,10 +418,42 @@ public:
     ///
     jb::core::Signal<> mutation_committed;
 
+    /// Emitted synchronously at most once for the first fatal storage/invariant failure.
+    /// Mutation admission is already closed and operation-local queries/transactions
+    /// have unwound before delivery. The sanitized error preserves its stable code
+    /// and category; its reference is borrowed only for the duration of delivery.
+    /// Ordinary validation/conflict errors and non-corruption read failures do not emit.
+    /// Failed and rejected operations never emit mutation_committed.
+    /// Slots run on the owner thread and may latch shutdown (including stop_mutations()),
+    /// but must not destroy the service, invoke another service operation, or start
+    /// nested event processing. Use receiver-aware connections when capturing Objects.
+    jb::core::Signal<jb::core::Error> failed;
+
 private:
     struct Private;
 
     void emit_mutation_committed();
+
+    // Transaction-owning bodies return to the public admission/failure boundary
+    // before notifications are delivered.
+    auto create_queue_impl(CreateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>;
+    auto get_queue_impl(QueueSelector const& selector, bool include_deleted)
+        -> jb::core::Result<Queue, jb::core::Error>;
+    auto list_queues_impl(QueueListRequest const& request) -> jb::core::Result<QueuePage, jb::core::Error>;
+    auto update_queue_impl(UpdateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>;
+    auto suspend_queue_impl(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>;
+    auto resume_queue_impl(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>;
+    auto delete_queue_impl(QueueSelector const& selector) -> jb::core::Result<void, jb::core::Error>;
+    auto create_job_impl(CreateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
+    auto run_now_impl(RunNowRequest request) -> jb::core::Result<JobRun, jb::core::Error>;
+    auto update_job_impl(UpdateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
+    auto suspend_job_impl(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>;
+    auto resume_job_impl(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>;
+    auto move_job_impl(MoveJobRequest const& request) -> jb::core::Result<JobDefinition, jb::core::Error>;
+    auto delete_job_impl(DeleteJobRequest const& request) -> jb::core::Result<void, jb::core::Error>;
+    auto get_job_impl(jb::core::Uuid const& id, bool include_deleted)
+        -> jb::core::Result<JobDefinition, jb::core::Error>;
+    auto list_jobs_impl(JobListRequest const& request) -> jb::core::Result<JobPage, jb::core::Error>;
 };
 
 } // namespace jb::jobu

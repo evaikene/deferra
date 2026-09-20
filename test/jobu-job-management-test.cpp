@@ -505,20 +505,26 @@ TEST_CASE("Job create idempotency is queue-scoped and replays the original defin
     CHECK(second_job->id != original->id);
     CHECK(count_rows(fixture.database, "jobu_idempotency") == 2);
 
-    execute(fixture.database,
-            "UPDATE jobu_idempotency SET result_json = '{}' WHERE method = 'job.create' AND key = 'job-key' "
-            "AND resource_id = X'00000000000070008000000000000002'");
-    require_error(service.create_job(request), ErrorCategory::Internal, "jobu.idempotency.invalid_record");
-
-    execute(fixture.database,
-            "CREATE TRIGGER fail_job_idempotency_insert BEFORE INSERT ON jobu_idempotency "
-            "WHEN NEW.key = 'fail-key' BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
-    auto rollback_request            = request;
-    rollback_request.idempotency_key = "fail-key";
-    require_error(service.create_job(std::move(rollback_request)), ErrorCategory::Conflict, "db.constraint");
-    CHECK(count_rows(fixture.database, "jobu_jobs") == 2);
-    CHECK(count_rows(fixture.database, "jobu_runs") == 2);
-    CHECK(count_rows(fixture.database, "jobu_idempotency") == 2);
+    // Each fatal scenario owns a fresh service incarnation.
+    SECTION("corrupted replay")
+    {
+        execute(fixture.database,
+                "UPDATE jobu_idempotency SET result_json = '{}' WHERE method = 'job.create' AND key = 'job-key' "
+                "AND resource_id = X'00000000000070008000000000000002'");
+        require_error(service.create_job(request), ErrorCategory::Internal, "jobu.idempotency.invalid_record");
+    }
+    SECTION("idempotency write rollback")
+    {
+        execute(fixture.database,
+                "CREATE TRIGGER fail_job_idempotency_insert BEFORE INSERT ON jobu_idempotency "
+                "WHEN NEW.key = 'fail-key' BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
+        auto rollback_request            = request;
+        rollback_request.idempotency_key = "fail-key";
+        require_error(service.create_job(std::move(rollback_request)), ErrorCategory::Conflict, "db.constraint");
+        CHECK(count_rows(fixture.database, "jobu_jobs") == 2);
+        CHECK(count_rows(fixture.database, "jobu_runs") == 2);
+        CHECK(count_rows(fixture.database, "jobu_idempotency") == 2);
+    }
 }
 
 TEST_CASE("Job create idempotency replay does not require fresh UUIDs", "[jobu][job][idempotency]")
@@ -1488,8 +1494,10 @@ TEST_CASE("Job management rejects malformed persisted definitions", "[jobu][job]
     execute(
         fixture.database,
         R"(UPDATE jobu_jobs SET type = 'http', payload_json = '{"headers":[{"name":"Idempotency-Key","value":"stored-secret"}],"url":"https://stored.test"}' WHERE id IS NOT NULL)");
+    auto failures = std::vector<Error>{};
+    service.failed.connect(&service, [&failures](Error const& error) { failures.push_back(error); });
     auto stored_error = require_error(service.get_job(job_id), ErrorCategory::Internal, "jobu.storage.invariant");
-    CHECK(stored_error.detail == "reason=invalid_headers");
+    CHECK(stored_error.detail == "operation=read reason=durable_invariant");
     CHECK(stored_error.detail.find("stored-secret") == std::string::npos);
     require_error(service.list_jobs({}), ErrorCategory::Internal, "jobu.storage.invariant");
 
@@ -1497,9 +1505,12 @@ TEST_CASE("Job management rejects malformed persisted definitions", "[jobu][job]
         fixture.database,
         R"(UPDATE jobu_jobs SET type = 'cli', payload_json = '{"command":"stored-command-secret"}' WHERE id IS NOT NULL)");
     stored_error = require_error(service.get_job(job_id), ErrorCategory::Internal, "jobu.storage.invariant");
-    CHECK(stored_error.detail == "reason=invalid_path");
+    CHECK(stored_error.detail == "operation=read reason=durable_invariant");
     CHECK(stored_error.detail.find("stored-command-secret") == std::string::npos);
     require_error(service.list_jobs({}), ErrorCategory::Internal, "jobu.storage.invariant");
+    REQUIRE(failures.size() == 1);
+    CHECK(failures.front().detail == "operation=read reason=durable_invariant");
+    require_error(service.create_queue({.name = "blocked"}), ErrorCategory::Unavailable, "jobu.service.stopping");
 
     execute(fixture.database,
             R"(UPDATE jobu_jobs SET type = 'cli', payload_json = '{"command":"/true"}', name = char(1))");

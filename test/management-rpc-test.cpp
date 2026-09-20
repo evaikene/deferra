@@ -7,6 +7,7 @@
 #include "management.hpp"
 #include "management_json.hpp"
 #include "protocol_priv.hpp"
+#include "query.hpp"
 #include "run_repository_priv.hpp"
 #include "server.hpp"
 #include "sqlite/sqlite_driver.hpp"
@@ -222,6 +223,29 @@ public:
     {
         _device->inject_input(request_frame(_next_id++, method, params));
         return take_response(*_device);
+    }
+
+    [[nodiscard]] auto call_buffered(std::string_view method, JsonValue const& first, JsonValue const& second)
+        -> std::vector<ResponseEnvelope>
+    {
+        // Both frames enter the same input buffer before either handler runs.
+        auto frames  = request_frame(_next_id++, method, first);
+        frames      += request_frame(_next_id++, method, second);
+        _device->inject_input(frames);
+        StreamFramer framer;
+        auto         bodies = framer.append(_device->take_written_data());
+        REQUIRE(bodies);
+        REQUIRE(bodies->size() == 2);
+        auto responses = std::vector<ResponseEnvelope>{};
+        for (auto const& body : *bodies) {
+            auto parsed = parse_json(body);
+            REQUIRE(parsed);
+            auto decoded = decode_response_document(*parsed);
+            REQUIRE(decoded);
+            REQUIRE(decoded->entries.size() == 1);
+            responses.push_back(std::move(decoded->entries.front()));
+        }
+        return responses;
     }
 
     [[nodiscard]] auto service() noexcept -> ManagementService& { return _service; }
@@ -809,4 +833,58 @@ TEST_CASE("Management RPC separates invalid params from safe application errors"
     })),
                            ErrorCode::InvalidParams);
     CHECK(rescans.request_count() == 1U);
+}
+
+TEST_CASE("Buffered management RPC mutations stop after the first fatal storage result",
+          "[jobu][management][rpc][failure]")
+{
+    Application    app{0, nullptr};
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2)}
+    };
+    RpcEndpoint endpoint{fixture};
+    auto        failures  = std::vector<Error>{};
+    auto        committed = std::size_t{0};
+    endpoint.service().failed.connect(&endpoint.service(), [&](Error const& error) { failures.push_back(error); });
+    endpoint.service().mutation_committed.connect(&endpoint.service(), [&] { ++committed; });
+
+    // Only the first name fails at storage. The second would commit if the
+    // buffered request could bypass the service admission latch.
+    {
+        Query query{fixture.database};
+        REQUIRE(query.exec("CREATE TRIGGER fail_first_queue BEFORE INSERT ON jobu_queues "
+                           "WHEN NEW.name = 'first' BEGIN SELECT RAISE(ABORT, 'sensitive SQL'); END"));
+    }
+    auto first     = encode_create(CreateQueueRequest{.name = "first"}, fixture.registry);
+    auto second    = encode_create(CreateQueueRequest{.name = "second"}, fixture.registry);
+    auto responses = endpoint.call_buffered("queue.create", first, second);
+    require_application_error(responses[0], "conflict", "db.constraint");
+    require_application_error(responses[1], "unavailable", "jobu.service.stopping");
+    REQUIRE(failures.size() == 1);
+    CHECK(failures.front().detail.find("sensitive") == std::string::npos);
+    CHECK(committed == 0);
+    auto queues = endpoint.service().list_queues({});
+    REQUIRE(queues);
+    CHECK(queues->items.empty());
+}
+
+TEST_CASE("Buffered management RPC conflicts do not close mutation admission", "[jobu][management][rpc][failure]")
+{
+    Application    app{0, nullptr};
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    RpcEndpoint endpoint{fixture};
+    REQUIRE(endpoint.service().create_queue({.name = "existing"}));
+    auto failures  = std::vector<Error>{};
+    auto committed = std::size_t{0};
+    endpoint.service().failed.connect(&endpoint.service(), [&](Error const& error) { failures.push_back(error); });
+    endpoint.service().mutation_committed.connect(&endpoint.service(), [&] { ++committed; });
+    auto first     = encode_create(CreateQueueRequest{.name = "existing"}, fixture.registry);
+    auto second    = encode_create(CreateQueueRequest{.name = "new"}, fixture.registry);
+    auto responses = endpoint.call_buffered("queue.create", first, second);
+    require_application_error(responses[0], "conflict", "jobu.queue.name_conflict");
+    CHECK(require_result(responses[1]).is_object());
+    CHECK(failures.empty());
+    CHECK(committed == 1);
 }

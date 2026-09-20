@@ -880,38 +880,42 @@ TEST_CASE("Run Now rolls back idempotency failures and rejects corrupted replay 
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "rollback"}));
     REQUIRE(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("/true")}));
-    execute(fixture.database,
-            "CREATE TRIGGER fail_run_now_idempotency BEFORE INSERT ON jobu_idempotency "
-            "WHEN NEW.method = 'job.run_now' BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
-
-    require_error(service.run_now({.job_id = job_id, .idempotency_key = "fail"}),
-                  ErrorCategory::Conflict,
-                  "db.constraint");
-    CHECK(count_rows(fixture.database, "jobu_runs") == 1);
-    CHECK(count_rows(fixture.database, "jobu_idempotency") == 0);
-
-    execute(fixture.database, "DROP TRIGGER fail_run_now_idempotency");
-    auto manual = service.run_now({.job_id = job_id, .idempotency_key = "stored"});
-    REQUIRE(manual);
-    SECTION("result document")
+    SECTION("idempotency write rollback")
     {
         execute(fixture.database,
-                "UPDATE jobu_idempotency SET result_json = '{}' "
-                "WHERE method = 'job.run_now' AND key = 'stored'");
-        require_error(service.run_now({.job_id = job_id, .idempotency_key = "stored"}),
-                      ErrorCategory::Internal,
-                      "jobu.idempotency.invalid_record");
+                "CREATE TRIGGER fail_run_now_idempotency BEFORE INSERT ON jobu_idempotency "
+                "WHEN NEW.method = 'job.run_now' BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
+
+        require_error(service.run_now({.job_id = job_id, .idempotency_key = "fail"}),
+                      ErrorCategory::Conflict,
+                      "db.constraint");
+        CHECK(count_rows(fixture.database, "jobu_runs") == 1);
+        CHECK(count_rows(fixture.database, "jobu_idempotency") == 0);
     }
-    SECTION("request identity")
+    SECTION("corrupted replay")
     {
-        execute(fixture.database,
-                "UPDATE jobu_idempotency "
-                "SET request_json = '{\"job_id\":\"00000000-0000-7000-8000-000000000063\"}' "
-                "WHERE method = 'job.run_now' AND key = 'stored'");
-        auto error = require_error(service.run_now({.job_id = job_id, .idempotency_key = "stored"}),
-                                   ErrorCategory::Internal,
-                                   "jobu.idempotency.invalid_record");
-        CHECK(error.detail == "reason=run_now_request_scope_mismatch");
+        auto manual = service.run_now({.job_id = job_id, .idempotency_key = "stored"});
+        REQUIRE(manual);
+        SECTION("result document")
+        {
+            execute(fixture.database,
+                    "UPDATE jobu_idempotency SET result_json = '{}' "
+                    "WHERE method = 'job.run_now' AND key = 'stored'");
+            require_error(service.run_now({.job_id = job_id, .idempotency_key = "stored"}),
+                          ErrorCategory::Internal,
+                          "jobu.idempotency.invalid_record");
+        }
+        SECTION("request identity")
+        {
+            execute(fixture.database,
+                    "UPDATE jobu_idempotency "
+                    "SET request_json = '{\"job_id\":\"00000000-0000-7000-8000-000000000063\"}' "
+                    "WHERE method = 'job.run_now' AND key = 'stored'");
+            auto error = require_error(service.run_now({.job_id = job_id, .idempotency_key = "stored"}),
+                                       ErrorCategory::Internal,
+                                       "jobu.idempotency.invalid_record");
+            CHECK(error.detail == "operation=mutation reason=durable_invariant");
+        }
     }
 }
 
@@ -966,21 +970,26 @@ TEST_CASE("Run Now signals fresh and replayed durable success", "[jobu][manageme
 
     auto emissions = std::size_t{0};
     service.mutation_committed.connect([&emissions]() -> void { ++emissions; });
-    execute(fixture.database,
-            "CREATE TRIGGER fail_signal_run_now BEFORE INSERT ON jobu_idempotency "
-            "WHEN NEW.method = 'job.run_now' AND NEW.key = 'fail' "
-            "BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
-    REQUIRE_FALSE(service.run_now({.job_id = job_id, .idempotency_key = "fail"}));
-    CHECK(emissions == 0);
-    execute(fixture.database, "DROP TRIGGER fail_signal_run_now");
+    SECTION("failed write")
+    {
+        execute(fixture.database,
+                "CREATE TRIGGER fail_signal_run_now BEFORE INSERT ON jobu_idempotency "
+                "WHEN NEW.method = 'job.run_now' AND NEW.key = 'fail' "
+                "BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
+        REQUIRE_FALSE(service.run_now({.job_id = job_id, .idempotency_key = "fail"}));
+        CHECK(emissions == 0);
+        require_error(service.run_now({.job_id = job_id}), ErrorCategory::Unavailable, "jobu.service.stopping");
+    }
+    SECTION("fresh and replayed success")
+    {
+        auto const request = RunNowRequest{.job_id = job_id, .idempotency_key = "signal-key"};
+        REQUIRE(service.run_now(request));
+        CHECK(emissions == 1);
+        REQUIRE(service.run_now(request));
+        CHECK(emissions == 2);
 
-    auto const request = RunNowRequest{.job_id = job_id, .idempotency_key = "signal-key"};
-    REQUIRE(service.run_now(request));
-    CHECK(emissions == 1);
-    REQUIRE(service.run_now(request));
-    CHECK(emissions == 2);
-
-    require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
-    require_error(service.run_now({.job_id = sequence_id(250)}), ErrorCategory::NotFound, "jobu.job.not_found");
-    CHECK(emissions == 2);
+        require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+        require_error(service.run_now({.job_id = sequence_id(250)}), ErrorCategory::NotFound, "jobu.job.not_found");
+        CHECK(emissions == 2);
+    }
 }

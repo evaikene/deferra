@@ -361,18 +361,26 @@ TEST_CASE("Queue create idempotency replays canonical results and rolls back rec
                   ErrorCategory::Conflict,
                   "jobu.idempotency.conflict");
 
-    execute(fixture.database,
-            "UPDATE jobu_idempotency SET result_json = '{}' WHERE method = 'queue.create' AND key = 'queue-key'");
-    require_error(service.create_queue(explicit_defaults), ErrorCategory::Internal, "jobu.idempotency.invalid_record");
-
-    execute(fixture.database,
-            "CREATE TRIGGER fail_idempotency_insert BEFORE INSERT ON jobu_idempotency "
-            "WHEN NEW.key = 'fail-key' BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
-    require_error(service.create_queue({.name = "rolled-back", .idempotency_key = "fail-key"}),
-                  ErrorCategory::Conflict,
-                  "db.constraint");
-    CHECK(count_rows(fixture.database, "jobu_queues") == 1);
-    CHECK(count_rows(fixture.database, "jobu_idempotency") == 1);
+    // Each fatal scenario owns a fresh service incarnation.
+    SECTION("corrupted replay")
+    {
+        execute(fixture.database,
+                "UPDATE jobu_idempotency SET result_json = '{}' WHERE method = 'queue.create' AND key = 'queue-key'");
+        require_error(service.create_queue(explicit_defaults),
+                      ErrorCategory::Internal,
+                      "jobu.idempotency.invalid_record");
+    }
+    SECTION("idempotency write rollback")
+    {
+        execute(fixture.database,
+                "CREATE TRIGGER fail_idempotency_insert BEFORE INSERT ON jobu_idempotency "
+                "WHEN NEW.key = 'fail-key' BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
+        require_error(service.create_queue({.name = "rolled-back", .idempotency_key = "fail-key"}),
+                      ErrorCategory::Conflict,
+                      "db.constraint");
+        CHECK(count_rows(fixture.database, "jobu_queues") == 1);
+        CHECK(count_rows(fixture.database, "jobu_idempotency") == 1);
+    }
 }
 
 TEST_CASE("Queue create idempotency replay does not require a fresh UUID", "[jobu][queue][idempotency]")
@@ -898,6 +906,8 @@ TEST_CASE("Queue management rejects malformed persisted attribute documents", "[
     REQUIRE(service.create_queue({.name = "queue"}));
     execute(fixture.database, "UPDATE jobu_queues SET defaults_json = '{}' WHERE name = 'queue'");
 
+    auto failures = std::vector<Error>{};
+    service.failed.connect(&service, [&failures](Error const& error) { failures.push_back(error); });
     require_error(service.get_queue(id), ErrorCategory::Internal, "jobu.attribute.invalid_document");
     require_error(service.list_queues({}), ErrorCategory::Internal, "jobu.attribute.invalid_document");
 
@@ -906,6 +916,9 @@ TEST_CASE("Queue management rejects malformed persisted attribute documents", "[
 
     execute(fixture.database, "UPDATE jobu_queues SET weight = 1, name = char(1) WHERE id IS NOT NULL");
     require_error(service.get_queue(id), ErrorCategory::Internal, "jobu.storage.invalid_queue");
+    REQUIRE(failures.size() == 1);
+    CHECK(failures.front().detail == "operation=read reason=durable_invariant");
+    require_error(service.create_queue({.name = "blocked"}), ErrorCategory::Unavailable, "jobu.service.stopping");
 }
 
 TEST_CASE("Queue mutations signal only after successful commit", "[jobu][queue][signal][sqlite]")
@@ -951,27 +964,100 @@ TEST_CASE("Queue mutations signal only after successful commit", "[jobu][queue][
     require_error(service.suspend_queue(sequence_id(250)), ErrorCategory::NotFound, "jobu.queue.not_found");
     CHECK(emissions == 9);
 
-    execute(fixture.database,
-            "CREATE TRIGGER fail_queue_repository BEFORE INSERT ON jobu_queues "
-            "WHEN NEW.name = 'repository-failure' BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
-    REQUIRE_FALSE(service.create_queue({.name = "repository-failure"}));
-    CHECK(emissions == 9);
+    auto failures = std::vector<Error>{};
+    service.failed.connect(&service, [&failures](Error const& error) { failures.push_back(error); });
+    SECTION("repository failure")
+    {
+        execute(fixture.database,
+                "CREATE TRIGGER fail_queue_repository BEFORE INSERT ON jobu_queues "
+                "WHEN NEW.name = 'repository-failure' BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
+        require_error(service.create_queue({.name = "repository-failure"}), ErrorCategory::Conflict, "db.constraint");
+        CHECK(emissions == 9);
 
-    execute(fixture.database,
-            "CREATE TRIGGER fail_queue_commit AFTER INSERT ON jobu_queues "
-            "WHEN NEW.name = 'commit-failure' BEGIN "
-            "INSERT INTO jobu_secret_refs(secret_name, job_id, field_path) "
-            "VALUES ('missing-secret', NEW.id, 'test'); END");
-    // Defer the injected foreign-key violation so the repository succeeds and commit itself fails.
-    execute(fixture.database, "PRAGMA defer_foreign_keys = ON");
-    REQUIRE_FALSE(service.create_queue({.name = "commit-failure"}));
-    CHECK(emissions == 9);
+        REQUIRE(failures.size() == 1);
+        require_error(service.create_queue({.name = "blocked"}), ErrorCategory::Unavailable, "jobu.service.stopping");
+    }
+    SECTION("commit failure")
+    {
+        execute(fixture.database,
+                "CREATE TRIGGER fail_queue_commit AFTER INSERT ON jobu_queues "
+                "WHEN NEW.name = 'commit-failure' BEGIN "
+                "INSERT INTO jobu_secret_refs(secret_name, job_id, field_path) "
+                "VALUES ('missing-secret', NEW.id, 'test'); END");
+        // Defer the injected foreign-key violation so the repository succeeds and commit itself fails.
+        execute(fixture.database, "PRAGMA defer_foreign_keys = ON");
+        require_error(service.create_queue({.name = "commit-failure"}),
+                      ErrorCategory::Conflict,
+                      "db.constraint.foreign_key");
+        CHECK(emissions == 9);
 
-    auto receiver_emissions = std::size_t{0};
-    auto receiver           = std::make_unique<Object>();
-    service.mutation_committed.connect(receiver.get(), [&receiver_emissions]() -> void { ++receiver_emissions; });
-    receiver.reset();
-    REQUIRE(service.create_queue({.name = "after-receiver-destruction"}));
-    CHECK(emissions == 10);
-    CHECK(receiver_emissions == 0);
+        REQUIRE(failures.size() == 1);
+        CHECK(count_rows(fixture.database, "jobu_queues") == 1);
+        require_error(service.create_queue({.name = "blocked"}), ErrorCategory::Unavailable, "jobu.service.stopping");
+    }
+    SECTION("receiver destruction")
+    {
+        auto receiver_emissions = std::size_t{0};
+        auto receiver           = std::make_unique<Object>();
+        service.mutation_committed.connect(receiver.get(), [&receiver_emissions]() -> void { ++receiver_emissions; });
+        receiver.reset();
+        REQUIRE(service.create_queue({.name = "after-receiver-destruction"}));
+        CHECK(emissions == 10);
+        CHECK(receiver_emissions == 0);
+        CHECK(failures.empty());
+    }
+}
+
+TEST_CASE("Management affected-row mismatch closes admission after SQLite rollback", "[jobu][queue][failure][sqlite]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              queue = service.create_queue({.name = "guarded"});
+    REQUIRE(queue);
+    auto failures  = std::vector<Error>{};
+    auto committed = std::size_t{0};
+    service.failed.connect(&service, [&failures](Error const& error) { failures.push_back(error); });
+    service.mutation_committed.connect(&service, [&committed] { ++committed; });
+
+    // Suppress a write after the service has read and validated its target row.
+    // The resulting zero-row update is not a caller state conflict.
+    execute(fixture.database,
+            "CREATE TRIGGER ignore_queue_update BEFORE UPDATE ON jobu_queues "
+            "BEGIN SELECT RAISE(IGNORE); END");
+    auto error = require_error(service.update_queue({.queue = queue->id, .weight = 2}),
+                               ErrorCategory::Conflict,
+                               "jobu.queue.state_conflict");
+    CHECK(error.detail == "operation=mutation reason=durable_invariant");
+    REQUIRE(failures.size() == 1);
+    CHECK(failures.front().code == error.code);
+    CHECK(committed == 0);
+    auto unchanged = service.get_queue(queue->id);
+    REQUIRE(unchanged);
+    CHECK(unchanged->weight == 1);
+    require_error(service.create_queue({.name = "blocked"}), ErrorCategory::Unavailable, "jobu.service.stopping");
+    CHECK(count_rows(fixture.database, "jobu_queues") == 1);
+}
+
+TEST_CASE("Malformed stored attributes are fatal during queue name lookup", "[jobu][queue][failure][sqlite]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "existing"}));
+    execute(fixture.database, "UPDATE jobu_queues SET defaults_json = '{}' WHERE name = 'existing'");
+    auto failures = std::vector<Error>{};
+    service.failed.connect(&service, [&failures](Error const& error) { failures.push_back(error); });
+
+    // Name-conflict lookup decodes the existing row. Its attribute error must
+    // retain persisted provenance even inside an otherwise valid create request.
+    require_error(service.create_queue({.name = "existing"}),
+                  ErrorCategory::Internal,
+                  "jobu.attribute.invalid_document");
+    REQUIRE(failures.size() == 1);
+    CHECK(failures.front().detail == "operation=mutation reason=durable_invariant");
+    require_error(service.create_queue({.name = "new"}), ErrorCategory::Unavailable, "jobu.service.stopping");
+    CHECK(count_rows(fixture.database, "jobu_queues") == 1);
 }
