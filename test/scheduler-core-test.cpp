@@ -15,6 +15,7 @@
 #include "support/fake_time_source.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
+#include "transaction.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -28,6 +29,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -37,6 +39,9 @@ using namespace jb::jobu;
 using namespace jb::jobu::detail;
 using namespace jb::test;
 using namespace std::chrono_literals;
+
+static_assert(!std::is_copy_constructible_v<SchedulerCore>);
+static_assert(!std::is_move_constructible_v<SchedulerCore>);
 
 namespace {
 
@@ -3258,4 +3263,201 @@ TEST_CASE("Scheduler core reports one sticky asynchronous completion failure",
     REQUIRE_FALSE(failed);
     CHECK(failed.error() == reported.front());
     CHECK(reported.size() == 1U);
+}
+
+TEST_CASE("Scheduler core shutdown preserves running work and permanently rejects further operations",
+          "[jobu][scheduler][core][shutdown][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  queue = id(1);
+    insert_queue(fixture.database, queue, 1);
+    insert_scheduled(fixture, queue, 2, JobType::Cli);
+    insert_scheduled(fixture, queue, 3, JobType::Cli);
+    fixture.executor.set_available(JobType::Cli, true);
+    auto          rescans  = std::size_t{0};
+    auto          failures = std::size_t{0};
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        fixture.time,
+        fixture.executor,
+        {},
+        {.rescan_requested = [&]() { ++rescans; }, .failure_reported = [&](Error const&) { ++failures; }}
+    };
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const key = fixture.executor.pending_keys().front();
+
+    core.shutdown();
+    core.shutdown();
+    core.reset();
+    REQUIRE(fixture.executor.complete(key, success(key)));
+    auto cycle = core.process_cycle();
+    REQUIRE_FALSE(cycle);
+    CHECK(cycle.error().code == "jobu.scheduler.stopping");
+    for (auto const run_id : {id(2), id(3)}) {
+        auto cancellation = core.cancel_run(run_id);
+        REQUIRE_FALSE(cancellation);
+        CHECK(cancellation.error().code == "jobu.scheduler.stopping");
+    }
+    CHECK(fixture.executor.start_requests().size() == 1U);
+    CHECK(fixture.executor.cancel_calls().empty());
+    CHECK(rescans == 0U);
+    CHECK(failures == 0U);
+
+    auto running = fixture.runs.find_by_id(key.run_id);
+    REQUIRE(running);
+    REQUIRE(running->has_value());
+    CHECK(running->value().state == RunState::Running);
+    auto attempt = fixture.attempts.find(key.run_id, key.attempt_number);
+    REQUIRE(attempt);
+    REQUIRE(attempt->has_value());
+    CHECK(attempt->value().state == AttemptState::Running);
+    auto output = fixture.attempts.find_output(key.run_id, key.attempt_number);
+    REQUIRE(output);
+    CHECK_FALSE(output->has_value());
+}
+
+TEST_CASE("Scheduler core retained completion outlives the core and all its borrowed dependencies",
+          "[jobu][scheduler][core][shutdown][lifetime][sqlite]")
+{
+    RawAttemptExecutor executor;
+    auto               notifications = std::size_t{0};
+    {
+        CoreFixture fixture;
+        insert_queue(fixture.database, id(1), 1);
+        insert_scheduled(fixture, id(1), 2, JobType::Cli);
+        SchedulerCore core{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            executor,
+            {},
+            {.rescan_requested = [&]() { ++notifications; },
+              .failure_reported = [&](Error const&) { ++notifications; }}
+        };
+        REQUIRE(core.process_cycle());
+        REQUIRE(executor.requests.size() == 1U);
+    }
+
+    // Deliberately retain the exact-operation callback past both the owner and its database/time dependencies.
+    // Token validation must precede every access to those now-destroyed objects.
+    executor.emit(success(executor.requests.front().key));
+    CHECK(notifications == 0U);
+}
+
+TEST_CASE("Scheduler core invalidates later completions before reporting the first persistence failure",
+          "[jobu][scheduler][core][shutdown][failure][sqlite]")
+{
+    CoreFixture         fixture;
+    AdvancingTimeSource time;
+    insert_queue(fixture.database, id(1), 3);
+    insert_scheduled_range(fixture, id(1), 2, 3, JobType::Cli);
+    fixture.executor.set_available(JobType::Cli, true);
+    auto          failures = std::vector<Error>{};
+    auto          rescans  = std::size_t{0};
+    auto          keys     = std::vector<AttemptKey>{};
+    SchedulerCore core{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        time,
+        fixture.executor,
+        {},
+        {.rescan_requested = [&]() { ++rescans; },
+                   .failure_reported =
+             [&](Error const& error) {
+                 failures.push_back(error);
+                 // A fresh transaction proves the failed completion's guard unwound before notification.
+                 auto transaction = Transaction::begin(fixture.database);
+                 REQUIRE(transaction);
+                 REQUIRE(transaction->rollback());
+                 // Removing the trigger makes later valid completions writable unless acceptance is shut.
+                 Query query{fixture.database};
+                 REQUIRE(query.exec("DROP TRIGGER fail_terminal_completion"));
+                 auto const sampled = time.utc_calls;
+                 REQUIRE(fixture.executor.complete(keys[1], success(keys[1])));
+                 CHECK(time.utc_calls == sampled);
+             }}
+    };
+    REQUIRE(core.process_cycle());
+    keys = fixture.executor.pending_keys();
+    REQUIRE(keys.size() == 3U);
+    {
+        Query query{fixture.database};
+        REQUIRE(query.exec("CREATE TRIGGER fail_terminal_completion BEFORE UPDATE OF state ON jobu_runs "
+                           "WHEN NEW.state = 'succeeded' BEGIN SELECT RAISE(ABORT, 'injected failure'); END"));
+    }
+
+    REQUIRE(fixture.executor.complete(keys[0], success(keys[0])));
+    REQUIRE(failures.size() == 1U);
+    CHECK(failures.front().code == "db.constraint");
+    auto const sampled = time.utc_calls;
+    core.reset();
+    REQUIRE(fixture.executor.complete(keys[2], success(keys[2])));
+    // Completion samples time immediately before beginning its transaction. Neither later callback reaches it.
+    CHECK(time.utc_calls == sampled);
+    auto cycle = core.process_cycle();
+    REQUIRE_FALSE(cycle);
+    CHECK(cycle.error() == failures.front());
+    CHECK(rescans == 0U);
+    CHECK(failures.size() == 1U);
+    for (auto const& key : keys) {
+        auto run = fixture.runs.find_by_id(key.run_id);
+        REQUIRE(run);
+        REQUIRE(run->has_value());
+        CHECK(run->value().state == RunState::Running);
+        auto attempt = fixture.attempts.find(key.run_id, key.attempt_number);
+        REQUIRE(attempt);
+        REQUIRE(attempt->has_value());
+        CHECK(attempt->value().state == AttemptState::Running);
+    }
+}
+
+TEST_CASE("Scheduler core stops between dispatch opportunities after an immediate completion notification",
+          "[jobu][scheduler][core][shutdown][reentrancy][sqlite]")
+{
+    CoreFixture fixture;
+    insert_queue(fixture.database, id(1), 3);
+    insert_scheduled(fixture, id(1), 2, JobType::Cli);
+    insert_scheduled(fixture, id(1), 3, JobType::Http);
+    insert_scheduled(fixture, id(1), 4, JobType::Cli);
+    fixture.executor.set_available(JobType::Cli, true);
+    fixture.executor.set_available(JobType::Http, true);
+    fixture.executor.set_start_error(Error{.category = ErrorCategory::Unavailable,
+                                           .code     = "test.executor.start_failed",
+                                           .message  = "Configured start failure"});
+    auto*         owner         = static_cast<SchedulerCore*>(nullptr);
+    auto          notifications = std::size_t{0};
+    SchedulerCore core{fixture.database,
+                       fixture.registry,
+                       fixture.cron,
+                       fixture.generator,
+                       fixture.time,
+                       fixture.executor,
+                       {},
+                       {.rescan_requested = [&]() {
+                           ++notifications;
+                           owner->shutdown();
+                       }}};
+    owner = &core;
+
+    // A returned start error synthesizes completion after durable dispatch. This is not the forbidden case where
+    // an executor invokes its handler synchronously from start(). The successful completion's observer stops us.
+    auto cycle = core.process_cycle();
+    REQUIRE(cycle);
+    CHECK_FALSE(cycle->next_wake);
+    CHECK(notifications == 1U);
+    REQUIRE(fixture.executor.start_requests().size() == 1U);
+    for (auto const run_id : {id(2), id(3), id(4)}) {
+        auto run = fixture.runs.find_by_id(run_id);
+        REQUIRE(run);
+        REQUIRE(run->has_value());
+        CHECK(run->value().state == (run_id == id(2) ? RunState::Failed : RunState::Scheduled));
+    }
 }

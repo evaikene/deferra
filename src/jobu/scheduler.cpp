@@ -5,6 +5,7 @@
 #include "object_priv.hpp"
 #include "scheduler_core_priv.hpp"
 #include "scheduler_repository_priv.hpp"
+#include "storage_failure_priv.hpp"
 #include "thread_context.hpp"
 #include "timer.hpp"
 
@@ -42,6 +43,13 @@ auto invalid_state() -> jb::core::Error
     return scheduler_error(jb::core::ErrorCategory::Conflict,
                            "jobu.scheduler.invalid_state",
                            "The scheduler operation is not valid in its current state");
+}
+
+auto stopping() -> jb::core::Error
+{
+    return scheduler_error(jb::core::ErrorCategory::Unavailable,
+                           "jobu.scheduler.stopping",
+                           "The scheduler has permanently stopped");
 }
 
 auto recovery_required() -> jb::core::Error
@@ -89,7 +97,9 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
                 .http_concurrency     = options.http_concurrency,
                 .candidate_batch_size = options.candidate_batch_size},
                {.rescan_requested = [this]() -> void { request_rescan(); },
-                .failure_reported = [this](jb::core::Error const& error) -> void { fail(error); }}}
+                .failure_reported = [this](jb::core::Error const& error) -> void {
+                    fail(error, detail::StorageOperation::Completion);
+                }}}
     {
         if (!valid_options(options)) {
             initialization_error = invalid_options();
@@ -108,6 +118,7 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
     AttributeRegistry const&       attributes;
     SchedulerOptions               options;
     SchedulerState                 state{SchedulerState::Stopped};
+    bool                           terminal{false};
     std::optional<jb::core::Error> initialization_error;
     std::optional<jb::core::Error> stored_failure;
     jb::core::Timer                wake_timer;
@@ -115,11 +126,11 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
 
     [[nodiscard]] auto start() -> SchedulerResult<>
     {
+        if (terminal) {
+            return SchedulerResult<>::failure(stopping());
+        }
         if (state == SchedulerState::Running) {
             return SchedulerResult<>::success();
-        }
-        if (state == SchedulerState::Failed) {
-            return SchedulerResult<>::failure(*stored_failure);
         }
         if (initialization_error) {
             return SchedulerResult<>::failure(*initialization_error);
@@ -155,6 +166,18 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
         }
     }
 
+    void shutdown() noexcept
+    {
+        // Latch without destroying callback traversal state. Failure slots may call this synchronously, and the
+        // first failure must remain observable after the enclosing runtime also requests shutdown.
+        terminal = true;
+        core.shutdown();
+        wake_timer.stop();
+        if (state != SchedulerState::Failed) {
+            state = SchedulerState::Shutdown;
+        }
+    }
+
     void request_rescan()
     {
         if (state != SchedulerState::Running) {
@@ -176,13 +199,20 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
         if (!cycle) {
             auto error = std::move(cycle).error();
             fail(error);
-            return SchedulerResult<>::failure(std::move(error));
+            return SchedulerResult<>::failure(*stored_failure);
+        }
+        // A start/completion observer may have shut down the scheduler while the core was on the stack.
+        if (state == SchedulerState::Failed) {
+            return SchedulerResult<>::failure(*stored_failure);
+        }
+        if (state != SchedulerState::Running) {
+            return terminal ? SchedulerResult<>::failure(stopping()) : SchedulerResult<>::success();
         }
         auto armed = arm_next_wake(*cycle);
         if (!armed) {
             auto error = std::move(armed).error();
             fail(error);
-            return SchedulerResult<>::failure(std::move(error));
+            return SchedulerResult<>::failure(*stored_failure);
         }
         return SchedulerResult<>::success();
     }
@@ -218,14 +248,15 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
         return SchedulerResult<>::success();
     }
 
-    void fail(jb::core::Error error)
+    void fail(jb::core::Error const& error, detail::StorageOperation operation = detail::StorageOperation::Dispatch)
     {
         if (state == SchedulerState::Failed) {
             return;
         }
-        wake_timer.stop();
         state          = SchedulerState::Failed;
-        stored_failure = std::move(error);
+        // Preserve the stable identity while keeping backend details out of the public failure signal/result.
+        stored_failure = detail::sanitized_storage_error(error, operation);
+        shutdown();
         owner->emit(owner->failed, *stored_failure);
     }
 };
@@ -246,8 +277,8 @@ Scheduler::Scheduler(jb::db::Database&        database,
 
 Scheduler::~Scheduler()
 {
-    // Stop external wake activity before Scheduler's signal members are destroyed.
-    d_ptr<Private>()->stop();
+    // Invalidate executor callbacks before Scheduler's signals and ObjectPrivate block are destroyed.
+    d_ptr<Private>()->shutdown();
 }
 
 auto Scheduler::start() -> jb::core::Result<void, jb::core::Error>
@@ -260,6 +291,11 @@ void Scheduler::stop()
     d_ptr<Private>()->stop();
 }
 
+void Scheduler::shutdown() noexcept
+{
+    d_ptr<Private>()->shutdown();
+}
+
 void Scheduler::request_rescan()
 {
     d_ptr<Private>()->request_rescan();
@@ -268,14 +304,19 @@ void Scheduler::request_rescan()
 auto Scheduler::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result<CancelRunResult, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
-    if (data->state == SchedulerState::Failed) {
-        return SchedulerResult<CancelRunResult>::failure(*data->stored_failure);
+    if (data->terminal) {
+        return SchedulerResult<CancelRunResult>::failure(stopping());
     }
     if (data->state != SchedulerState::Running) {
         return SchedulerResult<CancelRunResult>::failure(invalid_state());
     }
 
     auto cancelled = data->core.cancel_run(run_id);
+    if (!cancelled && detail::classify_storage_failure(cancelled.error(), detail::StorageOperation::Mutation) ==
+                          detail::StorageFailureDisposition::Fatal) {
+        data->fail(cancelled.error(), detail::StorageOperation::Mutation);
+        return SchedulerResult<CancelRunResult>::failure(*data->stored_failure);
+    }
     if (cancelled && cancelled->disposition == CancelDisposition::Completed) {
         data->request_rescan();
     }

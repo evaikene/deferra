@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -119,18 +120,6 @@ struct SchedulerFixture {
         scheduler  = std::make_unique<Scheduler>(database, registry, cron, generator, time, executor, options);
     }
 
-    ~SchedulerFixture()
-    {
-        if (!scheduler) {
-            return;
-        }
-        scheduler->stop();
-        for (auto const& key : executor.pending_keys()) {
-            (void)executor.complete(key, success(key));
-        }
-        scheduler.reset();
-    }
-
     auto create_queue(std::string name = "queue", std::uint32_t concurrency = 1) const -> Queue
     {
         auto created = management->create_queue({.name = std::move(name), .concurrency_limit = concurrency});
@@ -166,6 +155,27 @@ struct SchedulerFixture {
     RunRepository                          runs;
     std::unique_ptr<ManagementService>     management;
     std::unique_ptr<Scheduler>             scheduler;
+};
+
+class NotifyingExecutor final : public AttemptExecutor {
+public:
+    FakeAttemptExecutor   fake;
+    std::function<void()> started;
+
+    [[nodiscard]] auto is_available(JobType type) const noexcept -> bool override { return fake.is_available(type); }
+
+    [[nodiscard]] auto start(AttemptStartRequest request, AttemptCompletionHandler completion)
+        -> Result<void, Error> override
+    {
+        auto result = fake.start(std::move(request), std::move(completion));
+        // Models a separate infrastructure notification on the start stack, not synchronous attempt completion.
+        if (started) {
+            started();
+        }
+        return result;
+    }
+
+    [[nodiscard]] auto cancel(AttemptKey const& key) -> Result<void, Error> override { return fake.cancel(key); }
 };
 
 } // anonymous namespace
@@ -361,6 +371,9 @@ TEST_CASE("Scheduler stop retains completion persistence without restarting disp
     CHECK(fixture.event_loop.loop->process_events(EventFlag::Timers) == ProcessEventsResult::Stopped);
     CHECK(fixture.executor.start_requests().size() == 1U);
     CHECK(fixture.scheduler->state() == SchedulerState::Stopped);
+
+    REQUIRE(fixture.scheduler->start());
+    CHECK(fixture.executor.start_requests().size() == 2U);
 }
 
 TEST_CASE("Scheduler exposes cancellation only while running and schedules a later rescan",
@@ -404,7 +417,8 @@ TEST_CASE("Scheduler stores and emits the first synchronous cycle failure once",
 
     auto repeated = fixture.scheduler->start();
     REQUIRE_FALSE(repeated);
-    CHECK(repeated.error() == failures.front());
+    CHECK(repeated.error().code == "jobu.scheduler.stopping");
+    CHECK(*fixture.scheduler->failure() == failures.front());
     CHECK(failures.size() == 1U);
 }
 
@@ -435,6 +449,256 @@ TEST_CASE("Scheduler observes an asynchronous completion failure and fails once"
     fixture.scheduler->request_rescan();
     auto restarted = fixture.scheduler->start();
     REQUIRE_FALSE(restarted);
-    CHECK(restarted.error() == failures.front());
+    CHECK(restarted.error().code == "jobu.scheduler.stopping");
+    CHECK(*fixture.scheduler->failure() == failures.front());
     CHECK(failures.size() == 1U);
+}
+
+TEST_CASE("Scheduler shutdown is terminal before startup and after resumable stop",
+          "[jobu][scheduler][event-loop][shutdown][sqlite]")
+{
+    SchedulerFixture fixture;
+    auto const       queue = fixture.create_queue();
+    auto const       run   = fixture.create_job(queue, JobType::Cli, at_seconds(90));
+    fixture.executor.set_available(JobType::Cli, true);
+    SECTION("before first start")
+    {}
+    SECTION("after stop")
+    {
+        fixture.time.set_utc(at_seconds(80));
+        REQUIRE(fixture.scheduler->start());
+        fixture.scheduler->stop();
+    }
+
+    fixture.scheduler->shutdown();
+    fixture.scheduler->shutdown();
+    fixture.scheduler->stop();
+    fixture.scheduler->request_rescan();
+    CHECK(fixture.scheduler->state() == SchedulerState::Shutdown);
+    CHECK_FALSE(fixture.scheduler->failure());
+    auto started = fixture.scheduler->start();
+    REQUIRE_FALSE(started);
+    CHECK(started.error().code == "jobu.scheduler.stopping");
+    CHECK(started.error().category == ErrorCategory::Unavailable);
+    auto cancelled = fixture.scheduler->cancel_run(run.id);
+    REQUIRE_FALSE(cancelled);
+    CHECK(cancelled.error().code == "jobu.scheduler.stopping");
+    CHECK(fixture.executor.start_requests().empty());
+    CHECK(fixture.executor.cancel_calls().empty());
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop) == 0U);
+}
+
+TEST_CASE("Scheduler shutdown suppresses queued completions and leaves durable running work for recovery",
+          "[jobu][scheduler][event-loop][shutdown][completion][sqlite]")
+{
+    SchedulerFixture fixture;
+    auto const       queue = fixture.create_queue("mixed", 2);
+    fixture.create_job(queue, JobType::Cli, at_seconds(90));
+    fixture.create_job(queue, JobType::Http, at_seconds(90));
+    fixture.create_job(queue, JobType::Cli, at_seconds(200));
+    fixture.executor.set_available(JobType::Cli, true);
+    fixture.executor.set_available(JobType::Http, true);
+    REQUIRE(fixture.scheduler->start());
+    auto const keys = fixture.executor.pending_keys();
+    REQUIRE(keys.size() == 2U);
+    fixture.scheduler->request_rescan();
+    REQUIRE(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop) == 1U);
+    REQUIRE(fixture.event_loop.loop->post([&]() {
+        for (auto const& key : keys) {
+            REQUIRE(fixture.executor.complete(key, success(key)));
+        }
+        fixture.scheduler->request_rescan();
+    }));
+
+    fixture.scheduler->shutdown();
+    CHECK(fixture.event_loop.loop->process_events(EventFlag::All) == ProcessEventsResult::Stopped);
+    CHECK(fixture.executor.pending_keys().empty());
+    CHECK(fixture.executor.start_requests().size() == 2U);
+    CHECK(fixture.executor.cancel_calls().empty());
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop) == 0U);
+    for (auto const& key : keys) {
+        auto run = fixture.runs.find_by_id(key.run_id);
+        REQUIRE(run);
+        REQUIRE(run->has_value());
+        CHECK(run->value().state == RunState::Running);
+    }
+}
+
+TEST_CASE("Scheduler destruction invalidates outstanding executor completions",
+          "[jobu][scheduler][event-loop][shutdown][lifetime][sqlite]")
+{
+    SchedulerFixture fixture;
+    auto const       queue = fixture.create_queue();
+    fixture.create_job(queue, JobType::Cli, at_seconds(90));
+    fixture.executor.set_available(JobType::Cli, true);
+    REQUIRE(fixture.scheduler->start());
+    auto const key = fixture.executor.pending_keys().front();
+    fixture.scheduler.reset();
+
+    REQUIRE(fixture.executor.complete(key, success(key)));
+    auto run = fixture.runs.find_by_id(key.run_id);
+    REQUIRE(run);
+    REQUIRE(run->has_value());
+    CHECK(run->value().state == RunState::Running);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop) == 0U);
+}
+
+TEST_CASE("Scheduler failure slots can shut down and deliver another completion without persistence",
+          "[jobu][scheduler][event-loop][shutdown][failure][sqlite]")
+{
+    SchedulerFixture fixture;
+    auto const       queue = fixture.create_queue("parallel", 2);
+    fixture.create_job(queue, JobType::Cli, at_seconds(90));
+    fixture.create_job(queue, JobType::Cli, at_seconds(90));
+    fixture.executor.set_available(JobType::Cli, true);
+    REQUIRE(fixture.scheduler->start());
+    auto const keys = fixture.executor.pending_keys();
+    REQUIRE(keys.size() == 2U);
+    execute(fixture.database,
+            "CREATE TRIGGER fail_first_completion BEFORE UPDATE OF state ON jobu_runs "
+            "WHEN NEW.state = 'succeeded' BEGIN SELECT RAISE(ABORT, 'secret backend diagnostic'); END");
+    auto  failures  = std::vector<Error>{};
+    auto* scheduler = fixture.scheduler.get();
+    scheduler->failed.connect(scheduler, [&](Error const& error) {
+        failures.push_back(error);
+        CHECK(scheduler->state() == SchedulerState::Failed);
+        CHECK(scheduler->failure() == error);
+        scheduler->shutdown();
+        scheduler->shutdown();
+        execute(fixture.database, "DROP TRIGGER fail_first_completion");
+        REQUIRE(fixture.executor.complete(keys[1], success(keys[1])));
+    });
+
+    REQUIRE(fixture.executor.complete(keys[0], success(keys[0])));
+    REQUIRE(failures.size() == 1U);
+    CHECK(failures.front().code == "db.constraint");
+    CHECK(failures.front().detail.find("secret") == std::string::npos);
+    CHECK(failures.front().message.find("secret") == std::string::npos);
+    CHECK(scheduler->state() == SchedulerState::Failed);
+    CHECK(scheduler->failure() == failures.front());
+    auto restarted = scheduler->start();
+    REQUIRE_FALSE(restarted);
+    CHECK(restarted.error().code == "jobu.scheduler.stopping");
+    auto cancelled = scheduler->cancel_run(keys.front().run_id);
+    REQUIRE_FALSE(cancelled);
+    CHECK(cancelled.error().code == "jobu.scheduler.stopping");
+    CHECK(fixture.executor.cancel_calls().empty());
+    for (auto const& key : keys) {
+        auto run = fixture.runs.find_by_id(key.run_id);
+        REQUIRE(run);
+        REQUIRE(run->has_value());
+        CHECK(run->value().state == RunState::Running);
+    }
+}
+
+TEST_CASE("Scheduler does not dispatch again or rearm after reentrant shutdown during start",
+          "[jobu][scheduler][event-loop][shutdown][reentrancy][sqlite]")
+{
+    SchedulerFixture  fixture;
+    NotifyingExecutor executor;
+    auto const        queue = fixture.create_queue("mixed", 3);
+    fixture.create_job(queue, JobType::Cli, at_seconds(90));
+    fixture.create_job(queue, JobType::Http, at_seconds(90));
+    fixture.create_job(queue, JobType::Cli, at_seconds(200));
+    executor.fake.set_available(JobType::Cli, true);
+    executor.fake.set_available(JobType::Http, true);
+    Scheduler scheduler{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time, executor};
+    executor.started = [&]() { scheduler.shutdown(); };
+
+    auto started = scheduler.start();
+    REQUIRE_FALSE(started);
+    CHECK(started.error().code == "jobu.scheduler.stopping");
+    CHECK(scheduler.state() == SchedulerState::Shutdown);
+    CHECK_FALSE(scheduler.failure());
+    CHECK(executor.fake.start_requests().size() == 1U);
+    CHECK(executor.fake.cancel_calls().empty());
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop) == 0U);
+    REQUIRE(executor.fake.pending_keys().size() == 1U);
+    auto const key = executor.fake.pending_keys().front();
+    REQUIRE(executor.fake.complete(key, success(key)));
+    auto run = fixture.runs.find_by_id(key.run_id);
+    REQUIRE(run);
+    REQUIRE(run->has_value());
+    CHECK(run->value().state == RunState::Running);
+}
+
+TEST_CASE("Scheduler cancellation storage failure closes completion acceptance after rollback",
+          "[jobu][scheduler][event-loop][shutdown][cancellation][sqlite]")
+{
+    SchedulerFixture fixture;
+    auto const       queue = fixture.create_queue();
+    fixture.create_job(queue, JobType::Cli, at_seconds(90));
+    auto const pending = fixture.create_job(queue, JobType::Cli, at_seconds(200));
+    fixture.executor.set_available(JobType::Cli, true);
+    REQUIRE(fixture.scheduler->start());
+    auto const key     = fixture.executor.pending_keys().front();
+    auto       unknown = fixture.scheduler->cancel_run(id(250));
+    REQUIRE_FALSE(unknown);
+    CHECK(unknown.error().code == "jobu.run.not_found");
+    CHECK(fixture.scheduler->state() == SchedulerState::Running);
+    execute(fixture.database,
+            "CREATE TRIGGER fail_cancellation BEFORE UPDATE OF state ON jobu_runs "
+            "WHEN NEW.state = 'cancelled' BEGIN SELECT RAISE(ABORT, 'injected cancellation failure'); END");
+    auto  failures  = std::vector<Error>{};
+    auto* scheduler = fixture.scheduler.get();
+    scheduler->failed.connect(scheduler, [&](Error const& error) {
+        failures.push_back(error);
+        scheduler->shutdown();
+        REQUIRE(fixture.executor.complete(key, success(key)));
+    });
+
+    auto cancelled = scheduler->cancel_run(pending.id);
+    REQUIRE_FALSE(cancelled);
+    CHECK(cancelled.error().code == "db.constraint");
+    REQUIRE(failures.size() == 1U);
+    CHECK(cancelled.error() == failures.front());
+    CHECK(scheduler->state() == SchedulerState::Failed);
+    auto unchanged = fixture.runs.find_by_id(pending.id);
+    REQUIRE(unchanged);
+    REQUIRE(unchanged->has_value());
+    CHECK(unchanged->value().state == RunState::Scheduled);
+    auto running = fixture.runs.find_by_id(key.run_id);
+    REQUIRE(running);
+    REQUIRE(running->has_value());
+    CHECK(running->value().state == RunState::Running);
+}
+
+TEST_CASE("Scheduler immediate completion failure stops the remaining mixed dispatch opportunities",
+          "[jobu][scheduler][event-loop][shutdown][reentrancy][failure][sqlite]")
+{
+    SchedulerFixture fixture;
+    auto const       queue = fixture.create_queue("mixed", 3);
+    auto const       cli   = fixture.create_job(queue, JobType::Cli, at_seconds(90));
+    auto const       http  = fixture.create_job(queue, JobType::Http, at_seconds(90));
+    fixture.executor.set_available(JobType::Cli, true);
+    fixture.executor.set_available(JobType::Http, true);
+    fixture.executor.set_start_error(Error{.category = ErrorCategory::Unavailable,
+                                           .code     = "test.executor.start_failed",
+                                           .message  = "Configured start failure"});
+    execute(fixture.database,
+            "CREATE TRIGGER fail_immediate_completion BEFORE UPDATE OF state ON jobu_runs "
+            "WHEN NEW.state = 'failed' BEGIN SELECT RAISE(ABORT, 'injected immediate completion failure'); END");
+    auto  failures  = std::vector<Error>{};
+    auto* scheduler = fixture.scheduler.get();
+    scheduler->failed.connect(scheduler, [&](Error const& error) {
+        failures.push_back(error);
+        scheduler->shutdown();
+    });
+
+    auto started = scheduler->start();
+    REQUIRE_FALSE(started);
+    REQUIRE(failures.size() == 1U);
+    CHECK(started.error() == failures.front());
+    CHECK(started.error().code == "db.constraint");
+    CHECK(scheduler->state() == SchedulerState::Failed);
+    CHECK(scheduler->failure() == failures.front());
+    REQUIRE(fixture.executor.start_requests().size() == 1U);
+    CHECK(fixture.executor.start_requests().front().key.run_id == cli.id);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop) == 0U);
+    for (auto const run_id : {cli.id, http.id}) {
+        auto run = fixture.runs.find_by_id(run_id);
+        REQUIRE(run);
+        REQUIRE(run->has_value());
+        CHECK(run->value().state == (run_id == cli.id ? RunState::Running : RunState::Scheduled));
+    }
 }
