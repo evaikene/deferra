@@ -7,6 +7,7 @@
 #include "retry_policy_priv.hpp"
 #include "scheduler_dispatch_priv.hpp"
 #include "scheduler_repository_priv.hpp"
+#include "storage_failure_priv.hpp"
 #include "time_source.hpp"
 #include "transaction.hpp"
 
@@ -17,6 +18,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -66,7 +68,7 @@ struct CompletionEffect {
 };
 
 using CompletionProcessor =
-    std::function<CoreResult<CompletionEffect>(jb::core::Uuid const&, AttemptCompletion const&)>;
+    std::function<CoreResult<std::optional<CompletionEffect>>(jb::core::Uuid const&, AttemptCompletion const&)>;
 
 auto core_error(jb::core::ErrorCategory category, std::string code, std::string message) -> jb::core::Error
 {
@@ -82,6 +84,13 @@ auto invalid_options() -> jb::core::Error
     return core_error(jb::core::ErrorCategory::InvalidArgument,
                       "jobu.scheduler.invalid_options",
                       "Scheduler concurrency limits and candidate batch size must be positive");
+}
+
+auto stopping() -> jb::core::Error
+{
+    return core_error(jb::core::ErrorCategory::Unavailable,
+                      "jobu.scheduler.stopping",
+                      "The scheduler has permanently stopped");
 }
 
 auto capacity_overflow() -> jb::core::Error
@@ -703,13 +712,17 @@ auto dispatch_visit(jb::db::Database&                        database,
                     CandidateCache&                          candidate_cache,
                     std::map<jb::core::Uuid, std::uint64_t>& active_attempts,
                     std::set<jb::core::Uuid>&                attempted_blocking_retries,
-                    CompletionProcessor const&               completion_processor) -> CoreResult<bool>
+                    CompletionProcessor const&               completion_processor,
+                    bool const&                              terminal) -> CoreResult<bool>
 {
-    if (running_for(capacity, type) >= global_limit_for(options, type)) {
+    if (terminal || running_for(capacity, type) >= global_limit_for(options, type)) {
         return CoreResult<bool>::success(false);
     }
     if (!executor.is_available(type)) {
         reset_credits(credits, queues);
+        return CoreResult<bool>::success(false);
+    }
+    if (terminal) {
         return CoreResult<bool>::success(false);
     }
 
@@ -776,6 +789,9 @@ auto dispatch_visit(jb::db::Database&                        database,
         }
 
         auto try_dispatch = [&](jb::core::Uuid const& run_id, bool queue_slot_already_occupied) -> CoreResult<bool> {
+            if (terminal) {
+                return CoreResult<bool>::success(false);
+            }
             auto completion = [expected_run_id = run_id,
                                processor       = completion_processor](AttemptCompletion const& value) mutable {
                 // The shared processor records a sticky failure or rescan request before this callback drops the
@@ -786,6 +802,11 @@ auto dispatch_visit(jb::db::Database&                        database,
             auto dispatched = dispatch_selected(database, attributes, executor, run_id, now, std::move(completion));
             if (!dispatched) {
                 return CoreResult<bool>::failure(std::move(dispatched).error());
+            }
+            // An executor may report infrastructure failure during start(). The committed attempt stays Running;
+            // neither synthesized completion nor further dispatch may cross the newly latched terminal boundary.
+            if (terminal) {
+                return CoreResult<bool>::success(dispatched->has_value());
             }
             if (!dispatched->has_value()) {
                 return CoreResult<bool>::success(false);
@@ -808,7 +829,10 @@ auto dispatch_visit(jb::db::Database&                        database,
                 if (!completed) {
                     return CoreResult<bool>::failure(std::move(completed).error());
                 }
-                auto reconciled = record_completion(capacity, type, selected.runtime->id, *completed);
+                if (terminal || !completed->has_value()) {
+                    return CoreResult<bool>::success(true);
+                }
+                auto reconciled = record_completion(capacity, type, selected.runtime->id, **completed);
                 if (!reconciled) {
                     return CoreResult<bool>::failure(std::move(reconciled).error());
                 }
@@ -861,7 +885,7 @@ SchedulerCore::SchedulerCore(jb::db::Database&        database,
                              jb::core::TimeSource&    time_source,
                              AttemptExecutor&         executor,
                              SchedulerCoreOptions     options,
-                             SchedulerCoreCallbacks   callbacks) noexcept
+                             SchedulerCoreCallbacks   callbacks)
     : _database{database}
     , _attributes{attributes}
     , _cron{cron}
@@ -870,7 +894,33 @@ SchedulerCore::SchedulerCore(jb::db::Database&        database,
     , _executor{executor}
     , _options{options}
     , _callbacks{std::move(callbacks)}
+    , _completion_token{std::make_shared<CompletionToken>(CompletionToken{.owner = this})}
 {}
+
+SchedulerCore::~SchedulerCore()
+{
+    shutdown();
+}
+
+void SchedulerCore::shutdown() noexcept
+{
+    // All access is on the owner thread. Keep traversal state intact until the current callback stack unwinds;
+    // retained executor closures own only this token, never the core or its borrowed dependencies.
+    _completion_token->terminal = true;
+    _completion_token->owner    = nullptr;
+}
+
+void SchedulerCore::fail(jb::core::Error const& error, bool notify)
+{
+    if (_failure) {
+        return;
+    }
+    _failure = error;
+    shutdown();
+    if (notify && _callbacks.failure_reported) {
+        _callbacks.failure_reported(*_failure);
+    }
+}
 
 auto SchedulerCore::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result<CancelRunResult, jb::core::Error>
 {
@@ -879,6 +929,23 @@ auto SchedulerCore::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result
     if (_failure) {
         return CancellationResult::failure(*_failure);
     }
+    if (_completion_token->terminal) {
+        return CancellationResult::failure(stopping());
+    }
+
+    // Cancellation is a scheduler state operation too. Only fatal storage errors close acceptance; expected run
+    // conflicts and executor refusals retain their existing retryable operation contract.
+    auto cancelled = cancel_run_impl(run_id);
+    if (!cancelled &&
+        classify_storage_failure(cancelled.error(), StorageOperation::Mutation) == StorageFailureDisposition::Fatal) {
+        fail(cancelled.error(), false);
+    }
+    return cancelled;
+}
+
+auto SchedulerCore::cancel_run_impl(jb::core::Uuid const& run_id) -> jb::core::Result<CancelRunResult, jb::core::Error>
+{
+    using CancellationResult = CoreResult<CancelRunResult>;
 
     // Resolve and validate the durable state before choosing between an executor request and a database transition.
     // Running cancellation deliberately occurs without an open transaction around the external executor call.
@@ -986,12 +1053,14 @@ auto SchedulerCore::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result
 
 void SchedulerCore::reset() noexcept
 {
+    if (_completion_token->terminal) {
+        return;
+    }
     _queue_weights.clear();
     _cli_credits.clear();
     _http_credits.clear();
     _active_attempts.clear();
     _cancellation_requests.clear();
-    _failure.reset();
     _cli_first = true;
 }
 
@@ -1000,6 +1069,23 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<SchedulerCycleResult, jb
     if (_failure) {
         return CoreResult<SchedulerCycleResult>::failure(*_failure);
     }
+    if (_completion_token->terminal) {
+        return CoreResult<SchedulerCycleResult>::failure(stopping());
+    }
+
+    // Dispatch/read failures also close acceptance. The result boundary ensures local transaction guards have
+    // unwound before a failure observer can request shutdown or deliver another retained completion.
+    auto cycle = process_cycle_impl();
+    if (!cycle) {
+        // Synchronous cycle errors are reported by the caller through this result; only completion failures need
+        // the separate notification path.
+        fail(cycle.error(), false);
+    }
+    return cycle;
+}
+
+auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResult, jb::core::Error>
+{
     if (_options.cli_concurrency == 0 || _options.http_concurrency == 0 || _options.candidate_batch_size == 0) {
         return CoreResult<SchedulerCycleResult>::failure(invalid_options());
     }
@@ -1026,30 +1112,34 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<SchedulerCycleResult, jb
     auto http_candidates         = CandidateCache{};
     auto attempted_cli_blocking  = std::set<jb::core::Uuid>{};
     auto attempted_http_blocking = std::set<jb::core::Uuid>{};
-    // All asynchronous and immediate completions share one processor. Its first error becomes sticky and successful
-    // state changes request a rescan so newly available work is considered promptly.
+    // Ordinary stop leaves this token valid. Terminal shutdown and destruction invalidate it before a retained
+    // closure can touch the core, including closures delivered reentrantly from the first failure notification.
     auto completion_processor =
-        CompletionProcessor{[this](jb::core::Uuid const&    expected_run_id,
-                                   AttemptCompletion const& completion) -> CoreResult<CompletionEffect> {
-            auto completed = process_completion(_database,
-                                                _attributes,
-                                                _cron,
-                                                _uuid_generator,
-                                                _time_source,
-                                                _active_attempts,
-                                                _cancellation_requests,
-                                                expected_run_id,
-                                                completion);
-            if (!completed && !_failure) {
-                _failure = completed.error();
-                if (_callbacks.failure_reported) {
-                    _callbacks.failure_reported(*_failure);
-                }
+        CompletionProcessor{[token = _completion_token](
+                                jb::core::Uuid const&    expected_run_id,
+                                AttemptCompletion const& completion) -> CoreResult<std::optional<CompletionEffect>> {
+            using CompletionResult = CoreResult<std::optional<CompletionEffect>>;
+            if (token->terminal || !token->owner) {
+                return CompletionResult::success(std::nullopt);
             }
-            else if (completed && _callbacks.rescan_requested) {
-                _callbacks.rescan_requested();
+            auto& core      = *token->owner;
+            auto  completed = process_completion(core._database,
+                                                 core._attributes,
+                                                 core._cron,
+                                                 core._uuid_generator,
+                                                 core._time_source,
+                                                 core._active_attempts,
+                                                 core._cancellation_requests,
+                                                 expected_run_id,
+                                                 completion);
+            if (!completed) {
+                core.fail(completed.error());
+                return CompletionResult::failure(std::move(completed).error());
             }
-            return completed;
+            if (core._callbacks.rescan_requested) {
+                core._callbacks.rescan_requested();
+            }
+            return CompletionResult::success(*completed);
         }};
 
     // Manual and schedule-owned runs share each repository-ordered batch; only the CLI/HTTP first opportunity
@@ -1077,12 +1167,16 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<SchedulerCycleResult, jb
                                     first_candidates,
                                     _active_attempts,
                                     first_blocking,
-                                    completion_processor);
+                                    completion_processor,
+                                    _completion_token->terminal);
         if (!first) {
             return CoreResult<SchedulerCycleResult>::failure(std::move(first).error());
         }
         if (_failure) {
             return CoreResult<SchedulerCycleResult>::failure(*_failure);
+        }
+        if (_completion_token->terminal) {
+            return CoreResult<SchedulerCycleResult>::success({.sampled_utc_now = now});
         }
         auto second = dispatch_visit(_database,
                                      _attributes,
@@ -1097,12 +1191,16 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<SchedulerCycleResult, jb
                                      second_candidates,
                                      _active_attempts,
                                      second_blocking,
-                                     completion_processor);
+                                     completion_processor,
+                                     _completion_token->terminal);
         if (!second) {
             return CoreResult<SchedulerCycleResult>::failure(std::move(second).error());
         }
         if (_failure) {
             return CoreResult<SchedulerCycleResult>::failure(*_failure);
+        }
+        if (_completion_token->terminal) {
+            return CoreResult<SchedulerCycleResult>::success({.sampled_utc_now = now});
         }
         if (!*first && !*second) {
             break;
@@ -1117,6 +1215,9 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<SchedulerCycleResult, jb
     for (auto const type : {JobType::Cli, JobType::Http}) {
         if (!_executor.is_available(type)) {
             continue;
+        }
+        if (_completion_token->terminal) {
+            return CoreResult<SchedulerCycleResult>::success({.sampled_utc_now = now});
         }
         auto earliest = repository.earliest_future_runnable(type, now);
         if (!earliest) {

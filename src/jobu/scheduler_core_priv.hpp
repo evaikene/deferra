@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 
@@ -50,13 +51,31 @@ public:
                   jb::core::TimeSource&    time_source,
                   AttemptExecutor&         executor,
                   SchedulerCoreOptions     options   = {},
-                  SchedulerCoreCallbacks   callbacks = {}) noexcept;
+                  SchedulerCoreCallbacks   callbacks = {});
+    ~SchedulerCore();
+
+    // Retained tokens identify one fixed owner address and must never be shared by copied cores.
+    SchedulerCore(SchedulerCore const&)                    = delete;
+    SchedulerCore(SchedulerCore&&)                         = delete;
+    auto operator=(SchedulerCore const&) -> SchedulerCore& = delete;
+    auto operator=(SchedulerCore&&) -> SchedulerCore&      = delete;
 
     [[nodiscard]] auto cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result<CancelRunResult, jb::core::Error>;
     [[nodiscard]] auto process_cycle() -> jb::core::Result<SchedulerCycleResult, jb::core::Error>;
     void               reset() noexcept;
+    void               shutdown() noexcept;
 
 private:
+    struct CompletionToken {
+        SchedulerCore* owner{nullptr};
+        bool           terminal{false};
+    };
+
+    [[nodiscard]] auto process_cycle_impl() -> jb::core::Result<SchedulerCycleResult, jb::core::Error>;
+    [[nodiscard]] auto cancel_run_impl(jb::core::Uuid const& run_id)
+        -> jb::core::Result<CancelRunResult, jb::core::Error>;
+    void fail(jb::core::Error const& error, bool notify = true);
+
     jb::db::Database&                       _database;
     AttributeRegistry const&                _attributes;
     CronEngine const&                       _cron;
@@ -65,6 +84,7 @@ private:
     AttemptExecutor&                        _executor;
     SchedulerCoreOptions                    _options;
     SchedulerCoreCallbacks                  _callbacks;
+    std::shared_ptr<CompletionToken>        _completion_token;
     std::map<jb::core::Uuid, std::uint32_t> _queue_weights;
     std::map<jb::core::Uuid, std::int64_t>  _cli_credits;
     std::map<jb::core::Uuid, std::int64_t>  _http_credits;
