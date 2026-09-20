@@ -17,16 +17,18 @@ namespace jb::jobu {
 ///
 /// The group has no Object affinity of its own. Construct, register, use, and destroy it on the shared owner thread of
 /// its executors and scheduler. Each accepted start retains one exact completion wrapper until the child completes or
-/// the group is destroyed. The wrapper retires routing state before invoking the original handler, so that handler may
-/// re-enter the group. Child completion values, including an incorrect key, are forwarded unchanged for Scheduler
-/// validation.
+/// the group is shut down or destroyed. The wrapper retires routing state before invoking the original handler, so that
+/// handler may re-enter ordinary routing operations. Child completion values, including an incorrect key, are forwarded
+/// unchanged for Scheduler validation.
 ///
 /// @par Stable error codes
 /// `jobu.executor.invalid_registration` rejects a null or already-parented executor;
 /// `jobu.executor.duplicate_type` rejects a second executor for one type;
 /// `jobu.executor.unsupported_type` rejects an unknown or unregistered type;
-/// `jobu.executor.duplicate_attempt` rejects an already-routed key; and
-/// `jobu.executor.attempt_not_found` rejects cancellation of an inactive key. Child start and cancellation errors are
+/// `jobu.executor.duplicate_attempt` rejects an already-routed key;
+/// `jobu.executor.attempt_not_found` rejects cancellation of an inactive key; and
+/// `jobu.executor.stopping` rejects registration, start, and cancellation after shutdown with Unavailable category.
+/// The stopping error takes precedence over other group errors. Child start and cancellation errors are
 /// returned unchanged. No error contains job payload, environment, path, or output data.
 ///
 class AttemptExecutorGroup final : public AttemptExecutor {
@@ -37,7 +39,7 @@ public:
     /// Destroys owned executors before discarding active routing state.
     ///
     /// Owned executors must suppress their retained completion handlers as required by AttemptExecutor. The group does
-    /// not invoke an attempt completion while being destroyed.
+    /// not invoke an attempt completion while being destroyed. Delegates to shutdown() with the same lifetime rules.
     ///
     ~AttemptExecutorGroup() override;
 
@@ -49,6 +51,17 @@ public:
     auto operator=(AttemptExecutorGroup const&) -> AttemptExecutorGroup& = delete;
     /// Prevents move assignment of state captured by active completion wrappers.
     auto operator=(AttemptExecutorGroup&&) -> AttemptExecutorGroup&      = delete;
+
+    /// Irreversibly stops admission and synchronously destroys all owned executors without delivering completions.
+    ///
+    /// Marks the group unavailable before destroying children, then discards routes. Repeated calls and subsequent
+    /// destruction are harmless. Pending handlers are discarded, without normal cancellation or durable finalization.
+    /// Borrowed runner dependencies (including the HTTP client and event loop) must remain alive through this call.
+    ///
+    /// @warning Call only on the shared owner thread after active runner and completion-callback stacks unwind.
+    /// Shut down the borrowing Scheduler first so it cannot dispatch or persist completions during teardown.
+    ///
+    void shutdown() noexcept;
 
     /// Registers one exclusively owned executor for a runner family.
     ///
@@ -66,7 +79,7 @@ public:
 
     /// Reports the selected child executor's current availability.
     /// @param type Runner family to query.
-    /// @return The registered child's current result, or false for an unregistered or unknown type.
+    /// @return The registered child's current result, or false after shutdown or for an unregistered or unknown type.
     /// @warning Call only on the shared executor/scheduler owner thread.
     ///
     [[nodiscard]] auto is_available(JobType type) const noexcept -> bool override;
