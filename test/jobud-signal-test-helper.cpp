@@ -543,6 +543,12 @@ TEST_CASE("descriptor inheritance")
 
 auto main(int argc, char* argv[]) -> int
 {
+    if (argc > 1 && std::string_view{argv[1]} == "--release-exit") {
+        // A deliberate peer exit gives the parent a deterministic EPIPE and buffered diagnostic.
+        std::string const message{"helper exited before release\n"};
+        static_cast<void>(::write(STDOUT_FILENO, message.data(), message.size()));
+        return 23;
+    }
     if (argc == 2 && std::string_view{argv[1]} == "--exec-probe") {
         return inspect_exec_state();
     }
