@@ -350,6 +350,27 @@ TEST_CASE("EventLoop exit drains deferred deletes without delivering remaining o
     CHECK(destruction_count == 1);
 }
 
+TEST_CASE("EventLoop request_quit preserves deletion from the final task drain", "[core][event]")
+{
+    Application app{0, nullptr};
+    int         delivery_count    = 0;
+    int         destruction_count = 0;
+    auto*       receiver          = new CountingEventReceiver{delivery_count, destruction_count};
+
+    Application::post_event(receiver, std::make_unique<CustomEvent>());
+    REQUIRE(app.event_loop()->post([&]() -> void {
+        app.event_loop()->request_quit();
+        CHECK(destruction_count == 0);
+
+        // Queue deletion from the final task snapshot, after the ordinary delete phase.
+        REQUIRE(app.event_loop()->post([receiver]() -> void { receiver->delete_later(); }));
+    }));
+
+    CHECK(app.exec() == 0);
+    CHECK(delivery_count == 0);
+    CHECK(destruction_count == 1);
+}
+
 TEST_CASE("EventLoop exit discards remaining object events", "[core][event]")
 {
     Application   app{0, nullptr};

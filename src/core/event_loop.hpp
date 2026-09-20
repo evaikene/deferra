@@ -159,10 +159,13 @@ public:
     ///
     /// This method must be called from the thread running the event loop. It runs
     /// the event loop until quit is signaled. The event loop will process posted
-    /// tasks and can be signaled to quit by calling the `quit()` method from any thread.
-    /// After quit is signaled, the event loop will finish processing remaining
-    /// generic tasks and deferred deletes, but will not deliver remaining object
-    /// events.
+    /// tasks and can be signaled to quit by calling `quit()` from any thread or
+    /// `request_quit()` from the owner thread. Each run starts with a fresh running
+    /// state; an earlier request_quit() does not prevent entry.
+    /// After stopping, the current dispatch batch may finish. The loop performs
+    /// one final generic-task queue snapshot drain, followed by deferred deletes,
+    /// and discards remaining object events. Tasks posted by that final snapshot
+    /// are not recursively drained.
     /// @return true after an ordinary stop, false after invalid initialization
     ///         or a backend polling failure
     auto run() -> bool;
@@ -184,6 +187,17 @@ public:
     /// the event loop to quit.
     /// @return true when the stop task was queued, false otherwise
     auto quit() -> bool;
+
+    /// Requests exit directly from the owner thread, without posting or waking the backend.
+    ///
+    /// Immediately clears the running flag. This operation does not allocate,
+    /// block, drain queues, or destroy objects. It is idempotent and must only be
+    /// called on the owner thread; use quit() for a cross-thread request.
+    ///
+    /// Current callbacks and final task/deferred-delete drains may still run, so
+    /// callers must keep their own terminal admission gates latched until teardown.
+    /// A request before run() is not sticky across that or any later run().
+    void request_quit() noexcept;
 
     /// Processes specified events until there are no more events to process
     /// @param[in] flags Events to process (tasks, object events, timers, watchers)
