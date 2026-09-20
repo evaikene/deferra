@@ -24,6 +24,13 @@ auto group_error(jb::core::ErrorCategory category, std::string code, std::string
     };
 }
 
+auto stopping_error() -> jb::core::Error
+{
+    return group_error(jb::core::ErrorCategory::Unavailable,
+                       "jobu.executor.stopping",
+                       "The executor group is stopping");
+}
+
 auto supported_type(JobType type) noexcept -> bool
 {
     switch (type) {
@@ -46,11 +53,16 @@ struct AttemptKeyHash {
 } // anonymous namespace
 
 struct AttemptExecutorGroup::Private {
+    bool                                                             stopping{false};
     std::map<JobType, std::unique_ptr<AttemptExecutor>>              executors;
     std::unordered_map<AttemptKey, AttemptExecutor*, AttemptKeyHash> routes;
 
     [[nodiscard]] auto add(JobType type, std::unique_ptr<AttemptExecutor> executor) -> GroupResult
     {
+        if (stopping) {
+            return GroupResult::failure(stopping_error());
+        }
+
         if (!supported_type(type)) {
             return GroupResult::failure(group_error(jb::core::ErrorCategory::Unsupported,
                                                     "jobu.executor.unsupported_type",
@@ -82,12 +94,20 @@ struct AttemptExecutorGroup::Private {
 
     [[nodiscard]] auto is_available(JobType type) const noexcept -> bool
     {
+        if (stopping) {
+            return false;
+        }
+
         auto const executor = executors.find(type);
         return executor != executors.end() && executor->second->is_available(type);
     }
 
     [[nodiscard]] auto start(AttemptStartRequest request, AttemptCompletionHandler completion) -> GroupResult
     {
+        if (stopping) {
+            return GroupResult::failure(stopping_error());
+        }
+
         auto const executor_entry = executors.find(request.type);
         if (executor_entry == executors.end()) {
             return GroupResult::failure(group_error(jb::core::ErrorCategory::Unsupported,
@@ -125,6 +145,10 @@ struct AttemptExecutorGroup::Private {
 
     [[nodiscard]] auto cancel(AttemptKey const& key) -> GroupResult
     {
+        if (stopping) {
+            return GroupResult::failure(stopping_error());
+        }
+
         auto const route = routes.find(key);
         if (route == routes.end()) {
             return GroupResult::failure(group_error(jb::core::ErrorCategory::NotFound,
@@ -134,8 +158,15 @@ struct AttemptExecutorGroup::Private {
         return route->second->cancel(key);
     }
 
-    void shutdown()
+    void shutdown() noexcept
     {
+        if (stopping) {
+            return;
+        }
+
+        // Close admission before child cleanup can re-enter the group, including through handler destruction.
+        stopping = true;
+
         // Child executors own the wrappers that reference this routing state. Destroy them while the route map is
         // still alive, relying on the AttemptExecutor contract to suppress callbacks during child destruction.
         executors.clear();
@@ -148,6 +179,11 @@ AttemptExecutorGroup::AttemptExecutorGroup()
 {}
 
 AttemptExecutorGroup::~AttemptExecutorGroup()
+{
+    shutdown();
+}
+
+void AttemptExecutorGroup::shutdown() noexcept
 {
     _data->shutdown();
 }

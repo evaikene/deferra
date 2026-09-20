@@ -12,6 +12,7 @@ static_assert(std::is_base_of_v<jb::jobu::AttemptExecutor, Group>);
 static_assert(!std::is_base_of_v<jb::core::Object, Group>);
 static_assert(!std::is_copy_constructible_v<Group>);
 static_assert(!std::is_move_constructible_v<Group>);
+static_assert(std::is_same_v<decltype(&Group::shutdown), void (Group::*)() noexcept>);
 static_assert(std::is_same_v<decltype(&Group::add),
                              ExecutorResult (Group::*)(jb::jobu::JobType, std::unique_ptr<jb::jobu::AttemptExecutor>)>);
 static_assert(std::is_same_v<decltype(&Group::is_available), bool (Group::*)(jb::jobu::JobType) const noexcept>);

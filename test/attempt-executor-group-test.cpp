@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -99,6 +100,7 @@ struct ObjectExecutorObservation {
     bool                    destroyed_with_pending_completion{false};
     bool                    available{true};
     std::vector<AttemptKey> cancellations;
+    std::function<void()>   on_destroy;
 };
 
 class ObjectAttemptExecutor final : public Object, public AttemptExecutor {
@@ -142,7 +144,10 @@ ObjectAttemptExecutor::~ObjectAttemptExecutor()
 {
     auto* state                                          = data();
     state->observation.destroyed_with_pending_completion = static_cast<bool>(state->completion);
-    state->completion                                    = {};
+    if (state->observation.on_destroy) {
+        state->observation.on_destroy();
+    }
+    state->completion = {};
     ++state->observation.destructions;
 }
 
@@ -425,4 +430,102 @@ TEST_CASE("Attempt executor group retires the accepted route before exact callba
         REQUIRE_FALSE(cancelled);
         CHECK(cancelled.error().code == "jobu.executor.attempt_not_found");
     }
+}
+
+TEST_CASE("Attempt executor group shutdown is terminal even when empty", "[jobu][executor-group]")
+{
+    AttemptExecutorGroup group;
+    group.shutdown();
+    group.shutdown();
+
+    auto check_stopping = [](Result<void, Error> const& result) {
+        REQUIRE_FALSE(result);
+        CHECK(result.error().category == ErrorCategory::Unavailable);
+        CHECK(result.error().code == "jobu.executor.stopping");
+        CHECK(result.error().detail.empty());
+    };
+
+    // Stopping takes precedence even when ordinary validation would reject the request for another reason.
+    for (auto type : {JobType::Cli, JobType::Http, static_cast<JobType>(255)}) {
+        CHECK_FALSE(group.is_available(type));
+        check_stopping(group.add(type, {}));
+        check_stopping(group.start(start_request(first_key(), type), {}));
+    }
+    check_stopping(group.cancel(first_key()));
+
+    ObjectExecutorObservation rejected;
+    check_stopping(group.add(JobType::Cli, std::make_unique<ObjectAttemptExecutor>(JobType::Cli, rejected)));
+    CHECK(rejected.destructions == 1U);
+}
+
+TEST_CASE("Attempt executor group shutdown releases mixed runners while dependencies remain alive",
+          "[jobu][executor-group]")
+{
+    ObjectExecutorObservation cli;
+    ObjectExecutorObservation http;
+    auto                      callback_count = std::size_t{0};
+    auto                      cleanup_count  = std::size_t{0};
+
+    // This borrowed dependency models the client/event-loop lifetime required by runner cleanup.
+    auto dependency          = std::make_shared<int>(42);
+    auto dependency_observer = std::weak_ptr<int>{dependency};
+    auto retained_capture    = std::weak_ptr<int>{};
+    {
+        AttemptExecutorGroup group;
+        auto                 during_cleanup = [&] {
+            ++cleanup_count;
+            CHECK_FALSE(dependency_observer.expired());
+            CHECK_FALSE(group.is_available(JobType::Cli));
+            CHECK_FALSE(group.is_available(JobType::Http));
+
+            // Routes and children are being torn down: every operation must stop before consulting either map.
+            auto cancelled = group.cancel(first_key());
+            REQUIRE_FALSE(cancelled);
+            CHECK(cancelled.error().code == "jobu.executor.stopping");
+            auto started = group.start(start_request(third_key(), JobType::Http), {});
+            REQUIRE_FALSE(started);
+            CHECK(started.error().code == "jobu.executor.stopping");
+            auto added = group.add(JobType::Cli, {});
+            REQUIRE_FALSE(added);
+            CHECK(added.error().code == "jobu.executor.stopping");
+            group.shutdown();
+        };
+        cli.on_destroy  = during_cleanup;
+        http.on_destroy = during_cleanup;
+        REQUIRE(group.add(JobType::Cli, std::make_unique<ObjectAttemptExecutor>(JobType::Cli, cli)));
+        REQUIRE(group.add(JobType::Http, std::make_unique<ObjectAttemptExecutor>(JobType::Http, http)));
+
+        // Only the retained completion wrappers keep this capture alive after setup.
+        {
+            auto capture     = std::make_shared<int>(7);
+            retained_capture = capture;
+            auto handler     = [&, capture](AttemptCompletion const&) {
+                callback_count += static_cast<std::size_t>(*capture);
+            };
+            REQUIRE(group.start(start_request(first_key(), JobType::Cli), handler));
+            REQUIRE(group.start(start_request(second_key(), JobType::Http), handler));
+        }
+        CHECK_FALSE(retained_capture.expired());
+
+        group.shutdown();
+        CHECK(cli.destructions == 1U);
+        CHECK(http.destructions == 1U);
+        CHECK(cli.destroyed_with_pending_completion);
+        CHECK(http.destroyed_with_pending_completion);
+        CHECK(cli.cancellations.empty());
+        CHECK(http.cancellations.empty());
+        CHECK(retained_capture.expired());
+        CHECK(callback_count == 0U);
+        CHECK(cleanup_count == 2U);
+
+        group.shutdown();
+        CHECK(cleanup_count == 2U);
+        // Explicit shutdown has released all runners; the empty group's later destructor needs no dependency.
+        dependency.reset();
+    }
+    CHECK(dependency_observer.expired());
+    CHECK(cli.destructions == 1U);
+    CHECK(http.destructions == 1U);
+    CHECK(callback_count == 0U);
+    CHECK(cleanup_count == 2U);
 }
