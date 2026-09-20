@@ -548,6 +548,116 @@ TEST_CASE("EventLoop quit processes remaining tasks before exiting", "[core][eve
     CHECK(counter.load() == 3);
 }
 
+TEST_CASE("EventLoop request_quit stops during a watcher batch without waking the backend", "[core][event_loop]")
+{
+    auto             fake = make_fake_loop();
+    std::vector<int> callbacks;
+
+    REQUIRE(fake.loop->watch_fd(42, FdEvent::Read, FdTriggerMode::Edge, [&](int, FdEvents) -> void {
+        CHECK(fake.loop->is_running());
+        fake.loop->request_quit();
+        fake.loop->request_quit();
+        CHECK_FALSE(fake.loop->is_running());
+        callbacks.push_back(1);
+    }));
+    REQUIRE(fake.loop->watch_fd(43, FdEvent::Read, FdTriggerMode::Edge, [&](int, FdEvents) -> void {
+        CHECK_FALSE(fake.loop->is_running());
+        callbacks.push_back(2);
+    }));
+    fake.backend->ready_events = {
+        {.ident = 42, .events = FdEvent::Read},
+        {.ident = 43, .events = FdEvent::Read}
+    };
+
+    // No queued stop task or successful wakeup is available to stop this run.
+    fake.backend->wakeup_result = false;
+    CHECK(fake.loop->run());
+    CHECK(callbacks == std::vector<int>{1, 2});
+    CHECK(fake.backend->poll_calls == 1);
+    CHECK(fake.backend->wakeup_calls == 0);
+}
+
+TEST_CASE("EventLoop request_quit stops during a task batch without posting", "[core][event_loop]")
+{
+    auto fake = make_fake_loop();
+    bool remaining_task_ran{false};
+
+    REQUIRE(fake.loop->post([&]() -> void {
+        CHECK(fake.loop->is_running());
+        fake.loop->request_quit();
+        CHECK_FALSE(fake.loop->is_running());
+    }));
+    REQUIRE(fake.loop->post([&]() -> void {
+        CHECK_FALSE(fake.loop->is_running());
+        remaining_task_ran = true;
+    }));
+
+    auto const wakeups          = fake.backend->wakeup_calls;
+    fake.backend->wakeup_result = false;
+    CHECK(fake.loop->run());
+    CHECK(remaining_task_ran);
+    CHECK(fake.backend->poll_calls == 1);
+    CHECK(fake.backend->wakeup_calls == wakeups);
+}
+
+TEST_CASE("EventLoop request_quit preserves gated final task snapshot draining", "[core][event_loop]")
+{
+    auto fake = make_fake_loop();
+    bool stopping{false};
+    bool final_task_ran{false};
+    bool later_task_ran{false};
+    bool operation_admitted{false};
+
+    REQUIRE(fake.loop->post([&]() -> void {
+        stopping = true;
+        fake.loop->request_quit();
+
+        // This task misses the current queue snapshot and must run in the final drain.
+        REQUIRE(fake.loop->post([&]() -> void {
+            final_task_ran = true;
+            CHECK_FALSE(fake.loop->is_running());
+            if (!stopping) {
+                operation_admitted = true;
+            }
+            REQUIRE(fake.loop->post([&]() -> void { later_task_ran = true; }));
+        }));
+    }));
+
+    CHECK(fake.loop->run());
+    CHECK(final_task_ran);
+    CHECK_FALSE(operation_admitted);
+    CHECK_FALSE(later_task_ran);
+    CHECK(fake.backend->poll_calls == 1);
+
+    // The final drain is a single snapshot, not an unbounded drain-until-empty loop.
+    CHECK(fake.loop->process_events(EventFlag::Tasks) == ProcessEventsResult::Stopped);
+    CHECK(later_task_ran);
+}
+
+TEST_CASE("EventLoop request_quit is not sticky across runs", "[core][event_loop]")
+{
+    auto fake = make_fake_loop();
+    int  tasks_run{0};
+
+    for (int run = 0; run < 2; ++run) {
+        fake.loop->request_quit();
+        fake.loop->request_quit();
+        CHECK_FALSE(fake.loop->is_running());
+        REQUIRE(fake.loop->post([&]() -> void {
+            // A queued implementation of request_quit would incorrectly clear this state first.
+            CHECK(fake.loop->is_running());
+            ++tasks_run;
+            fake.loop->request_quit();
+        }));
+
+        CHECK(fake.loop->run());
+        CHECK_FALSE(fake.loop->is_running());
+    }
+    CHECK(tasks_run == 2);
+    CHECK(fake.backend->wakeup_calls == 2);
+    CHECK(fake.backend->poll_calls == 2);
+}
+
 TEST_CASE("EventLoop post_at in the past fires on next process_events", "[core][event_loop]")
 {
     EventLoop loop;

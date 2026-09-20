@@ -248,6 +248,11 @@ auto EventLoop::quit() -> bool
     return post([this]() -> void { _running.store(false, std::memory_order_relaxed); });
 }
 
+void EventLoop::request_quit() noexcept
+{
+    _running.store(false, std::memory_order_relaxed);
+}
+
 auto EventLoop::run() -> bool
 {
     // set the thread context for this event loop
