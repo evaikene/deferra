@@ -14,6 +14,7 @@
 #include "queue_validation_priv.hpp"
 #include "run_repository_priv.hpp"
 #include "secret_repository_priv.hpp"
+#include "storage_failure_priv.hpp"
 #include "transaction.hpp"
 
 #include <cstddef>
@@ -398,6 +399,70 @@ struct ManagementService::Private : jb::core::priv::ObjectPrivate {
         }
     }
 
+    // Only the public boundary emits notifications. The operation returns first,
+    // releasing its queries and rolling back any uncommitted transaction.
+    template <typename T, typename Operation>
+    auto invoke(ManagementService& owner, detail::StorageOperation context, Operation&& operation) -> ServiceResult<T>
+    {
+        if (context == detail::StorageOperation::Mutation && mutations_stopped) {
+            return ServiceResult<T>::failure(service_error(jb::core::ErrorCategory::Unavailable,
+                                                           "jobu.service.stopping",
+                                                           "Management mutations are stopped"));
+        }
+
+        failure_origin = detail::StorageFailureOrigin::Operation;
+        auto result    = std::forward<Operation>(operation)();
+        if (result) {
+            if (context == detail::StorageOperation::Mutation) {
+                owner.emit_mutation_committed();
+            }
+            return result;
+        }
+
+        auto&      error = result.error();
+        auto const fatal = detail::classify_storage_failure(error, context, failure_origin) ==
+                           detail::StorageFailureDisposition::Fatal;
+        // Translated uniqueness conflicts may still carry backend detail. Keep
+        // their ordinary disposition, but do not expose that diagnostic text.
+        if (fatal || error.code.starts_with("db.") || error.code == "jobu.queue.name_conflict" ||
+            error.code == "jobu.run.schedule_conflict") {
+            error = detail::sanitized_storage_error(error, context, failure_origin);
+        }
+        if (fatal) {
+            mutations_stopped = true;
+            if (!first_failure) {
+                first_failure = error;
+                // Latch before synchronous delivery; observers may stop runtime
+                // admission, but cannot destroy or reenter this active service.
+                owner.emit(owner.failed, *first_failure);
+            }
+        }
+        return result;
+    }
+
+    auto persisted_error(jb::core::Error error) -> jb::core::Error
+    {
+        failure_origin = detail::StorageFailureOrigin::PersistedData;
+        return error;
+    }
+
+    auto repository_read_error(jb::core::Error error) -> jb::core::Error
+    {
+        // These row reads perform no caller attribute/schedule validation. Apart
+        // from driver failures and the explicit historical-name ambiguity, their
+        // errors describe persisted decoding. Preserve that provenance even when
+        // a decoder shares an error identity with user-input validation.
+        if (!error.code.starts_with("db.") && error.code != "jobu.queue.ambiguous_deleted_name") {
+            return persisted_error(std::move(error));
+        }
+        return error;
+    }
+
+    // Owner-thread, operation-local provenance; service operations cannot reenter.
+    bool                           mutations_stopped{false};
+    std::optional<jb::core::Error> first_failure;
+    detail::StorageFailureOrigin   failure_origin{detail::StorageFailureOrigin::Operation};
+
     jb::db::Database&              database;
     AttributeRegistry const&       attributes;
     CronEngine const&              cron;
@@ -425,6 +490,11 @@ ManagementService::ManagementService(jb::db::Database&        database,
 
 ManagementService::~ManagementService() = default;
 
+void ManagementService::stop_mutations() noexcept
+{
+    d_ptr<Private>()->mutations_stopped = true;
+}
+
 void ManagementService::emit_mutation_committed()
 {
     // Notify only after durable commit and before an RPC adapter can begin encoding the successful response.
@@ -432,6 +502,120 @@ void ManagementService::emit_mutation_committed()
 }
 
 auto ManagementService::create_queue(CreateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<Queue>(*this, detail::StorageOperation::Mutation, [&]() {
+        return create_queue_impl(std::move(request));
+    });
+}
+
+auto ManagementService::get_queue(QueueSelector const& selector, bool include_deleted)
+    -> jb::core::Result<Queue, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<Queue>(*this, detail::StorageOperation::Read, [&]() {
+        return get_queue_impl(selector, include_deleted);
+    });
+}
+
+auto ManagementService::list_queues(QueueListRequest const& request) -> jb::core::Result<QueuePage, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<QueuePage>(*this, detail::StorageOperation::Read, [&]() {
+        return list_queues_impl(request);
+    });
+}
+
+auto ManagementService::update_queue(UpdateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<Queue>(*this, detail::StorageOperation::Mutation, [&]() {
+        return update_queue_impl(std::move(request));
+    });
+}
+
+auto ManagementService::suspend_queue(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<Queue>(*this, detail::StorageOperation::Mutation, [&]() {
+        return suspend_queue_impl(selector);
+    });
+}
+
+auto ManagementService::resume_queue(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<Queue>(*this, detail::StorageOperation::Mutation, [&]() {
+        return resume_queue_impl(selector);
+    });
+}
+
+auto ManagementService::delete_queue(QueueSelector const& selector) -> jb::core::Result<void, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<void>(*this, detail::StorageOperation::Mutation, [&]() {
+        return delete_queue_impl(selector);
+    });
+}
+
+auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<JobDefinition>(*this, detail::StorageOperation::Mutation, [&]() {
+        return create_job_impl(std::move(request));
+    });
+}
+
+auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRun, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<JobRun>(*this, detail::StorageOperation::Mutation, [&]() {
+        return run_now_impl(std::move(request));
+    });
+}
+
+auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<JobDefinition>(*this, detail::StorageOperation::Mutation, [&]() {
+        return update_job_impl(std::move(request));
+    });
+}
+
+auto ManagementService::suspend_job(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<JobDefinition>(*this, detail::StorageOperation::Mutation, [&]() {
+        return suspend_job_impl(id);
+    });
+}
+
+auto ManagementService::resume_job(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<JobDefinition>(*this, detail::StorageOperation::Mutation, [&]() {
+        return resume_job_impl(id);
+    });
+}
+
+auto ManagementService::move_job(MoveJobRequest const& request) -> jb::core::Result<JobDefinition, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<JobDefinition>(*this, detail::StorageOperation::Mutation, [&]() {
+        return move_job_impl(request);
+    });
+}
+
+auto ManagementService::delete_job(DeleteJobRequest const& request) -> jb::core::Result<void, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<void>(*this, detail::StorageOperation::Mutation, [&]() {
+        return delete_job_impl(request);
+    });
+}
+
+auto ManagementService::get_job(jb::core::Uuid const& id, bool include_deleted)
+    -> jb::core::Result<JobDefinition, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<JobDefinition>(*this, detail::StorageOperation::Read, [&]() {
+        return get_job_impl(id, include_deleted);
+    });
+}
+
+auto ManagementService::list_jobs(JobListRequest const& request) -> jb::core::Result<JobPage, jb::core::Error>
+{
+    return d_ptr<Private>()->invoke<JobPage>(*this, detail::StorageOperation::Read, [&]() {
+        return list_jobs_impl(request);
+    });
+}
+
+auto ManagementService::create_queue_impl(CreateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -477,19 +661,19 @@ auto ManagementService::create_queue(CreateQueueRequest request) -> jb::core::Re
 
         auto record = data->idempotency.find("queue.create", jb::core::Uuid{}, *request.idempotency_key);
         if (!record) {
-            return ServiceResult<Queue>::failure(std::move(record).error());
+            return ServiceResult<Queue>::failure(data->repository_read_error(std::move(record).error()));
         }
         if (record->has_value()) {
             auto valid = detail::validate_queue_create_idempotency_request((**record).request_json, data->attributes);
             if (!valid) {
-                return ServiceResult<Queue>::failure(std::move(valid).error());
+                return ServiceResult<Queue>::failure(data->persisted_error(std::move(valid).error()));
             }
             if ((**record).request_json != *canonical_request) {
                 return ServiceResult<Queue>::failure(idempotency_conflict());
             }
             auto replay = detail::decode_queue_idempotency_result((**record).result_json, data->attributes);
             if (!replay) {
-                return ServiceResult<Queue>::failure(std::move(replay).error());
+                return ServiceResult<Queue>::failure(data->persisted_error(std::move(replay).error()));
             }
             if (replay->id != (**record).resource_id) {
                 return ServiceResult<Queue>::failure(invalid_idempotency_record("queue_resource_id_mismatch"));
@@ -498,7 +682,7 @@ auto ManagementService::create_queue(CreateQueueRequest request) -> jb::core::Re
             if (!committed) {
                 return ServiceResult<Queue>::failure(std::move(committed).error());
             }
-            emit_mutation_committed();
+
             return ServiceResult<Queue>::success(std::move(replay).value());
         }
     }
@@ -532,7 +716,7 @@ auto ManagementService::create_queue(CreateQueueRequest request) -> jb::core::Re
     }
     auto existing = data->queues.find_by_name(queue.name, false);
     if (!existing) {
-        return ServiceResult<Queue>::failure(std::move(existing).error());
+        return ServiceResult<Queue>::failure(data->repository_read_error(std::move(existing).error()));
     }
     if (existing->has_value()) {
         return ServiceResult<Queue>::failure(queue_name_conflict());
@@ -564,11 +748,11 @@ auto ManagementService::create_queue(CreateQueueRequest request) -> jb::core::Re
     if (!committed) {
         return ServiceResult<Queue>::failure(std::move(committed).error());
     }
-    emit_mutation_committed();
+
     return ServiceResult<Queue>::success(std::move(queue));
 }
 
-auto ManagementService::get_queue(QueueSelector const& selector, bool include_deleted)
+auto ManagementService::get_queue_impl(QueueSelector const& selector, bool include_deleted)
     -> jb::core::Result<Queue, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
@@ -582,7 +766,7 @@ auto ManagementService::get_queue(QueueSelector const& selector, bool include_de
     }
     auto found = find_queue(data->queues, selector, include_deleted);
     if (!found) {
-        return ServiceResult<Queue>::failure(std::move(found).error());
+        return ServiceResult<Queue>::failure(data->repository_read_error(std::move(found).error()));
     }
     if (!found->has_value()) {
         return ServiceResult<Queue>::failure(queue_not_found());
@@ -590,7 +774,8 @@ auto ManagementService::get_queue(QueueSelector const& selector, bool include_de
     return ServiceResult<Queue>::success(std::move(**found));
 }
 
-auto ManagementService::list_queues(QueueListRequest const& request) -> jb::core::Result<QueuePage, jb::core::Error>
+auto ManagementService::list_queues_impl(QueueListRequest const& request)
+    -> jb::core::Result<QueuePage, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -606,7 +791,7 @@ auto ManagementService::list_queues(QueueListRequest const& request) -> jb::core
     auto listed =
         data->queues.list(request.include_deleted, request.state, request.page.limit + 1U, request.page.after_id);
     if (!listed) {
-        return ServiceResult<QueuePage>::failure(std::move(listed).error());
+        return ServiceResult<QueuePage>::failure(data->repository_read_error(std::move(listed).error()));
     }
 
     auto page = QueuePage{.items = std::move(listed).value()};
@@ -617,7 +802,7 @@ auto ManagementService::list_queues(QueueListRequest const& request) -> jb::core
     return ServiceResult<QueuePage>::success(std::move(page));
 }
 
-auto ManagementService::update_queue(UpdateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>
+auto ManagementService::update_queue_impl(UpdateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -669,7 +854,7 @@ auto ManagementService::update_queue(UpdateQueueRequest request) -> jb::core::Re
     auto transaction = std::move(begun).value();
     auto found       = find_queue(data->queues, request.queue, false);
     if (!found) {
-        return ServiceResult<Queue>::failure(std::move(found).error());
+        return ServiceResult<Queue>::failure(data->repository_read_error(std::move(found).error()));
     }
     if (!found->has_value()) {
         return ServiceResult<Queue>::failure(queue_not_found());
@@ -678,7 +863,7 @@ auto ManagementService::update_queue(UpdateQueueRequest request) -> jb::core::Re
     if (request.name && *request.name != replacement.name) {
         auto conflict = data->queues.find_by_name(*request.name, false);
         if (!conflict) {
-            return ServiceResult<Queue>::failure(std::move(conflict).error());
+            return ServiceResult<Queue>::failure(data->repository_read_error(std::move(conflict).error()));
         }
         if (conflict->has_value() && (**conflict).id != replacement.id) {
             return ServiceResult<Queue>::failure(queue_name_conflict());
@@ -711,17 +896,17 @@ auto ManagementService::update_queue(UpdateQueueRequest request) -> jb::core::Re
         return ServiceResult<Queue>::failure(std::move(replaced).error());
     }
     if (!*replaced) {
-        return ServiceResult<Queue>::failure(queue_state_conflict());
+        return ServiceResult<Queue>::failure(data->persisted_error(queue_state_conflict()));
     }
     auto committed = transaction.commit();
     if (!committed) {
         return ServiceResult<Queue>::failure(std::move(committed).error());
     }
-    emit_mutation_committed();
+
     return ServiceResult<Queue>::success(std::move(replacement));
 }
 
-auto ManagementService::suspend_queue(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>
+auto ManagementService::suspend_queue_impl(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -741,7 +926,7 @@ auto ManagementService::suspend_queue(QueueSelector const& selector) -> jb::core
     auto transaction = std::move(begun).value();
     auto found       = find_queue(data->queues, selector, true);
     if (!found) {
-        return ServiceResult<Queue>::failure(std::move(found).error());
+        return ServiceResult<Queue>::failure(data->repository_read_error(std::move(found).error()));
     }
     if (!found->has_value()) {
         return ServiceResult<Queue>::failure(queue_not_found());
@@ -755,7 +940,7 @@ auto ManagementService::suspend_queue(QueueSelector const& selector) -> jb::core
         if (!committed) {
             return ServiceResult<Queue>::failure(std::move(committed).error());
         }
-        emit_mutation_committed();
+
         return ServiceResult<Queue>::success(std::move(queue));
     }
     if (queue.state == QueueState::Active) {
@@ -766,7 +951,7 @@ auto ManagementService::suspend_queue(QueueSelector const& selector) -> jb::core
             return ServiceResult<Queue>::failure(std::move(transitioned).error());
         }
         if (!*transitioned) {
-            return ServiceResult<Queue>::failure(queue_state_conflict());
+            return ServiceResult<Queue>::failure(data->persisted_error(queue_state_conflict()));
         }
         queue.state      = QueueState::Suspending;
         queue.updated_at = now;
@@ -782,7 +967,7 @@ auto ManagementService::suspend_queue(QueueSelector const& selector) -> jb::core
             return ServiceResult<Queue>::failure(std::move(transitioned).error());
         }
         if (!*transitioned) {
-            return ServiceResult<Queue>::failure(queue_state_conflict());
+            return ServiceResult<Queue>::failure(data->persisted_error(queue_state_conflict()));
         }
         queue.state      = QueueState::Suspended;
         queue.updated_at = now;
@@ -792,11 +977,11 @@ auto ManagementService::suspend_queue(QueueSelector const& selector) -> jb::core
     if (!committed) {
         return ServiceResult<Queue>::failure(std::move(committed).error());
     }
-    emit_mutation_committed();
+
     return ServiceResult<Queue>::success(std::move(queue));
 }
 
-auto ManagementService::resume_queue(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>
+auto ManagementService::resume_queue_impl(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -816,7 +1001,7 @@ auto ManagementService::resume_queue(QueueSelector const& selector) -> jb::core:
     auto transaction = std::move(begun).value();
     auto found       = find_queue(data->queues, selector, true);
     if (!found) {
-        return ServiceResult<Queue>::failure(std::move(found).error());
+        return ServiceResult<Queue>::failure(data->repository_read_error(std::move(found).error()));
     }
     if (!found->has_value()) {
         return ServiceResult<Queue>::failure(queue_not_found());
@@ -832,7 +1017,7 @@ auto ManagementService::resume_queue(QueueSelector const& selector) -> jb::core:
             return ServiceResult<Queue>::failure(std::move(transitioned).error());
         }
         if (!*transitioned) {
-            return ServiceResult<Queue>::failure(queue_state_conflict());
+            return ServiceResult<Queue>::failure(data->persisted_error(queue_state_conflict()));
         }
         queue.state      = QueueState::Active;
         queue.updated_at = now;
@@ -842,11 +1027,11 @@ auto ManagementService::resume_queue(QueueSelector const& selector) -> jb::core:
     if (!committed) {
         return ServiceResult<Queue>::failure(std::move(committed).error());
     }
-    emit_mutation_committed();
+
     return ServiceResult<Queue>::success(std::move(queue));
 }
 
-auto ManagementService::delete_queue(QueueSelector const& selector) -> jb::core::Result<void, jb::core::Error>
+auto ManagementService::delete_queue_impl(QueueSelector const& selector) -> jb::core::Result<void, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -866,7 +1051,7 @@ auto ManagementService::delete_queue(QueueSelector const& selector) -> jb::core:
     auto transaction = std::move(begun).value();
     auto found       = find_queue(data->queues, selector, true);
     if (!found) {
-        return ServiceResult<void>::failure(std::move(found).error());
+        return ServiceResult<void>::failure(data->repository_read_error(std::move(found).error()));
     }
     if (!found->has_value()) {
         return ServiceResult<void>::failure(queue_not_found());
@@ -924,17 +1109,17 @@ auto ManagementService::delete_queue(QueueSelector const& selector) -> jb::core:
         return ServiceResult<void>::failure(std::move(deleted_queue).error());
     }
     if (!*deleted_queue) {
-        return ServiceResult<void>::failure(queue_state_conflict());
+        return ServiceResult<void>::failure(data->persisted_error(queue_state_conflict()));
     }
     auto committed = transaction.commit();
     if (!committed) {
         return ServiceResult<void>::failure(std::move(committed).error());
     }
-    emit_mutation_committed();
+
     return ServiceResult<void>::success();
 }
 
-auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>
+auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -995,7 +1180,7 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
     auto transaction = std::move(begun).value();
     auto found_queue = find_queue(data->queues, request.queue, false);
     if (!found_queue) {
-        return ServiceResult<JobDefinition>::failure(std::move(found_queue).error());
+        return ServiceResult<JobDefinition>::failure(data->repository_read_error(std::move(found_queue).error()));
     }
     if (!found_queue->has_value()) {
         return ServiceResult<JobDefinition>::failure(queue_not_found());
@@ -1016,19 +1201,19 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
         canonical_request = std::move(encoded).value();
         auto record       = data->idempotency.find("job.create", queue.id, *request.idempotency_key);
         if (!record) {
-            return ServiceResult<JobDefinition>::failure(std::move(record).error());
+            return ServiceResult<JobDefinition>::failure(data->repository_read_error(std::move(record).error()));
         }
         if (record->has_value()) {
             auto valid = detail::validate_job_create_idempotency_request((**record).request_json, data->attributes);
             if (!valid) {
-                return ServiceResult<JobDefinition>::failure(std::move(valid).error());
+                return ServiceResult<JobDefinition>::failure(data->persisted_error(std::move(valid).error()));
             }
             if ((**record).request_json != *canonical_request) {
                 return ServiceResult<JobDefinition>::failure(idempotency_conflict());
             }
             auto replay = detail::decode_job_idempotency_result((**record).result_json, data->attributes);
             if (!replay) {
-                return ServiceResult<JobDefinition>::failure(std::move(replay).error());
+                return ServiceResult<JobDefinition>::failure(data->persisted_error(std::move(replay).error()));
             }
             if (replay->id != (**record).resource_id || replay->queue_id != queue.id) {
                 return ServiceResult<JobDefinition>::failure(invalid_idempotency_record("job_resource_id_mismatch"));
@@ -1037,7 +1222,7 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
             if (!committed) {
                 return ServiceResult<JobDefinition>::failure(std::move(committed).error());
             }
-            emit_mutation_committed();
+
             return ServiceResult<JobDefinition>::success(std::move(replay).value());
         }
 
@@ -1141,11 +1326,11 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
     }
-    emit_mutation_committed();
+
     return ServiceResult<JobDefinition>::success(std::move(job));
 }
 
-auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRun, jb::core::Error>
+auto ManagementService::run_now_impl(RunNowRequest request) -> jb::core::Result<JobRun, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -1176,7 +1361,7 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
     if (request.idempotency_key) {
         auto record = data->idempotency.find("job.run_now", request.job_id, *request.idempotency_key);
         if (!record) {
-            return ServiceResult<JobRun>::failure(std::move(record).error());
+            return ServiceResult<JobRun>::failure(data->repository_read_error(std::move(record).error()));
         }
         if (record->has_value()) {
             auto const& stored = **record;
@@ -1186,14 +1371,14 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
             }
             auto valid = detail::validate_run_now_idempotency_request(stored.request_json);
             if (!valid) {
-                return ServiceResult<JobRun>::failure(std::move(valid).error());
+                return ServiceResult<JobRun>::failure(data->persisted_error(std::move(valid).error()));
             }
             if (stored.request_json != *canonical_request) {
                 return ServiceResult<JobRun>::failure(invalid_idempotency_record("run_now_request_scope_mismatch"));
             }
             auto replay = detail::decode_run_now_idempotency_result(stored.result_json, data->attributes);
             if (!replay) {
-                return ServiceResult<JobRun>::failure(std::move(replay).error());
+                return ServiceResult<JobRun>::failure(data->persisted_error(std::move(replay).error()));
             }
             if (replay->id != stored.resource_id || replay->job_id != request.job_id) {
                 return ServiceResult<JobRun>::failure(invalid_idempotency_record("run_now_resource_id_mismatch"));
@@ -1202,7 +1387,7 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
             if (!committed) {
                 return ServiceResult<JobRun>::failure(std::move(committed).error());
             }
-            emit_mutation_committed();
+
             return ServiceResult<JobRun>::success(std::move(replay).value());
         }
     }
@@ -1211,7 +1396,7 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
     // require an idle job with no existing non-terminal manual barrier.
     auto found_job = data->jobs.find_by_id(request.job_id, true);
     if (!found_job) {
-        return ServiceResult<JobRun>::failure(std::move(found_job).error());
+        return ServiceResult<JobRun>::failure(data->repository_read_error(std::move(found_job).error()));
     }
     if (!found_job->has_value()) {
         return ServiceResult<JobRun>::failure(job_not_found());
@@ -1222,7 +1407,7 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
     }
     auto found_queue = data->queues.find_by_id(job.queue_id, true);
     if (!found_queue) {
-        return ServiceResult<JobRun>::failure(std::move(found_queue).error());
+        return ServiceResult<JobRun>::failure(data->repository_read_error(std::move(found_queue).error()));
     }
     if (!found_queue->has_value()) {
         return ServiceResult<JobRun>::failure(storage_invariant("run_now_missing_queue"));
@@ -1232,7 +1417,7 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
     }
     auto schedule_owned = data->runs.find_schedule_owned(job.id);
     if (!schedule_owned) {
-        return ServiceResult<JobRun>::failure(std::move(schedule_owned).error());
+        return ServiceResult<JobRun>::failure(data->repository_read_error(std::move(schedule_owned).error()));
     }
     if (!schedule_owned->has_value()) {
         return ServiceResult<JobRun>::failure(manual_run_conflict());
@@ -1315,11 +1500,11 @@ auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRu
     if (!committed) {
         return ServiceResult<JobRun>::failure(std::move(committed).error());
     }
-    emit_mutation_committed();
+
     return ServiceResult<JobRun>::success(std::move(run));
 }
 
-auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>
+auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -1357,7 +1542,7 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
     auto const now         = data->time_source.utc_now();
     auto       found       = data->jobs.find_by_id(request.job_id, true);
     if (!found) {
-        return ServiceResult<JobDefinition>::failure(std::move(found).error());
+        return ServiceResult<JobDefinition>::failure(data->repository_read_error(std::move(found).error()));
     }
     if (!found->has_value()) {
         return ServiceResult<JobDefinition>::failure(job_not_found());
@@ -1387,7 +1572,7 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
     }
     auto schedule_owned = data->runs.find_schedule_owned(replacement.id);
     if (!schedule_owned) {
-        return ServiceResult<JobDefinition>::failure(std::move(schedule_owned).error());
+        return ServiceResult<JobDefinition>::failure(data->repository_read_error(std::move(schedule_owned).error()));
     }
     if (!schedule_owned->has_value()) {
         return ServiceResult<JobDefinition>::failure(schedule_refresh_conflict());
@@ -1456,7 +1641,7 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
     if (!*replaced) {
         auto diagnosed = data->jobs.find_by_id(replacement.id, true);
         if (!diagnosed) {
-            return ServiceResult<JobDefinition>::failure(std::move(diagnosed).error());
+            return ServiceResult<JobDefinition>::failure(data->repository_read_error(std::move(diagnosed).error()));
         }
         if (!diagnosed->has_value()) {
             return ServiceResult<JobDefinition>::failure(job_not_found());
@@ -1467,7 +1652,7 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
         if ((**diagnosed).revision != request.expected_revision) {
             return ServiceResult<JobDefinition>::failure(job_revision_conflict());
         }
-        return ServiceResult<JobDefinition>::failure(job_state_conflict());
+        return ServiceResult<JobDefinition>::failure(data->persisted_error(job_state_conflict()));
     }
 
     if (refresh_snapshot) {
@@ -1498,18 +1683,18 @@ auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result
             return ServiceResult<JobDefinition>::failure(std::move(refreshed).error());
         }
         if (!*refreshed) {
-            return ServiceResult<JobDefinition>::failure(schedule_refresh_conflict());
+            return ServiceResult<JobDefinition>::failure(data->persisted_error(schedule_refresh_conflict()));
         }
     }
     auto committed = transaction.commit();
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
     }
-    emit_mutation_committed();
+
     return ServiceResult<JobDefinition>::success(std::move(replacement));
 }
 
-auto ManagementService::suspend_job(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>
+auto ManagementService::suspend_job_impl(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -1525,7 +1710,7 @@ auto ManagementService::suspend_job(jb::core::Uuid const& id) -> jb::core::Resul
     auto transaction = std::move(begun).value();
     auto found       = data->jobs.find_by_id(id, true);
     if (!found) {
-        return ServiceResult<JobDefinition>::failure(std::move(found).error());
+        return ServiceResult<JobDefinition>::failure(data->repository_read_error(std::move(found).error()));
     }
     if (!found->has_value()) {
         return ServiceResult<JobDefinition>::failure(job_not_found());
@@ -1539,7 +1724,7 @@ auto ManagementService::suspend_job(jb::core::Uuid const& id) -> jb::core::Resul
         if (!committed) {
             return ServiceResult<JobDefinition>::failure(std::move(committed).error());
         }
-        emit_mutation_committed();
+
         return ServiceResult<JobDefinition>::success(std::move(job));
     }
     if (job.state == JobState::Active) {
@@ -1556,7 +1741,7 @@ auto ManagementService::suspend_job(jb::core::Uuid const& id) -> jb::core::Resul
             return ServiceResult<JobDefinition>::failure(std::move(transitioned).error());
         }
         if (!*transitioned) {
-            return ServiceResult<JobDefinition>::failure(job_state_conflict());
+            return ServiceResult<JobDefinition>::failure(data->persisted_error(job_state_conflict()));
         }
         job.state      = JobState::Suspending;
         job.revision   = next_revision;
@@ -1583,7 +1768,7 @@ auto ManagementService::suspend_job(jb::core::Uuid const& id) -> jb::core::Resul
             return ServiceResult<JobDefinition>::failure(std::move(transitioned).error());
         }
         if (!*transitioned) {
-            return ServiceResult<JobDefinition>::failure(job_state_conflict());
+            return ServiceResult<JobDefinition>::failure(data->persisted_error(job_state_conflict()));
         }
         job.state      = JobState::Suspended;
         job.revision   = next_revision;
@@ -1594,11 +1779,11 @@ auto ManagementService::suspend_job(jb::core::Uuid const& id) -> jb::core::Resul
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
     }
-    emit_mutation_committed();
+
     return ServiceResult<JobDefinition>::success(std::move(job));
 }
 
-auto ManagementService::resume_job(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>
+auto ManagementService::resume_job_impl(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -1614,7 +1799,7 @@ auto ManagementService::resume_job(jb::core::Uuid const& id) -> jb::core::Result
     auto transaction = std::move(begun).value();
     auto found       = data->jobs.find_by_id(id, true);
     if (!found) {
-        return ServiceResult<JobDefinition>::failure(std::move(found).error());
+        return ServiceResult<JobDefinition>::failure(data->repository_read_error(std::move(found).error()));
     }
     if (!found->has_value()) {
         return ServiceResult<JobDefinition>::failure(job_not_found());
@@ -1636,7 +1821,7 @@ auto ManagementService::resume_job(jb::core::Uuid const& id) -> jb::core::Result
             return ServiceResult<JobDefinition>::failure(std::move(transitioned).error());
         }
         if (!*transitioned) {
-            return ServiceResult<JobDefinition>::failure(job_state_conflict());
+            return ServiceResult<JobDefinition>::failure(data->persisted_error(job_state_conflict()));
         }
         job.state      = JobState::Active;
         job.revision   = next_revision;
@@ -1647,11 +1832,11 @@ auto ManagementService::resume_job(jb::core::Uuid const& id) -> jb::core::Result
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
     }
-    emit_mutation_committed();
+
     return ServiceResult<JobDefinition>::success(std::move(job));
 }
 
-auto ManagementService::move_job(MoveJobRequest const& request) -> jb::core::Result<JobDefinition, jb::core::Error>
+auto ManagementService::move_job_impl(MoveJobRequest const& request) -> jb::core::Result<JobDefinition, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -1674,7 +1859,7 @@ auto ManagementService::move_job(MoveJobRequest const& request) -> jb::core::Res
     auto transaction = std::move(begun).value();
     auto found       = data->jobs.find_by_id(request.job_id, true);
     if (!found) {
-        return ServiceResult<JobDefinition>::failure(std::move(found).error());
+        return ServiceResult<JobDefinition>::failure(data->repository_read_error(std::move(found).error()));
     }
     if (!found->has_value()) {
         return ServiceResult<JobDefinition>::failure(job_not_found());
@@ -1692,7 +1877,7 @@ auto ManagementService::move_job(MoveJobRequest const& request) -> jb::core::Res
 
     auto found_queue = find_queue(data->queues, request.target_queue, false);
     if (!found_queue) {
-        return ServiceResult<JobDefinition>::failure(std::move(found_queue).error());
+        return ServiceResult<JobDefinition>::failure(data->repository_read_error(std::move(found_queue).error()));
     }
     if (!found_queue->has_value()) {
         return ServiceResult<JobDefinition>::failure(queue_not_found());
@@ -1715,7 +1900,7 @@ auto ManagementService::move_job(MoveJobRequest const& request) -> jb::core::Res
     if (!*moved_job) {
         auto diagnosed = data->jobs.find_by_id(job.id, true);
         if (!diagnosed) {
-            return ServiceResult<JobDefinition>::failure(std::move(diagnosed).error());
+            return ServiceResult<JobDefinition>::failure(data->repository_read_error(std::move(diagnosed).error()));
         }
         if (!diagnosed->has_value()) {
             return ServiceResult<JobDefinition>::failure(job_not_found());
@@ -1729,7 +1914,7 @@ auto ManagementService::move_job(MoveJobRequest const& request) -> jb::core::Res
         if ((**diagnosed).state != JobState::Suspended) {
             return ServiceResult<JobDefinition>::failure(job_not_suspended());
         }
-        return ServiceResult<JobDefinition>::failure(job_state_conflict());
+        return ServiceResult<JobDefinition>::failure(data->persisted_error(job_state_conflict()));
     }
     auto moved_runs = data->runs.move_non_terminal(job.id, target_queue.id, next_revision);
     if (!moved_runs) {
@@ -1743,11 +1928,11 @@ auto ManagementService::move_job(MoveJobRequest const& request) -> jb::core::Res
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
     }
-    emit_mutation_committed();
+
     return ServiceResult<JobDefinition>::success(std::move(job));
 }
 
-auto ManagementService::delete_job(DeleteJobRequest const& request) -> jb::core::Result<void, jb::core::Error>
+auto ManagementService::delete_job_impl(DeleteJobRequest const& request) -> jb::core::Result<void, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -1766,7 +1951,7 @@ auto ManagementService::delete_job(DeleteJobRequest const& request) -> jb::core:
     auto transaction = std::move(begun).value();
     auto found       = data->jobs.find_by_id(request.job_id, true);
     if (!found) {
-        return ServiceResult<void>::failure(std::move(found).error());
+        return ServiceResult<void>::failure(data->repository_read_error(std::move(found).error()));
     }
     if (!found->has_value()) {
         return ServiceResult<void>::failure(job_not_found());
@@ -1801,7 +1986,7 @@ auto ManagementService::delete_job(DeleteJobRequest const& request) -> jb::core:
     if (!*deleted) {
         auto diagnosed = data->jobs.find_by_id(job.id, true);
         if (!diagnosed) {
-            return ServiceResult<void>::failure(std::move(diagnosed).error());
+            return ServiceResult<void>::failure(data->repository_read_error(std::move(diagnosed).error()));
         }
         if (!diagnosed->has_value()) {
             return ServiceResult<void>::failure(job_not_found());
@@ -1815,7 +2000,7 @@ auto ManagementService::delete_job(DeleteJobRequest const& request) -> jb::core:
         if ((**diagnosed).state != JobState::Suspended) {
             return ServiceResult<void>::failure(job_not_suspended());
         }
-        return ServiceResult<void>::failure(job_state_conflict());
+        return ServiceResult<void>::failure(data->persisted_error(job_state_conflict()));
     }
     auto cancelled = data->runs.cancel_pending_for_job(job.id, now, "job_deleted");
     if (!cancelled) {
@@ -1829,11 +2014,11 @@ auto ManagementService::delete_job(DeleteJobRequest const& request) -> jb::core:
     if (!committed) {
         return ServiceResult<void>::failure(std::move(committed).error());
     }
-    emit_mutation_committed();
+
     return ServiceResult<void>::success();
 }
 
-auto ManagementService::get_job(jb::core::Uuid const& id, bool include_deleted)
+auto ManagementService::get_job_impl(jb::core::Uuid const& id, bool include_deleted)
     -> jb::core::Result<JobDefinition, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
@@ -1843,7 +2028,7 @@ auto ManagementService::get_job(jb::core::Uuid const& id, bool include_deleted)
     }
     auto found = data->jobs.find_by_id(id, include_deleted);
     if (!found) {
-        return ServiceResult<JobDefinition>::failure(std::move(found).error());
+        return ServiceResult<JobDefinition>::failure(data->repository_read_error(std::move(found).error()));
     }
     if (!found->has_value()) {
         return ServiceResult<JobDefinition>::failure(job_not_found());
@@ -1851,7 +2036,7 @@ auto ManagementService::get_job(jb::core::Uuid const& id, bool include_deleted)
     return ServiceResult<JobDefinition>::success(std::move(**found));
 }
 
-auto ManagementService::list_jobs(JobListRequest const& request) -> jb::core::Result<JobPage, jb::core::Error>
+auto ManagementService::list_jobs_impl(JobListRequest const& request) -> jb::core::Result<JobPage, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -1876,7 +2061,7 @@ auto ManagementService::list_jobs(JobListRequest const& request) -> jb::core::Re
         }
         auto found_queue = find_queue(data->queues, *request.queue, request.include_deleted);
         if (!found_queue) {
-            return ServiceResult<JobPage>::failure(std::move(found_queue).error());
+            return ServiceResult<JobPage>::failure(data->repository_read_error(std::move(found_queue).error()));
         }
         if (!found_queue->has_value()) {
             return ServiceResult<JobPage>::failure(queue_not_found());
@@ -1891,7 +2076,7 @@ auto ManagementService::list_jobs(JobListRequest const& request) -> jb::core::Re
                                   request.page.limit + 1U,
                                   request.page.after_id);
     if (!listed) {
-        return ServiceResult<JobPage>::failure(std::move(listed).error());
+        return ServiceResult<JobPage>::failure(data->repository_read_error(std::move(listed).error()));
     }
 
     auto page = JobPage{.items = std::move(listed).value()};

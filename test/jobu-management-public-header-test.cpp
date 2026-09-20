@@ -4,6 +4,9 @@
 
 static_assert(std::is_base_of_v<jb::core::Object, jb::jobu::ManagementService>);
 static_assert(std::is_same_v<decltype(jb::jobu::ManagementService::mutation_committed), jb::core::Signal<>>);
+static_assert(std::is_same_v<decltype(jb::jobu::ManagementService::failed), jb::core::Signal<jb::core::Error>>);
+static_assert(std::is_same_v<decltype(&jb::jobu::ManagementService::stop_mutations),
+                             void (jb::jobu::ManagementService::*)() noexcept>);
 static_assert(!std::is_copy_constructible_v<jb::jobu::ManagementService>);
 static_assert(!std::is_move_constructible_v<jb::jobu::ManagementService>);
 static_assert(std::is_constructible_v<jb::jobu::ManagementService,
