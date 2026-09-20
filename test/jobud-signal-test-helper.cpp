@@ -1,5 +1,6 @@
 #include "shutdown_signal_linux_priv.hpp"
 #include "shutdown_signal_priv.hpp"
+#include "shutdown_signal_test_priv.hpp"
 
 #include "event_loop.hpp"
 #include "event_loop_types.hpp"
@@ -9,6 +10,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <csignal> // IWYU pragma: keep POSIX signal sets and dispositions.
 #include <cstdint>
@@ -33,13 +35,64 @@ struct ShutdownSignalTestAccess {
     static auto install(ShutdownSignalOperations const& operations) { return ShutdownSignalRelay::install(operations); }
 };
 
+namespace {
+
+// Configured before starting workers and kept alive for the process. The actual signal handler
+// calls these checkpoints, so neither a latch nor an atomic wait is allowed in the checkpoint.
+static_assert(std::atomic<unsigned>::is_always_lock_free);
+
+struct SignalProbe {
+    SignalTestCheckpoint  pause_at{SignalTestCheckpoint::HandlerEntered};
+    std::atomic<unsigned> entered{0};
+    std::atomic<unsigned> released{1};
+    std::atomic<unsigned> retirement_waiting{0};
+    std::atomic<unsigned> writes_finished{0};
+    std::atomic<unsigned> release_borrows{1};
+};
+
+SignalProbe signal_probe;
+
+void pause_handlers_at(SignalTestCheckpoint checkpoint)
+{
+    signal_probe.pause_at = checkpoint;
+    signal_probe.entered.store(0);
+    signal_probe.retirement_waiting.store(0);
+    signal_probe.released.store(0);
+    signal_probe.writes_finished.store(0);
+    signal_probe.release_borrows.store(checkpoint == SignalTestCheckpoint::DescriptorAcquired ? 0U : 1U);
+}
+
+} // namespace
+
+void signal_test_checkpoint(SignalTestCheckpoint checkpoint) noexcept
+{
+    if (checkpoint == SignalTestCheckpoint::RetirementWaiting) {
+        signal_probe.retirement_waiting.store(1, std::memory_order_release);
+        return;
+    }
+    if (checkpoint == SignalTestCheckpoint::DescriptorWritten) {
+        signal_probe.writes_finished.fetch_add(1, std::memory_order_release);
+        while (signal_probe.release_borrows.load(std::memory_order_acquire) == 0) {
+        }
+        return;
+    }
+    if (checkpoint == signal_probe.pause_at) {
+        signal_probe.entered.fetch_add(1, std::memory_order_release);
+        while (signal_probe.released.load(std::memory_order_acquire) == 0) {
+        }
+    }
+}
+
 } // namespace jb::jobud::detail
 
 namespace {
 
+using jb::jobud::detail::pause_handlers_at;
 using jb::jobud::detail::ShutdownSignalOperations;
 using jb::jobud::detail::ShutdownSignalRelay;
 using jb::jobud::detail::ShutdownSignalTestAccess;
+using jb::jobud::detail::signal_probe;
+using jb::jobud::detail::SignalTestCheckpoint;
 
 enum class Failure : std::uint8_t {
     None,
@@ -442,6 +495,141 @@ TEST_CASE("worker lifetime")
     REQUIRE(relay->requested());
     REQUIRE(previous_calls == 0);
     REQUIRE(relay->close());
+    require_restored(original);
+}
+
+TEST_CASE("retirement waits for admitted handlers")
+{
+    auto const original = prepare_signals();
+    auto       relay    = install_relay();
+    pause_handlers_at(SignalTestCheckpoint::DescriptorAcquired);
+
+    // Real TERM and INT handlers both hold the pipe descriptor. Keep their worker threads alive
+    // after handler return as well: close must wait for the writes, but not for worker exit.
+    std::latch                  finish_workers{1};
+    std::atomic<unsigned>       workers_exited{0};
+    std::array<bool, 2>         delivered{};
+    std::array<bool, 2>         preserved_errno{};
+    std::array<std::jthread, 2> workers;
+    for (std::size_t index = 0; index < workers.size(); ++index) {
+        workers[index] = std::jthread{[&, index] {
+            errno                  = EDOM;
+            delivered[index]       = ::pthread_kill(::pthread_self(), index == 0 ? SIGTERM : SIGINT) == 0;
+            preserved_errno[index] = errno == EDOM;
+            finish_workers.wait();
+            workers_exited.fetch_add(1);
+        }};
+    }
+    while (signal_probe.entered.load(std::memory_order_acquire) != workers.size()) {
+        std::this_thread::yield();
+    }
+
+    bool failed_close_retained_resources{true};
+    SECTION("ordinary retirement")
+    {}
+    SECTION("retry after partial disposition restoration")
+    {
+        failure                         = Failure::RestoreInt;
+        auto rejected                   = relay->close();
+        failed_close_retained_resources = !rejected && rejected.error().code == "jobud.signal.cleanup" &&
+                                          ::fcntl(pipe_descriptors[0], F_GETFD) >= 0 &&
+                                          ::fcntl(pipe_descriptors[1], F_GETFD) >= 0;
+    }
+
+    bool         descriptors_open_while_waiting{false};
+    bool         admitted_writes_completed{false};
+    std::jthread release_handlers{[&] {
+        // Wait until retirement has closed admission and observed outstanding borrowers. This
+        // handshake proves the pipe remains open during the wait without a timing assertion.
+        while (signal_probe.retirement_waiting.load(std::memory_order_acquire) == 0) {
+            std::this_thread::yield();
+        }
+        descriptors_open_while_waiting =
+            ::fcntl(pipe_descriptors[0], F_GETFD) >= 0 && ::fcntl(pipe_descriptors[1], F_GETFD) >= 0;
+        signal_probe.released.store(1, std::memory_order_release);
+
+        // Keep both descriptor borrows until the writes are observable. Retirement cannot close
+        // either pipe end while this second handshake is pending.
+        while (signal_probe.writes_finished.load(std::memory_order_acquire) != workers.size()) {
+            std::this_thread::yield();
+        }
+        std::array<char, 2> bytes{};
+        admitted_writes_completed =
+            ::read(pipe_descriptors[0], bytes.data(), bytes.size()) == 2 && bytes[0] == 's' && bytes[1] == 's';
+        signal_probe.release_borrows.store(1, std::memory_order_release);
+    }};
+
+    auto       closed          = relay->close();
+    auto const exited_at_close = workers_exited.load();
+    relay.reset();
+    finish_workers.count_down();
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    release_handlers.join();
+
+    REQUIRE(closed);
+    REQUIRE(failed_close_retained_resources);
+    REQUIRE(descriptors_open_while_waiting);
+    REQUIRE(admitted_writes_completed);
+    REQUIRE(exited_at_close == 0);
+    for (std::size_t index = 0; index < workers.size(); ++index) {
+        REQUIRE(delivered[index]);
+        REQUIRE(preserved_errno[index]);
+    }
+    require_restored(original);
+}
+
+TEST_CASE("late handler cannot write a reused descriptor")
+{
+    auto const original = prepare_signals();
+    auto       relay    = install_relay();
+    pause_handlers_at(SignalTestCheckpoint::HandlerEntered);
+
+    bool         delivered{false};
+    bool         preserved_errno{false};
+    bool         restored_delivery{false};
+    std::jthread worker{[&] {
+        errno             = EDOM;
+        delivered         = ::pthread_kill(::pthread_self(), SIGTERM) == 0;
+        preserved_errno   = errno == EDOM;
+        // The worker survives relay retirement; subsequent signals use the restored disposition.
+        restored_delivery = ::pthread_kill(::pthread_self(), SIGINT) == 0;
+    }};
+    while (signal_probe.entered.load(std::memory_order_acquire) == 0) {
+        std::this_thread::yield();
+    }
+
+    // This handler has entered but has not borrowed the descriptor. Close and destroy the relay
+    // while it is paused, then reuse BOTH pipe numbers before allowing its body to proceed.
+    auto closed = relay->close();
+    relay.reset();
+    bool const         descriptors_closed = ::fcntl(pipe_descriptors[0], F_GETFD) == -1 && errno == EBADF &&
+                                            ::fcntl(pipe_descriptors[1], F_GETFD) == -1 && errno == EBADF;
+    std::array<int, 2> recycled{-1, -1};
+    auto const         opened = ::pipe2(recycled.data(), O_NONBLOCK | O_CLOEXEC);
+    auto const         seeded = opened == 0 ? ::write(recycled[1], "x", 1) : -1;
+    signal_probe.released.store(1, std::memory_order_release);
+    worker.join();
+
+    std::array<char, 2> bytes{};
+    auto const          count = opened == 0 ? ::read(recycled[0], bytes.data(), bytes.size()) : -1;
+    for (auto const descriptor : recycled) {
+        if (descriptor >= 0) {
+            ::close(descriptor);
+        }
+    }
+    REQUIRE(closed);
+    REQUIRE(descriptors_closed);
+    REQUIRE(opened == 0);
+    REQUIRE(recycled == pipe_descriptors);
+    REQUIRE(seeded == 1);
+    REQUIRE(count == 1);
+    REQUIRE(bytes[0] == 'x');
+    REQUIRE(delivered);
+    REQUIRE(preserved_errno);
+    REQUIRE(restored_delivery);
+    REQUIRE(previous_calls == 1);
     require_restored(original);
 }
 

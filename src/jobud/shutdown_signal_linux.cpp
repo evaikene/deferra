@@ -5,16 +5,22 @@
 #include "logging.hpp"
 #include "shutdown_signal_linux_priv.hpp"
 
+#ifdef JOBUD_SIGNAL_TESTING
+#  include "shutdown_signal_test_priv.hpp"
+#endif
+
 #include <array>
 #include <atomic>
 #include <cerrno>
 #include <csignal> // IWYU pragma: keep POSIX signal sets and dispositions.
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
 
 #include <fcntl.h>
+#include <sched.h>
 #include <unistd.h>
 
 namespace jb::jobud::detail {
@@ -25,10 +31,10 @@ using VoidResult  = jb::core::Result<void, jb::core::Error>;
 using RelayResult = jb::core::Result<std::unique_ptr<ShutdownSignalRelay>, jb::core::Error>;
 using WatchResult = jb::core::Result<std::unique_ptr<ShutdownSignalWatch>, jb::core::Error>;
 
-// Published with both signals blocked before any worker exists. Neither descriptor nor ownership
-// changes until workers have joined and the owner has blocked both signals again.
+// Handler-visible storage has process lifetime: even a handler selected before disposition
+// restoration may enter after the relay object is gone. The descriptor is protected separately.
 volatile sig_atomic_t shutdown_requested{0};
-volatile sig_atomic_t handler_descriptor{-1};
+int                   handler_descriptor{-1};
 bool                  relay_owned{false};
 
 // sig_atomic_t protects interrupted access on one thread, not concurrent worker handlers. Only the
@@ -37,18 +43,63 @@ bool                  relay_owned{false};
 static_assert(std::atomic<unsigned>::is_always_lock_free);
 std::atomic<unsigned> request_publication{0}; // 0: unclaimed, 1: publishing, 2: immutable flag is visible
 
+// One atomic word combines admission and the number of handlers borrowing the descriptor.
+// A separate flag and counter would let retirement miss a handler between its check and increment.
+constexpr unsigned    kHandlerAdmissionClosed = 1U << (std::numeric_limits<unsigned>::digits - 1);
+std::atomic<unsigned> handler_access{kHandlerAdmissionClosed};
+
+auto acquire_handler_descriptor() noexcept -> bool
+{
+    auto access = handler_access.load(std::memory_order_relaxed);
+    while (access < kHandlerAdmissionClosed - 1U) {
+        // Acquire the published descriptor only if admission is still open. Reserve the high bit
+        // for retirement and refuse counter overflow rather than allowing it to reopen the gate.
+        if (handler_access.compare_exchange_weak(access, access + 1U, std::memory_order_acquire)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void retire_handler_descriptor() noexcept
+{
+    handler_access.fetch_or(kHandlerAdmissionClosed, std::memory_order_acq_rel);
+    // Wait only for already admitted signal handlers, never for the workers that ran them. Late
+    // handlers cannot acquire the descriptor. The final acquire observes every borrower's release
+    // before close/reuse; yielding here is owner-thread teardown, not signal-handler work.
+    while (handler_access.load(std::memory_order_acquire) != kHandlerAdmissionClosed) {
+#ifdef JOBUD_SIGNAL_TESTING
+        signal_test_checkpoint(SignalTestCheckpoint::RetirementWaiting);
+#endif
+        ::sched_yield();
+    }
+    handler_descriptor = -1;
+}
+
 void handle_shutdown_signal(int /*signal*/) noexcept
 {
     auto const saved_errno = errno;
-    unsigned   unclaimed{0};
+#ifdef JOBUD_SIGNAL_TESTING
+    signal_test_checkpoint(SignalTestCheckpoint::HandlerEntered);
+#endif
+    unsigned unclaimed{0};
     if (request_publication.compare_exchange_strong(unclaimed, 1, std::memory_order_relaxed)) {
         shutdown_requested = 1;
         request_publication.store(2, std::memory_order_release);
     }
 
-    // A full pipe already wakes the loop. Retry EINTR so an unrelated handler cannot lose the wakeup.
-    char const byte{'s'};
-    while (::write(handler_descriptor, &byte, 1) < 0 && errno == EINTR) {
+    if (acquire_handler_descriptor()) {
+#ifdef JOBUD_SIGNAL_TESTING
+        signal_test_checkpoint(SignalTestCheckpoint::DescriptorAcquired);
+#endif
+        // A full pipe already wakes the loop. Retry EINTR so an unrelated handler cannot lose the wakeup.
+        char const byte{'s'};
+        while (::write(handler_descriptor, &byte, 1) < 0 && errno == EINTR) {
+        }
+#ifdef JOBUD_SIGNAL_TESTING
+        signal_test_checkpoint(SignalTestCheckpoint::DescriptorWritten);
+#endif
+        handler_access.fetch_sub(1U, std::memory_order_release);
     }
     errno = saved_errno;
 }
@@ -154,6 +205,7 @@ auto ShutdownSignalRelay::install(ShutdownSignalOperations const& operations) ->
     action.sa_mask     = signals;
     action.sa_flags    = SA_RESTART;
     handler_descriptor = data.descriptors[1];
+    handler_access.store(0U, std::memory_order_release);
     if (operations.action(SIGTERM, &action, &data.original_term) != 0) {
         return fail("install_sigterm");
     }
@@ -164,7 +216,8 @@ auto ShutdownSignalRelay::install(ShutdownSignalOperations const& operations) ->
     data.int_installed = true;
 
     // Deliberately enable delivery even when the launching shell blocked a target signal. Workers
-    // created afterward inherit this mask; the process-main lifetime contract includes their join.
+    // created afterward inherit this mask. Retirement fences descriptor access even if a library
+    // worker outlives its owner (for example, a detached libcurl DNS resolver).
     auto serving_mask = data.original_mask;
     ::sigdelset(&serving_mask, SIGTERM);
     ::sigdelset(&serving_mask, SIGINT);
@@ -224,8 +277,8 @@ auto ShutdownSignalRelay::close() -> VoidResult
         return VoidResult::success();
     }
 
-    // The caller has joined every possible handler thread. Blocking this last thread now makes
-    // disposition restoration and descriptor retirement safe against close/reuse races.
+    // Block owner-thread delivery while restoring dispositions. Other threads can still be inside
+    // our handler, so restoring the dispositions alone does not permit descriptor retirement.
     auto const signals = shutdown_signals();
     if (data.operations.mask(SIG_BLOCK, &signals, nullptr) != 0) {
         return VoidResult::failure(signal_error("jobud.signal.cleanup", "block_signals"));
@@ -243,7 +296,7 @@ auto ShutdownSignalRelay::close() -> VoidResult
         data.int_installed = false;
     }
 
-    handler_descriptor = -1;
+    retire_handler_descriptor();
     for (auto& descriptor : data.descriptors) {
         if (descriptor >= 0) {
             // Linux closes the descriptor even when close reports EINTR; never retry a reused number.

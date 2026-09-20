@@ -262,8 +262,8 @@ public:
 
     ~DaemonFixture()
     {
-        // Default daemon signals do not unwind its runner Objects. Let bounded test attempts finish before
-        // terminating it; this teardown is not evidence of Phase 7 coordinated daemon shutdown.
+        // This fixture lets bounded attempts finish before Process destruction. It does not assert
+        // Phase 7's immediate signal-shutdown behavior with active work; that has a separate test stage.
         auto const deadline = Clock::now() + 8s;
         while (Clock::now() < deadline && has_running_attempt()) {
             if (app.process_events(EventFlag::All, 10) == ProcessEventsResult::Failed) {

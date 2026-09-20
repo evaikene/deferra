@@ -609,8 +609,15 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JobU executable smoke tests
 if(TARGET jobud-signal)
-    add_executable(jobud-signal-test-helper jobud-signal-test-helper.cpp)
-    target_link_libraries(jobud-signal-test-helper PRIVATE jobud-signal Catch2::Catch2)
+    # Compile the same relay with deterministic handler checkpoints only in this isolated helper.
+    # The production jobud-signal library contains neither hooks nor runtime test switches.
+    add_executable(jobud-signal-test-helper
+        jobud-signal-test-helper.cpp
+        ../src/jobud/shutdown_signal_linux.cpp
+    )
+    target_compile_definitions(jobud-signal-test-helper PRIVATE JOBUD_SIGNAL_TESTING)
+    target_include_directories(jobud-signal-test-helper PRIVATE ../src/jobud)
+    target_link_libraries(jobud-signal-test-helper PRIVATE core Catch2::Catch2)
     add_executable(jobud-signal-test jobud-signal-test.cpp)
     target_link_libraries(jobud-signal-test PRIVATE core Catch2::Catch2WithMain)
     target_compile_definitions(jobud-signal-test PRIVATE
@@ -622,6 +629,15 @@ endif()
 
 if(TARGET jobud)
     if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
+        add_executable(jobud-runtime-test
+            jobud-runtime-test.cpp
+            support/fake_http_client.cpp
+            support/memory_io_device.cpp
+            support/recovery_fixture.cpp
+            support/temporary_directory.cpp
+        )
+        target_link_libraries(jobud-runtime-test PRIVATE jobud-runtime jobu-sqlite jobu-http Catch2::Catch2WithMain)
+        add_test(NAME jobud-runtime-test COMMAND $<TARGET_FILE:jobud-runtime-test>)
         add_executable(jobud-startup-test
             jobud-startup-test.cpp
             ../src/jobud/startup_priv.cpp
