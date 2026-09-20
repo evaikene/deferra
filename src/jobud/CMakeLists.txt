@@ -10,6 +10,14 @@ configure_file(
 
 add_executable(${TARGET} main.cpp startup_priv.cpp composition_priv.cpp)
 
+# Signal ownership is activated by the Stage 7.13 runtime composition.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_library(jobud-signal STATIC shutdown_signal_linux.cpp)
+    target_link_libraries(jobud-signal PUBLIC core)
+    target_include_directories(jobud-signal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(${TARGET} PRIVATE jobud-signal)
+endif()
+
 target_include_directories(${TARGET}
     PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}

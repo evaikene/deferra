@@ -608,6 +608,18 @@ target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JobU executable smoke tests
+if(TARGET jobud-signal)
+    add_executable(jobud-signal-test-helper jobud-signal-test-helper.cpp)
+    target_link_libraries(jobud-signal-test-helper PRIVATE jobud-signal Catch2::Catch2)
+    add_executable(jobud-signal-test jobud-signal-test.cpp)
+    target_link_libraries(jobud-signal-test PRIVATE core Catch2::Catch2WithMain)
+    target_compile_definitions(jobud-signal-test PRIVATE
+        JOBUD_SIGNAL_TEST_HELPER="$<TARGET_FILE:jobud-signal-test-helper>")
+    add_dependencies(jobud-signal-test jobud-signal-test-helper)
+    add_test(NAME jobud-signal-test COMMAND $<TARGET_FILE:jobud-signal-test>)
+    set_tests_properties(jobud-signal-test PROPERTIES TIMEOUT 60)
+endif()
+
 if(TARGET jobud)
     if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
         add_executable(jobud-startup-test
