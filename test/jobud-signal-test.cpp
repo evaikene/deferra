@@ -506,6 +506,14 @@ TEST_CASE("Daemon signal relay restores process state across setup and teardown 
     {
         scenario = "concurrent workers";
     }
+    SECTION("retirement with admitted handlers and surviving workers")
+    {
+        scenario = "retirement waits for admitted handlers";
+    }
+    SECTION("late handler and descriptor reuse after relay destruction")
+    {
+        scenario = "late handler cannot write a reused descriptor";
+    }
     SECTION("exec inheritance and SIGCHLD preservation")
     {
         scenario = "descriptor inheritance";

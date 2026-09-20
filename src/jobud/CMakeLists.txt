@@ -8,9 +8,15 @@ configure_file(
     @ONLY
 )
 
-add_executable(${TARGET} main.cpp startup_priv.cpp composition_priv.cpp)
+add_executable(${TARGET} main.cpp composition_priv.cpp)
 
-# Signal ownership is activated by the Stage 7.13 runtime composition.
+add_library(jobud-runtime STATIC runtime_priv.cpp startup_priv.cpp)
+target_include_directories(jobud-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+    PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_link_libraries(jobud-runtime PUBLIC jobu net rpc)
+target_link_libraries(${TARGET} PRIVATE jobud-runtime)
+
+# Native macOS signal ownership is adapted separately in Stage 7.18.
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_library(jobud-signal STATIC shutdown_signal_linux.cpp)
     target_link_libraries(jobud-signal PUBLIC core)

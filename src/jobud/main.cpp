@@ -1,6 +1,11 @@
 #include "composition_priv.hpp"
 #include "jobu_version_priv.hpp"
+#include "runtime_priv.hpp"
 #include "startup_priv.hpp"
+
+#if defined(__linux__)
+#  include "shutdown_signal_priv.hpp"
+#endif
 
 #include "application.hpp"
 #include "attempt_executor_group.hpp"
@@ -8,17 +13,9 @@
 #include "cron.hpp"
 #include "database.hpp"
 #include "http/system_http_client.hpp"
-#include "local_server.hpp"
 #include "logging.hpp"
-#include "management.hpp"
-#include "management_rpc.hpp"
-#include "protocol.hpp"
-#include "scheduler.hpp"
-#include "server.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
-#include "system_info.hpp"
-#include "system_info_rpc.hpp"
 #include "time_source.hpp"
 #include "uuid.hpp"
 
@@ -26,11 +23,10 @@
 
 #include <cstdio> // IWYU pragma: keep for stderr and stdout
 #include <cstdlib>
+#include <functional>
 #include <memory>
-#include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 namespace {
 
@@ -49,8 +45,6 @@ auto main(int argc, char* argv[]) -> int
 {
     using namespace jb::core;
     using namespace jb::jobu;
-    using namespace jb::net;
-    using namespace jb::rpc;
 
     if (argc == 2 && std::string_view{argv[1]} == "--version") {
         fmt::print(stdout, "jobud {}\n", jb::jobu::detail::project_version);
@@ -63,121 +57,100 @@ auto main(int argc, char* argv[]) -> int
         return EXIT_FAILURE;
     }
 
-    Application      app{0, nullptr};
-    SystemTimeSource time_source;
-    jb::db::Database database{
-        std::make_unique<jb::db::sqlite::Driver>(jb::db::sqlite::Options{.database_file = startup->database_path})};
-
-    auto opened = database.open();
-    if (!opened) {
-        log_error("Unable to open the JobU database: {} ({})", opened.error().message, opened.error().code);
+    // The relay precedes Application and every worker-capable dependency. Its checked retirement
+    // follows their complete scope teardown, including every early startup return.
+#if defined(__linux__)
+    auto installed = jb::jobud::detail::ShutdownSignalRelay::install();
+    if (!installed) {
+        log_error("JobU signal setup failed: code={}", installed.error().code);
         return EXIT_FAILURE;
     }
+    auto relay = std::move(installed).value();
+#endif
 
-    auto schema = jb::jobu::sqlite::ensure_schema(database);
-    if (!schema) {
-        log_error("Unable to prepare the JobU database schema: {} ({})", schema.error().message, schema.error().code);
-        return EXIT_FAILURE;
-    }
+    auto run_application = [&]() -> int {
+        Application      app{0, nullptr};
+        SystemTimeSource time_source;
+        jb::db::Database database{
+            std::make_unique<jb::db::sqlite::Driver>(jb::db::sqlite::Options{.database_file = startup->database_path})};
+        UuidV7Generator           uuid_generator{time_source};
+        StandardAttributeRegistry attribute_registry;
+        SystemCronEngine          cron;
 
-    UuidV7Generator           uuid_generator{time_source};
-    StandardAttributeRegistry attribute_registry;
-    SystemCronEngine          cron;
-
-    auto created_http_client = jb::net::http::SystemHttpClient::create(*app.event_loop(),
-                                                                       {
-                                                                           .ca_bundle = startup->http_ca_bundle,
-                                                                           .proxy     = startup->http_proxy,
-                                                                       });
-    if (!created_http_client) {
-        log_error("Unable to initialize the JobU HTTP client: {} ({})",
-                  created_http_client.error().message,
-                  created_http_client.error().code);
-        return EXIT_FAILURE;
-    }
-
-    // Reverse destruction stops Scheduler first, then destroys group-owned runners while the HTTP client is alive.
-    // This scope cleanup does not install Phase 7's daemon signal handling or rewrite durable running attempts.
-    auto                 http_client = std::move(created_http_client).value();
-    AttemptExecutorGroup executors;
-    auto                 registered =
-        jb::jobud::detail::register_attempt_executors(executors, *http_client, time_source, startup->allow_root_cli);
-    if (!registered) {
-        log_error("Unable to register the JobU attempt executors: {} ({})",
-                  registered.error().message,
-                  registered.error().code);
-        return EXIT_FAILURE;
-    }
-
-    Scheduler         scheduler{database,
-                                attribute_registry,
-                                cron,
-                                uuid_generator,
-                                time_source,
-                                executors,
-                                jb::jobud::detail::scheduler_options(*startup)};
-    ManagementService management_service{database, attribute_registry, cron, uuid_generator, time_source};
-    LocalServer       local_server;
-    Server            rpc_server;
-
-    http_client->failed.connect(
-        [](Error const& error) -> void { log_error("System HTTP client failed: {} ({})", error.message, error.code); });
-    scheduler.failed.connect(
-        [](Error const& error) -> void { log_error("Scheduler failed: {} ({})", error.message, error.code); });
-
-    auto capabilities = std::vector<std::string>{std::string{system_info_rpc_method_name()}};
-    capabilities.reserve(capabilities.size() + management_rpc_method_names().size());
-    for (auto const method : management_rpc_method_names()) {
-        capabilities.emplace_back(method);
-    }
-
-    auto info = SystemInfo{
-        .daemon_version = std::string{jb::jobu::detail::project_version},
-        .api_version    = {.major = 1, .minor = 2},
-        .capabilities   = std::move(capabilities),
-    };
-    if (!register_system_info_method(rpc_server, std::move(info))) {
-        log_fatal("Unable to register the jobud system.info handler");
-        return EXIT_FAILURE;
-    }
-    // Receiver tracking deactivates this Object-capturing slot if the scheduler is destroyed before the service.
-    management_service.mutation_committed.connect(&scheduler, [&scheduler]() -> void { scheduler.request_rescan(); });
-    if (!register_management_methods(rpc_server, management_service, attribute_registry)) {
-        log_fatal("Unable to register the jobud management handlers");
-        return EXIT_FAILURE;
-    }
-
-    // rpc_server is destroyed before local_server, so receiver tracking deactivates its admission slot first.
-    local_server.new_connection.connect(&rpc_server, [&local_server, &rpc_server]() -> void {
-        while (auto socket = local_server.take_next_connection()) {
-            auto const credentials    = socket->peer_credentials();
-            auto       operation      = OperationContext{};
-            operation.peer.process_id = credentials.process_id;
-            operation.peer.user_id    = credentials.user_id;
-            operation.peer.group_id   = credentials.group_id;
-
-            auto added = rpc_server.add_connection(std::move(socket), std::move(operation));
-            if (!added) {
-                log_error("Unable to admit a local RPC connection: {} ({})", added.error().message, added.error().code);
-            }
+        // Native macOS signal-relay adaptation remains Stage 7.18. The common runtime and recovery
+        // ordering compile there without pretending that Linux signal handling supplies coverage.
+        std::function<bool()> should_stop;
+#if defined(__linux__)
+        should_stop = [&relay] { return relay->requested(); };
+#endif
+        jb::jobud::detail::DaemonRuntime runtime{*app.event_loop(),
+                                                 database,
+                                                 attribute_registry,
+                                                 cron,
+                                                 uuid_generator,
+                                                 time_source,
+                                                 *startup,
+                                                 std::move(should_stop)};
+#if defined(__linux__)
+        auto attached = relay->attach(*app.event_loop(), [&runtime] { runtime.request_stop(); });
+        if (!attached) {
+            runtime.fail("signal_watch", attached.error());
+            return runtime.exit_code();
         }
-    });
-    local_server.accept_error.connect(
-        [](IOError, std::string const& message) -> void { log_error("Local server accept error: {}", message); });
-    rpc_server.connection_error.connect([](ConnectionId, Error const& error) -> void {
-        log_error("RPC connection error: {} ({})", error.message, error.code);
-    });
+        // This watch dies before both its callback target and its EventLoop.
+        auto watch = std::move(attached).value();
+        if (relay->requested()) {
+            runtime.request_stop();
+            return runtime.exit_code();
+        }
+#endif
+        auto opened = database.open();
+        if (!opened) {
+            runtime.fail("database_open", opened.error());
+            return runtime.exit_code();
+        }
+        auto schema = jb::jobu::sqlite::ensure_schema(database);
+        if (!schema) {
+            runtime.fail("schema", schema.error());
+            return runtime.exit_code();
+        }
 
-    if (!local_server.listen(startup->socket_path)) {
-        log_error("Unable to listen on the local socket: {}", local_server.error_string());
-        return EXIT_FAILURE;
+        auto make_runners = [&]() -> Result<jb::jobud::detail::RuntimeRunners, Error> {
+            using RunnersResult = Result<jb::jobud::detail::RuntimeRunners, Error>;
+            auto created        = jb::net::http::SystemHttpClient::create(
+                *app.event_loop(),
+                {.ca_bundle = startup->http_ca_bundle, .proxy = startup->http_proxy});
+            if (!created) {
+                return RunnersResult::failure(std::move(created).error());
+            }
+            auto runners    = jb::jobud::detail::RuntimeRunners{.http      = std::move(created).value(),
+                                                                .executors = std::make_unique<AttemptExecutorGroup>()};
+            auto registered = jb::jobud::detail::register_attempt_executors(*runners.executors,
+                                                                            *runners.http,
+                                                                            time_source,
+                                                                            startup->allow_root_cli);
+            if (!registered) {
+                return RunnersResult::failure(std::move(registered).error());
+            }
+            return RunnersResult::success(std::move(runners));
+        };
+        static_cast<void>(runtime.run(make_runners, [&app] { return app.exec(); }));
+
+        // run() has destroyed service queries and transactions before releasing database ownership.
+        auto closed = database.close();
+        if (!closed) {
+            runtime.fail("database_close", closed.error());
+        }
+        return runtime.exit_code();
+    };
+
+    auto status = run_application();
+#if defined(__linux__)
+    auto closed = relay->close();
+    if (!closed) {
+        log_error("JobU signal cleanup failed: code={}", closed.error().code);
+        status = EXIT_FAILURE;
     }
-
-    auto started = scheduler.start();
-    if (!started) {
-        log_error("Unable to start the JobU scheduler: {} ({})", started.error().message, started.error().code);
-        return EXIT_FAILURE;
-    }
-
-    return app.exec();
+#endif
+    return status;
 }

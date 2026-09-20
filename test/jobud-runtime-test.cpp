@@ -1,0 +1,514 @@
+#include "runtime_priv.hpp"
+
+#include "attempt_repository_priv.hpp"
+#include "framing.hpp"
+#include "http/http_attempt_executor.hpp"
+#include "json.hpp"
+#include "local_socket.hpp"
+#include "management.hpp"
+#include "protocol_priv.hpp"
+#include "query.hpp"
+#include "run_repository_priv.hpp"
+#include "server.hpp"
+#include "support/fake_cron_engine.hpp"
+#include "support/fake_event_loop_backend.hpp"
+#include "support/fake_http_client.hpp"
+#include "support/fake_time_source.hpp"
+#include "support/memory_io_device.hpp"
+#include "support/recovery_fixture.hpp"
+#include "uuid.hpp"
+
+#include <catch2/catch_test_macros.hpp>
+
+#include <chrono>
+#include <cstdlib>
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace jb::jobud::detail {
+
+struct RuntimeTestAccess {
+    static auto management(DaemonRuntime& runtime) { return runtime.management(); }
+
+    static auto scheduler(DaemonRuntime& runtime) { return runtime.scheduler(); }
+
+    static auto rpc(DaemonRuntime& runtime) { return runtime.rpc_server(); }
+};
+
+} // namespace jb::jobud::detail
+
+namespace {
+
+using namespace jb::core;
+using namespace jb::jobu;
+using namespace jb::jobud::detail;
+using namespace jb::test;
+using namespace std::chrono_literals;
+using RunnersResult = Result<RuntimeRunners, Error>;
+
+auto success(AttemptKey key) -> AttemptCompletion
+{
+    return {.key = key, .outcome = AttemptOutcome::Succeeded, .result = {.data = JsonValue::Object{}}};
+}
+
+auto failure() -> Error
+{
+    return {.category = ErrorCategory::Internal,
+            .code     = "net.http.backend_failed",
+            .message  = "sensitive message",
+            .detail   = "sensitive detail"};
+}
+
+struct ExecutionRecord {
+    std::vector<AttemptStartRequest>      starts;
+    std::vector<AttemptCompletionHandler> completions;
+    std::vector<std::string>              destruction;
+    std::function<void()>                 on_start;
+};
+
+/// Intentionally retains callback copies beyond runner destruction to probe the group's lifetime gate.
+class ObservedExecutor final : public AttemptExecutor {
+public:
+    explicit ObservedExecutor(ExecutionRecord& record)
+        : _record{record}
+    {}
+
+    ~ObservedExecutor() override
+    {
+        _record.destruction.emplace_back("executor");
+        if (!_record.completions.empty()) {
+            _record.completions.front()(success(_record.starts.front().key));
+        }
+    }
+
+    auto is_available(JobType type) const noexcept -> bool override { return type == JobType::Cli; }
+
+    auto start(AttemptStartRequest request, AttemptCompletionHandler completion) -> Result<void, Error> override
+    {
+        _record.starts.push_back(std::move(request));
+        _record.completions.push_back(std::move(completion));
+        if (_record.on_start) {
+            _record.on_start();
+        }
+        return Result<void, Error>::success();
+    }
+
+    auto cancel(AttemptKey const& /*key*/) -> Result<void, Error> override { return Result<void, Error>::success(); }
+
+private:
+    ExecutionRecord& _record;
+};
+
+struct RuntimeFixture {
+    RuntimeFixture()
+    {
+        time.set_utc(UtcTimePoint{120s});
+        auto queue              = recovery_queue(recovery_id(1));
+        queue.concurrency_limit = 2;
+        storage.insert_queue(queue);
+        options.socket_path      = storage.directory.path() / "daemon.sock";
+        options.cli_concurrency  = 1;
+        options.http_concurrency = 1;
+    }
+
+    auto seed(std::uint32_t suffix = 1, JobType type = JobType::Cli, RunState state = RunState::Scheduled)
+        -> RecoveryRunFixture
+    {
+        auto job = storage.make_job(recovery_id(suffix + 10), recovery_id(1), type);
+        auto run = storage.make_run(recovery_id(suffix + 100), job, state);
+        storage.insert_job(job);
+        storage.insert_run(run);
+        return run;
+    }
+
+    void create_runtime(std::function<bool()> should_stop = {})
+    {
+        runtime = std::make_unique<DaemonRuntime>(*loop.loop,
+                                                  storage.database,
+                                                  storage.registry,
+                                                  cron,
+                                                  generator,
+                                                  time,
+                                                  options,
+                                                  std::move(should_stop));
+    }
+
+    auto make_runners() -> RunnersResult
+    {
+        ++factory_calls;
+        CHECK(runtime->state() == RuntimeState::Recovering);
+        CHECK_FALSE(std::filesystem::exists(options.socket_path));
+        auto client = std::make_unique<FakeHttpClient>();
+        http        = client.get();
+        client->destroyed.connect(runtime.get(), [this] { record.destruction.emplace_back("http"); });
+        auto group = std::make_unique<AttemptExecutorGroup>();
+        REQUIRE(group->add(JobType::Cli, std::make_unique<ObservedExecutor>(record)));
+        REQUIRE(group->add(JobType::Http, std::make_unique<http::HttpAttemptExecutor>(*client, time)));
+        return RunnersResult::success({.http = std::move(client), .executors = std::move(group)});
+    }
+
+    auto run(std::function<int()> const& execute) -> int
+    {
+        return runtime->run([this] { return make_runners(); }, execute);
+    }
+
+    void require_running(RecoveryRunFixture const& expected)
+    {
+        detail::RunRepository runs{storage.database, storage.registry};
+        auto                  run = runs.find_by_id(expected.run.id);
+        REQUIRE(run);
+        REQUIRE(run->has_value());
+        REQUIRE(run->value().state == RunState::Running);
+        detail::AttemptRepository attempts{storage.database};
+        auto                      attempt = attempts.find(expected.run.id, 1);
+        REQUIRE(attempt);
+        REQUIRE(attempt->has_value());
+        REQUIRE(attempt->value().state == AttemptState::Running);
+        auto output = attempts.find_output(expected.run.id, 1);
+        REQUIRE(output);
+        REQUIRE_FALSE(output->has_value());
+    }
+
+    jb::core::priv::FakeEventLoop          loop{jb::core::priv::make_fake_event_loop()};
+    jb::core::priv::ScopedCurrentEventLoop current{loop.loop.get()};
+    RecoveryFixture                        storage;
+    FakeTimeSource                         time;
+    FakeCronEngine                         cron;
+    UuidV7Generator                        generator{time};
+    StartupOptions                         options;
+    ExecutionRecord                        record;
+    FakeHttpClient*                        http{};
+    int                                    factory_calls{};
+    std::unique_ptr<DaemonRuntime>         runtime;
+};
+
+auto request(std::string_view method, std::string_view name) -> std::string
+{
+    auto json = jb::rpc::detail::encode_request(
+        1,
+        method,
+        JsonValue{.data = JsonValue::Object{{"name", JsonValue{.data = std::string{name}}}}});
+    auto serialized = serialize_json(json);
+    REQUIRE(serialized);
+    auto frame = jb::rpc::frame_message(*serialized);
+    REQUIRE(frame);
+    return std::move(*frame);
+}
+
+} // namespace
+
+TEST_CASE("Daemon recovery failure prevents runner construction listening and dispatch")
+{
+    RuntimeFixture fixture;
+    fixture.seed(1, JobType::Cli, RunState::Running);
+    {
+        jb::db::Query query{fixture.storage.database};
+        REQUIRE(query.exec("DELETE FROM jobu_attempts"));
+    }
+    fixture.create_runtime();
+    auto result = fixture.run([] {
+        FAIL("must not enter event loop");
+        return EXIT_SUCCESS;
+    });
+    REQUIRE(result == EXIT_FAILURE);
+    REQUIRE(fixture.factory_calls == 0);
+    REQUIRE(fixture.record.starts.empty());
+    REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
+    REQUIRE(fixture.runtime->state() == RuntimeState::Stopped);
+}
+
+TEST_CASE("Daemon recovery precedes runner construction and scheduler startup")
+{
+    RuntimeFixture fixture;
+    auto           interrupted = fixture.seed(1, JobType::Cli, RunState::Running);
+    auto           runnable    = fixture.seed(2);
+    fixture.create_runtime();
+    auto result = fixture.run([&] {
+        REQUIRE(fixture.runtime->state() == RuntimeState::Serving);
+        REQUIRE(std::filesystem::is_socket(fixture.options.socket_path));
+        REQUIRE(fixture.record.starts.size() == 1);
+        REQUIRE(fixture.record.starts.front().key.run_id == runnable.run.id);
+        detail::RunRepository runs{fixture.storage.database, fixture.storage.registry};
+        auto                  run = runs.find_by_id(interrupted.run.id);
+        REQUIRE(run);
+        REQUIRE(run->has_value());
+        REQUIRE(run->value().state == RunState::Interrupted);
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    });
+    REQUIRE(result == EXIT_SUCCESS);
+    REQUIRE(fixture.record.destruction == std::vector<std::string>{"executor", "http"});
+    fixture.require_running(runnable);
+    REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
+}
+
+TEST_CASE("Daemon startup failures unwind runners without terminalizing durable attempts")
+{
+    RuntimeFixture fixture;
+    auto           seeded = fixture.seed();
+    bool           listener_failure{false};
+    SECTION("scheduler startup")
+    {
+        fixture.options.cli_concurrency = 0;
+    }
+    SECTION("listener after dispatch")
+    {
+        listener_failure            = true;
+        fixture.options.socket_path = fixture.storage.directory.path() / "missing" / "daemon.sock";
+    }
+    fixture.create_runtime();
+    auto result = fixture.run([] {
+        FAIL("must not enter event loop");
+        return EXIT_SUCCESS;
+    });
+    REQUIRE(result == EXIT_FAILURE);
+    REQUIRE(fixture.factory_calls == 1);
+    REQUIRE(fixture.record.destruction == std::vector<std::string>{"executor", "http"});
+    if (listener_failure) {
+        REQUIRE(fixture.record.starts.size() == 1);
+        fixture.require_running(seeded);
+    }
+    else {
+        REQUIRE(fixture.record.starts.empty());
+        fixture.storage.require_run(seeded);
+    }
+    REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
+}
+
+TEST_CASE("Daemon signal polling skips startup and preserves successful exit")
+{
+    RuntimeFixture fixture;
+    fixture.seed();
+    bool stop{false};
+    SECTION("before recovery")
+    {
+        stop = true;
+    }
+    SECTION("during recovery")
+    {}
+    fixture.create_runtime([&] { return stop || fixture.runtime->state() == RuntimeState::Recovering; });
+    REQUIRE(fixture.run([] {
+        FAIL("must not enter event loop");
+        return EXIT_FAILURE;
+    }) == EXIT_SUCCESS);
+    REQUIRE(fixture.factory_calls == 0);
+    REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
+}
+
+TEST_CASE("Daemon signal during synchronous dispatch prevents listening and further dispatch")
+{
+    RuntimeFixture fixture;
+    auto           first  = fixture.seed();
+    auto           second = fixture.seed(2);
+    bool           signal_requested{false};
+    fixture.record.on_start = [&] { signal_requested = true; };
+    fixture.create_runtime([&] { return signal_requested; });
+    REQUIRE(fixture.run([] {
+        FAIL("must not enter event loop");
+        return EXIT_FAILURE;
+    }) == EXIT_SUCCESS);
+    REQUIRE(fixture.record.starts.size() == 1);
+    fixture.require_running(first);
+    fixture.storage.require_run(second);
+    REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
+}
+
+TEST_CASE("Daemon gates remain latched through final task drains and retained completions")
+{
+    RuntimeFixture fixture;
+    auto           seeded = fixture.seed();
+    fixture.create_runtime();
+    bool drained{false};
+    auto result = fixture.run([&] {
+        auto* management = RuntimeTestAccess::management(*fixture.runtime);
+        auto* scheduler  = RuntimeTestAccess::scheduler(*fixture.runtime);
+        REQUIRE(fixture.loop.loop->post([&, management, scheduler] {
+            fixture.runtime->request_stop();
+            fixture.runtime->request_stop();
+            // This task is added after the normal task snapshot. It executes in run()'s final drain.
+            REQUIRE(fixture.loop.loop->post([&, management, scheduler] {
+                drained = true;
+                REQUIRE(fixture.record.destruction.empty());
+                REQUIRE(scheduler->state() == SchedulerState::Shutdown);
+                REQUIRE_FALSE(scheduler->start());
+                auto created = management->create_queue({.name = "late"});
+                REQUIRE_FALSE(created);
+                REQUIRE(created.error().code == "jobu.service.stopping");
+                fixture.record.completions.front()(success(fixture.record.starts.front().key));
+                fixture.require_running(seeded);
+            }));
+        }));
+        return fixture.loop.loop->run() ? EXIT_SUCCESS : EXIT_FAILURE;
+    });
+    REQUIRE(result == EXIT_SUCCESS);
+    REQUIRE(drained);
+    fixture.runtime.reset();
+    fixture.record.completions.front()(success(fixture.record.starts.front().key));
+    fixture.require_running(seeded);
+}
+
+TEST_CASE("Daemon HTTP shared failure wins before failed completion persistence")
+{
+    RuntimeFixture fixture;
+    auto           cli  = fixture.seed();
+    auto           http = fixture.seed(2, JobType::Http);
+    fixture.create_runtime();
+    auto result = fixture.run([&] {
+        REQUIRE(fixture.http->pending_request_ids().size() == 1);
+        REQUIRE(fixture.http->inject_shared_failure(failure()));
+        REQUIRE(fixture.runtime->state() == RuntimeState::Stopping);
+        REQUIRE(fixture.record.destruction.empty());
+        fixture.record.completions.front()(success(fixture.record.starts.front().key));
+        fixture.require_running(cli);
+        fixture.require_running(http);
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    });
+    REQUIRE(result == EXIT_FAILURE);
+    REQUIRE(fixture.record.destruction == std::vector<std::string>{"executor", "http"});
+    fixture.require_running(cli);
+    fixture.require_running(http);
+}
+
+TEST_CASE("Daemon scheduler failure shuts management admission before the notifying callback returns")
+{
+    RuntimeFixture fixture;
+    auto           seeded = fixture.seed();
+    fixture.create_runtime();
+    auto result = fixture.run([&] {
+        // A mismatched completion identity is a fatal scheduler invariant, not a normal failed job.
+        fixture.record.completions.front()(success({.run_id = recovery_id(999), .attempt_number = 1}));
+        REQUIRE(fixture.runtime->state() == RuntimeState::Stopping);
+        REQUIRE(RuntimeTestAccess::scheduler(*fixture.runtime)->state() == SchedulerState::Failed);
+        auto rejected = RuntimeTestAccess::management(*fixture.runtime)->create_queue({.name = "late"});
+        REQUIRE_FALSE(rejected);
+        REQUIRE(rejected.error().code == "jobu.service.stopping");
+        REQUIRE(fixture.record.destruction.empty());
+        fixture.record.completions.front()(success(fixture.record.starts.front().key));
+        fixture.require_running(seeded);
+        return EXIT_SUCCESS;
+    });
+    REQUIRE(result == EXIT_FAILURE);
+    fixture.require_running(seeded);
+}
+
+TEST_CASE("Daemon connection admission stays closed during already-ready listener callbacks")
+{
+    RuntimeFixture fixture;
+    fixture.create_runtime();
+    REQUIRE(fixture.run([&] {
+        auto const listener_fd = fixture.loop.backend->last_added_fd;
+        auto       callback    = jb::core::priv::EventLoopTestAccess::fd_callback(*fixture.loop.loop, listener_fd);
+        REQUIRE(callback);
+        jb::net::LocalSocket client;
+        client.connect_to_server(fixture.options.socket_path);
+        REQUIRE(client.state() != jb::net::LocalSocketState::Unconnected);
+        fixture.runtime->request_stop();
+
+        // Simulate a listener readiness notification already present in the current poll batch.
+        // The listener is still alive, but its notification must not transfer a connection to RPC.
+        callback(listener_fd, FdEvent::Read);
+        REQUIRE(RuntimeTestAccess::rpc(*fixture.runtime)->connection_count() == 0);
+        REQUIRE(fixture.record.destruction.empty());
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+    REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
+}
+
+TEST_CASE("Daemon management failure gates buffered RPC requests without destroying callback owners")
+{
+    RuntimeFixture fixture;
+    auto           seeded = fixture.seed();
+    fixture.create_runtime();
+    auto result = fixture.run([&] {
+        auto* server = RuntimeTestAccess::rpc(*fixture.runtime);
+        auto  device = std::make_unique<MemoryIODevice>();
+        auto* peer   = device.get();
+        device->open();
+        REQUIRE(server->add_connection(std::move(device)));
+        {
+            jb::db::Query query{fixture.storage.database};
+            REQUIRE(query.exec("CREATE TRIGGER fail_queue BEFORE INSERT ON jobu_queues "
+                               "WHEN NEW.name = 'first' BEGIN SELECT RAISE(ABORT, 'sensitive SQL'); END"));
+        }
+        peer->inject_input(request("queue.create", "first") + request("queue.create", "second"));
+        REQUIRE(fixture.runtime->state() == RuntimeState::Stopping);
+        REQUIRE(fixture.record.destruction.empty());
+        REQUIRE(server->connection_count() == 1);
+        REQUIRE(peer->written_data().find("jobu.service.stopping") != std::string::npos);
+        REQUIRE(peer->written_data().find("sensitive SQL") == std::string::npos);
+        fixture.record.completions.front()(success(fixture.record.starts.front().key));
+        fixture.require_running(seeded);
+        return EXIT_SUCCESS;
+    });
+    REQUIRE(result == EXIT_FAILURE);
+    REQUIRE(fixture.runtime->state() == RuntimeState::Stopped);
+    fixture.require_running(seeded);
+}
+
+TEST_CASE("Daemon records event-loop failure and fatal errors after a normal stop")
+{
+    RuntimeFixture fixture;
+    auto           seeded = fixture.seed();
+    fixture.create_runtime();
+    bool late_failure{false};
+    SECTION("poll failure")
+    {
+        fixture.loop.backend->poll_result = -1;
+    }
+    SECTION("fatal after signal")
+    {
+        late_failure = true;
+    }
+    auto result = fixture.run([&] {
+        if (late_failure) {
+            fixture.runtime->request_stop();
+            fixture.runtime->fail("test", failure());
+            return EXIT_SUCCESS;
+        }
+        return fixture.loop.loop->run() ? EXIT_SUCCESS : EXIT_FAILURE;
+    });
+    REQUIRE(result == EXIT_FAILURE);
+    REQUIRE(fixture.runtime->state() == RuntimeState::Stopped);
+    REQUIRE(fixture.record.destruction == std::vector<std::string>{"executor", "http"});
+    fixture.require_running(seeded);
+    REQUIRE(fixture.run([] {
+        FAIL("must not restart");
+        return EXIT_SUCCESS;
+    }) == EXIT_FAILURE);
+}
+
+TEST_CASE("Daemon runner factory failure never enters serving")
+{
+    RuntimeFixture fixture;
+    bool           stop{false};
+    bool           fail_factory{false};
+    SECTION("failure after constructing runner infrastructure")
+    {
+        fail_factory = true;
+    }
+    SECTION("signal after constructing runner infrastructure")
+    {}
+    fixture.create_runtime([&] { return stop; });
+    REQUIRE(fixture.runtime->run(
+                [&] {
+                    auto runners = fixture.make_runners();
+                    if (fail_factory) {
+                        return RunnersResult::failure(failure());
+                    }
+                    stop = true;
+                    return runners;
+                },
+                [] {
+                    FAIL("must not enter event loop");
+                    return EXIT_SUCCESS;
+                }) == (fail_factory ? EXIT_FAILURE : EXIT_SUCCESS));
+    REQUIRE(fixture.runtime->state() == RuntimeState::Stopped);
+    REQUIRE(fixture.record.starts.empty());
+    REQUIRE(fixture.record.destruction == std::vector<std::string>{"executor", "http"});
+    REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
+}

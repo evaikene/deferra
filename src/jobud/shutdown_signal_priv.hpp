@@ -20,13 +20,14 @@ class ShutdownSignalWatch;
 ///
 /// This is daemon infrastructure, not an embeddable signal API. Install, poll, attach, and close on
 /// the main thread. Installation unblocks these two signals on that thread; subsequently created
-/// workers deliberately inherit that mask and may execute the handler. All such workers must be
-/// joined before close/destruction: blocking only the main thread cannot retire a live handler.
+/// workers deliberately inherit that mask and may execute the handler. Retirement prevents new
+/// descriptor borrows and waits for admitted handlers, allowing library workers to outlive the relay.
 /// Other signal dispositions, including SIGCHLD, are untouched.
 ///
 /// The request is monotonic for the process lifetime. Poll before entering the event loop and use
 /// requested() as recovery's borrowed stop predicate. A pre-run EventLoop exit request is not sticky.
-/// Destroy the watch before its loop, and keep this relay alive through watch and worker teardown.
+/// Destroy the watch before its loop, and keep this relay alive through application-owned cleanup.
+/// Stop creating workers before retirement. Installation is still a pre-worker process-main operation.
 class ShutdownSignalRelay final {
 public:
 
@@ -47,7 +48,9 @@ public:
     [[nodiscard]] auto attach(jb::core::EventLoop& loop, std::function<void()> notify)
         -> jb::core::Result<std::unique_ptr<ShutdownSignalWatch>, jb::core::Error>;
 
-    /// After watch destruction and worker joins, restores dispositions/mask and closes descriptors.
+    /// After watch destruction, restores dispositions/mask and closes descriptors safely even when
+    /// workers survive. Waits for admitted handler writes, not worker exit; a late handler cannot
+    /// touch a retired descriptor or the destroyed relay. The wait has no hard wall-clock bound.
     /// Idempotent. A restoration failure returns jobud.signal.cleanup and retains handler resources
     /// where necessary for a safe retry; destruction logs an unrecovered cleanup error.
     [[nodiscard]] auto close() -> jb::core::Result<void, jb::core::Error>;
