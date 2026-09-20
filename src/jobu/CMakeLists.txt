@@ -55,6 +55,8 @@ target_sources(${TARGET}
         retry_policy_priv.hpp
         recurrence_priv.cpp
         recurrence_priv.hpp
+        recovery.cpp
+        recovery_priv.hpp
         recovery_repository_priv.cpp
         recovery_repository_priv.hpp
         recovery_retry_priv.cpp
@@ -92,6 +94,7 @@ target_sources(${TARGET}
         management_json.hpp
         management_rpc.hpp
         queue.hpp
+        recovery.hpp
         run.hpp
         scheduler.hpp
         secret.hpp
