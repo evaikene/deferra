@@ -34,9 +34,15 @@ these features, with native Process, CLI executor, mixed scheduler, client,
 and daemon integration coverage. Final clean Linux verification after the
 macOS changes passed. The merged Phase 6 disabled-capture correction also passed
 integrated Linux and focused native macOS validation. Phase 6 is complete.
-The [closure design](docs/planning/jobu-phase6-closure-code-design.md) and
-[verification addendum](docs/planning/jobu-phase6-verification.md#stage-621-closure-verification)
-record the tested revision, evidence, and accepted historical limitations.
+The [closure design](docs/planning/jobu-phase6-closure-code-design.md) records the
+Phase 6 correction and accepted historical limitations.
+
+Phase 7 recovery and immediate shutdown are complete. Final clean Linux
+verification passed all 135 registered tests against the merged implementation.
+Native Stage 7.18 passed 136 tests, with the real-root denial case skipped; the
+later scheduler startup sanitizer has Linux evidence only. The single shared
+`~/cloud/Projektid/JobU/jobu-phase7-verification.md` records exact revisions,
+commands, platform limits, and the inherited Phase 6 closure summary.
 Windows is not a v1 runtime target.
 
 ## Requirements

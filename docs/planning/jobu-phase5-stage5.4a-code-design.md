@@ -1,7 +1,7 @@
 # JobU Phase 5 — Stage 5.4a Code-Level Design
 
 Status: implementation-ready design  
-Baseline: `main` at `5c80f21c18e41465aba7ca8f38bfcc7e85113429`, after Stage 5.4  
+Baseline: completed Stage 5.4\
 Prepared: 2026-08-28  
 Revised: 2026-08-28 after native macOS kqueue mode-transition validation
 Parent design: `docs/planning/jobu-phase5-code-design.md`

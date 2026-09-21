@@ -1,7 +1,7 @@
 # JobU Phase 5 Closure Code-Level Design
 
 **Status:** implementation-ready design  
-**Baseline:** GitHub `main` at `447e8b0e0713e026c32c28c31524e6c1b56c49c4`  
+**Baseline:** completed Stage 5.19 HTTP-runner verification\
 **Stage range:** 5.20 through 5.32  
 **Repository path when adopted:** `docs/planning/jobu-phase5-closure-code-design.md`
 

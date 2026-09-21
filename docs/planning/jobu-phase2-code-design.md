@@ -7,9 +7,8 @@ This document defines Phase 2 of JobU: bounded local IPC, a transport-independen
 It is based on:
 
 - the JobU v1 technical plan .codex/jobu-v1-technical-plan.md;
-- Phase 0 merged as commit `4e6724834dc49df447f9f9224c88a7e03acab207`;
-- Phase 1 merged as commit `f2a438155a3be04a20333563a4119e0baa0313c3`;
-- current `main` at commit `1652407584742c29de2c0f0865c352124d029b3b`;
+- the merged Phase 0 core foundation;
+- the merged Phase 1 database layer;
 - the existing `jb::core::Application`, `EventLoop`, `Object`, `Signal`, and `IODevice` contracts;
 - the existing `jb::net::TcpSocket` implementation as a style and event-loop integration reference;
 - the repository's mandatory staged implementation workflow.

@@ -21,7 +21,7 @@ current source tree remain authoritative for exact implemented behavior.
 | [JobU Phase 5 closure code-level design](jobu-phase5-closure-code-design.md) | Completed | Defines the Object private-data and signal/callback architecture, closure stages, and Phase 6 entry boundary. |
 | [JobU Phase 6 code-level design](jobu-phase6-code-design.md) | Completed | Defines asynchronous local command execution, process supervision, CLI policy, executor integration, and platform stage boundaries. |
 | [JobU Phase 6 closure code-level design](jobu-phase6-closure-code-design.md) | Completed: Stage 6.20 merged and verified; Stage 6.21 evidence recorded | Corrects disabled CLI capture retention and records the final verification and closure disposition. |
-| [JobU Phase 7 code-level design](jobu-phase7-code-design.md) | Stages 7.1–7.18 merged; Stage 7.19 ready for review; Stage 7.20 pending | Defines startup recovery, terminal storage-failure gates, immediate shutdown, and platform verification boundaries. |
+| [JobU Phase 7 code-level design](jobu-phase7-code-design.md) | Completed: merged Stage 7.19 implementation verified by Stage 7.20 | Defines startup recovery, terminal storage-failure gates, immediate shutdown, and platform verification boundaries. |
 
 ## Authority
 
@@ -59,6 +59,9 @@ Stage: 5.3
 
 ## Maintenance
 
+- Describe implementation baselines by phase or stage, without specific commit
+  IDs. Exact tested revisions and platform evidence belong in shared verification
+  records outside this directory.
 - Approve and merge plan changes before the corresponding implementation when
   practical.
 - Mark a stage complete only after its implementation has merged and its

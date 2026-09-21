@@ -7,7 +7,7 @@ This document defines the reduced Phase 1 of JobU: a small Qt SQL-inspired datab
 It is based on:
 
 - the JobU v1 technical plan;
-- Phase 0 merged into `main` as commit `4e6724834dc49df447f9f9224c88a7e03acab207`;
+- the merged Phase 0 core foundation;
 - the current `jb::core::Result<T, E>`, `Error`, and `ByteBuffer` contracts;
 - the repository's staged implementation rule.
 

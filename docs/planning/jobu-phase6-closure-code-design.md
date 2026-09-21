@@ -1,7 +1,7 @@
 # JobU Phase 6 closure code-level design
 
 Date: 2026-09-19  
-Baseline: `112da91f37eb1b81baeaed413294e8364d6aa1b2` (Stage 6.19, PR #153)  
+Baseline: completed Stage 6.19 verification\
 Proposed repository path: `docs/planning/jobu-phase6-closure-code-design.md`
 
 ## 1. Purpose and disposition
@@ -28,7 +28,7 @@ Baseline source references:
 
 With both configured limits at 64 MiB, a disabled-capture attempt can retain 128 MiB of payload, with additional allocation while `take()` assembles the completion snapshot. Retention and copying multiply across concurrent attempts. Correct final JSON does not make that runtime behavior conformant.
 
-The final audit independently compared the tested Stage 6.18 source `d637ba65f878f4fa0716d56d730be6b11a35f14a` with the baseline: only README/planning documents changed. The handoff reports Linux 114/114 and carried native macOS 115/115 CTest targets passing. These counts describe historical runs, not this closure patch. The audit workspace lacked CMake, so it did not independently repeat those runs.
+The final audit independently compared the tested Stage 6.18 source with the baseline: only README/planning documents changed. The handoff reports Linux 114/114 and carried native macOS 115/115 CTest targets passing. These counts describe historical runs, not this closure patch. The audit workspace lacked CMake, so it did not independently repeat those runs.
 
 ## 3. Required behavior
 
@@ -172,7 +172,7 @@ Update these tracked documents together:
 | `README.md` | Remove the obsolete claim that deleted native provenance must be recovered. Link the closure design/verification record and state the actual closure status. |
 | `docs/planning/README.md` | Add this closure design, record stages 6.20/6.21 and their actual status, and remove obsolete recovery gates. |
 | `docs/planning/jobu-phase6-code-design.md` | Preserve historical stage definitions; append a concise final-audit/closure disposition linking this design and the verification addendum. Replace obsolete current-status statements without rewriting prior test history. |
-| `docs/planning/jobu-phase6-verification.md` | Append closure-patch verification and update the introduction/remaining-work section. Preserve original 6.19 measurements, tested revisions, and platform limitations. |
+| Shared phase verification record | Record closure-patch verification and update the disposition. Preserve original measurements, tested revisions, and platform limitations in the shared evidence document, outside repository planning files. |
 
 The verification addendum must record:
 

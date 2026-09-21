@@ -1,7 +1,7 @@
 # JobU Phase 5 Code-Level Design
 
 Status: implementation-ready design  
-Baseline: `main` at `2cdc64dae62b0cf64bbaf6ed2b36c72f92fd5412`  
+Baseline: completed Phase 4.1\
 Prepared: 2026-08-27
 
 ## 1. Purpose
@@ -14,7 +14,7 @@ Phase 5 is deliberately limited to HTTP. It does not implement native processes,
 
 ## 2. Baseline and repository evidence
 
-This design is based on GitHub `main` at commit `2cdc64d`, after Phase 4.1:
+This design is based on the completed Phase 4.1 baseline:
 
 - Phase 4's deterministic scheduler, retries, capacity accounting, Run Now barriers, and cancellation state transitions are present.
 - Phase 4.1 moved the generic JSON facility to `jb::core`; all new JSON code uses `jb::core::JsonValue` and `core.json.*` codec errors.
