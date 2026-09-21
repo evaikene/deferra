@@ -2,13 +2,23 @@
 
 ## 1. Purpose and baseline
 
+Completed: the merged Stage 7.21 correction passed Stage 7.22's fresh Debug,
+SQLite-enabled Linux build and all 135 registered tests, with one internal
+root-only case skipped. The cancellation rollback finding is resolved. This
+correction has Linux-only execution evidence under the approved platform choice
+in §7; earlier native evidence retains its original source scope. Exact tested
+identities, the observed pre-fix failure, and verification results are retained
+in the shared external `jobu-phase7-verification.md` record. Phase 8 is the next
+planning boundary.
+
+The defect description and implementation stages below preserve the original
+audit baseline and correction contract.
+
 This plan closes the single issue found in the final independent Phase 7 audit: scheduler cancellation can return an ordinary operation error after failed transaction cleanup has poisoned the database, without immediately closing scheduler completion acceptance or notifying the daemon.
 
 Baseline: the merged Stage 7.20 tree, following the Stage 7.19 implementation and final verification. Refresh `main` and read the current root `AGENTS.md` before implementation. Confirm the cancellation boundary still lacks the connection-health check described below; reconcile any intervening fix before editing.
 
 This is a corrective extension to `docs/planning/jobu-phase7-code-design.md`, using Stages **7.21–7.22**. The existing Phase 7 implementation and its evidence remain the baseline. The final audit checked the merged implementation and native source provenance but did not execute a new C++ regression; Stage 7.21 must establish the failure with a deterministic test.
-
-Proposed repository path: `docs/planning/jobu-phase7-closure-code-design.md`.
 
 Keep exact tested revisions and execution provenance in the existing standalone `jobu-phase7-verification.md` record. Follow the repository's current convention of omitting specific commit IDs and commit URLs from planning documents.
 
@@ -186,11 +196,11 @@ Report changed files, the observed pre-fix failure, exact commands/results, impl
 
 Proceed after approval of Stage 7.21. Start from the reviewed implementation and confirm there are no unrecorded source/test/build changes.
 
-### Native macOS follow-up
+### Native macOS coverage
 
-When the established native macOS workspace is available, build and run the same four focused targets using its actual configured build directory. Record host, toolchain, tested source identity, commands, results, and skips. This is a native check of the correction; no full native suite, signal stress run, or root-only test is required for this platform-independent result-boundary change.
+The approved Stage 7.22 plan uses Linux-only execution evidence for this correction. The change selects a result after RAII cleanup through existing database-health and scheduler-failure paths; it changes no platform backend, event-loop primitive, signal handling, dependency, or build configuration. A separate native macOS session is not required for closure.
 
-If native execution is unavailable, state that the correction has Linux-only execution evidence. Keep the earlier native Stage 7.18 result under its original source scope; do not relabel it as verification of this fix. No deleted historical evidence needs to be recovered.
+Keep the earlier native Stage 7.18 result under its original source scope; it does not verify this correction. A future native follow-up may build and run the same four focused targets, recording host, toolchain, tested source identity, commands, results, and skips. No full native suite, signal stress run, root-only test, or recovery of deleted historical evidence is required by this stage.
 
 ### Final Linux verification
 
