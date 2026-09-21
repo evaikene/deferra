@@ -35,6 +35,9 @@ For code changes, Codex must use a staged workflow.
 * `ctest --test-dir .bld/test --output-on-failure`: run the registered Catch2 tests and show failures.
 * `clang-format -i src/core/*.hpp src/core/*.cpp test/*.cpp`: format changed C++ files using the repository style.
 
+For containerized Ubuntu and Alpine validation, follow
+[containers/README.md](containers/README.md).
+
 The project requires CMake 3.20+, a C++20 compiler, `fmt`, `sqlite3`, `nlohmann_json`, and Catch2 discoverable via CMake package config.
 
 ## Clangd Diagnostics
