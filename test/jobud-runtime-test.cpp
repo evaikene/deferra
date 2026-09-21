@@ -14,12 +14,15 @@
 #include "support/fake_event_loop_backend.hpp"
 #include "support/fake_http_client.hpp"
 #include "support/fake_time_source.hpp"
+#include "support/fault_database_driver.hpp"
 #include "support/memory_io_device.hpp"
 #include "support/recovery_fixture.hpp"
+#include "support/storage_fault_helpers.hpp"
 #include "uuid.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -106,6 +109,23 @@ private:
 struct RuntimeFixture {
     RuntimeFixture()
     {
+        faults->classify = [this](std::string_view sql) -> std::string {
+            if (sql.starts_with("SELECT id FROM jobu_runs WHERE 1 = 1") &&
+                sql.find("AND state = :state") == std::string_view::npos) {
+                auto committed = std::ranges::find(faults->calls,
+                                                   DatabaseCall{.boundary  = "connection",
+                                                                .operation = DatabaseOperation::Commit,
+                                                                .phase     = DatabaseFaultPhase::AfterSuccess});
+                return committed == faults->calls.end() ? "recovery.scan" : "recovery.final_scan";
+            }
+            if (sql.starts_with("INSERT INTO jobu_attempt_output")) {
+                return "recovery.output";
+            }
+            if (sql.starts_with("INSERT INTO jobu_queues")) {
+                return "management.queue";
+            }
+            return "other";
+        };
         time.set_utc(UtcTimePoint{120s});
         auto queue              = recovery_queue(recovery_id(1));
         queue.concurrency_limit = 2;
@@ -175,7 +195,10 @@ struct RuntimeFixture {
 
     jb::core::priv::FakeEventLoop          loop{jb::core::priv::make_fake_event_loop()};
     jb::core::priv::ScopedCurrentEventLoop current{loop.loop.get()};
-    RecoveryFixture                        storage;
+    std::shared_ptr<DatabaseFaultState>    faults = std::make_shared<DatabaseFaultState>();
+    RecoveryFixture                        storage{[this](std::unique_ptr<jb::db::Driver> driver) {
+        return std::make_unique<FaultDatabaseDriver>(std::move(driver), faults);
+    }};
     FakeTimeSource                         time;
     FakeCronEngine                         cron;
     UuidV7Generator                        generator{time};
@@ -219,6 +242,52 @@ TEST_CASE("Daemon recovery failure prevents runner construction listening and di
     REQUIRE(fixture.record.starts.empty());
     REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
     REQUIRE(fixture.runtime->state() == RuntimeState::Stopped);
+}
+
+TEST_CASE("Daemon injected recovery failures never construct runners or enter serving")
+{
+    using Operation = DatabaseOperation;
+    using Phase     = DatabaseFaultPhase;
+    for (auto const& fault : std::vector<DatabaseCall>{
+             {.boundary = "recovery.scan", .operation = Operation::Prepare},
+             {.boundary = "recovery.output", .operation = Operation::Execute},
+             {.boundary = "connection", .operation = Operation::Commit},
+             {.boundary = "connection", .operation = Operation::Commit, .phase = Phase::AfterSuccess},
+             {.boundary = "recovery.final_scan", .operation = Operation::Fetch}
+    }) {
+        DYNAMIC_SECTION(fault.boundary << ' ' << static_cast<int>(fault.operation) << ' '
+                                       << static_cast<int>(fault.phase))
+        {
+            RuntimeFixture fixture;
+            auto           original = fixture.seed(1, JobType::Cli, RunState::Running);
+            fixture.create_runtime();
+            fixture.faults->calls.clear();
+            fixture.faults->faults.push_back({.at = fault, .error = fault_error()});
+            auto result = fixture.run([] {
+                FAIL("failed recovery must not enter the event loop");
+                return EXIT_SUCCESS;
+            });
+            CHECK(result == EXIT_FAILURE);
+            require_consumed_faults(*fixture.faults);
+            CHECK(fixture.factory_calls == 0);
+            CHECK(fixture.record.starts.empty());
+            CHECK_FALSE(std::filesystem::exists(fixture.options.socket_path));
+            CHECK(fixture.runtime->state() == RuntimeState::Stopped);
+
+            fixture.runtime.reset();
+            fixture.storage.reopen();
+            if (fault.phase == Phase::AfterSuccess || fault.boundary == "recovery.final_scan") {
+                detail::RunRepository runs{fixture.storage.database, fixture.storage.registry};
+                auto                  repaired = runs.find_by_id(original.run.id);
+                REQUIRE(repaired);
+                REQUIRE(*repaired);
+                CHECK((*repaired)->state == RunState::Interrupted);
+            }
+            else {
+                fixture.storage.require_run(original);
+            }
+        }
+    }
 }
 
 TEST_CASE("Daemon recovery precedes runner construction and scheduler startup")
@@ -448,6 +517,80 @@ TEST_CASE("Daemon management failure gates buffered RPC requests without destroy
     REQUIRE(result == EXIT_FAILURE);
     REQUIRE(fixture.runtime->state() == RuntimeState::Stopped);
     fixture.require_running(seeded);
+}
+
+TEST_CASE("Daemon injected mutation failures gate buffered requests and retained completions")
+{
+    for (auto const* scenario : {"write", "acknowledgement", "conflict_rollback"}) {
+        DYNAMIC_SECTION(scenario)
+        {
+            RuntimeFixture fixture;
+            auto           seeded       = fixture.seed();
+            bool const     conflict     = std::string_view{scenario} == "conflict_rollback";
+            bool const     acknowledged = std::string_view{scenario} == "acknowledgement";
+            if (conflict) {
+                auto queue = recovery_queue(recovery_id(9));
+                queue.name = "first";
+                fixture.storage.insert_queue(queue);
+            }
+            fixture.create_runtime();
+            auto result = fixture.run([&] {
+                auto* server  = RuntimeTestAccess::rpc(*fixture.runtime);
+                auto* service = RuntimeTestAccess::management(*fixture.runtime);
+                auto  device  = std::make_unique<MemoryIODevice>();
+                auto* peer    = device.get();
+                device->open();
+                REQUIRE(server->add_connection(std::move(device)));
+
+                std::size_t calls_at_failure = 0;
+                std::size_t failures         = 0;
+                auto        connection       = service->failed.connect(service, [&](Error const& error) {
+                    ++failures;
+                    calls_at_failure = fixture.faults->calls.size();
+                    check_safe_error(error, "db.io");
+                });
+                auto fault = DatabaseCall{.boundary = "management.queue", .operation = DatabaseOperation::Execute};
+                if (conflict || acknowledged) {
+                    fault = {.boundary  = "connection",
+                             .operation = conflict ? DatabaseOperation::Rollback : DatabaseOperation::Commit,
+                             .phase     = acknowledged ? DatabaseFaultPhase::AfterSuccess : DatabaseFaultPhase::Before};
+                }
+                fixture.faults->faults.push_back({.at = fault, .error = fault_error()});
+                // Both frames are already admitted. The second must reach the management gate after
+                // the first latched failure, with owners alive until this event-loop stack unwinds.
+                peer->inject_input(request("queue.create", "first") + request("queue.create", "second"));
+                CHECK(fixture.runtime->state() == RuntimeState::Stopping);
+                CHECK(fixture.record.destruction.empty());
+                CHECK(server->connection_count() == 1);
+                CHECK(failures == 1U);
+                REQUIRE(calls_at_failure > 0U);
+                CHECK(fixture.faults->calls.size() == calls_at_failure);
+                CHECK(peer->written_data().find("jobu.service.stopping") != std::string::npos);
+                CHECK(peer->written_data().find("private-backend-marker") == std::string::npos);
+                fixture.record.completions.front()(success(fixture.record.starts.front().key));
+                CHECK(fixture.faults->calls.size() == calls_at_failure);
+                connection.disconnect();
+                return EXIT_SUCCESS;
+            });
+            CHECK(result == EXIT_FAILURE);
+            require_consumed_faults(*fixture.faults);
+            CHECK(fixture.runtime->state() == RuntimeState::Stopped);
+            fixture.runtime.reset();
+            fixture.storage.reopen();
+            fixture.require_running(seeded);
+            jb::db::Query query{fixture.storage.database};
+            REQUIRE(query.exec("SELECT name FROM jobu_queues WHERE name IN ('first', 'second') ORDER BY name"));
+            auto next = query.next();
+            REQUIRE(next);
+            CHECK(*next == (acknowledged || conflict));
+            if (*next) {
+                CHECK(query.value(0) == jb::db::make_text("first"));
+                auto end = query.next();
+                REQUIRE(end);
+                CHECK_FALSE(*end);
+            }
+        }
+    }
 }
 
 TEST_CASE("Daemon records event-loop failure and fatal errors after a normal stop")

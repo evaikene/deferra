@@ -30,6 +30,10 @@
 #include "uuid.hpp"               // IWYU pragma: keep for public header self-containment coverage
 #include "value.hpp"              // IWYU pragma: keep for public header self-containment coverage
 
+#include <type_traits>
+
+static_assert(std::is_same_v<decltype(&jb::db::Database::is_poisoned), bool (jb::db::Database::*)() const noexcept>);
+
 auto main() -> int
 {
     return 0;

@@ -64,6 +64,11 @@ public:
     /// @return True after successful open() and before successful close().
     [[nodiscard]] auto is_open() const noexcept -> bool;
 
+    /// Reports whether a failed rollback or ownership violation made this connection unusable.
+    /// @return True until the poisoned connection is successfully closed; false for invalid or closed handles.
+    /// Call on the connection's owner thread. This observation does not call the driver or alter last_error().
+    [[nodiscard]] auto is_poisoned() const noexcept -> bool;
+
     /// Returns the selected backend name.
     /// @return Driver-owned name, or an empty view for an invalid database.
     [[nodiscard]] auto driver_name() const noexcept -> std::string_view;

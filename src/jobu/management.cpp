@@ -412,6 +412,20 @@ struct ManagementService::Private : jb::core::priv::ObjectPrivate {
 
         failure_origin = detail::StorageFailureOrigin::Operation;
         auto result    = std::forward<Operation>(operation)();
+        auto fatal     = !result && detail::classify_storage_failure(result.error(), context, failure_origin) ==
+                                        detail::StorageFailureDisposition::Fatal;
+
+        // An ordinary conflict can unwind through a failed rollback. Observe connection health after
+        // the guard is gone, so cleanup failure closes admission before any subsequent request.
+        if (database.is_poisoned()) {
+            if (!fatal) {
+                result = ServiceResult<T>::failure(database.last_error().value_or(
+                    service_error(jb::core::ErrorCategory::Internal,
+                                  "db.connection_failed",
+                                  "The database connection is unusable after an unrecoverable failure")));
+            }
+            fatal = true;
+        }
         if (result) {
             if (context == detail::StorageOperation::Mutation) {
                 owner.emit_mutation_committed();
@@ -419,9 +433,7 @@ struct ManagementService::Private : jb::core::priv::ObjectPrivate {
             return result;
         }
 
-        auto&      error = result.error();
-        auto const fatal = detail::classify_storage_failure(error, context, failure_origin) ==
-                           detail::StorageFailureDisposition::Fatal;
+        auto& error = result.error();
         // Translated uniqueness conflicts may still carry backend detail. Keep
         // their ordinary disposition, but do not expose that diagnostic text.
         if (fatal || error.code.starts_with("db.") || error.code == "jobu.queue.name_conflict" ||

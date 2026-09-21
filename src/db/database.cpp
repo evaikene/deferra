@@ -83,6 +83,11 @@ auto Database::is_open() const noexcept -> bool
     return is_valid() && _data->open && _data->driver->is_open();
 }
 
+auto Database::is_poisoned() const noexcept -> bool
+{
+    return _data && _data->poisoned;
+}
+
 auto Database::driver_name() const noexcept -> std::string_view
 {
     return is_valid() ? _data->driver->name() : std::string_view{};
