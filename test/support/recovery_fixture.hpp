@@ -12,6 +12,8 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -44,7 +46,8 @@ struct RecoveryRunFixture {
 /// scenarios must modify these values or execute explicit SQL in the test. Helpers report failures through Catch2.
 class RecoveryFixture final {
 public:
-    RecoveryFixture();
+    /// Optionally decorates the closed SQLite driver; the wrapper must preserve exclusive ownership and file identity.
+    explicit RecoveryFixture(std::function<std::unique_ptr<db::Driver>(std::unique_ptr<db::Driver>)> wrap_driver = {});
 
     /// Builds an active one-time definition with three allowed attempts; callers may edit the returned value.
     [[nodiscard]] auto make_job(core::Uuid id, core::Uuid queue_id, jobu::JobType type = jobu::JobType::Cli) const

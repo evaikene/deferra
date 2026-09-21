@@ -61,6 +61,39 @@ protected:
     /// Constructs the base portion of a concrete backend query.
     DriverQuery() = default;
 
+    /// @name Forwarding operations for query decorators
+    /// The decorator must exclusively own the wrapped query and
+    /// destroy it before its connection. Invoke these only within the corresponding outer Query operation;
+    /// they preserve backend results/errors and do not perform generic binding, cursor, or lifetime checks.
+    /// @{
+    /// Prepares the supplied SQL on the wrapped query.
+    [[nodiscard]] static auto forward_prepare(DriverQuery& query, std::string_view sql)
+        -> jb::core::Result<void, jb::core::Error>;
+
+    /// Returns the wrapped query's bind-slot count.
+    [[nodiscard]] static auto forward_parameter_count(DriverQuery const& query) noexcept -> std::size_t;
+
+    /// Returns a bind-slot name borrowed from the wrapped query.
+    [[nodiscard]] static auto forward_parameter_name(DriverQuery const& query, std::size_t index) -> std::string_view;
+
+    /// Binds a value whose storage remains owned by the outer Query.
+    [[nodiscard]] static auto forward_bind(DriverQuery& query, std::size_t index, Value const& value)
+        -> jb::core::Result<void, jb::core::Error>;
+
+    /// Executes the wrapped statement and returns its owning metadata.
+    [[nodiscard]] static auto forward_exec(DriverQuery& query) -> jb::core::Result<ExecutionInfo, jb::core::Error>;
+
+    /// Returns the next owning row, end-of-results, or the wrapped error.
+    [[nodiscard]] static auto forward_next(DriverQuery& query)
+        -> jb::core::Result<std::optional<Record>, jb::core::Error>;
+
+    /// Releases the wrapped cursor while retaining its statement.
+    [[nodiscard]] static auto forward_finish(DriverQuery& query) -> jb::core::Result<void, jb::core::Error>;
+
+    /// Discards the wrapped query state.
+    static auto forward_clear(DriverQuery& query) noexcept -> void;
+    /// @}
+
 private:
     friend class Query;
 

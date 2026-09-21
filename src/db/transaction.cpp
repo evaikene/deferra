@@ -27,8 +27,10 @@ Transaction::~Transaction()
     }
     auto rolled_back = rollback();
     if (!rolled_back) {
+        // Failed rollback has already poisoned the connection. Report the runtime failure without aborting
+        // stack unwinding, so the caller can latch its original error and tear down owned resources.
         auto const& error = rolled_back.error();
-        jb::core::log_fatal("Failed to roll back guarded transaction during destruction: {} ({})",
+        jb::core::log_error("Failed to roll back guarded transaction during destruction: {} ({})",
                             error.message,
                             error.code);
     }

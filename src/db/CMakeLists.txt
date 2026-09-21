@@ -14,6 +14,8 @@ target_sources(${TARGET}
         database.cpp
         database_priv.hpp
         db.cpp
+        driver.cpp
+        driver_query.cpp
         query.cpp
         query_priv.hpp
         record.cpp

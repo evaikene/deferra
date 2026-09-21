@@ -26,6 +26,7 @@ public:
     Transaction() noexcept;
 
     /// Rolls back an active guarded transaction best-effort.
+    /// A backend rollback failure poisons the connection and is logged as an error; scope unwinding continues.
     /// @warning The referenced Database must still exist and all queries declared after this guard must be destroyed.
     ~Transaction();
 
