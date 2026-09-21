@@ -967,6 +967,24 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
     endif()
 endif()
 
+# Real Linux daemon crash/restart evidence with committed SQLite state assertions.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
+    add_executable(jobud-recovery-integration-test
+        jobud-recovery-integration-test.cpp
+        support/recovery_fixture.cpp
+        support/http_test_server.cpp
+        support/temporary_directory.cpp)
+    target_link_libraries(jobud-recovery-integration-test PRIVATE
+        jobu-sqlite net rpc OpenSSL::SSL OpenSSL::Crypto Catch2::Catch2WithMain)
+    target_compile_definitions(jobud-recovery-integration-test PRIVATE
+        JOBUD_EXECUTABLE="$<TARGET_FILE:jobud>"
+        JOBUCTL_EXECUTABLE="$<TARGET_FILE:jobuctl>"
+        PROCESS_TEST_HELPER="$<TARGET_FILE:process-test-helper>")
+    add_dependencies(jobud-recovery-integration-test jobud jobuctl process-test-helper)
+    add_test(NAME jobud-recovery-integration-test COMMAND $<TARGET_FILE:jobud-recovery-integration-test>)
+    set_tests_properties(jobud-recovery-integration-test PROPERTIES TIMEOUT 120)
+endif()
+
 # Real POSIX daemon CLI execution; the root override requires an explicit isolated-test opt-in.
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
     set(TARGET "jobud-cli-integration-test")
