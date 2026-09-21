@@ -10,6 +10,7 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include <csignal> // IWYU pragma: keep POSIX signal constants.
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -142,8 +143,17 @@ TEST_CASE("isolated runtime proves fatal cleanup and direct-child reaping", "[jo
     helper.standard_output.connect(&app, [&](ByteBuffer const& bytes) { output.append(as_string_view(bytes)); });
     helper.standard_error.connect(&app, [&](ByteBuffer const& bytes) { output.append(as_string_view(bytes)); });
     helper.finished.connect(&app, [&](ProcessExit const& value) { exit = value; });
-    REQUIRE(helper.start(
-        {.executable = JOBUD_SHUTDOWN_TEST_HELPER, .arguments = {scenario}, .timeout = 12s, .termination_grace = 0ms}));
+
+    // Process uses an exact environment. Preserve the caller's explicit opt-in for the helper's own root guard.
+    ProcessEnvironment environment;
+    if (auto const* opt_in = std::getenv("JOBU_TEST_ALLOW_ROOT_CLI")) {
+        environment.emplace("JOBU_TEST_ALLOW_ROOT_CLI", opt_in);
+    }
+    REQUIRE(helper.start({.executable        = JOBUD_SHUTDOWN_TEST_HELPER,
+                          .arguments         = {scenario},
+                          .environment       = std::move(environment),
+                          .timeout           = 12s,
+                          .termination_grace = 0ms}));
     auto const deadline = Clock::now() + 14s;
     while (!exit && Clock::now() < deadline) {
         REQUIRE(app.process_events(EventFlag::All, 20) != ProcessEventsResult::Failed);
