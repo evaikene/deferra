@@ -6,9 +6,7 @@ This document defines Phase 4 of JobU: the cron engine and the centralized,
 event-driven scheduler, verified with deterministic fake attempt execution.
 It is based on the JobU v1 technical plan .codex/jobu-v1-technical-plan.md.
 
-The design is based on GitHub `main` at commit
-[`6f5e730`](https://github.com/evaikene/deferra/commit/6f5e7302ad72b9c970b2338136e4de96097fa416)
-on 2026-07-23. That revision contains the completed Phase 3 implementation:
+The design is based on the completed Phase 3 implementation:
 
 - application schema version 1;
 - durable queue, job, run, attempt, output, secret, and idempotency tables;

@@ -2,18 +2,18 @@
 
 ## 1. Status, baseline, and implementation rules
 
-Stages 7.1–7.18 are merged through `91cc7eb8e22565954dc9fdb62e96095d1daa5a92`
-(Stage 7.18, PR #175). The [Stage 7.19 audit](jobu-phase7-audit.md) records the
-public-contract and documentation review against that implementation. Stage 7.20
-final clean Linux verification and phase closure remain pending. Native macOS
-Stage 7.18 evidence is recorded separately; it is not final Linux evidence.
+Phase 7 is complete against the merged Stage 7.19 implementation. Stage 7.20
+verified a fresh Debug, SQLite-enabled Linux build and all 135 registered tests.
+The Stage 7.19 public-contract audit has no unresolved finding. Native Stage 7.18
+verification passed 136 tests, with its root-only case skipped; the later
+scheduler startup sanitizer has Linux evidence only.
 
 The requirements and numbered stages below retain their implementation order.
 The baseline table describes the original entry state, not current behavior.
 See the [operator guide](../../README.md#recovery-and-shutdown) for implemented
 recovery and shutdown behavior.
 
-Repository baseline: [`3bba9c58a7062fd3a10de43a91b07a3b39dfb7da`](https://github.com/evaikene/deferra/commit/3bba9c58a7062fd3a10de43a91b07a3b39dfb7da), the merged Stage 6.21 handoff. Its verified implementation baseline is `fc326b4d63796d363dff14acac26aff6f8416698`; the subsequent baseline changes record verification and planning. Read current `AGENTS.md` before implementation, and reconcile any later implementation changes before starting a stage.
+Repository baseline: the completed Phase 6 closure, including the merged Stage 6.20 disabled-capture correction and Stage 6.21 verification. Read current `AGENTS.md` before implementation, and reconcile any later implementation changes before starting a stage.
 
 Authoritative scope: `docs/planning/jobu-v1-technical-plan.md`, particularly §§15.2 and 19, and the Phase 7 roadmap entry. Preserve Phase 6 and its closure contracts for CLI execution, process ownership, output capture, and callback lifetime.
 

@@ -2,9 +2,9 @@
 
 ## 1. Status and purpose
 
-This document defines Phase 3 against GitHub main at commit
-75423800061ec7cc0b901171b8334f2aca2ab0cd. Phase 2 is treated as implemented
-and fixed input: JobU has the generic database API and isolated SQLite driver,
+This document defines Phase 3 against the completed Phase 2 baseline.
+Phase 2 is treated as implemented and fixed input: JobU has the generic database
+API and isolated SQLite driver,
 project-owned JSON and JSON-RPC, local IPC on Linux and macOS, and a working
 foreground jobud/jobuctl system.info round trip.
 
@@ -2231,7 +2231,7 @@ change.
 
 This design is grounded in:
 
-- main commit 75423800061ec7cc0b901171b8334f2aca2ab0cd;
+- the completed Phase 2 baseline;
 - the merged generic Database, Query, Record, Value, Transaction, and isolated
   db::sqlite::Driver APIs from Phase 1;
 - the merged JsonValue, JSON codec, framing, JSON-RPC client/server, local IPC,

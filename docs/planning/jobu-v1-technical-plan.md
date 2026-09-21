@@ -1048,11 +1048,9 @@ Exit criteria: concurrent CLI jobs and descendant termination work on Linux and 
 
 ### Phase 7: Recovery, fail-closed behavior, and shutdown
 
-Implementation is merged through Stage 7.18 (`91cc7eb8`, PR #175), including
-native macOS adaptation and verification. The [Stage 7.19 audit](jobu-phase7-audit.md)
-records documentation and boundary review; Stage 7.20 final clean Linux
-verification remains the closure gate. The detailed requirements are in the
-[Phase 7 code-level design](jobu-phase7-code-design.md).
+Phase 7 is complete against the merged Stage 7.19 implementation after the
+Stage 7.20 fresh SQLite-enabled Linux build and full test pass. The public-contract
+audit is complete. The detailed requirements are in the [Phase 7 code-level design](jobu-phase7-code-design.md).
 
 - Implement startup recovery for `fail_interrupted` and `retry_interrupted`.
 - Repair recurrence/manual/suspension invariants.
