@@ -630,6 +630,16 @@ auto main(int argc, char** argv) -> int
     if (mode == "daemon-wait" && argc == 4) {
         return daemon_wait(argv[2], argv[3]);
     }
+    if (mode == "daemon-output-wait" && argc == 4) {
+        // Publish bytes before readiness so crash tests distinguish lost capture from silent execution.
+        constexpr char output[]{'o', '\0', 'u', 't'};
+        constexpr char diagnostic[]{'e', '\0', 'r', 'r'};
+        if (!write_all(STDOUT_FILENO, output, sizeof(output)) ||
+            !write_all(STDERR_FILENO, diagnostic, sizeof(diagnostic))) {
+            return 45;
+        }
+        return daemon_wait(argv[2], argv[3]);
+    }
     if (mode == "inspect-jobu") {
         return inspect_jobu(argc, argv);
     }
