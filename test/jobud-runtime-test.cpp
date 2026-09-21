@@ -425,13 +425,22 @@ TEST_CASE("Daemon HTTP shared failure wins before failed completion persistence"
     RuntimeFixture fixture;
     auto           cli  = fixture.seed();
     auto           http = fixture.seed(2, JobType::Http);
+    fixture.seed(3);
+    fixture.seed(4, JobType::Http);
     fixture.create_runtime();
     auto result = fixture.run([&] {
         REQUIRE(fixture.http->pending_request_ids().size() == 1);
+        auto const calls = fixture.faults->calls.size();
         REQUIRE(fixture.http->inject_shared_failure(failure()));
         REQUIRE(fixture.runtime->state() == RuntimeState::Stopping);
         REQUIRE(fixture.record.destruction.empty());
         fixture.record.completions.front()(success(fixture.record.starts.front().key));
+        auto rejected = RuntimeTestAccess::management(*fixture.runtime)->create_queue({.name = "late"});
+        REQUIRE_FALSE(rejected);
+        REQUIRE(rejected.error().code == "jobu.service.stopping");
+        REQUIRE(fixture.faults->calls.size() == calls);
+        REQUIRE(fixture.record.starts.size() == 1);
+        REQUIRE(fixture.http->start_records().size() == 1);
         fixture.require_running(cli);
         fixture.require_running(http);
         fixture.runtime->request_stop();
@@ -468,6 +477,8 @@ TEST_CASE("Daemon scheduler failure shuts management admission before the notify
 TEST_CASE("Daemon connection admission stays closed during already-ready listener callbacks")
 {
     RuntimeFixture fixture;
+    auto           cli  = fixture.seed();
+    auto           http = fixture.seed(2, JobType::Http);
     fixture.create_runtime();
     REQUIRE(fixture.run([&] {
         auto const listener_fd = fixture.loop.backend->last_added_fd;
@@ -477,12 +488,17 @@ TEST_CASE("Daemon connection admission stays closed during already-ready listene
         client.connect_to_server(fixture.options.socket_path);
         REQUIRE(client.state() != jb::net::LocalSocketState::Unconnected);
         fixture.runtime->request_stop();
+        auto const calls = fixture.faults->calls.size();
 
         // Simulate a listener readiness notification already present in the current poll batch.
         // The listener is still alive, but its notification must not transfer a connection to RPC.
         callback(listener_fd, FdEvent::Read);
         REQUIRE(RuntimeTestAccess::rpc(*fixture.runtime)->connection_count() == 0);
         REQUIRE(fixture.record.destruction.empty());
+        fixture.record.completions.front()(success(fixture.record.starts.front().key));
+        REQUIRE(fixture.faults->calls.size() == calls);
+        fixture.require_running(cli);
+        fixture.require_running(http);
         return EXIT_SUCCESS;
     }) == EXIT_SUCCESS);
     REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
