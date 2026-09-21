@@ -2,11 +2,15 @@
 
 ## 1. Status, baseline, and implementation rules
 
-Phase 7 is complete against the merged Stage 7.19 implementation. Stage 7.20
-verified a fresh Debug, SQLite-enabled Linux build and all 135 registered tests.
-The Stage 7.19 public-contract audit has no unresolved finding. Native Stage 7.18
-verification passed 136 tests, with its root-only case skipped; the later
-scheduler startup sanitizer has Linux evidence only.
+Phase 7 is complete against the merged Stage 7.21 implementation. Stage 7.22
+verified a fresh Debug, SQLite-enabled Linux build and all 135 registered tests,
+with one internal root-only case skipped. The cancellation rollback finding from
+the final independent audit is resolved by the
+[Phase 7 closure correction](jobu-phase7-closure-code-design.md).
+Native Stage 7.18 verification passed 136 tests, with its root-only case skipped;
+the later scheduler startup sanitizer and cancellation cleanup correction have
+Linux execution evidence only. Exact implementation identities and historical
+results remain in the shared external `jobu-phase7-verification.md` record.
 
 The requirements and numbered stages below retain their implementation order.
 The baseline table describes the original entry state, not current behavior.
