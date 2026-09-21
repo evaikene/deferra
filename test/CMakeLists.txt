@@ -3,6 +3,20 @@ find_package(OpenSSL REQUIRED)
 
 enable_testing()
 
+# Generic forwarding/fault support, independent of SQLite and JobU.
+add_executable(fault-database-driver-test
+    fault-database-driver-test.cpp support/fault_database_driver.cpp support/fake_database_driver.cpp)
+target_link_libraries(fault-database-driver-test PRIVATE db Catch2::Catch2WithMain)
+add_test(NAME fault-database-driver-test COMMAND $<TARGET_FILE:fault-database-driver-test>)
+
+foreach(DB_DRIVER_HEADER driver driver_query)
+    set(TARGET "db-${DB_DRIVER_HEADER}-public-header-test")
+    add_executable(${TARGET} db-driver-public-header-test.cpp)
+    target_compile_definitions(${TARGET} PRIVATE DB_DRIVER_HEADER="${DB_DRIVER_HEADER}.hpp")
+    target_link_libraries(${TARGET} PRIVATE db)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+endforeach()
+
 # Process contract and deterministic request preparation (no child launch).
 add_executable(process-public-header-test process-public-header-test.cpp)
 target_link_libraries(process-public-header-test PRIVATE core)
@@ -360,6 +374,13 @@ if(TARGET jobu-sqlite)
     )
     target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+    # JobU dispatch/completion fault matrix using a forwarding driver over real SQLite.
+    add_executable(scheduler-transaction-fault-test
+        scheduler-transaction-fault-test.cpp support/fault_database_driver.cpp
+        support/recovery_fixture.cpp support/fake_attempt_executor.cpp support/temporary_directory.cpp)
+    target_link_libraries(scheduler-transaction-fault-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME scheduler-transaction-fault-test COMMAND $<TARGET_FILE:scheduler-transaction-fault-test>)
 
     # JobU SQLite-backed public scheduler EventLoop adapter test
     set(TARGET "scheduler-event-loop-test")

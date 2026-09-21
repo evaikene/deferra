@@ -62,6 +62,36 @@ protected:
     /// Constructs the base portion of a concrete backend driver.
     Driver() = default;
 
+    /// @name Forwarding operations for backend decorators
+    /// The decorator must exclusively own the wrapped driver and
+    /// keep it alive until every wrapped query is destroyed. Invoke these only while handling the corresponding
+    /// outer Database/Query operation, on its owner thread; they do not perform generic lifetime/state checks.
+    /// Results and errors pass through unchanged, with the same contracts as the underlying driver operations.
+    /// @{
+    /// Opens the wrapped connection.
+    [[nodiscard]] static auto forward_open(Driver& driver) -> jb::core::Result<void, jb::core::Error>;
+
+    /// Closes the wrapped connection.
+    [[nodiscard]] static auto forward_close(Driver& driver) -> jb::core::Result<void, jb::core::Error>;
+
+    /// Reports whether the wrapped connection is open.
+    [[nodiscard]] static auto forward_is_open(Driver const& driver) noexcept -> bool;
+
+    /// Creates a query on the wrapped connection; ownership passes to the caller.
+    [[nodiscard]] static auto forward_create_query(Driver& driver)
+        -> jb::core::Result<std::unique_ptr<DriverQuery>, jb::core::Error>;
+
+    /// Begins a transaction with the supplied mode.
+    [[nodiscard]] static auto forward_begin(Driver& driver, TransactionMode mode)
+        -> jb::core::Result<void, jb::core::Error>;
+
+    /// Commits the wrapped transaction.
+    [[nodiscard]] static auto forward_commit(Driver& driver) -> jb::core::Result<void, jb::core::Error>;
+
+    /// Rolls back the wrapped transaction.
+    [[nodiscard]] static auto forward_rollback(Driver& driver) -> jb::core::Result<void, jb::core::Error>;
+    /// @}
+
 private:
     friend class Database;
     friend class Query;

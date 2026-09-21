@@ -293,6 +293,40 @@ TEST_CASE("Guard rollback failure deactivates the guard and poisons its database
     REQUIRE(fixture.database.close());
 }
 
+TEST_CASE("Destructor rollback failure permits unwinding and prevents backend reuse", "[db][transaction][guard]")
+{
+    OpenDatabase fixture;
+    {
+        auto begun = Transaction::begin(fixture.database);
+        REQUIRE(begun);
+        auto guard                    = std::move(begun).value();
+        fixture.state->rollback_error = test_error("db.fake.rollback");
+        // Leave the guard active: this must take the destructor path with the default Debug logger, not an explicit
+        // rollback or a test logger that could conceal an accidental fatal abort.
+    }
+    CHECK(call_count(*fixture.state, "driver.rollback") == 1U);
+    REQUIRE(fixture.database.last_error());
+    CHECK(fixture.database.last_error()->code == "db.fake.rollback");
+
+    auto const calls = fixture.state->calls.size();
+    auto       begun = Transaction::begin(fixture.database);
+    REQUIRE_FALSE(begun);
+    CHECK(begun.error().code == "db.connection_failed");
+    {
+        Query query{fixture.database};
+        auto  executed = query.exec("SELECT 1");
+        REQUIRE_FALSE(executed);
+        CHECK(executed.error().code == "db.connection_failed");
+    }
+    CHECK(fixture.state->calls.size() == calls);
+
+    fixture.state->rollback_error.reset();
+    REQUIRE(fixture.database.close());
+    REQUIRE(fixture.database.open());
+    REQUIRE(fixture.database.transaction());
+    REQUIRE(fixture.database.rollback());
+}
+
 TEST_CASE("Guard token mismatch poisons the database", "[db][transaction][guard]")
 {
     OpenDatabase fixture;
