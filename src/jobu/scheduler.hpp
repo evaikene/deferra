@@ -127,15 +127,18 @@ public:
 
     /// Starts dispatch and arms the event-loop wake adapter.
     ///
-    /// The call verifies option, event-loop, database owner-thread, and Phase 4 recovery preconditions before entering
-    /// Running. It then performs one scheduling cycle synchronously and arms at most one future wake. Calling start()
-    /// while Running succeeds without another cycle. After fatal failure or shutdown(), returns
-    /// `jobu.scheduler.stopping` (Unavailable) without accessing storage; failure() retains the first fatal error.
+    /// Run recover_startup() under exclusive database ownership before the first start after opening durable state.
+    /// This call does not perform recovery: it checks options, event-loop/database affinity, and the absence of
+    /// persisted Running runs or attempts before entering Running. It then performs one scheduling cycle synchronously
+    /// and arms at most one future wake. Calling start() while Running succeeds without another cycle.
+    /// After fatal failure or shutdown(), returns `jobu.scheduler.stopping` (Unavailable) without accessing storage;
+    /// failure() retains the first fatal error.
     /// Fatal cycle or wake failures observed after entering Running may emit failed synchronously before this call
     /// returns.
     ///
     /// @return Success in Running state, or a stable scheduler/database Error. Preflight failures leave the scheduler
-    /// Stopped; fatal scheduling failures leave it Failed. A reentrant shutdown during the initial cycle leaves it
+    /// Stopped without emitting failed; their storage errors retain category/code with sanitized diagnostic text.
+    /// Fatal scheduling failures leave it Failed. A reentrant shutdown during the initial cycle leaves it
     /// Shutdown and returns `jobu.scheduler.stopping`.
     ///
     [[nodiscard]] auto start() -> jb::core::Result<void, jb::core::Error>;

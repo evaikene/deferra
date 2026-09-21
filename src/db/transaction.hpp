@@ -61,7 +61,8 @@ public:
 
     /// Commits the guarded transaction.
     /// @return Success, or a generic/driver Error. A failed driver commit leaves this guard active so rollback() can be
-    /// attempted.
+    /// attempted. The error alone does not prove the backend left the transaction uncommitted: an acknowledgement
+    /// may fail after the durable commit. A rollback attempt cannot undo an already committed transaction.
     [[nodiscard]] auto commit() -> jb::core::Result<void, jb::core::Error>;
 
     /// Rolls back the guarded transaction.
