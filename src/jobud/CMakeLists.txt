@@ -16,9 +16,13 @@ target_include_directories(jobud-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(jobud-runtime PUBLIC jobu net rpc)
 target_link_libraries(${TARGET} PRIVATE jobud-runtime)
 
-# Native macOS signal ownership is adapted separately in Stage 7.18.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    add_library(jobud-signal STATIC shutdown_signal_linux.cpp)
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        set(JOBUD_SIGNAL_PIPE_SOURCE shutdown_signal_pipe_macos.cpp)
+    else()
+        set(JOBUD_SIGNAL_PIPE_SOURCE shutdown_signal_pipe_linux.cpp)
+    endif()
+    add_library(jobud-signal STATIC shutdown_signal_posix.cpp ${JOBUD_SIGNAL_PIPE_SOURCE})
     target_link_libraries(jobud-signal PUBLIC core)
     target_include_directories(jobud-signal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(${TARGET} PRIVATE jobud-signal)

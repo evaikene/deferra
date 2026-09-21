@@ -12,15 +12,12 @@
 #include <sqlite3.h>
 
 #include <cerrno>
-#include <csignal> // IWYU pragma: keep POSIX signal constants.
 #include <cstdlib>
 #include <string_view>
 #include <utility>
 
 #include <fcntl.h>
-#include <poll.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -63,12 +60,8 @@ ShutdownWork::ShutdownWork(std::function<std::unique_ptr<db::Driver>(std::unique
 ShutdownWork::~ShutdownWork()
 {
     // Assertions inspect both identities before any destructor can supply the cleanup under test.
-    for (auto fd : _pidfds) {
-        if (fd >= 0) {
-            static_cast<void>(::syscall(SYS_pidfd_send_signal, fd, SIGKILL, nullptr, 0));
-            ::close(fd);
-        }
-    }
+    // Linux watches own identity-safe fallback kills; Darwin helpers have independent emergency alarms.
+    _targets = {};
     ::close(_report_fd);
 }
 
@@ -123,8 +116,7 @@ auto ShutdownWork::read_identities() -> bool
     REQUIRE(size == sizeof(identities));
     for (std::size_t index = 0; index < identities.size(); ++index) {
         REQUIRE(identities[index] > 0);
-        _pidfds[index] = static_cast<int>(::syscall(SYS_pidfd_open, identities[index], 0));
-        REQUIRE(_pidfds[index] >= 0);
+        _targets[index] = std::make_unique<ProcessExitWatch>(identities[index]);
     }
     return true;
 }
@@ -137,9 +129,8 @@ void ShutdownWork::await_work()
     REQUIRE(count("SELECT count(*) FROM jobu_attempts") == 2);
     REQUIRE(count("SELECT count(*) FROM jobu_runs WHERE state='scheduled'") == 2);
     REQUIRE(count("SELECT count(*) FROM jobu_attempt_output") == 0);
-    for (auto fd : _pidfds) {
-        pollfd descriptor{.fd = fd, .events = POLLIN, .revents = 0};
-        REQUIRE(::poll(&descriptor, 1, 0) == 0);
+    for (auto const& target : _targets) {
+        REQUIRE_FALSE(target->exited());
     }
 }
 
@@ -147,10 +138,8 @@ void ShutdownWork::require_cleanup()
 {
     // The response barrier is still closed; only client cancellation/teardown can close the peer.
     REQUIRE(server.wait_for_blocked_peer_disconnect(2s));
-    for (auto fd : _pidfds) {
-        pollfd descriptor{.fd = fd, .events = POLLIN, .revents = 0};
-        REQUIRE(::poll(&descriptor, 1, 2000) == 1);
-        REQUIRE((descriptor.revents & POLLIN) != 0);
+    for (auto const& target : _targets) {
+        REQUIRE(target->exited(2s));
     }
     REQUIRE(server.requests().size() == 1);
     // The helper arms a 15-second emergency alarm after launch. Never accept its expiry as cleanup evidence;

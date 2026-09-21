@@ -1,4 +1,4 @@
-#include "shutdown_signal_linux_priv.hpp"
+#include "shutdown_signal_posix_priv.hpp"
 #include "shutdown_signal_priv.hpp"
 #include "shutdown_signal_test_priv.hpp"
 
@@ -8,6 +8,9 @@
 
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
+#if defined(__APPLE__)
+#  include <catch2/generators/catch_generators.hpp>
+#endif
 
 #include <array>
 #include <atomic>
@@ -28,6 +31,8 @@
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+extern char** environ;
 
 namespace jb::jobud::detail {
 
@@ -120,17 +125,40 @@ auto consume_failure(Failure operation) noexcept -> bool
     return true;
 }
 
+#if defined(__APPLE__)
+auto create_pipe(int* descriptors) noexcept -> int
+#else
 auto create_pipe(int* descriptors, int flags) noexcept -> int
+#endif
 {
     if (consume_failure(Failure::Pipe)) {
         return -1;
     }
+#if defined(__APPLE__)
+    auto const result = ::pipe(descriptors);
+#else
     auto const result = ::pipe2(descriptors, flags);
+#endif
     if (result == 0) {
         pipe_descriptors = {descriptors[0], descriptors[1]};
     }
     return result;
 }
+
+#if defined(__APPLE__)
+int failed_control_call{-1};
+int control_calls{0};
+
+auto control_pipe(int descriptor, int command, int value) -> int
+{
+    if (control_calls++ == failed_control_call) {
+        failed_control_call = -1;
+        errno               = EIO;
+        return -1;
+    }
+    return ::fcntl(descriptor, command, value);
+}
+#endif
 
 auto set_action(int signal, struct sigaction const* action, struct sigaction* previous) noexcept -> int
 {
@@ -152,6 +180,16 @@ auto set_mask(int how, sigset_t const* mask, sigset_t* previous) noexcept -> int
         return EIO;
     }
     return ::pthread_sigmask(how, mask, previous);
+}
+
+auto relay_operations() -> ShutdownSignalOperations
+{
+    return {.pipe = &create_pipe,
+#if defined(__APPLE__)
+            .control = &control_pipe,
+#endif
+            .action = &set_action,
+            .mask   = &set_mask};
 }
 
 void previous_handler(int /*signal*/) noexcept
@@ -183,8 +221,8 @@ auto prepare_signals() -> SignalSnapshot
 {
     struct sigaction action{};
     action.sa_handler = &previous_handler;
-    REQUIRE(::sigemptyset(&action.sa_mask) == 0);
-    REQUIRE(::sigaddset(&action.sa_mask, SIGUSR2) == 0);
+    REQUIRE(sigemptyset(&action.sa_mask) == 0);
+    REQUIRE(sigaddset(&action.sa_mask, SIGUSR2) == 0);
     action.sa_flags = SA_RESTART;
     REQUIRE(::sigaction(SIGTERM, &action, nullptr) == 0);
     REQUIRE(::sigaction(SIGINT, &action, nullptr) == 0);
@@ -192,10 +230,10 @@ auto prepare_signals() -> SignalSnapshot
     REQUIRE(::sigaction(SIGCHLD, &action, nullptr) == 0);
 
     sigset_t blocked;
-    REQUIRE(::sigemptyset(&blocked) == 0);
-    REQUIRE(::sigaddset(&blocked, SIGTERM) == 0);
-    REQUIRE(::sigaddset(&blocked, SIGINT) == 0);
-    REQUIRE(::sigaddset(&blocked, SIGUSR1) == 0);
+    REQUIRE(sigemptyset(&blocked) == 0);
+    REQUIRE(sigaddset(&blocked, SIGTERM) == 0);
+    REQUIRE(sigaddset(&blocked, SIGINT) == 0);
+    REQUIRE(sigaddset(&blocked, SIGUSR1) == 0);
     REQUIRE(::pthread_sigmask(SIG_SETMASK, &blocked, nullptr) == 0);
     previous_calls = 0;
     return snapshot();
@@ -205,7 +243,7 @@ auto prepare_signals() -> SignalSnapshot
 void require_same_mask(sigset_t const& actual, sigset_t const& expected)
 {
     for (int signal = 1; signal < NSIG; ++signal) {
-        REQUIRE(::sigismember(&actual, signal) == ::sigismember(&expected, signal));
+        REQUIRE(sigismember(&actual, signal) == sigismember(&expected, signal));
     }
 }
 
@@ -237,19 +275,18 @@ void require_restored(SignalSnapshot const& original)
 auto install_relay() -> std::unique_ptr<ShutdownSignalRelay>
 {
     pipe_descriptors = {-1, -1};
-    auto installed =
-        ShutdownSignalTestAccess::install({.pipe = &create_pipe, .action = &set_action, .mask = &set_mask});
+    auto installed   = ShutdownSignalTestAccess::install(relay_operations());
     REQUIRE(installed);
     for (auto const fd : pipe_descriptors) {
         REQUIRE((::fcntl(fd, F_GETFL) & O_NONBLOCK) != 0);
         REQUIRE((::fcntl(fd, F_GETFD) & FD_CLOEXEC) != 0);
     }
     auto const active = snapshot();
-    REQUIRE(::sigismember(&active.mask, SIGTERM) == 0);
-    REQUIRE(::sigismember(&active.mask, SIGINT) == 0);
-    REQUIRE(::sigismember(&active.mask, SIGUSR1) == 1);
-    REQUIRE(::sigismember(&active.term.sa_mask, SIGTERM) == 1);
-    REQUIRE(::sigismember(&active.term.sa_mask, SIGINT) == 1);
+    REQUIRE(sigismember(&active.mask, SIGTERM) == 0);
+    REQUIRE(sigismember(&active.mask, SIGINT) == 0);
+    REQUIRE(sigismember(&active.mask, SIGUSR1) == 1);
+    REQUIRE(sigismember(&active.term.sa_mask, SIGTERM) == 1);
+    REQUIRE(sigismember(&active.term.sa_mask, SIGINT) == 1);
     return std::move(installed).value();
 }
 
@@ -372,6 +409,14 @@ TEST_CASE("setup")
     {
         failure = Failure::Pipe;
     }
+#if defined(__APPLE__)
+    SECTION("partial pipe descriptor configuration")
+    {
+        // Fail every get/set boundary on each end, including after the first end is fully configured.
+        failed_control_call = GENERATE(0, 1, 2, 3, 4, 5, 6, 7);
+        control_calls       = 0;
+    }
+#endif
     SECTION("first disposition")
     {
         failure = Failure::Term;
@@ -385,10 +430,13 @@ TEST_CASE("setup")
         failure = Failure::Enable;
     }
 
-    auto rejected = ShutdownSignalTestAccess::install({.pipe = &create_pipe, .action = &set_action, .mask = &set_mask});
+    auto rejected = ShutdownSignalTestAccess::install(relay_operations());
     REQUIRE_FALSE(rejected);
     REQUIRE(rejected.error().code == "jobud.signal.setup");
     REQUIRE(failure == Failure::None);
+#if defined(__APPLE__)
+    REQUIRE(failed_control_call == -1);
+#endif
     require_restored(original);
 
     // Partial installation must release singleton ownership as well as native resources.
@@ -455,7 +503,7 @@ TEST_CASE("watch lifetime")
     relay.reset();
     require_restored(original);
     std::array<int, 2> recycled{};
-    REQUIRE(::pipe2(recycled.data(), O_NONBLOCK | O_CLOEXEC) == 0);
+    REQUIRE(jb::jobud::detail::prepare_shutdown_pipe(recycled.data(), ShutdownSignalOperations{}) == 0);
     REQUIRE(recycled[0] == pipe_descriptors[0]);
     REQUIRE(::write(recycled[1], "x", 1) == 1);
     retained(recycled[0], jb::core::FdEvent::Read);
@@ -476,8 +524,8 @@ TEST_CASE("worker lifetime")
     bool        delivered{false};
     std::thread worker{[&] {
         sigset_t mask;
-        inherited_delivery = ::pthread_sigmask(SIG_SETMASK, nullptr, &mask) == 0 &&
-                             ::sigismember(&mask, SIGTERM) == 0 && ::sigismember(&mask, SIGINT) == 0;
+        inherited_delivery = ::pthread_sigmask(SIG_SETMASK, nullptr, &mask) == 0 && sigismember(&mask, SIGTERM) == 0 &&
+                             sigismember(&mask, SIGINT) == 0;
         release_worker.wait();
         // Thread-directed delivery proves a worker may still access the handler's descriptor.
         delivered = ::pthread_kill(::pthread_self(), SIGTERM) == 0;
@@ -607,7 +655,7 @@ TEST_CASE("late handler cannot write a reused descriptor")
     bool const         descriptors_closed = ::fcntl(pipe_descriptors[0], F_GETFD) == -1 && errno == EBADF &&
                                             ::fcntl(pipe_descriptors[1], F_GETFD) == -1 && errno == EBADF;
     std::array<int, 2> recycled{-1, -1};
-    auto const         opened = ::pipe2(recycled.data(), O_NONBLOCK | O_CLOEXEC);
+    auto const         opened = jb::jobud::detail::prepare_shutdown_pipe(recycled.data(), ShutdownSignalOperations{});
     auto const         seeded = opened == 0 ? ::write(recycled[1], "x", 1) : -1;
     signal_probe.released.store(1, std::memory_order_release);
     worker.join();
@@ -710,7 +758,7 @@ TEST_CASE("descriptor inheritance")
     auto       relay    = install_relay();
     REQUIRE(::setenv("JOBUD_SIGNAL_READ_FD", std::to_string(pipe_descriptors[0]).c_str(), 1) == 0);
     REQUIRE(::setenv("JOBUD_SIGNAL_WRITE_FD", std::to_string(pipe_descriptors[1]).c_str(), 1) == 0);
-    char                 executable[]{"/proc/self/exe"};
+    char                 executable[]{JOBUD_SIGNAL_TEST_HELPER};
     char                 filter[]{"--exec-probe"};
     std::array<char*, 3> arguments{executable, filter, nullptr};
     pid_t                child{-1};
@@ -731,14 +779,24 @@ TEST_CASE("descriptor inheritance")
 
 auto main(int argc, char* argv[]) -> int
 {
+    if (argc == 2 && std::string_view{argv[1]} == "--exec-probe") {
+        return inspect_exec_state();
+    }
+
+    // The parent registers native exit observation before allowing even a fast-failing helper to run.
+    char    command{};
+    ssize_t received;
+    do {
+        received = ::read(STDIN_FILENO, &command, 1);
+    } while (received < 0 && errno == EINTR);
+    if (received != 1 || command != 'G') {
+        return 70;
+    }
     if (argc > 1 && std::string_view{argv[1]} == "--release-exit") {
         // A deliberate peer exit gives the parent a deterministic EPIPE and buffered diagnostic.
         std::string const message{"helper exited before release\n"};
         static_cast<void>(::write(STDOUT_FILENO, message.data(), message.size()));
         return 23;
-    }
-    if (argc == 2 && std::string_view{argv[1]} == "--exec-probe") {
-        return inspect_exec_state();
     }
     return Catch::Session().run(argc, argv);
 }

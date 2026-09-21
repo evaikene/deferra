@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal> // IWYU pragma: keep POSIX signal constants and kill.
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <optional>
@@ -13,9 +14,15 @@
 #include <poll.h>
 #include <spawn.h>
 #include <sys/socket.h>
-#include <sys/syscall.h>
+#if defined(__APPLE__)
+#  include <sys/event.h>
+#else
+#  include <sys/syscall.h>
+#endif
 #include <sys/wait.h>
 #include <unistd.h>
+
+extern char** environ;
 
 namespace {
 
@@ -32,7 +39,13 @@ auto remaining_ms(Clock::time_point deadline, Clock::time_point now) -> int
 
 /// Test-only boundaries let retry/deadline cases be exercised without scheduler timing or sleeps.
 struct ReleaseOperations {
-    std::function<ssize_t(int)>  send          = [](int fd) { return ::send(fd, "G", 1, MSG_NOSIGNAL); };
+    std::function<ssize_t(int)> send = [](int fd) {
+#if defined(__APPLE__)
+        return ::send(fd, "G", 1, 0); // SO_NOSIGPIPE is set before the child starts.
+#else
+        return ::send(fd, "G", 1, MSG_NOSIGNAL);
+#endif
+    };
     std::function<int(int, int)> wait_writable = [](int fd, int timeout) {
         pollfd descriptor{.fd = fd, .events = POLLOUT, .revents = 0};
         return ::poll(&descriptor, 1, timeout);
@@ -99,7 +112,7 @@ public:
             while (::waitpid(_pid, nullptr, 0) < 0 && errno == EINTR) {
             }
         }
-        for (auto const fd : {_channel[0], _channel[1], _pidfd}) {
+        for (auto const fd : {_channel[0], _channel[1], _exit_watch}) {
             if (fd >= 0) {
                 ::close(fd);
             }
@@ -112,7 +125,16 @@ public:
     /// @throws Catch::TestFailureException if subprocess setup fails.
     void start(std::string scenario)
     {
+#if defined(__APPLE__)
+        REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM, 0, _channel.data()) == 0);
+        for (auto const descriptor : _channel) {
+            REQUIRE(::fcntl(descriptor, F_SETFD, FD_CLOEXEC) == 0);
+            int const enabled{1};
+            REQUIRE(::setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled)) == 0);
+        }
+#else
         REQUIRE(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, _channel.data()) == 0);
+#endif
         posix_spawn_file_actions_t actions;
         REQUIRE(::posix_spawn_file_actions_init(&actions) == 0);
 
@@ -137,9 +159,24 @@ public:
         REQUIRE(::posix_spawn(&_pid, executable.c_str(), &actions, nullptr, arguments.data(), ::environ) == 0);
         ::close(_channel[1]);
         _channel[1] = -1;
-        _pidfd      = static_cast<int>(::syscall(SYS_pidfd_open, _pid, 0));
-        REQUIRE(_pidfd >= 0);
+#if defined(__APPLE__)
+        _exit_watch = ::kqueue();
+        REQUIRE(_exit_watch >= 0);
+        REQUIRE(::fcntl(_exit_watch, F_SETFD, FD_CLOEXEC) == 0);
+        struct kevent change;
+        EV_SET(&change, static_cast<std::uintptr_t>(_pid), EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, nullptr);
+        int registered;
+        do {
+            registered = ::kevent(_exit_watch, &change, 1, nullptr, 0, nullptr);
+        } while (registered < 0 && errno == EINTR);
+        REQUIRE(registered == 0);
+#else
+        _exit_watch = static_cast<int>(::syscall(SYS_pidfd_open, _pid, 0));
+        REQUIRE(_exit_watch >= 0);
+#endif
         REQUIRE(::fcntl(_channel[0], F_SETFL, O_NONBLOCK) == 0);
+        // The helper waits before entering any scenario, closing the spawn-to-watch exit race.
+        release();
     }
 
     /// @throws Catch::TestFailureException if readiness is absent or the child fails early.
@@ -198,7 +235,7 @@ public:
         bool       output_open{true};
         for (;;) {
             std::array<pollfd, 2> descriptors{
-                {{.fd = _pidfd, .events = POLLIN, .revents = 0},
+                {{.fd = _exit_watch, .events = POLLIN, .revents = 0},
                  {.fd = output_open ? _channel[0] : -1, .events = POLLIN, .revents = 0}}
             };
             auto const remaining = remaining_ms(deadline, Clock::now());
@@ -214,6 +251,15 @@ public:
                 output_open = read_output();
             }
             if ((descriptors[0].revents & POLLIN) != 0) {
+#if defined(__APPLE__)
+                struct kevent   event;
+                struct timespec timeout{};
+                auto const      observed = ::kevent(_exit_watch, nullptr, 0, &event, 1, &timeout);
+                if (observed != 1 || event.filter != EVFILT_PROC || event.ident != static_cast<std::uintptr_t>(_pid) ||
+                    (event.fflags & NOTE_EXIT) == 0) {
+                    result.observation_error = observed < 0 ? errno : EIO;
+                }
+#endif
                 break;
             }
             if (ready == 0 || remaining == 0) {
@@ -293,7 +339,7 @@ private:
     }
 
     pid_t                    _pid{-1};
-    int                      _pidfd{-1};
+    int                      _exit_watch{-1};
     std::array<int, 2>       _channel{-1, -1};
     std::string              _output;
     std::optional<ChildExit> _exit;

@@ -13,6 +13,7 @@
 #include "queue_repository_priv.hpp"
 #include "run_repository_priv.hpp"
 #include "support/http_test_server.hpp"
+#include "support/process_exit_watch.hpp"
 #include "support/recovery_fixture.hpp"
 #include "support/storage_fault_helpers.hpp"
 
@@ -35,9 +36,7 @@
 #include <vector>
 
 #include <fcntl.h>
-#include <poll.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <unistd.h>
 
 using namespace jb::core;
@@ -98,42 +97,6 @@ private:
     int                   _fd{-1};
 };
 
-/// SIGKILL bypasses daemon cleanup. Keep identity-safe handles to every coordinated orphan.
-class TargetWatch final {
-public:
-    explicit TargetWatch(pid_t pid)
-        : _fd{static_cast<int>(::syscall(SYS_pidfd_open, pid, 0))}
-    {
-        REQUIRE(_fd >= 0);
-    }
-
-    ~TargetWatch()
-    {
-        static_cast<void>(::syscall(SYS_pidfd_send_signal, _fd, SIGKILL, nullptr, 0));
-        ::close(_fd);
-    }
-
-    TargetWatch(TargetWatch const&)                    = delete;
-    auto operator=(TargetWatch const&) -> TargetWatch& = delete;
-
-    void kill() const
-    {
-        auto const result = ::syscall(SYS_pidfd_send_signal, _fd, SIGKILL, nullptr, 0);
-        REQUIRE((result == 0 || errno == ESRCH));
-    }
-
-    auto exited() const -> bool
-    {
-        pollfd     descriptor{.fd = _fd, .events = POLLIN, .revents = 0};
-        auto const result = ::poll(&descriptor, 1, 0);
-        REQUIRE((result >= 0 || errno == EINTR));
-        return result == 1 && (descriptor.revents & POLLIN) != 0;
-    }
-
-private:
-    int _fd;
-};
-
 /// One database, multiple real daemon incarnations. Only the stopped parent opens the owning driver.
 /// The live observer is read-only and keeps no statement/transaction between readiness polls.
 class CrashFixture final {
@@ -145,7 +108,7 @@ public:
 
     ~CrashFixture()
     {
-        // On assertion failure Process kills/reaps the daemon; pidfds clean up the single-process CLI helpers.
+        // On assertion failure Process cleans up the daemon; watches or helper alarms bound orphan lifetimes.
         daemon.reset();
         targets.clear();
     }
@@ -219,7 +182,15 @@ public:
 
         // Old target effects must not overlap the restarted attempt. Daemon SIGKILL cannot clean these up.
         for (auto const& target : targets) {
+#if defined(__APPLE__)
+            // kqueue observes identity but cannot signal it safely. Release the controlled orphan
+            // over its private channel, and observe exit before starting another incarnation.
+            if (!target->exited()) {
+                release.release();
+            }
+#else
             target->kill();
+#endif
             until([&] { return target->exited(); }, true);
         }
         targets.clear();
@@ -289,7 +260,7 @@ public:
                 }
                 return pid.has_value();
             });
-            targets.push_back(std::make_unique<TargetWatch>(*pid));
+            targets.push_back(std::make_unique<ProcessExitWatch>(*pid));
         }
         else {
             until([&] { return server.requests().size() == http_request; });
@@ -363,7 +334,7 @@ private:
     std::string                                        log;
     std::optional<ProcessExit>                         exit;
     std::unique_ptr<sqlite3, decltype(&sqlite3_close)> observer{nullptr, sqlite3_close};
-    std::vector<std::unique_ptr<TargetWatch>>          targets;
+    std::vector<std::unique_ptr<ProcessExitWatch>>     targets;
     std::unique_ptr<Process>                           daemon;
 };
 
@@ -389,7 +360,9 @@ void require_interrupted(CrashFixture& fixture, RecoveryRunFixture before, bool 
     last.output      = AttemptOutput{.stdout_bytes = ByteBuffer{}, .stderr_bytes = ByteBuffer{}, .capture_lost = true};
     before.run.state = retry ? RunState::RetryWait : RunState::Interrupted;
     if (retry) {
-        before.run.runnable_at = *completed + delay;
+        auto const clock_delay = std::chrono::duration_cast<UtcTimePoint::duration>(delay);
+        REQUIRE(clock_delay == delay);
+        before.run.runnable_at = *completed + clock_delay;
     }
     else {
         before.run.completed_at = completed;

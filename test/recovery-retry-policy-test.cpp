@@ -110,21 +110,40 @@ TEST_CASE("Recovery jitter retains deterministic run and next-attempt identity",
     auto values                    = attributes();
     values.at("retry.jitter").data = 0.25;
     auto current                   = context();
-    auto first                     = recovery_retry_decision(values, current);
-    auto repeat                    = recovery_retry_decision(values, current);
+    current.attempt_number         = GENERATE(AttemptNumber{1}, AttemptNumber{2});
+
+    auto policy = retry_policy_from_attributes(values);
+    REQUIRE(policy);
+    auto delay = retry_delay(*policy, current.run_id, current.attempt_number + 1U);
+    REQUIRE(delay);
+    if (current.attempt_number == 1) {
+        // Pin the same nanosecond delay vector as the ordinary retry tests, independently of the host clock.
+        CHECK(delay->count() == 8'293'882'753);
+    }
+    else {
+        CHECK(delay->count() != 8'293'882'753);
+    }
+    CHECK(*delay >= 7500ms);
+    CHECK(*delay <= 12500ms);
+
+    auto first  = recovery_retry_decision(values, current);
+    auto repeat = recovery_retry_decision(values, current);
+
+    // Recovery must reject precision loss on coarser clocks (microseconds on macOS), not round jitter.
+    auto const clock_delay = std::chrono::duration_cast<UtcTimePoint::duration>(*delay);
+    if (clock_delay != *delay) {
+        REQUIRE_FALSE(first);
+        REQUIRE_FALSE(repeat);
+        CHECK(first.error().code == "jobu.retry.out_of_range");
+        CHECK(repeat.error().code == "jobu.retry.out_of_range");
+        return;
+    }
+
     REQUIRE(first);
     REQUIRE(repeat);
     REQUIRE(first->retry);
     CHECK(*repeat == *first);
-    // Same published delay vector as the ordinary retry tests, now anchored at recovery time.
-    CHECK(first->retry->due_at == current.recovery_time + Duration{8293882753});
-    ++current.attempt_number;
-    auto next = recovery_retry_decision(values, current);
-    REQUIRE(next);
-    REQUIRE(next->retry);
-    CHECK(next->retry->due_at != first->retry->due_at);
-    CHECK(next->retry->due_at >= current.recovery_time + 7500ms);
-    CHECK(next->retry->due_at <= current.recovery_time + 12500ms);
+    CHECK(first->retry->due_at == current.recovery_time + clock_delay);
 }
 
 TEST_CASE("Recovery rejects invalid contexts and policy even when no retry would be chosen", "[jobu][recovery][retry]")
