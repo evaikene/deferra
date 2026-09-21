@@ -228,7 +228,9 @@ struct RunNowRequest {
 /// Every mutation checks admission before validation or database work. stop_mutations() or a fatal storage/invariant
 /// failure irreversibly closes admission; later mutations return Unavailable / `jobu.service.stopping`. The failing
 /// operation returns its own sanitized error and emits failed after its transaction/query guards have unwound.
-/// Read operations remain available and still report corruption/invariant failures through failed.
+/// Failed transaction cleanup also closes admission; its error takes precedence over an ordinary conflict,
+/// while an existing fatal storage error is preserved. Read operations remain available and still report
+/// corruption/invariant failures or a poisoned connection through failed.
 ///
 class ManagementService final : public jb::core::Object {
 public:
@@ -422,7 +424,8 @@ public:
     /// Mutation admission is already closed and operation-local queries/transactions
     /// have unwound before delivery. The sanitized error preserves its stable code
     /// and category; its reference is borrowed only for the duration of delivery.
-    /// Ordinary validation/conflict errors and non-corruption read failures do not emit.
+    /// Ordinary validation/conflict errors and non-corruption read failures do not emit unless
+    /// the connection is poisoned (for example, by failed rollback during conflict handling).
     /// Failed and rejected operations never emit mutation_committed.
     /// Slots run on the owner thread and may latch shutdown (including stop_mutations()),
     /// but must not destroy the service, invoke another service operation, or start

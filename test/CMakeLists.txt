@@ -9,7 +9,7 @@ add_executable(fault-database-driver-test
 target_link_libraries(fault-database-driver-test PRIVATE db Catch2::Catch2WithMain)
 add_test(NAME fault-database-driver-test COMMAND $<TARGET_FILE:fault-database-driver-test>)
 
-foreach(DB_DRIVER_HEADER driver driver_query)
+foreach(DB_DRIVER_HEADER driver driver_query database)
     set(TARGET "db-${DB_DRIVER_HEADER}-public-header-test")
     add_executable(${TARGET} db-driver-public-header-test.cpp)
     target_compile_definitions(${TARGET} PRIVATE DB_DRIVER_HEADER="${DB_DRIVER_HEADER}.hpp")
@@ -355,6 +355,18 @@ if(TARGET jobu-sqlite)
     target_link_libraries(recovery-service-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME recovery-service-test COMMAND $<TARGET_FILE:recovery-service-test>)
 
+    add_executable(recovery-transaction-fault-test
+        recovery-transaction-fault-test.cpp support/fault_database_driver.cpp
+        support/recovery_fixture.cpp support/temporary_directory.cpp)
+    target_link_libraries(recovery-transaction-fault-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME recovery-transaction-fault-test COMMAND $<TARGET_FILE:recovery-transaction-fault-test>)
+
+    add_executable(management-transaction-fault-test
+        management-transaction-fault-test.cpp support/fault_database_driver.cpp
+        support/recovery_fixture.cpp support/temporary_directory.cpp)
+    target_link_libraries(management-transaction-fault-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME management-transaction-fault-test COMMAND $<TARGET_FILE:management-transaction-fault-test>)
+
     # JobU SQLite-backed scheduler read repository test
     set(TARGET "scheduler-repository-test")
     add_executable(${TARGET}
@@ -652,6 +664,7 @@ if(TARGET jobud)
     if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
         add_executable(jobud-runtime-test
             jobud-runtime-test.cpp
+            support/fault_database_driver.cpp
             support/fake_http_client.cpp
             support/memory_io_device.cpp
             support/recovery_fixture.cpp

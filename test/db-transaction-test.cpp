@@ -296,6 +296,7 @@ TEST_CASE("Guard rollback failure deactivates the guard and poisons its database
 TEST_CASE("Destructor rollback failure permits unwinding and prevents backend reuse", "[db][transaction][guard]")
 {
     OpenDatabase fixture;
+    CHECK_FALSE(fixture.database.is_poisoned());
     {
         auto begun = Transaction::begin(fixture.database);
         REQUIRE(begun);
@@ -309,7 +310,11 @@ TEST_CASE("Destructor rollback failure permits unwinding and prevents backend re
     CHECK(fixture.database.last_error()->code == "db.fake.rollback");
 
     auto const calls = fixture.state->calls.size();
-    auto       begun = Transaction::begin(fixture.database);
+    auto const error = fixture.database.last_error();
+    CHECK(fixture.database.is_poisoned());
+    CHECK(fixture.database.last_error() == error);
+    CHECK(fixture.state->calls.size() == calls);
+    auto begun = Transaction::begin(fixture.database);
     REQUIRE_FALSE(begun);
     CHECK(begun.error().code == "db.connection_failed");
     {
@@ -322,7 +327,9 @@ TEST_CASE("Destructor rollback failure permits unwinding and prevents backend re
 
     fixture.state->rollback_error.reset();
     REQUIRE(fixture.database.close());
+    CHECK_FALSE(fixture.database.is_poisoned());
     REQUIRE(fixture.database.open());
+    CHECK_FALSE(fixture.database.is_poisoned());
     REQUIRE(fixture.database.transaction());
     REQUIRE(fixture.database.rollback());
 }
