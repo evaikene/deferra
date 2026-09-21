@@ -6,6 +6,7 @@
 #include "query.hpp"
 #include "queue_repository_priv.hpp"
 #include "run_repository_priv.hpp"
+#include "scheduler_core_priv.hpp"
 #include "support/fake_attempt_executor.hpp"
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_event_loop_backend.hpp"
@@ -53,6 +54,13 @@ auto storage_error(std::string code = "db.io") -> Error
             .detail   = "private-backend-marker"};
 }
 
+auto successor_error() -> Error
+{
+    return {.category = ErrorCategory::ResourceExhausted,
+            .code     = "test.cron.next_failed",
+            .message  = "Configured cron next-occurrence failure"};
+}
+
 // Match logical SQL shapes, never a global query ordinal. Every injected test asserts that its named fault fired,
 // so a repository rewrite cannot silently turn a rollback case into a successful control.
 auto boundary(std::string_view sql) -> std::string
@@ -72,6 +80,9 @@ auto boundary(std::string_view sql) -> std::string
     }
     if (sql.starts_with("UPDATE jobu_runs SET state = 'running'")) {
         return "dispatch.run";
+    }
+    if (sql.starts_with("UPDATE jobu_runs SET state = 'cancelled'")) {
+        return "cancellation.run";
     }
     if (sql.starts_with("UPDATE jobu_attempts SET completed_at_us")) {
         return "completion.attempt";
@@ -228,6 +239,22 @@ struct Fixture {
     void arm(DatabaseCall call, std::string code = "db.io")
     {
         faults->faults.push_back({.at = std::move(call), .error = storage_error(std::move(code))});
+    }
+
+    auto insert_future_recurring_run() -> RecoveryRunFixture
+    {
+        auto       recurring_job = store.make_job(recovery_id(6), queue.id);
+        auto const schedule      = CronSchedule{.expression = "* * * * *", .timezone = "UTC"};
+        recurring_job.schedule   = schedule;
+        cron.set_occurrences(schedule, {at(200), at(300)});
+        store.insert_job(recurring_job);
+
+        // Keep cancellation's target pending while startup dispatches an unrelated attempt.
+        auto pending            = store.make_run(recovery_id(7), recurring_job);
+        pending.run.planned_at  = at(200);
+        pending.run.runnable_at = at(200);
+        store.insert_run(pending);
+        return pending;
     }
 
     auto start_completion(Scenario scenario) -> AttemptKey
@@ -665,6 +692,204 @@ TEST_CASE("Scheduler rollback failure preserves the first error and poisons the 
             CHECK(fixture.faults->calls.size() == calls);
             fixture.reopen();
             CHECK(snapshot(fixture.store.database) == before);
+        }
+    }
+}
+
+TEST_CASE("Scheduler cancellation promotes failed rollback before notifying retained completions",
+          "[jobu][scheduler][fault][cancellation][sqlite]")
+{
+    Fixture    fixture;
+    auto const pending    = fixture.insert_future_recurring_run();
+    auto const key        = fixture.start_completion(Scenario::Terminal);
+    auto const before     = snapshot(fixture.store.database);
+    auto const cron_calls = fixture.cron.next_calls().size();
+
+    // Successor generation is an ordinary operation failure until transaction cleanup also fails.
+    fixture.cron.set_next_error(successor_error());
+    fixture.faults->faults.push_back({
+        .at    = {.boundary = "connection", .operation = Operation::Rollback, .phase = Phase::Before},
+        .error = {.category = ErrorCategory::Io,
+                  .code     = "db.rollback_failed",
+                  .message  = "private-rollback-message",
+                  .detail   = "private-rollback-detail"}
+    });
+
+    bool cancellation_returned = false;
+    bool completion_delivered  = false;
+    fixture.scheduler->failed.connect(fixture.scheduler.get(), [&](Error const& error) {
+        CHECK_FALSE(cancellation_returned);
+        CHECK(fixture.store.database.is_poisoned());
+        CHECK(fixture.scheduler->state() == SchedulerState::Failed);
+        CHECK(fixture.scheduler->failure() == error);
+        CHECK(error.code == "db.rollback_failed");
+
+        // Failure state must already be visible, and a completion delivered inside notification must be inert.
+        auto const calls = fixture.faults->calls.size();
+        REQUIRE(fixture.executor.fake.complete(key, completion(key)));
+        completion_delivered = true;
+        CHECK(fixture.faults->calls.size() == calls);
+        CHECK(fixture.scheduler->failure() == error);
+        CHECK(fixture.failures.size() == 1U);
+    });
+
+    auto cancelled        = fixture.scheduler->cancel_run(pending.run.id);
+    cancellation_returned = true;
+    REQUIRE_FALSE(cancelled);
+    REQUIRE(fixture.cron.next_calls().size() == cron_calls + 1);
+    CHECK(fixture.cron.next_calls().back().exclusive_lower_bound == pending.run.planned_at);
+    REQUIRE(fixture.faults->faults.front().fired);
+    REQUIRE(fixture.store.database.is_poisoned());
+    CHECK(cancelled.error().code == "db.rollback_failed");
+    CHECK(fixture.scheduler->state() == SchedulerState::Failed);
+    CHECK(completion_delivered);
+    fixture.require_failure("db.rollback_failed");
+    CHECK(cancelled.error() == fixture.failures.front());
+    CHECK(cancelled.error().message.find("private-rollback") == std::string::npos);
+    CHECK(cancelled.error().detail.find("private-rollback") == std::string::npos);
+
+    auto const calls    = fixture.faults->calls.size();
+    auto       repeated = fixture.scheduler->cancel_run(pending.run.id);
+    REQUIRE_FALSE(repeated);
+    CHECK(repeated.error().code == "jobu.scheduler.stopping");
+    CHECK(fixture.faults->calls.size() == calls);
+    fixture.require_closed_gate();
+    CHECK(fixture.executor.fake.start_requests().size() == 1U);
+
+    // Release scheduler dependencies before closing the poisoned connection. SQLite close rolls back the uncommitted
+    // cancellation; the full snapshot also proves no successor or completion of the unrelated active run persisted.
+    fixture.reopen();
+    CHECK(snapshot(fixture.store.database) == before);
+    fixture.store.require_run(pending);
+}
+
+TEST_CASE("Scheduler cancellation retains ordinary successor errors when rollback succeeds",
+          "[jobu][scheduler][fault][cancellation][sqlite]")
+{
+    Fixture    fixture;
+    auto const pending = fixture.insert_future_recurring_run();
+    (void)fixture.start_completion(Scenario::Terminal);
+    auto const before = snapshot(fixture.store.database);
+    fixture.cron.set_next_error(successor_error());
+
+    auto cancelled = fixture.scheduler->cancel_run(pending.run.id);
+    REQUIRE_FALSE(cancelled);
+    CHECK(cancelled.error() == successor_error());
+    CHECK_FALSE(fixture.store.database.is_poisoned());
+    CHECK(fixture.scheduler->state() == SchedulerState::Running);
+    CHECK_FALSE(fixture.scheduler->failure());
+    CHECK(fixture.failures.empty());
+    CHECK(snapshot(fixture.store.database) == before);
+    fixture.store.require_run(pending);
+
+    // Successful rollback leaves the same scheduler and pending run usable for a caller retry.
+    fixture.cron.set_next_error(std::nullopt);
+    auto retried = fixture.scheduler->cancel_run(pending.run.id);
+    REQUIRE(retried);
+    CHECK(retried->disposition == CancelDisposition::Completed);
+    CHECK(retried->run.state == RunState::Cancelled);
+    RunRepository runs{fixture.store.database, fixture.store.registry};
+    auto          successor = runs.find_schedule_owned(pending.run.job_id);
+    REQUIRE(successor);
+    REQUIRE(successor->has_value());
+    CHECK(successor->value().id == recovery_id(100));
+    CHECK(successor->value().planned_at == at(300));
+    CHECK(successor->value().state == RunState::Scheduled);
+    CHECK(fixture.scheduler->state() == SchedulerState::Running);
+    CHECK(fixture.failures.empty());
+}
+
+TEST_CASE("Scheduler cancellation preserves its first fatal error when rollback also fails",
+          "[jobu][scheduler][fault][cancellation][sqlite]")
+{
+    Fixture    fixture;
+    auto const pending = fixture.insert_future_recurring_run();
+    (void)fixture.start_completion(Scenario::Terminal);
+    auto const before = snapshot(fixture.store.database);
+
+    // Fail after the cancellation update reaches SQLite, so durable restoration requires rollback on close.
+    fixture.arm({.boundary = "cancellation.run", .operation = Operation::Execute, .phase = Phase::AfterSuccess});
+    fixture.arm({.boundary = "connection", .operation = Operation::Rollback, .phase = Phase::Before},
+                "db.rollback_failed");
+    auto cancelled = fixture.scheduler->cancel_run(pending.run.id);
+    REQUIRE_FALSE(cancelled);
+    CHECK(fixture.store.database.is_poisoned());
+    fixture.require_failure("db.io");
+    CHECK(cancelled.error() == fixture.failures.front());
+    CHECK(cancelled.error().message != "Injected storage failure");
+
+    auto const calls    = fixture.faults->calls.size();
+    auto       repeated = fixture.scheduler->cancel_run(pending.run.id);
+    REQUIRE_FALSE(repeated);
+    CHECK(repeated.error().code == "jobu.scheduler.stopping");
+    CHECK(fixture.faults->calls.size() == calls);
+    fixture.require_closed_gate();
+
+    fixture.reopen();
+    CHECK(snapshot(fixture.store.database) == before);
+}
+
+TEST_CASE("Scheduler core latches cancellation cleanup failure without asynchronous notification",
+          "[jobu][scheduler][core][fault][cancellation][sqlite]")
+{
+    for (bool fatal_cleanup_error : {true, false}) {
+        DYNAMIC_SECTION("fatal cleanup error " << fatal_cleanup_error)
+        {
+            Fixture    fixture;
+            auto const pending = fixture.insert_future_recurring_run();
+            fixture.scheduler.reset();
+            Snapshot before;
+
+            // Own the core directly to prove it closes completion acceptance without help from the public adapter.
+            // Destroy it before reopening the connection, just as the public fixture releases its scheduler.
+            {
+                SchedulerCore core{
+                    fixture.store.database,
+                    fixture.store.registry,
+                    fixture.cron,
+                    fixture.generator,
+                    fixture.time,
+                    fixture.executor,
+                    {},
+                    {.failure_reported = [&](Error const& error) { fixture.failures.push_back(error); }}};
+                REQUIRE(core.process_cycle());
+                REQUIRE(fixture.executor.fake.start_requests().size() == 1U);
+                auto const key        = fixture.executor.fake.pending_keys().front();
+                before                = snapshot(fixture.store.database);
+                auto const cron_calls = fixture.cron.next_calls().size();
+                fixture.cron.set_next_error(successor_error());
+                fixture.arm({.boundary = "connection", .operation = Operation::Rollback, .phase = Phase::Before},
+                            fatal_cleanup_error ? "db.rollback_failed" : "test.rollback.failed");
+
+                auto cancelled = core.cancel_run(pending.run.id);
+                REQUIRE_FALSE(cancelled);
+                CHECK(fixture.cron.next_calls().size() == cron_calls + 1);
+                REQUIRE(fixture.faults->faults.front().fired);
+                CHECK(fixture.store.database.is_poisoned());
+                CHECK(cancelled.error().code == (fatal_cleanup_error ? "db.rollback_failed" : "db.connection_failed"));
+                if (!fatal_cleanup_error) {
+                    CHECK(cancelled.error().category == ErrorCategory::Internal);
+                    CHECK(cancelled.error().message.find("Injected") == std::string::npos);
+                    CHECK(cancelled.error().detail.empty());
+                }
+
+                // A retained completion must not replace the latched error or invoke the asynchronous failure path.
+                auto const calls = fixture.faults->calls.size();
+                REQUIRE(fixture.executor.fake.complete(key, completion(key)));
+                auto cycle = core.process_cycle();
+                REQUIRE_FALSE(cycle);
+                CHECK(cycle.error() == cancelled.error());
+                auto repeated = core.cancel_run(pending.run.id);
+                REQUIRE_FALSE(repeated);
+                CHECK(repeated.error() == cancelled.error());
+                CHECK(fixture.faults->calls.size() == calls);
+                CHECK(fixture.executor.fake.start_requests().size() == 1U);
+                CHECK(fixture.failures.empty());
+            }
+
+            fixture.reopen();
+            CHECK(snapshot(fixture.store.database) == before);
+            fixture.store.require_run(pending);
         }
     }
 }
