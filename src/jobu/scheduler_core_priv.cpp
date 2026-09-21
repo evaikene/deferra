@@ -2,6 +2,7 @@
 
 #include "attempt_executor.hpp"
 #include "attempt_repository_priv.hpp"
+#include "database.hpp"
 #include "json.hpp"
 #include "recurrence_priv.hpp"
 #include "retry_policy_priv.hpp"
@@ -936,8 +937,26 @@ auto SchedulerCore::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result
     // Cancellation is a scheduler state operation too. Only fatal storage errors close acceptance; expected run
     // conflicts and executor refusals retain their existing retryable operation contract.
     auto cancelled = cancel_run_impl(run_id);
-    if (!cancelled &&
-        classify_storage_failure(cancelled.error(), StorageOperation::Mutation) == StorageFailureDisposition::Fatal) {
+    auto fatal     = !cancelled && classify_storage_failure(cancelled.error(), StorageOperation::Mutation) ==
+                                       StorageFailureDisposition::Fatal;
+
+    // A nonfatal operation error is safe only if transaction cleanup succeeds. Inspect health after the local
+    // guard has unwound, preserving an earlier fatal error when rollback also fails.
+    if (_database.is_poisoned()) {
+        if (!fatal) {
+            auto cleanup_error = _database.last_error();
+            if (!cleanup_error || classify_storage_failure(*cleanup_error, StorageOperation::Mutation) !=
+                                      StorageFailureDisposition::Fatal) {
+                cleanup_error = core_error(jb::core::ErrorCategory::Internal,
+                                           "db.connection_failed",
+                                           "The database connection is unusable after transaction cleanup");
+            }
+            cancelled = CancellationResult::failure(std::move(*cleanup_error));
+        }
+        fatal = true;
+    }
+
+    if (fatal) {
         fail(cancelled.error(), false);
     }
     return cancelled;

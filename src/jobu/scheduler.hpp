@@ -176,8 +176,9 @@ public:
     /// Scheduler must be Running. Pending cancellation, a possible recurring successor, and suspension drains commit in
     /// one transaction before `Completed` is returned. `Requested` retains capacity until the executor's exactly-once
     /// completion is forced to the cancelled outcome and commits. A synchronously completed cancellation schedules a
-    /// later coalesced rescan. A fatal storage failure emits failed after transaction unwinding; expected run conflicts
-    /// and executor cancellation refusals remain ordinary operation errors.
+    /// later coalesced rescan. A fatal storage failure, including failed cleanup that poisons the connection, closes
+    /// completion acceptance and emits failed after transaction unwinding, before this call returns. Expected run
+    /// conflicts and executor cancellation refusals remain ordinary operation errors when cleanup succeeds.
     /// After fatal failure or shutdown(), rejects with `jobu.scheduler.stopping` without accessing storage or
     /// executors.
     ///
