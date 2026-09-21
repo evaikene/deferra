@@ -73,7 +73,7 @@ struct ExecutionRecord {
     std::function<void()>                 on_start;
 };
 
-/// Intentionally retains callback copies beyond runner destruction to probe the group's lifetime gate.
+/// Probes retained completions during final drains and child teardown while the group and runtime still exist.
 class ObservedExecutor final : public AttemptExecutor {
 public:
     explicit ObservedExecutor(ExecutionRecord& record)
@@ -416,7 +416,7 @@ TEST_CASE("Daemon gates remain latched through final task drains and retained co
     REQUIRE(result == EXIT_SUCCESS);
     REQUIRE(drained);
     fixture.runtime.reset();
-    fixture.record.completions.front()(success(fixture.record.starts.front().key));
+    // Child-to-group callbacks borrow their owners; post-destruction scheduler-token tests live separately.
     fixture.require_running(seeded);
 }
 

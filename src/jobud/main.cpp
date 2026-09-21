@@ -3,7 +3,7 @@
 #include "runtime_priv.hpp"
 #include "startup_priv.hpp"
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #  include "shutdown_signal_priv.hpp"
 #endif
 
@@ -59,7 +59,7 @@ auto main(int argc, char* argv[]) -> int
 
     // The relay precedes Application and every worker-capable dependency. Its checked retirement
     // follows their complete scope teardown, including every early startup return.
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     auto installed = jb::jobud::detail::ShutdownSignalRelay::install();
     if (!installed) {
         log_error("JobU signal setup failed: code={}", installed.error().code);
@@ -77,10 +77,8 @@ auto main(int argc, char* argv[]) -> int
         StandardAttributeRegistry attribute_registry;
         SystemCronEngine          cron;
 
-        // Native macOS signal-relay adaptation remains Stage 7.18. The common runtime and recovery
-        // ordering compile there without pretending that Linux signal handling supplies coverage.
         std::function<bool()> should_stop;
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
         should_stop = [&relay] { return relay->requested(); };
 #endif
         jb::jobud::detail::DaemonRuntime runtime{*app.event_loop(),
@@ -91,7 +89,7 @@ auto main(int argc, char* argv[]) -> int
                                                  time_source,
                                                  *startup,
                                                  std::move(should_stop)};
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
         auto attached = relay->attach(*app.event_loop(), [&runtime] { runtime.request_stop(); });
         if (!attached) {
             runtime.fail("signal_watch", attached.error());
@@ -145,7 +143,7 @@ auto main(int argc, char* argv[]) -> int
     };
 
     auto status = run_application();
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     auto closed = relay->close();
     if (!closed) {
         log_error("JobU signal cleanup failed: code={}", closed.error().code);

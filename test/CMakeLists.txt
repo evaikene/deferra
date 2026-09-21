@@ -646,9 +646,15 @@ if(TARGET jobud-signal)
     # The production jobud-signal library contains neither hooks nor runtime test switches.
     add_executable(jobud-signal-test-helper
         jobud-signal-test-helper.cpp
-        ../src/jobud/shutdown_signal_linux.cpp
+        ../src/jobud/shutdown_signal_posix.cpp
     )
-    target_compile_definitions(jobud-signal-test-helper PRIVATE JOBUD_SIGNAL_TESTING)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        target_sources(jobud-signal-test-helper PRIVATE ../src/jobud/shutdown_signal_pipe_macos.cpp)
+    else()
+        target_sources(jobud-signal-test-helper PRIVATE ../src/jobud/shutdown_signal_pipe_linux.cpp)
+    endif()
+    target_compile_definitions(jobud-signal-test-helper PRIVATE JOBUD_SIGNAL_TESTING
+        JOBUD_SIGNAL_TEST_HELPER="$<TARGET_FILE:jobud-signal-test-helper>")
     target_include_directories(jobud-signal-test-helper PRIVATE ../src/jobud)
     target_link_libraries(jobud-signal-test-helper PRIVATE core Catch2::Catch2)
     add_executable(jobud-signal-test jobud-signal-test.cpp)
@@ -672,6 +678,10 @@ if(TARGET jobud)
         )
         target_link_libraries(jobud-runtime-test PRIVATE jobud-runtime jobu-sqlite jobu-http Catch2::Catch2WithMain)
         add_test(NAME jobud-runtime-test COMMAND $<TARGET_FILE:jobud-runtime-test>)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+            # The default macOS temporary directory can exceed the Unix socket path limit.
+            set_tests_properties(jobud-runtime-test PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+        endif()
         add_executable(jobud-startup-test
             jobud-startup-test.cpp
             ../src/jobud/startup_priv.cpp
@@ -967,8 +977,8 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
     endif()
 endif()
 
-# Real Linux daemon crash/restart evidence with committed SQLite state assertions.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
+# Native daemon crash/restart evidence with committed SQLite state assertions.
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
     add_executable(jobud-recovery-integration-test
         jobud-recovery-integration-test.cpp
         support/recovery_fixture.cpp
@@ -983,10 +993,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
     add_dependencies(jobud-recovery-integration-test jobud jobuctl process-test-helper)
     add_test(NAME jobud-recovery-integration-test COMMAND $<TARGET_FILE:jobud-recovery-integration-test>)
     set_tests_properties(jobud-recovery-integration-test PROPERTIES TIMEOUT 120)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        set_tests_properties(jobud-recovery-integration-test PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+    endif()
 endif()
 
-# Immediate shutdown evidence stays Linux-only until the native macOS stage.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
+# Native immediate shutdown evidence with mixed HTTP and CLI work.
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
     add_executable(jobud-shutdown-test-helper
         jobud-shutdown-test-helper.cpp
         support/shutdown_fixture.cpp
@@ -1016,6 +1029,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
     add_dependencies(jobud-shutdown-integration-test jobud jobud-shutdown-test-helper process-test-helper)
     add_test(NAME jobud-shutdown-integration-test COMMAND $<TARGET_FILE:jobud-shutdown-integration-test>)
     set_tests_properties(jobud-shutdown-integration-test PROPERTIES TIMEOUT 120)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        set_tests_properties(jobud-shutdown-integration-test PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+    endif()
 endif()
 
 # Real POSIX daemon CLI execution; the root override requires an explicit isolated-test opt-in.

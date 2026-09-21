@@ -89,7 +89,7 @@ public:
     [[nodiscard]] auto wait_for_response_segments(std::size_t count, std::chrono::milliseconds timeout) -> bool;
     void               release_response_segment();
     [[nodiscard]] auto wait_for_peer_closes(std::size_t count, std::chrono::milliseconds timeout) -> bool;
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     /// Observes a FIN while exactly one request is held at the initial response barrier.
     /// Requires one accepted connection and unreleased responses. Does not consume data, release the barrier,
     /// or close either endpoint. The timeout is test protection, not a shutdown deadline.

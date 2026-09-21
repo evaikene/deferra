@@ -3,7 +3,7 @@
 #include "event_loop.hpp"
 #include "event_loop_types.hpp"
 #include "logging.hpp"
-#include "shutdown_signal_linux_priv.hpp"
+#include "shutdown_signal_posix_priv.hpp"
 
 #ifdef JOBUD_SIGNAL_TESTING
 #  include "shutdown_signal_test_priv.hpp"
@@ -19,7 +19,6 @@
 #include <string_view>
 #include <utility>
 
-#include <fcntl.h>
 #include <sched.h>
 #include <unistd.h>
 
@@ -120,9 +119,9 @@ auto signal_error(std::string_view code, std::string_view reason) -> jb::core::E
 auto shutdown_signals() -> sigset_t
 {
     sigset_t signals;
-    ::sigemptyset(&signals);
-    ::sigaddset(&signals, SIGTERM);
-    ::sigaddset(&signals, SIGINT);
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGTERM);
+    sigaddset(&signals, SIGINT);
     return signals;
 }
 
@@ -195,7 +194,7 @@ auto ShutdownSignalRelay::install(ShutdownSignalOperations const& operations) ->
     data.owns_relay = true;
     relay_owned     = true;
 
-    if (operations.pipe(data.descriptors.data(), O_NONBLOCK | O_CLOEXEC) != 0) {
+    if (prepare_shutdown_pipe(data.descriptors.data(), operations) != 0) {
         return fail("create_pipe");
     }
 
@@ -219,8 +218,8 @@ auto ShutdownSignalRelay::install(ShutdownSignalOperations const& operations) ->
     // created afterward inherit this mask. Retirement fences descriptor access even if a library
     // worker outlives its owner (for example, a detached libcurl DNS resolver).
     auto serving_mask = data.original_mask;
-    ::sigdelset(&serving_mask, SIGTERM);
-    ::sigdelset(&serving_mask, SIGINT);
+    sigdelset(&serving_mask, SIGTERM);
+    sigdelset(&serving_mask, SIGINT);
     if (operations.mask(SIG_SETMASK, &serving_mask, nullptr) != 0) {
         return fail("enable_signals");
     }
@@ -299,7 +298,7 @@ auto ShutdownSignalRelay::close() -> VoidResult
     retire_handler_descriptor();
     for (auto& descriptor : data.descriptors) {
         if (descriptor >= 0) {
-            // Linux closes the descriptor even when close reports EINTR; never retry a reused number.
+            // Never retry close on a descriptor number that another thread could already have reused.
             ::close(descriptor);
             descriptor = -1;
         }

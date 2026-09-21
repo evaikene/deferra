@@ -791,6 +791,7 @@ TEST_CASE("Recovery rejects a cron engine returning a nonfuture successor", "[jo
 
 TEST_CASE("Recovery repairs revalidate owner existence and timestamp representation", "[jobu][recovery][sqlite]")
 {
+    auto const    commit = GENERATE(false, true);
     RepairFixture fixture;
     auto          queue = recovery_queue(recovery_id(1), QueueState::Suspending);
     auto          job   = recurring_job(fixture, queue.id, JobState::Suspending);
@@ -812,25 +813,63 @@ TEST_CASE("Recovery repairs revalidate owner existence and timestamp representat
         CHECK(no_queue.error().code == "jobu.recovery.invariant");
         CHECK(no_job_drain.error().code == "jobu.recovery.invariant");
     }
+
+    // A nanosecond clock's minimum can floor below its decodable range. A microsecond clock's
+    // minimum (macOS) is exact and must survive storage/reopen instead of being rejected.
+    auto const minimum       = UtcTimePoint::min();
+    auto const exact_minimum = std::chrono::floor<std::chrono::microseconds>(minimum.time_since_epoch()) ==
+                               std::chrono::ceil<std::chrono::microseconds>(minimum.time_since_epoch());
+    fixture.cron.set_occurrences(std::get<CronSchedule>(job.schedule), {UtcTimePoint{180s}});
     {
         auto transaction = Transaction::begin(fixture.storage.database);
         REQUIRE(transaction);
-        // The minimum clock instant floors below the microsecond value the decoder can reopen.
-        auto invalid_job   = fixture.recovery.complete_drained_job_suspension(job.id, UtcTimePoint::min());
-        auto invalid_queue = fixture.recovery.complete_drained_queue_suspension(queue.id, UtcTimePoint::min());
-        auto invalid_recurrence =
-            fixture.recovery.repair_missing_successor(job.id, UtcTimePoint::min(), fixture.cron, fixture.generator);
-        REQUIRE_FALSE(invalid_job);
-        REQUIRE_FALSE(invalid_queue);
-        REQUIRE_FALSE(invalid_recurrence);
-        CHECK(invalid_job.error().detail == "reason=timestamp_out_of_range");
-        CHECK(invalid_queue.error().detail == "reason=timestamp_out_of_range");
-        CHECK(invalid_recurrence.error().detail == "reason=timestamp_out_of_range");
+        auto job_drain   = fixture.recovery.complete_drained_job_suspension(job.id, minimum);
+        auto queue_drain = fixture.recovery.complete_drained_queue_suspension(queue.id, minimum);
+        auto recurrence  = fixture.recovery.repair_missing_successor(job.id, minimum, fixture.cron, fixture.generator);
+        if (exact_minimum) {
+            REQUIRE(job_drain);
+            REQUIRE(queue_drain);
+            REQUIRE(recurrence);
+            CHECK(*job_drain);
+            CHECK(*queue_drain);
+            CHECK(*recurrence);
+            CHECK(read_job(fixture, job.id).updated_at == minimum);
+            CHECK(read_queue(fixture, queue.id).updated_at == minimum);
+            REQUIRE(fixture.cron.next_calls().size() == 1);
+            CHECK(fixture.cron.next_calls().front().exclusive_lower_bound == minimum);
+        }
+        else {
+            REQUIRE_FALSE(job_drain);
+            REQUIRE_FALSE(queue_drain);
+            REQUIRE_FALSE(recurrence);
+            CHECK(job_drain.error().detail == "reason=timestamp_out_of_range");
+            CHECK(queue_drain.error().detail == "reason=timestamp_out_of_range");
+            CHECK(recurrence.error().detail == "reason=timestamp_out_of_range");
+            CHECK(fixture.cron.next_calls().empty());
+        }
+        if (commit) {
+            REQUIRE(transaction->commit());
+        }
     }
-    CHECK(read_job(fixture, job.id).state == JobState::Suspending);
-    CHECK(read_job(fixture, job.id).revision == job.revision);
-    CHECK(read_queue(fixture, queue.id).state == QueueState::Suspending);
-    CHECK(fixture.cron.next_calls().empty());
+
+    // Reopen after both commit and rollback: rejected repairs must never leave partial writes.
+    fixture.storage.reopen();
+    auto const persisted_job   = read_job(fixture, job.id);
+    auto const persisted_queue = read_queue(fixture, queue.id);
+    auto const changed         = exact_minimum && commit;
+    CHECK(persisted_job.state == (changed ? JobState::Suspended : JobState::Suspending));
+    CHECK(persisted_job.revision == job.revision + (changed ? 1 : 0));
+    CHECK(persisted_job.updated_at == (changed ? minimum : job.updated_at));
+    CHECK(persisted_queue.state == (changed ? QueueState::Suspended : QueueState::Suspending));
+    CHECK(persisted_queue.updated_at == (changed ? minimum : queue.updated_at));
+    if (changed) {
+        require_successor(fixture, persisted_job, UtcTimePoint{180s});
+    }
+    else {
+        auto runs = fixture.recovery.list_runs(256);
+        REQUIRE(runs);
+        CHECK(runs->empty());
+    }
 }
 
 TEST_CASE("Queue-only repair reports malformed durable owners as recovery invariants", "[jobu][recovery][sqlite]")

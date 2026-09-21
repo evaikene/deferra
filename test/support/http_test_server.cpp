@@ -23,6 +23,9 @@
 #include <pthread.h>
 #if defined(__linux__)
 #  include <poll.h>
+#elif defined(__APPLE__)
+#  include <fcntl.h>
+#  include <sys/event.h>
 #endif
 
 #include <openssl/pem.h>
@@ -585,25 +588,72 @@ auto HttpTestServer::wait_for_peer_closes(std::size_t count, std::chrono::millis
            _peer_closes >= count;
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 auto HttpTestServer::wait_for_blocked_peer_disconnect(std::chrono::milliseconds timeout) -> bool
 {
-    // Holding the mutex keeps this descriptor registered and prevents server teardown/reuse during poll.
+    // Holding the mutex keeps this descriptor registered and prevents server teardown/reuse during observation.
     // The connection thread is asleep at the response barrier; peer FIN detection needs no server progress.
     std::unique_lock lock{_mutex};
     if (_stopping || _responses_released || _requests.size() != 1 || _connection_fds.size() != 1) {
         return false;
     }
-    pollfd     descriptor{.fd = *_connection_fds.begin(), .events = POLLRDHUP, .revents = 0};
+#  if defined(__APPLE__)
+    struct Watch {
+        int descriptor{::kqueue()};
+
+        ~Watch()
+        {
+            if (descriptor >= 0) {
+                ::close(descriptor);
+            }
+        }
+    } watch;
+
+    if (watch.descriptor < 0 || ::fcntl(watch.descriptor, F_SETFD, FD_CLOEXEC) < 0) {
+        return false;
+    }
+    // EV_EOF observes the peer FIN independently of the response thread. EV_CLEAR prevents
+    // queued data from repeatedly waking this observer before a later disconnect arrives.
+    struct kevent change;
+    EV_SET(&change,
+           static_cast<std::uintptr_t>(*_connection_fds.begin()),
+           EVFILT_READ,
+           EV_ADD | EV_CLEAR,
+           0,
+           0,
+           nullptr);
+    int registered;
+    do {
+        registered = ::kevent(watch.descriptor, &change, 1, nullptr, 0, nullptr);
+    } while (registered < 0 && errno == EINTR);
+    if (registered < 0) {
+        return false;
+    }
+#  else
+    pollfd descriptor{.fd = *_connection_fds.begin(), .events = POLLRDHUP, .revents = 0};
+#  endif
     auto const deadline = std::chrono::steady_clock::now() + timeout;
     for (;;) {
         auto const remaining =
             std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
-        auto const wait   = std::clamp<std::int64_t>(remaining.count(), 0, 2000);
+        auto const wait = std::clamp<std::int64_t>(remaining.count(), 0, 2000);
+#  if defined(__APPLE__)
+        struct kevent   event;
+        struct timespec interval{.tv_sec  = static_cast<time_t>(wait / 1000),
+                                 .tv_nsec = static_cast<long>((wait % 1000) * 1000000)};
+        auto const      result = ::kevent(watch.descriptor, nullptr, 0, &event, 1, &interval);
+        if (result > 0 && (event.flags & EV_ERROR) != 0) {
+            return false;
+        }
+        if (result > 0 && (event.flags & EV_EOF) != 0) {
+            return true;
+        }
+#  else
         auto const result = ::poll(&descriptor, 1, static_cast<int>(wait));
         if (result > 0) {
             return (descriptor.revents & POLLRDHUP) != 0;
         }
+#  endif
         if ((result < 0 && errno != EINTR) || std::chrono::steady_clock::now() >= deadline) {
             return false;
         }

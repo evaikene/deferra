@@ -2,6 +2,7 @@
 
 #include "application.hpp"
 #include "http_test_server.hpp"
+#include "process_exit_watch.hpp"
 #include "recovery_fixture.hpp"
 
 #include <array>
@@ -14,7 +15,7 @@
 
 namespace jb::test {
 
-/// Linux-only fixture for observed shutdown. Destructors are fallback cleanup, never success evidence.
+/// Native fixture for observed shutdown. Destructors are fallback cleanup, never success evidence.
 class ShutdownWork final {
 public:
     explicit ShutdownWork(std::function<std::unique_ptr<db::Driver>(std::unique_ptr<db::Driver>)> wrap = {});
@@ -41,11 +42,11 @@ public:
     std::array<pid_t, 2> identities{};
 
 private:
-    auto                  read_identities() -> bool;
-    std::filesystem::path _report;
-    int                   _report_fd{-1};
-    std::array<int, 2>    _pidfds{-1, -1};
-    core::TimePoint       _created_at{core::Clock::now()};
+    auto                                             read_identities() -> bool;
+    std::filesystem::path                            _report;
+    int                                              _report_fd{-1};
+    std::array<std::unique_ptr<ProcessExitWatch>, 2> _targets;
+    core::TimePoint                                  _created_at{core::Clock::now()};
 };
 
 /// Preserve the explicit isolated-environment opt-in used by existing CLI integration tests.
