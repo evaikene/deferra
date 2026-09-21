@@ -21,6 +21,9 @@
 #include <unistd.h>
 
 #include <pthread.h>
+#if defined(__linux__)
+#  include <poll.h>
+#endif
 
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
@@ -581,6 +584,32 @@ auto HttpTestServer::wait_for_peer_closes(std::size_t count, std::chrono::millis
     return _condition.wait_for(lock, timeout, [this, count]() -> bool { return _peer_closes >= count || _stopping; }) &&
            _peer_closes >= count;
 }
+
+#if defined(__linux__)
+auto HttpTestServer::wait_for_blocked_peer_disconnect(std::chrono::milliseconds timeout) -> bool
+{
+    // Holding the mutex keeps this descriptor registered and prevents server teardown/reuse during poll.
+    // The connection thread is asleep at the response barrier; peer FIN detection needs no server progress.
+    std::unique_lock lock{_mutex};
+    if (_stopping || _responses_released || _requests.size() != 1 || _connection_fds.size() != 1) {
+        return false;
+    }
+    pollfd     descriptor{.fd = *_connection_fds.begin(), .events = POLLRDHUP, .revents = 0};
+    auto const deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+        auto const remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        auto const wait   = std::clamp<std::int64_t>(remaining.count(), 0, 2000);
+        auto const result = ::poll(&descriptor, 1, static_cast<int>(wait));
+        if (result > 0) {
+            return (descriptor.revents & POLLRDHUP) != 0;
+        }
+        if ((result < 0 && errno != EINTR) || std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+    }
+}
+#endif
 
 void HttpTestServer::accept_connections(int listen_fd)
 {

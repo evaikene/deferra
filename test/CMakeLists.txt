@@ -985,6 +985,39 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
     set_tests_properties(jobud-recovery-integration-test PROPERTIES TIMEOUT 120)
 endif()
 
+# Immediate shutdown evidence stays Linux-only until the native macOS stage.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
+    add_executable(jobud-shutdown-test-helper
+        jobud-shutdown-test-helper.cpp
+        support/shutdown_fixture.cpp
+        support/recovery_fixture.cpp
+        support/http_test_server.cpp
+        support/fault_database_driver.cpp
+        support/memory_io_device.cpp
+        support/temporary_directory.cpp)
+    target_link_libraries(jobud-shutdown-test-helper PRIVATE
+        jobud-runtime jobu-sqlite jobu-http jobu-cli net-http OpenSSL::SSL OpenSSL::Crypto Catch2::Catch2WithMain)
+    target_compile_definitions(jobud-shutdown-test-helper PRIVATE
+        PROCESS_TEST_HELPER="$<TARGET_FILE:process-test-helper>")
+    add_dependencies(jobud-shutdown-test-helper process-test-helper)
+
+    add_executable(jobud-shutdown-integration-test
+        jobud-shutdown-integration-test.cpp
+        support/shutdown_fixture.cpp
+        support/recovery_fixture.cpp
+        support/http_test_server.cpp
+        support/temporary_directory.cpp)
+    target_link_libraries(jobud-shutdown-integration-test PRIVATE
+        jobu-sqlite net rpc OpenSSL::SSL OpenSSL::Crypto Catch2::Catch2WithMain)
+    target_compile_definitions(jobud-shutdown-integration-test PRIVATE
+        JOBUD_EXECUTABLE="$<TARGET_FILE:jobud>"
+        JOBUD_SHUTDOWN_TEST_HELPER="$<TARGET_FILE:jobud-shutdown-test-helper>"
+        PROCESS_TEST_HELPER="$<TARGET_FILE:process-test-helper>")
+    add_dependencies(jobud-shutdown-integration-test jobud jobud-shutdown-test-helper process-test-helper)
+    add_test(NAME jobud-shutdown-integration-test COMMAND $<TARGET_FILE:jobud-shutdown-integration-test>)
+    set_tests_properties(jobud-shutdown-integration-test PROPERTIES TIMEOUT 120)
+endif()
+
 # Real POSIX daemon CLI execution; the root override requires an explicit isolated-test opt-in.
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
     set(TARGET "jobud-cli-integration-test")
