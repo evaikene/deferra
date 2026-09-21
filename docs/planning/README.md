@@ -20,9 +20,10 @@ current source tree remain authoritative for exact implemented behavior.
 | [JobU Phase 5 Stage 5.4a code-level design](jobu-phase5-stage5.4a-code-design.md) | Completed | Defines explicit EventLoop readiness trigger modes and the level-triggered libcurl integration correction. |
 | [JobU Phase 5 closure code-level design](jobu-phase5-closure-code-design.md) | Completed | Defines the Object private-data and signal/callback architecture, closure stages, and Phase 6 entry boundary. |
 | [JobU Phase 6 code-level design](jobu-phase6-code-design.md) | Completed | Defines asynchronous local command execution, process supervision, CLI policy, executor integration, and platform stage boundaries. |
-| [JobU Phase 6 closure code-level design](jobu-phase6-closure-code-design.md) | Completed: Stage 6.20 merged and verified; Stage 6.21 evidence recorded | Corrects disabled CLI capture retention and records the final verification and closure disposition. |
-| [JobU Phase 7 code-level design](jobu-phase7-code-design.md) | Completed: merged Stage 7.21 implementation verified by Stage 7.22 | Defines startup recovery, terminal storage-failure gates, immediate shutdown, and platform verification boundaries. |
-| [JobU Phase 7 closure code-level design](jobu-phase7-closure-code-design.md) | Completed: Stage 7.21 merged and verified; Stage 7.22 evidence recorded | Corrects cancellation rollback failure handling and records final Linux verification with explicit native coverage limits. |
+| [JobU Phase 6 closure code-level design](jobu-phase6-closure-code-design.md) | Completed | Corrects disabled CLI capture retention and records the final verification and closure disposition. |
+| [JobU Phase 7 code-level design](jobu-phase7-code-design.md) | Completed | Defines startup recovery, terminal storage-failure gates, immediate shutdown, and platform verification boundaries. |
+| [JobU Phase 7 closure code-level design](jobu-phase7-closure-code-design.md) | Completed | Corrects cancellation rollback failure handling and records final Linux verification with explicit native coverage limits. |
+| [JobU Phase 8 code-level design](jobu-phase8-code-design.md) | Active | Secrets, complete RPC, and `jobuctl` |
 
 ## Authority
 
