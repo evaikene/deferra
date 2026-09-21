@@ -694,7 +694,7 @@ Fail closed:
 - Never start work if the pre-dispatch transaction fails.
 - Completion state and capture commit atomically; do not retry without output.
 - If a scheduler-state write fails, stop dispatch and RPC mutations, terminate active work through immediate shutdown, and exit nonzero.
-- A failed completion remains durably running and is recovered as interrupted at next startup.
+- A completion failure before commit leaves the prior durable Running state for startup recovery. A commit error can instead mean the commit succeeded but its acknowledgement failed; reopen and recover from actual durable state rather than assuming rollback.
 - Ordinary history-read errors return RPC errors unless they indicate corruption.
 - Corruption or invariant failure is fatal.
 
@@ -1048,9 +1048,15 @@ Exit criteria: concurrent CLI jobs and descendant termination work on Linux and 
 
 ### Phase 7: Recovery, fail-closed behavior, and shutdown
 
+Implementation is merged through Stage 7.18 (`91cc7eb8`, PR #175), including
+native macOS adaptation and verification. The [Stage 7.19 audit](jobu-phase7-audit.md)
+records documentation and boundary review; Stage 7.20 final clean Linux
+verification remains the closure gate. The detailed requirements are in the
+[Phase 7 code-level design](jobu-phase7-code-design.md).
+
 - Implement startup recovery for `fail_interrupted` and `retry_interrupted`.
 - Repair recurrence/manual/suspension invariants.
-- Implement atomic dispatch/completion boundaries.
+- Preserve atomic dispatch/completion boundaries and prove their failure behavior.
 - Add SQLite fault injection and fatal transition.
 - Implement immediate service shutdown.
 

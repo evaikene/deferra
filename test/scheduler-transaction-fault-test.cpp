@@ -57,6 +57,9 @@ auto storage_error(std::string code = "db.io") -> Error
 // so a repository rewrite cannot silently turn a rollback case into a successful control.
 auto boundary(std::string_view sql) -> std::string
 {
+    if (sql.find("AS running_run_count") != std::string_view::npos) {
+        return "startup.running_state";
+    }
     if (sql.find("AS manual_sibling_count") != std::string_view::npos) {
         return "dispatch.context";
     }
@@ -404,6 +407,49 @@ void require_committed_completion(Fixture& fixture, AttemptKey key, Scenario sce
 }
 
 } // namespace
+
+TEST_CASE("Scheduler startup storage errors are sanitized without a fatal transition",
+          "[jobu][scheduler][fault][startup][sqlite]")
+{
+    for (auto const operation : {Operation::Prepare, Operation::Execute, Operation::Fetch}) {
+        for (auto const category : {ErrorCategory::Io, ErrorCategory::Internal}) {
+            CAPTURE(operation, category);
+            Fixture     fixture;
+            auto const  before = snapshot(fixture.store.database);
+            auto const  timers = jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.loop.loop);
+            auto const* code   = category == ErrorCategory::Io ? "db.io" : "db.corrupt";
+
+            // Fail the running-state preflight with private text in both human-readable fields.
+            // Even corruption keeps the existing startup contract: return to the owner before entering Running.
+            fixture.faults->faults.push_back({
+                .at    = {.boundary = "startup.running_state", .operation = operation},
+                .error = {.category = category,
+                          .code     = code,
+                          .message  = "private-startup-message",
+                          .detail   = "private-startup-detail"}
+            });
+            auto started = fixture.scheduler->start();
+            REQUIRE_FALSE(started);
+            REQUIRE(fixture.faults->faults.front().fired);
+            CHECK(started.error().category == category);
+            CHECK(started.error().code == code);
+            CHECK(started.error().message.find("private-startup") == std::string::npos);
+            CHECK(started.error().detail.find("private-startup") == std::string::npos);
+            CHECK(fixture.scheduler->state() == SchedulerState::Stopped);
+            CHECK_FALSE(fixture.scheduler->failure());
+            CHECK(fixture.failures.empty());
+            CHECK(fixture.executor.fake.start_requests().empty());
+            CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.loop.loop) == timers);
+            CHECK(snapshot(fixture.store.database) == before);
+
+            // The synthetic fault is consumed and the real database remains healthy. No terminal gate was latched.
+            REQUIRE(fixture.scheduler->start());
+            CHECK(fixture.scheduler->state() == SchedulerState::Running);
+            CHECK(fixture.executor.fake.start_requests().size() == 1U);
+            CHECK(fixture.failures.empty());
+        }
+    }
+}
 
 TEST_CASE("Dispatch transaction faults never launch and restore the full SQLite snapshot",
           "[jobu][scheduler][fault][sqlite]")

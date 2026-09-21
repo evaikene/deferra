@@ -8,6 +8,12 @@ storage capabilities from the recovery behavior specified by the Phase 7 design.
 The invariant tables and fixture descriptions are a reference for implementation
 and review across the phase; they do not change production behavior or the schema.
 
+This is a historical Stage 7.1 record. Its future-tense recovery notes are resolved
+by the merged Phase 7 implementation: recovery writes Interrupted history and
+lost-capture metadata, and scheduler validation accepts that history for RetryWait.
+The [Stage 7.19 audit](jobu-phase7-audit.md) maps the current contracts and evidence;
+the writer inventory below continues to describe the named pre-recovery source.
+
 The governing scope is [Phase 7 §§6–8 and Stage 7.1](jobu-phase7-code-design.md),
 with [technical-plan §§15.2 and 19](jobu-v1-technical-plan.md) defining shutdown and
 unknown outcomes. The distinctions below matter when implementing recovery scans:

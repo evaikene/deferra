@@ -2,13 +2,20 @@
 
 ## 1. Status, baseline, and implementation rules
 
-This is an implementation-ready design, not a report that Phase 7 is implemented.
+Stages 7.1–7.18 are merged through `91cc7eb8e22565954dc9fdb62e96095d1daa5a92`
+(Stage 7.18, PR #175). The [Stage 7.19 audit](jobu-phase7-audit.md) records the
+public-contract and documentation review against that implementation. Stage 7.20
+final clean Linux verification and phase closure remain pending. Native macOS
+Stage 7.18 evidence is recorded separately; it is not final Linux evidence.
+
+The requirements and numbered stages below retain their implementation order.
+The baseline table describes the original entry state, not current behavior.
+See the [operator guide](../../README.md#recovery-and-shutdown) for implemented
+recovery and shutdown behavior.
 
 Repository baseline: [`3bba9c58a7062fd3a10de43a91b07a3b39dfb7da`](https://github.com/evaikene/deferra/commit/3bba9c58a7062fd3a10de43a91b07a3b39dfb7da), the merged Stage 6.21 handoff. Its verified implementation baseline is `fc326b4d63796d363dff14acac26aff6f8416698`; the subsequent baseline changes record verification and planning. Read current `AGENTS.md` before implementation, and reconcile any later implementation changes before starting a stage.
 
 Authoritative scope: `docs/planning/jobu-v1-technical-plan.md`, particularly §§15.2 and 19, and the Phase 7 roadmap entry. Preserve Phase 6 and its closure contracts for CLI execution, process ownership, output capture, and callback lifetime.
-
-Proposed repository location: `docs/planning/jobu-phase7-code-design.md`.
 
 Implement one numbered stage at a time. Each stage must have a reviewable diff, focused verification, and a handoff; stop at its review boundary. Temporary incompleteness between stages is acceptable. Do not demand that an intermediate stage deliver the final phase behavior. A stage must not claim features whose integration is still pending.
 
@@ -32,9 +39,9 @@ No schema migration is planned. Do not add a durable capacity counter, recovery 
 
 The accidentally deleted historical macOS evidence is accepted and is not a prerequisite for this phase. New macOS evidence concerns Phase 7 changes only.
 
-## 3. Existing implementation and changes required
+## 3. Original implementation baseline and Phase 7 changes
 
-| Existing location | Current behavior | Phase 7 action |
+| Existing location | Behavior before Phase 7 | Phase 7 action |
 |---|---|---|
 | `src/jobu/scheduler.cpp` | `start()` rejects existing running state; `stop()` allows active completions to persist | Keep the startup guard and resumable stop; add irreversible `shutdown()` |
 | `src/jobu/scheduler_core_priv.cpp` | Completion closure retains the core; atomic completion precedes capacity release | Gate all dispatch/completion entry and invalidate retained callbacks before teardown |
@@ -46,7 +53,14 @@ The accidentally deleted historical macOS evidence is accepted and is not a prer
 | `src/core/event_loop.cpp` | `quit()` enqueues a task; shutdown drains generic tasks | Add owner-thread allocation-free quit request; keep gates valid through final drains |
 | `src/db/sqlite/sqlite_error.cpp` | Already maps corruption to `db.corrupt`, I/O to `db.io` | Consume stable errors; keep SQLite details out of generic JobU |
 
-New generic JobU files: `recovery.hpp`, `recovery.cpp`, `recovery_repository_priv.hpp/.cpp`, and small shared private recovery/recurrence/storage-failure helpers where justified. New daemon-private files: `runtime_priv.hpp/.cpp`, `shutdown_signal_priv.hpp`, and POSIX/platform implementation files chosen consistently with the current build layout. Test helpers remain in test targets.
+The implementation adds generic JobU recovery, recovery-repository, recovery-retry,
+recurrence, and storage-failure helpers. Daemon-private runtime composition uses
+`runtime_priv.hpp/.cpp`. The relay uses `shutdown_signal_priv.hpp`, shared
+`shutdown_signal_posix.cpp` and `shutdown_signal_posix_priv.hpp`, and isolated
+`shutdown_signal_pipe_linux.cpp` / `shutdown_signal_pipe_macos.cpp` setup.
+Database decorators use protected generic Driver/DriverQuery forwarding operations;
+`Database::is_poisoned()` exposes connection health after transaction cleanup.
+Fault injection and signal checkpoints remain in test targets.
 
 ## 4. Lifecycle model
 

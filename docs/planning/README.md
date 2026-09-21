@@ -21,11 +21,15 @@ current source tree remain authoritative for exact implemented behavior.
 | [JobU Phase 5 closure code-level design](jobu-phase5-closure-code-design.md) | Completed | Defines the Object private-data and signal/callback architecture, closure stages, and Phase 6 entry boundary. |
 | [JobU Phase 6 code-level design](jobu-phase6-code-design.md) | Completed | Defines asynchronous local command execution, process supervision, CLI policy, executor integration, and platform stage boundaries. |
 | [JobU Phase 6 closure code-level design](jobu-phase6-closure-code-design.md) | Completed: Stage 6.20 merged and verified; Stage 6.21 evidence recorded | Corrects disabled CLI capture retention and records the final verification and closure disposition. |
+| [JobU Phase 7 code-level design](jobu-phase7-code-design.md) | Stages 7.1–7.18 merged; Stage 7.19 ready for review; Stage 7.20 pending | Defines startup recovery, terminal storage-failure gates, immediate shutdown, and platform verification boundaries. |
+| [JobU Phase 7 boundary audit](jobu-phase7-audit.md) | Stage 7.19 implemented and validated; awaiting review/merge | Records public contracts, the startup-error correction, documentation reconciliation, and the remaining closure gate. |
 
 Historical Stage 6.19 results and new Stage 6.21 Linux/native macOS results are
 recorded separately in the [Phase 6 verification record](jobu-phase6-verification.md).
-Phase 6 is complete against the verified merged correction, enabling Phase 7
-planning. Deleted Stage 6.17 evidence is accepted without recovery.
+Phase 6 is complete against the verified merged correction. Deleted Stage 6.17
+evidence is accepted without recovery. Phase 7 has separate native macOS
+Stage 7.18 evidence; final clean Linux verification remains Stage 7.20. See the
+Phase 7 audit for source identities and evidence provenance.
 
 ## Authority
 

@@ -54,7 +54,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
 
     /// The HTTP fatal notification may follow queued failed completions. Observe the stored failure
     /// at the daemon's execution boundary before any completion can persist or any runner can start.
-    /// Group shutdown invalidates its forwarding closures before this borrowed boundary is destroyed.
+    /// Group shutdown destroys child-owned forwarding closures before this borrowed boundary is destroyed.
     class ExecutionBoundary final : public jb::jobu::AttemptExecutor {
     public:
         explicit ExecutionBoundary(Private& runtime)
@@ -169,6 +169,8 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
     auto start_services() -> bool
     {
         using namespace jb::jobu;
+
+        // Recovery is complete. Establish all failure receivers before start() can dispatch synchronously.
         scheduler  = std::make_unique<Scheduler>(database,
                                                  attributes,
                                                  cron,
@@ -223,6 +225,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
             jb::core::log_error("JobU RPC connection failed: code={}", error.code);
         });
 
+        // Readiness requires successful scheduler startup; listening must not expose a partially started runtime.
         if (poll_stop() || check_http_failure()) {
             return false;
         }
@@ -249,6 +252,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         if (state == RuntimeState::Stopped) {
             return;
         }
+        // The active callback stack has unwound. Close RPC before destroying runners, while persistence stays gated.
         request_stop();
         admission.disconnect();
         if (listener) {
@@ -308,6 +312,7 @@ DaemonRuntime::DaemonRuntime(jb::core::EventLoop&               loop,
                        std::move(should_stop)}
 }
 {
+    // Bind only after Object owns the private block; service connections are installed later by run().
     d_ptr<Private>()->owner = this;
 }
 

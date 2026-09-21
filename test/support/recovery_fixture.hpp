@@ -56,8 +56,8 @@ public:
     /// Builds a snapshot and contiguous history, with no output by default.
     ///
     /// Prior failures precede the current attempt. RetryWait requires at least one prior failure. Cancelled represents
-    /// cancellation while waiting (zero attempts, or completed failures); Interrupted represents the future recovery
-    /// terminal shape already supported by storage. Scheduled requires zero prior failures. Only Scheduled/Manual
+    /// cancellation while waiting (zero attempts, or completed failures); Interrupted represents recovery's
+    /// terminal shape. Scheduled requires zero prior failures. Only Scheduled/Manual
     /// origins are supported, with at most 998 prior failures. The caller must choose a retry allowance consistent
     /// with the requested history; overflow scenarios should edit a small history explicitly.
     [[nodiscard]] auto make_run(core::Uuid                 id,

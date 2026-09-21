@@ -229,10 +229,73 @@ attribute model supports `output.capture`, `output.stdout_limit`,
 Timeout and scheduler cancellation terminate the attempt's process group,
 with TERM followed by KILL after the configured grace period.
 
-Recovery and coordinated daemon signal/shutdown handling remain Phase 7
-work. Process/executor destruction kills active targets, but ordinary daemon
-signal termination does not guarantee that these destructors run. Incomplete
-attempts retain durable running state and startup currently refuses recovery.
+### Recovery and shutdown
+
+On Linux and macOS, `jobud` validates and recovers its database before starting
+jobs or accepting RPC connections. Use one daemon owner per database. After a
+crash or shutdown, restart with the same database and let recovery finish;
+if validation or storage fails, the daemon exits without serving work.
+Recovery commits repairs in separate transactions, so a later startup can
+continue safely after an interrupted recovery.
+
+A command or HTTP request may have produced its external effect before the
+daemon could commit its result. Recovery records that attempt as `Interrupted`
+with an unknown outcome. It cannot infer success, failure, an exit code, or an
+HTTP status. Lost in-memory output is recorded as `capture_lost=true`; empty
+recovered output does not mean the target emitted nothing.
+
+Each queue selects the treatment of its interrupted runs:
+
+| `recovery_policy` | Startup behavior |
+| --- | --- |
+| `fail_interrupted` (default) | Make the run terminally Interrupted, even if retry allowance remains. |
+| `retry_interrupted` | Schedule a new attempt of the same run when its saved retry policy has attempts remaining; otherwise make it terminally Interrupted. |
+
+The existing queue-create option selects the policy, for example:
+
+```sh
+.bld/src/jobuctl/jobuctl --socket /tmp/jobud.sock queue create recoverable \
+    --recovery-policy retry_interrupted
+```
+
+Selecting `retry_interrupted` does not increase the attempt limit. The
+`retry.max_attempts` attribute defaults to **1**, including the original
+attempt. Recovery uses the run's saved retry attributes and payload, together
+with the queue's current recovery policy. A retry waits for its calculated
+delay and normal suspension, barrier, and capacity checks. The next attempt
+is created only when dispatched. Ordinary observed failures continue to use
+normal job retry policy.
+
+Retries can repeat external side effects. Use `retry_interrupted` when the
+operation can tolerate repetition or the target supports an idempotency key.
+JobU's creation idempotency keys do not make arbitrary command or HTTP effects
+exactly once. With `fail_interrupted`, reconcile any unknown external effect
+before deciding to submit replacement work.
+
+Recovery preserves suspended owners and pending work. It completes drained
+`Suspending` transitions and repairs missing recurring work, including for
+suspended definitions. A recurring run made terminal receives its next future
+occurrence; missed ticks are skipped. A manual run waiting for retry keeps its
+barrier against schedule-owned work; terminal interruption releases it.
+
+`SIGTERM` and `SIGINT` request immediate shutdown: stop admitting mutations and
+dispatching attempts, disable late completion writes, cancel HTTP transfers,
+and kill owned CLI process groups with `SIGKILL`, reaping direct children.
+There is no application grace period or wait for normal job completion, and
+no hard wall-clock deadline for kernel cleanup or proof that every descendant
+has terminated. Repeated signals do not bypass cleanup. Unresolved durable
+Running rows remain for the next startup's recovery; shutdown does not mark
+them Cancelled. Signal-only shutdown exits successfully; a fatal runtime
+failure or a reported database/signal cleanup failure makes the exit unsuccessful.
+
+State-changing storage failures and detected corruption/invariant failures
+trigger the same shutdown with a nonzero exit status. Ordinary management
+validation/conflict errors and non-corruption read errors remain operation
+errors. A failed commit acknowledgement may follow a successful durable
+commit: after restart, recovery uses the actual stored state. Diagnose the
+reported stable error code and address the storage problem before retrying
+startup; do not assume an error proves the external effect or commit failed.
+
 Phase 8 owns protected secret resolution, public cancellation, and run/output
 management commands. The existing API is version 1.2 with the same management
 method set.

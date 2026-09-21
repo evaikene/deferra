@@ -77,7 +77,7 @@ void update_definition(RepairFixture& fixture, JobDefinition const& job, JobRevi
 
 auto interrupt(RepairFixture& fixture, RecoveryRunFixture original, UtcTimePoint time) -> RecoveryRunFixture
 {
-    // Compose just one transaction-local unit; the service's paged orchestration is Stage 7.7.
+    // Compose just one transaction-local unit; recovery-service-test covers the service's paged orchestration.
     auto key      = RecoveryAttemptKey{.run_id         = original.run.id,
                                        .attempt_number = original.attempts.back().attempt.attempt_number};
     auto decision = fixture.recovery.find_retry_decision(key, time);

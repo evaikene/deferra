@@ -291,7 +291,7 @@ TEST_CASE("Drained suspension fixtures preserve retry work while advancing owner
     CHECK((*suspended_job)->updated_at == UtcTimePoint{100s});
 }
 
-TEST_CASE("SQLite permits cross-row shapes that future recovery must reject", "[jobu][recovery][sqlite]")
+TEST_CASE("SQLite permits cross-row shapes that recovery must reject", "[jobu][recovery][sqlite]")
 {
     RecoveryFixture fixture;
     auto            queue = recovery_queue(recovery_id(1));
@@ -370,7 +370,7 @@ TEST_CASE("Recovery fixtures expose schema guards and application-only manual un
         REQUIRE_FALSE(rejected);
         CHECK(rejected.error().code == "jobu.run.manual_conflict");
 
-        // Explicitly bypass that application guard to retain a duplicate-barrier fixture for Stage 7.3.
+        // Bypass that application guard to demonstrate why recovery must validate duplicate barriers itself.
         fixture.insert_run(duplicate);
         fixture.require_run(manual);
         fixture.require_run(duplicate);

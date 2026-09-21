@@ -146,7 +146,10 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
         detail::SchedulerRepository repository{database, attributes};
         auto                        running = repository.has_any_running_state();
         if (!running) {
-            return SchedulerResult<>::failure(std::move(running).error());
+            // Startup failure returns to the owner without entering Failed, but this public result must still
+            // remove backend diagnostics just like failures reported after scheduling begins.
+            return SchedulerResult<>::failure(
+                detail::sanitized_storage_error(running.error(), detail::StorageOperation::Validation));
         }
         if (*running) {
             return SchedulerResult<>::failure(recovery_required());
