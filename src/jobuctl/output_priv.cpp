@@ -58,40 +58,6 @@ auto application_error_code(RpcError const& error) -> std::optional<std::string_
 
 } // namespace
 
-void print_usage()
-{
-    fmt::print(stderr,
-               "Usage:\n"
-               "  jobuctl --socket PATH system info\n"
-               "  jobuctl --socket PATH queue create NAME [--weight N] [--concurrency-limit N]\n"
-               "      [--recovery-policy fail_interrupted|retry_interrupted] [--idempotency-key KEY]\n"
-               "  jobuctl --socket PATH queue get (--id UUID | --name NAME)\n"
-               "  jobuctl --socket PATH queue list [--include-deleted] [--limit N] [--after UUID]\n"
-               "  jobuctl --socket PATH queue update (--id UUID | --name NAME)\n"
-               "      [--new-name NAME] [--weight N] [--concurrency-limit N]\n"
-               "  jobuctl --socket PATH queue suspend (--id UUID | --name NAME)\n"
-               "  jobuctl --socket PATH queue resume (--id UUID | --name NAME)\n"
-               "  jobuctl --socket PATH queue delete (--id UUID | --name NAME)\n"
-               "  jobuctl --socket PATH job create (--queue-id UUID | --queue-name NAME)\n"
-               "      --type cli --at UTC --command PATH [--arg VALUE ...]\n"
-               "      [--working-directory PATH] [--env NAME=VALUE ...] [--unset-env NAME ...]\n"
-               "      [--expected-exit-code 0..255 ...]\n"
-               "      [--name NAME] [--priority N] [--idempotency-key KEY]\n"
-               "  jobuctl --socket PATH job create (--queue-id UUID | --queue-name NAME)\n"
-               "      --type http --at UTC --url URL [--method METHOD]\n"
-               "      [--name NAME] [--priority N] [--idempotency-key KEY]\n"
-               "  jobuctl --socket PATH job get UUID\n"
-               "  jobuctl --socket PATH job list [--queue-id UUID | --queue-name NAME]\n"
-               "      [--include-deleted] [--limit N] [--after UUID]\n"
-               "  jobuctl --socket PATH job update UUID --revision N\n"
-               "      [--name NAME | --clear-name] [--priority N] [--at UTC]\n"
-               "  jobuctl --socket PATH job suspend UUID\n"
-               "  jobuctl --socket PATH job resume UUID\n"
-               "  jobuctl --socket PATH job move UUID --revision N\n"
-               "      (--queue-id UUID | --queue-name NAME)\n"
-               "  jobuctl --socket PATH job delete UUID --revision N\n");
-}
-
 void print_operator_error(std::string_view message)
 {
     fmt::print(stderr, "jobuctl: {}\n", message);

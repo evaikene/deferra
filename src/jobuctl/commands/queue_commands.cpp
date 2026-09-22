@@ -68,7 +68,7 @@ auto parse_selector(std::span<CommandLineArgument const> arguments) -> SelectorR
 auto make_selector_command(std::filesystem::path                socket_path,
                            CommandKind                          kind,
                            std::string_view                     method,
-                           std::span<CommandLineArgument const> arguments) -> ParseResult
+                           std::span<CommandLineArgument const> arguments) -> CommandBuildResult
 {
     auto selector = parse_selector(arguments);
     if (!selector.selector) {
@@ -94,7 +94,7 @@ auto make_selector_command(std::filesystem::path                socket_path,
 
 auto parse_queue_create(std::filesystem::path                socket_path,
                         std::span<CommandLineArgument const> arguments,
-                        StandardAttributeRegistry const&     registry) -> ParseResult
+                        StandardAttributeRegistry const&     registry) -> CommandBuildResult
 {
     if (arguments.empty() || arguments.front().kind() != CommandLineArgumentKind::Positional ||
         arguments.front().token().empty()) {
@@ -168,7 +168,8 @@ auto parse_queue_create(std::filesystem::path                socket_path,
     };
 }
 
-auto parse_queue_list(std::filesystem::path socket_path, std::span<CommandLineArgument const> arguments) -> ParseResult
+auto parse_queue_list(std::filesystem::path socket_path, std::span<CommandLineArgument const> arguments)
+    -> CommandBuildResult
 {
     auto request              = QueueListRequest{};
     auto include_deleted_seen = false;
@@ -228,7 +229,7 @@ auto parse_queue_list(std::filesystem::path socket_path, std::span<CommandLineAr
 
 auto parse_queue_update(std::filesystem::path                socket_path,
                         std::span<CommandLineArgument const> arguments,
-                        StandardAttributeRegistry const&     registry) -> ParseResult
+                        StandardAttributeRegistry const&     registry) -> CommandBuildResult
 {
     auto selector         = std::optional<QueueSelector>{};
     auto new_name         = std::optional<std::string>{};
@@ -370,7 +371,7 @@ void print_deleted_selector(QueueSelector const& selector)
 auto parse_queue_command(std::filesystem::path                socket_path,
                          std::string_view                     action,
                          std::span<CommandLineArgument const> arguments,
-                         StandardAttributeRegistry const&     registry) -> ParseResult
+                         StandardAttributeRegistry const&     registry) -> CommandBuildResult
 {
     if (action == "create") {
         return parse_queue_create(std::move(socket_path), arguments, registry);

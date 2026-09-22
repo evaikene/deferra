@@ -14,7 +14,8 @@ using namespace jb::jobu;
 
 auto parse_system_command(std::filesystem::path                socket_path,
                           std::string_view                     action,
-                          std::span<CommandLineArgument const> arguments) -> ParseResult
+                          std::span<CommandLineArgument const> arguments,
+                          StandardAttributeRegistry const& /*registry*/) -> CommandBuildResult
 {
     if (action != "info" || !arguments.empty()) {
         return parse_failure("unknown command");

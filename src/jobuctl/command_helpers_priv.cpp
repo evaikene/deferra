@@ -9,7 +9,7 @@ namespace jb::jobuctl::detail {
 using namespace jb::core;
 using namespace jb::jobu;
 
-auto parse_failure(std::string message) -> ParseResult
+auto parse_failure(std::string message) -> CommandBuildResult
 {
     return {.command = std::nullopt, .error = std::move(message)};
 }

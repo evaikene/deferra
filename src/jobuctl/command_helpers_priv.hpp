@@ -10,7 +10,7 @@
 
 namespace jb::jobuctl::detail {
 
-auto parse_failure(std::string message) -> ParseResult;
+auto parse_failure(std::string message) -> CommandBuildResult;
 auto option_value(jb::core::CommandLineArgument const& argument) -> std::optional<std::string_view>;
 auto parse_unsigned(std::string_view text, std::uint64_t minimum, std::uint64_t maximum)
     -> std::optional<std::uint64_t>;

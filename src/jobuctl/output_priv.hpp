@@ -7,7 +7,6 @@
 
 namespace jb::jobuctl::detail {
 
-void print_usage();
 void print_operator_error(std::string_view message);
 void print_remote_error(jb::rpc::RpcError const& error);
 /// Validates a family response before printing the existing human representation.
