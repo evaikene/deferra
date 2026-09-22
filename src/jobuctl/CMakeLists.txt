@@ -11,6 +11,8 @@ configure_file(
 # Private implementation shared by the executable and direct command parsing tests.
 add_library(jobuctl-private STATIC
     command_line_priv.cpp
+    command_registry_priv.cpp
+    help_priv.cpp
     command_helpers_priv.cpp
     output_priv.cpp
     session_priv.cpp

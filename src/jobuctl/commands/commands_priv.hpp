@@ -13,14 +13,15 @@ namespace jb::jobuctl::detail {
 auto parse_queue_command(std::filesystem::path                          socket_path,
                          std::string_view                               action,
                          std::span<jb::core::CommandLineArgument const> arguments,
-                         jb::jobu::StandardAttributeRegistry const&     registry) -> ParseResult;
+                         jb::jobu::StandardAttributeRegistry const&     registry) -> CommandBuildResult;
 auto parse_job_command(std::filesystem::path                          socket_path,
                        std::string_view                               action,
                        std::span<jb::core::CommandLineArgument const> arguments,
-                       jb::jobu::StandardAttributeRegistry const&     registry) -> ParseResult;
+                       jb::jobu::StandardAttributeRegistry const&     registry) -> CommandBuildResult;
 auto parse_system_command(std::filesystem::path                          socket_path,
                           std::string_view                               action,
-                          std::span<jb::core::CommandLineArgument const> arguments) -> ParseResult;
+                          std::span<jb::core::CommandLineArgument const> arguments,
+                          jb::jobu::StandardAttributeRegistry const&     registry) -> CommandBuildResult;
 
 // These names need raw-token protection before the lexical parser consumes their values.
 auto is_cli_creation_option(std::string_view name) -> bool;

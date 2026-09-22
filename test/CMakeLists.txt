@@ -704,15 +704,19 @@ endif()
 
 add_test(NAME jobuctl-version COMMAND $<TARGET_FILE:jobuctl> --version)
 add_test(NAME jobuctl-usage COMMAND $<TARGET_FILE:jobuctl>)
-set_tests_properties(jobuctl-usage PROPERTIES
-    WILL_FAIL TRUE
-)
 
 add_executable(jobuctl-command-line-test jobuctl-command-line-test.cpp)
 target_link_libraries(jobuctl-command-line-test PRIVATE jobuctl-private Catch2::Catch2WithMain)
 add_test(NAME jobuctl-command-line-test COMMAND $<TARGET_FILE:jobuctl-command-line-test>)
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
+    add_executable(jobuctl-help-test jobuctl-help-test.cpp support/temporary_directory.cpp)
+    target_link_libraries(jobuctl-help-test PRIVATE core Catch2::Catch2WithMain)
+    target_compile_definitions(jobuctl-help-test PRIVATE JOBUCTL_EXECUTABLE="$<TARGET_FILE:jobuctl>")
+    add_dependencies(jobuctl-help-test jobuctl)
+    add_test(NAME jobuctl-help-test COMMAND $<TARGET_FILE:jobuctl-help-test>)
+    set_tests_properties(jobuctl-help-test PROPERTIES TIMEOUT 60)
+
     add_executable(jobuctl-session-test jobuctl-session-test.cpp support/temporary_directory.cpp)
     target_link_libraries(jobuctl-session-test PRIVATE jobu Catch2::Catch2WithMain)
     target_compile_definitions(jobuctl-session-test PRIVATE JOBUCTL_EXECUTABLE="$<TARGET_FILE:jobuctl>")

@@ -91,7 +91,7 @@ auto add_job_queue_selector(CommandLineArgument const& argument, std::optional<Q
 auto make_job_id_command(std::filesystem::path                socket_path,
                          CommandKind                          kind,
                          std::string_view                     method,
-                         std::span<CommandLineArgument const> arguments) -> ParseResult
+                         std::span<CommandLineArgument const> arguments) -> CommandBuildResult
 {
     if (arguments.size() != 1U || arguments.front().kind() != CommandLineArgumentKind::Positional) {
         return parse_failure(fmt::format("{} requires one job UUID", method));
@@ -167,7 +167,7 @@ auto add_cli_creation_option(CliCreationOptions& options, std::string_view name,
 
 auto parse_job_create(std::filesystem::path                socket_path,
                       std::span<CommandLineArgument const> arguments,
-                      StandardAttributeRegistry const&     registry) -> ParseResult
+                      StandardAttributeRegistry const&     registry) -> CommandBuildResult
 {
     auto selector         = std::optional<QueueSelector>{};
     auto type             = std::optional<JobType>{};
@@ -353,7 +353,8 @@ auto parse_job_create(std::filesystem::path                socket_path,
     };
 }
 
-auto parse_job_list(std::filesystem::path socket_path, std::span<CommandLineArgument const> arguments) -> ParseResult
+auto parse_job_list(std::filesystem::path socket_path, std::span<CommandLineArgument const> arguments)
+    -> CommandBuildResult
 {
     auto request              = JobListRequest{};
     auto include_deleted_seen = false;
@@ -419,7 +420,7 @@ auto parse_job_list(std::filesystem::path socket_path, std::span<CommandLineArgu
 
 auto parse_job_update(std::filesystem::path                socket_path,
                       std::span<CommandLineArgument const> arguments,
-                      StandardAttributeRegistry const&     registry) -> ParseResult
+                      StandardAttributeRegistry const&     registry) -> CommandBuildResult
 {
     if (arguments.empty() || arguments.front().kind() != CommandLineArgumentKind::Positional) {
         return parse_failure("job update requires a job UUID");
@@ -520,7 +521,8 @@ auto parse_job_update(std::filesystem::path                socket_path,
     };
 }
 
-auto parse_job_move(std::filesystem::path socket_path, std::span<CommandLineArgument const> arguments) -> ParseResult
+auto parse_job_move(std::filesystem::path socket_path, std::span<CommandLineArgument const> arguments)
+    -> CommandBuildResult
 {
     if (arguments.empty() || arguments.front().kind() != CommandLineArgumentKind::Positional) {
         return parse_failure("job move requires a job UUID");
@@ -581,7 +583,8 @@ auto parse_job_move(std::filesystem::path socket_path, std::span<CommandLineArgu
     };
 }
 
-auto parse_job_delete(std::filesystem::path socket_path, std::span<CommandLineArgument const> arguments) -> ParseResult
+auto parse_job_delete(std::filesystem::path socket_path, std::span<CommandLineArgument const> arguments)
+    -> CommandBuildResult
 {
     if (arguments.empty() || arguments.front().kind() != CommandLineArgumentKind::Positional) {
         return parse_failure("job delete requires a job UUID");
@@ -695,7 +698,7 @@ auto print_job_page(JobPage const& page) -> bool
 auto parse_job_command(std::filesystem::path                socket_path,
                        std::string_view                     action,
                        std::span<CommandLineArgument const> arguments,
-                       StandardAttributeRegistry const&     registry) -> ParseResult
+                       StandardAttributeRegistry const&     registry) -> CommandBuildResult
 {
     if (action == "create") {
         return parse_job_create(std::move(socket_path), arguments, registry);

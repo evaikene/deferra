@@ -40,8 +40,8 @@ struct ClientExchange {
 auto run_client(std::vector<std::string> arguments,
                 SystemInfo               info = {
                     .daemon_version = "fixture",
-                    .api_version    = {.major = 1,   .minor = 2   },
-                    .capabilities   = {"job.create", "system.info"}
+                    .api_version    = {.major = 1, .minor = 2},
+                    .capabilities   = {"job.create", "queue.create", "system.info"}
 }) -> ClientExchange
 {
     ClientExchange               exchange;
@@ -68,6 +68,12 @@ auto run_client(std::vector<std::string> arguments,
         return MethodResult::failure(
             {.code = static_cast<std::int64_t>(ErrorCode::InvalidParams), .message = "fixture job.create reached"});
     }));
+    REQUIRE(server.register_method("queue.create", [&](RequestContext const&, std::optional<JsonValue> const& params) {
+        exchange.methods.emplace_back("queue.create");
+        exchange.params = params;
+        return MethodResult::failure(
+            {.code = static_cast<std::int64_t>(ErrorCode::InvalidParams), .message = "fixture queue.create reached"});
+    }));
     auto collect  = [&](ByteBuffer const& bytes) { exchange.output.append(as_string_view(bytes)); };
     auto output   = client.standard_output.connect(&app, collect);
     auto error    = client.standard_error.connect(&app, collect);
@@ -87,7 +93,7 @@ auto run_client(std::vector<std::string> arguments,
     REQUIRE(exchange.exit);
     INFO(exchange.output);
     REQUIRE(exchange.exit->kind == ProcessExitKind::Exited);
-    REQUIRE(exchange.exit->exit_code == EXIT_FAILURE);
+    REQUIRE(exchange.exit->exit_code == (exchange.connections == 0 ? 2 : EXIT_FAILURE));
     REQUIRE_FALSE(exchange.exit->stdout_lost);
     REQUIRE_FALSE(exchange.exit->stderr_lost);
     return exchange;
@@ -113,6 +119,7 @@ auto cli_create(std::vector<std::string> options = {}, std::string command = "/b
 void check_request(ClientExchange const& exchange, std::string_view payload)
 {
     INFO(exchange.output);
+    REQUIRE(exchange.exit->exit_code == EXIT_FAILURE);
     REQUIRE(exchange.connections == 1);
     REQUIRE(exchange.methods == std::vector<std::string>{"system.info", "job.create"});
     REQUIRE(exchange.params);
@@ -129,6 +136,7 @@ void check_request(ClientExchange const& exchange, std::string_view payload)
 void check_local_rejection(ClientExchange const& exchange)
 {
     INFO(exchange.output);
+    CHECK(exchange.exit->exit_code == 2);
     CHECK(exchange.connections == 0);
     CHECK(exchange.methods.empty());
     CHECK_FALSE(exchange.params);
@@ -184,19 +192,36 @@ TEST_CASE("jobuctl omits unsupplied CLI fields and preserves explicit defaults",
 
 TEST_CASE("jobuctl preserves literal CLI arguments after registering new option names", "[jobuctl][cli]")
 {
-    auto exchange = run_client(cli_create({"--arg",           "",
-                                           "--arg",           "-abc",
-                                           "--arg",           "--unknown",
-                                           "--arg",           "--env",
-                                           "--arg",           "--env=NAME=value",
-                                           "--arg",           "--unset-env",
-                                           "--arg",           "--working-directory",
-                                           "--arg",           "--expected-exit-code",
-                                           "--arg=--command", "--arg=",
-                                           "--env",           "ACTUAL=value"}));
+    auto exchange = run_client(cli_create({"--arg",
+                                           "",
+                                           "--arg",
+                                           "-abc",
+                                           "--arg",
+                                           "--unknown",
+                                           "--arg",
+                                           "--env",
+                                           "--arg",
+                                           "--env=NAME=value",
+                                           "--arg",
+                                           "--unset-env",
+                                           "--arg",
+                                           "--working-directory",
+                                           "--arg",
+                                           "--expected-exit-code",
+                                           "--arg=--command",
+                                           "--arg=",
+                                           "--arg=--help",
+                                           "--arg",
+                                           "--help",
+                                           "--arg",
+                                           "-h",
+                                           "--arg",
+                                           "-ahb",
+                                           "--env",
+                                           "ACTUAL=value"}));
     check_request(
         exchange,
-        R"({"command":"/bin/true","arguments":["","-abc","--unknown","--env","--env=NAME=value","--unset-env","--working-directory","--expected-exit-code","--command",""],"environment":{"ACTUAL":"value"}})");
+        R"({"command":"/bin/true","arguments":["","-abc","--unknown","--env","--env=NAME=value","--unset-env","--working-directory","--expected-exit-code","--command","","--help","--help","-h","-ahb"],"environment":{"ACTUAL":"value"}})");
 }
 
 TEST_CASE("jobuctl rejects invalid CLI creation options before connecting", "[jobuctl][cli]")
@@ -306,4 +331,19 @@ TEST_CASE("jobuctl preserves major-version and capability checks for CLI creatio
         CHECK_FALSE(exchange.params);
         CHECK(exchange.output.find("Usage:\n") == std::string::npos);
     }
+}
+
+TEST_CASE("jobuctl creation aliases send the canonical methods and identical requests", "[jobuctl][cli]")
+{
+    auto       job_arguments = cli_create({"--arg=--help"});
+    auto const job           = run_client(job_arguments);
+    job_arguments[1]         = "add";
+    auto const job_alias     = run_client(job_arguments);
+    CHECK(job_alias.methods == std::vector<std::string>{"system.info", "job.create"});
+    CHECK(job_alias.params == job.params);
+
+    auto const queue       = run_client({"queue", "create", "reports", "--weight", "2"});
+    auto const queue_alias = run_client({"queue", "add", "reports", "--weight", "2"});
+    CHECK(queue_alias.methods == std::vector<std::string>{"system.info", "queue.create"});
+    CHECK(queue_alias.params == queue.params);
 }
