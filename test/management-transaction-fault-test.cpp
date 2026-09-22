@@ -1,5 +1,7 @@
 #include "management.hpp"
 
+#include "secret_repository_priv.hpp"
+
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/fault_database_driver.hpp"
@@ -47,6 +49,9 @@ auto boundary(std::string_view sql) -> std::string
                 return std::string{name} + std::string{action};
             }
         }
+    }
+    if (sql.find("FROM jobu_secrets") != std::string_view::npos) {
+        return "secret.read";
     }
     return "read";
 }
@@ -184,7 +189,17 @@ struct MutationFixture : Fixture {
         if (mutation == Mutation::ResumeJob || mutation == Mutation::MoveJob || mutation == Mutation::DeleteJob) {
             job.state = JobState::Suspended;
         }
+        auto payload =
+            parse_json(R"({"command":"/bin/tool","arguments":[{"secret":"old.token"},{"secret":"old.token"}]})");
+        REQUIRE(payload);
+        job.payload = *payload;
+        jb::jobu::detail::SecretRepository secrets{storage.database};
+        REQUIRE(secrets.set("old.token", {}, time.utc_now()));
+        REQUIRE(secrets.set("new.token", {}, time.utc_now()));
         storage.insert_job(job);
+        auto references = jb::jobu::detail::validate_payload_template(job.type, job.payload);
+        REQUIRE(references);
+        REQUIRE(secrets.replace_references_for_job(job.id, *references));
         auto run            = storage.make_run(recovery_id(3), job);
         run.run.planned_at  = UtcTimePoint{180s};
         run.run.runnable_at = UtcTimePoint{180s};
@@ -210,9 +225,13 @@ struct MutationFixture : Fixture {
                                                          .schedule        = job.schedule,
                                                          .payload         = job.payload,
                                                          .idempotency_key = "create"}));
-            case Mutation::UpdateJob:
-                return discard_value(
-                    service.update_job({.job_id = job.id, .expected_revision = job.revision, .priority = 9}));
+            case Mutation::UpdateJob: {
+                auto payload = parse_json(
+                    R"({"command":"/bin/tool","arguments":[{"secret":"new.token"},{"secret":"new.token"}]})");
+                REQUIRE(payload);
+                return discard_value(service.update_job(
+                    {.job_id = job.id, .expected_revision = job.revision, .priority = 9, .payload = *payload}));
+            }
             case Mutation::SuspendJob:
                 return discard_value(service.suspend_job(job.id));
             case Mutation::ResumeJob:
@@ -242,9 +261,9 @@ auto mutation_writes(Mutation mutation) -> std::vector<std::string>
         case Mutation::DeleteQueue:
             return {"references.delete", "job.update", "run.update", "queue.update"};
         case Mutation::CreateJob:
-            return {"job.insert", "run.insert", "idempotency.insert"};
+            return {"job.insert", "references.delete", "references.insert", "run.insert", "idempotency.insert"};
         case Mutation::UpdateJob:
-            return {"job.update", "run.update"};
+            return {"job.update", "references.delete", "references.insert", "run.update"};
         case Mutation::SuspendJob:
         case Mutation::ResumeJob:
             return {"job.update"};
@@ -267,6 +286,11 @@ auto mutation_faults(Mutation mutation) -> std::vector<DatabaseCall>
     };
     for (auto operation : {Operation::Prepare, Operation::Execute, Operation::Fetch}) {
         result.push_back({.boundary = "read", .operation = operation});
+    }
+    if (mutation == Mutation::CreateJob || mutation == Mutation::UpdateJob) {
+        for (auto operation : {Operation::Prepare, Operation::Bind, Operation::Execute, Operation::Fetch}) {
+            result.push_back({.boundary = "secret.read", .operation = operation});
+        }
     }
     for (auto const& write : mutation_writes(mutation)) {
         for (auto operation : {Operation::Prepare, Operation::Bind, Operation::Execute}) {
@@ -476,6 +500,63 @@ TEST_CASE("Management revision conflicts stay nonfatal and unexpected constraint
     check_safe_error(failed.error(), "db.constraint");
     fixture.check_terminal_failure("db.constraint", false);
     fixture.check_closed_gate();
+    fixture.storage.reopen();
+    CHECK(storage_snapshot(fixture.storage.database) == before);
+}
+
+TEST_CASE("Missing job secret names stay ordinary unless rollback poisons the connection", "[jobu][management][fault]")
+{
+    for (bool create : {false, true}) {
+        for (bool poison : {false, true}) {
+            DYNAMIC_SECTION("create=" << create << " poison=" << poison)
+            {
+                MutationFixture fixture{Mutation::UpdateJob};
+                auto payload = parse_json(R"({"command":"/bin/tool","arguments":[{"secret":"missing.token"}]})");
+                REQUIRE(payload);
+                auto before = storage_snapshot(fixture.storage.database);
+                if (poison) {
+                    fixture.arm({.boundary = "connection", .operation = Operation::Rollback}, "db.rollback_failed");
+                }
+                auto result = create ? fixture.service.create_job({.queue           = fixture.queue.id,
+                                                                   .schedule        = fixture.job.schedule,
+                                                                   .payload         = *payload,
+                                                                   .idempotency_key = "missing"})
+                                     : fixture.service.update_job(
+                                           {.job_id = fixture.job.id, .expected_revision = 1, .payload = *payload});
+                REQUIRE_FALSE(result);
+                if (poison) {
+                    fixture.require_faults_fired();
+                    fixture.check_terminal_failure("db.rollback_failed");
+                    fixture.check_closed_gate();
+                    fixture.check_poisoned_connection();
+                }
+                else {
+                    check_safe_error(result.error(), "jobu.secret.not_found");
+                    CHECK(result.error().category == ErrorCategory::NotFound);
+                    CHECK(fixture.failures.empty());
+                    CHECK(fixture.committed == 0);
+                    CHECK(storage_snapshot(fixture.storage.database) == before);
+                }
+                fixture.storage.reopen();
+                CHECK(storage_snapshot(fixture.storage.database) == before);
+            }
+        }
+    }
+}
+
+TEST_CASE("Reference replacement failure retains its fatal cause when rollback also fails", "[jobu][management][fault]")
+{
+    MutationFixture fixture{Mutation::UpdateJob};
+    auto            before = storage_snapshot(fixture.storage.database);
+    fixture.arm({.boundary = "references.insert", .operation = Operation::Execute, .phase = Phase::AfterSuccess});
+    fixture.arm({.boundary = "connection", .operation = Operation::Rollback}, "db.rollback_failed");
+    auto result = fixture.mutate(Mutation::UpdateJob);
+    REQUIRE_FALSE(result);
+    check_safe_error(result.error(), "db.io");
+    fixture.require_faults_fired();
+    fixture.check_terminal_failure("db.io");
+    fixture.check_closed_gate();
+    fixture.check_poisoned_connection();
     fixture.storage.reopen();
     CHECK(storage_snapshot(fixture.storage.database) == before);
 }

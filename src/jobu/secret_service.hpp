@@ -46,8 +46,10 @@ public:
     [[nodiscard]] auto list(SecretListRequest const& request) -> jb::core::Result<SecretPage, jb::core::Error>;
 
     /// Deletes one named secret transactionally; the name is borrowed only for the call.
-    /// Missing names return jobu.secret.not_found; current-definition references return jobu.secret.in_use.
-    /// Nonterminal snapshot protection is added with transactional reference ownership in Stage 8.6.
+    /// Missing names return jobu.secret.not_found. Current definitions and all nonterminal run snapshots
+    /// protect references with jobu.secret.in_use; terminal history alone does not prevent deletion.
+    /// Checks and deletion share one transaction. Snapshot scanning is bounded in memory, not total latency.
+    /// Malformed stored templates fail closed through the service failure boundary.
     [[nodiscard]] auto erase(std::string_view name) -> jb::core::Result<void, jb::core::Error>;
 
     /// Irreversibly rejects subsequent writes with Unavailable / jobu.service.stopping. Reads remain available.

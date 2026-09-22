@@ -1633,7 +1633,10 @@ TEST_CASE("Job templates survive definition updates snapshots and idempotency re
     auto              queue = service.create_queue({.name = "templates"});
     REQUIRE(queue);
 
-    // Template admission and replay are structural operations, independent of secret storage or resolution.
+    // Creation checks named metadata; execution values are not resolved into durable templates.
+    execute(fixture.database,
+            "INSERT INTO jobu_secrets(name, value_blob, created_at_us, updated_at_us) "
+            "VALUES ('service.token', X'01', 1, 1), ('request.bytes', X'02', 1, 1)");
     auto original_payload = jb::core::parse_json(
         R"({"command":"/bin/tool","arguments":[{"secret":"service.token"}],"future":{"secret":"ignored"}})");
     REQUIRE(original_payload);
@@ -1675,7 +1678,7 @@ TEST_CASE("Job templates survive definition updates snapshots and idempotency re
     CHECK(replay->payload == *original_payload);
     CHECK(count_rows(fixture.database, "jobu_jobs") == 1);
     CHECK(count_rows(fixture.database, "jobu_runs") == 1);
-    CHECK(count_rows(fixture.database, "jobu_secrets") == 0);
+    CHECK(count_rows(fixture.database, "jobu_secrets") == 2);
 
     auto malformed = jb::core::parse_json(R"({"command":"/bin/tool","arguments":[{"secret":"private marker"}]})");
     REQUIRE(malformed);

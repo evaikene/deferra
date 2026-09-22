@@ -6,6 +6,7 @@
 #include "storage_failure_priv.hpp"
 #include "transaction.hpp"
 
+#include <algorithm>
 #include <optional>
 #include <string>
 #include <utility>
@@ -186,7 +187,7 @@ auto SecretService::erase_impl(std::string_view name) -> ServiceResult<void>
     auto transaction = std::move(begun).value();
 
     // The sole writer holds one transaction across protection and deletion. Detect expected conflicts before SQL
-    // constraints reach the fatal classifier. Stage 8.6 extends this boundary to nonterminal run snapshots.
+    // constraints reach the fatal classifier. Older executable snapshots retain ownership independently of jobs.
     auto references = data.secrets.reference_count(name);
     if (!references) {
         return ServiceResult<void>::failure(std::move(references).error());
@@ -196,6 +197,30 @@ auto SecretService::erase_impl(std::string_view name) -> ServiceResult<void>
                                                           "jobu.secret.in_use",
                                                           "Secret is referenced by a current job"));
     }
+
+    // Keep one writer transaction for the whole scan. Each page releases its query before the next is read;
+    // no execution bytes are needed, and terminal historical snapshots deliberately do not protect secrets.
+    constexpr std::size_t page_size = 100;
+    auto                  after_id  = std::optional<jb::core::Uuid>{};
+    for (;;) {
+        auto page = data.secrets.list_nonterminal_references(page_size, after_id);
+        if (!page) {
+            return ServiceResult<void>::failure(std::move(page).error());
+        }
+        for (auto const& snapshot : *page) {
+            if (std::ranges::any_of(snapshot.references,
+                                    [name](auto const& reference) { return reference.secret_name == name; })) {
+                return ServiceResult<void>::failure(service_error(jb::core::ErrorCategory::Conflict,
+                                                                  "jobu.secret.in_use",
+                                                                  "Secret is referenced by a nonterminal run"));
+            }
+        }
+        if (page->size() < page_size) {
+            break;
+        }
+        after_id = page->back().run_id;
+    }
+
     auto erased = data.secrets.erase(name);
     if (!erased) {
         return erased;

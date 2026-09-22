@@ -1,6 +1,7 @@
 #include "secret_repository_priv.hpp"
 
 #include "domain_storage_priv.hpp"
+#include "job_validation_priv.hpp"
 #include "query.hpp"
 #include "text_validation_priv.hpp"
 #include "value.hpp"
@@ -316,6 +317,102 @@ auto SecretRepository::list_metadata(std::size_t limit, std::optional<std::strin
         result.push_back(std::move(metadata).value());
     }
     return RepositoryResult<std::vector<SecretMetadata>>::success(std::move(result));
+}
+
+auto SecretRepository::require_existing_references(std::span<SecretReference const> references)
+    -> RepositoryResult<void>
+{
+    if (references.size() > kMaximumReferences) {
+        return RepositoryResult<void>::failure(invalid_limit());
+    }
+
+    // A repeated name at different payload positions needs only one existence check. Read metadata, never bytes.
+    auto checked = std::set<std::string_view>{};
+    for (auto const& reference : references) {
+        if (!is_valid_secret_name(reference.secret_name)) {
+            return RepositoryResult<void>::failure(invalid_name());
+        }
+        if (!checked.insert(reference.secret_name).second) {
+            continue;
+        }
+        auto found = find_metadata(_database, reference.secret_name);
+        if (!found) {
+            return RepositoryResult<void>::failure(std::move(found).error());
+        }
+        if (!found->has_value()) {
+            return RepositoryResult<void>::failure(not_found());
+        }
+    }
+    return RepositoryResult<void>::success();
+}
+
+auto SecretRepository::list_nonterminal_references(std::size_t limit, std::optional<jb::core::Uuid> after_id)
+    -> RepositoryResult<std::vector<RunSecretReferences>>
+{
+    using PageResult = RepositoryResult<std::vector<RunSecretReferences>>;
+    if (limit == 0 || limit > 200) {
+        return PageResult::failure(invalid_limit());
+    }
+
+    // Ownership follows the immutable snapshot, even after its definition is edited or tombstoned.
+    // Do not join current owners or select result/output columns while deciding whether deletion is safe.
+    auto sql = std::string{"SELECT id AS run_id, type AS run_type, payload_json AS run_payload_json FROM jobu_runs "
+                           "WHERE state IN ('scheduled', 'running', 'retry_wait')"};
+    if (after_id) {
+        sql += " AND id > :after_id";
+    }
+    sql += " ORDER BY id ASC LIMIT :limit";
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare(sql);
+    if (!prepared) {
+        return PageResult::failure(std::move(prepared).error());
+    }
+    if (after_id) {
+        auto bound = query.bind_value(":after_id", uuid_to_storage(*after_id));
+        if (!bound) {
+            return PageResult::failure(std::move(bound).error());
+        }
+    }
+    auto bound = query.bind_value(":limit", static_cast<std::int64_t>(limit));
+    if (!bound) {
+        return PageResult::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return PageResult::failure(std::move(executed).error());
+    }
+
+    auto page = std::vector<RunSecretReferences>{};
+    page.reserve(limit);
+    for (;;) {
+        auto next = query.next();
+        if (!next) {
+            return PageResult::failure(std::move(next).error());
+        }
+        if (!*next) {
+            break;
+        }
+        auto const& row = query.record();
+        auto        id  = read_uuid(row, "run_id");
+        if (!id) {
+            return PageResult::failure(std::move(id).error());
+        }
+        auto type = read_job_type(row, "run_type");
+        if (!type) {
+            return PageResult::failure(std::move(type).error());
+        }
+        auto payload = read_json(row, "run_payload_json", true, maximum_job_document_bytes);
+        if (!payload) {
+            return PageResult::failure(std::move(payload).error());
+        }
+        auto references = validate_payload_template(*type, *payload);
+        if (!references) {
+            // An invalid stored template is not evidence of absence. Keep caller payload errors out of this path.
+            return PageResult::failure(invalid_record("invalid_run_template"));
+        }
+        page.push_back({.run_id = *id, .references = std::move(references).value()});
+    }
+    return PageResult::success(std::move(page));
 }
 
 auto SecretRepository::erase(std::string_view name) -> jb::core::Result<void, jb::core::Error>
