@@ -3,8 +3,10 @@
 #include "job_validation_priv.hpp"
 #include "json.hpp"
 #include "result.hpp"
+#include "secret_provider.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -53,5 +55,29 @@ using PayloadText = std::optional<std::string_view>;
 /// The document byte bound is applied separately by validate_and_serialize_job_payload or durable JSON decoding.
 [[nodiscard]] auto validate_payload_template(JobType type, jb::core::JsonValue const& payload)
     -> jb::core::Result<std::vector<SecretReference>, JobPayloadIssue>;
+
+/// Ordinary preparation failures become terminal attempts only after durable attempt-start commits.
+/// Other kinds abort dispatch; the caller owns transaction cleanup, poison checks, and fatal notification.
+enum class PayloadPreparationFailureKind : std::uint8_t {
+    Ordinary,
+    Storage,
+    PersistedData,
+    Provider
+};
+
+struct PayloadPreparationFailure {
+    PayloadPreparationFailureKind kind;
+    jb::core::Error error; ///< Safe diagnostics only; never contains a resolved value or raw provider diagnostic.
+};
+
+/// Produces an owning transient execution payload; never persist the returned JSON.
+/// Revalidates the bounded durable template before lookup, then resolves each distinct name once per call.
+/// Neither the original template nor storage is modified. No transaction or callbacks are owned by this helper.
+/// Ordinary failures use jobu.secret.not_found (NotFound), jobu.secret.invalid_value (InvalidArgument), or
+/// jobu.secret.resolved_payload_too_large (ResourceExhausted). Malformed templates are PersistedData failures;
+/// Unknown provider failures or values exceeding the provider byte contract use jobu.secret.provider_failed
+/// (Internal) and must abort dispatch. Storage/PersistedData errors retain trusted codes with sanitized diagnostics.
+[[nodiscard]] auto prepare_payload_template(JobType type, jb::core::JsonValue const& payload, SecretProvider& provider)
+    -> jb::core::Result<jb::core::JsonValue, PayloadPreparationFailure>;
 
 } // namespace jb::jobu::detail

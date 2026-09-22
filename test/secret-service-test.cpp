@@ -1,7 +1,9 @@
 #include "secret_service.hpp"
 
 #include "management.hpp"
+#include "payload_template_priv.hpp"
 #include "query.hpp"
+#include "secret_provider_priv.hpp"
 #include "secret_repository_priv.hpp"
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
@@ -867,4 +869,74 @@ TEST_CASE("Definition existence checks use metadata and never inspect private se
     CHECK(metadata_reads == 1);
     CHECK(created->payload ==
           payload(R"({"command":"/bin/tool","arguments":[{"secret":"token"},{"secret":"token"}]})"));
+}
+
+TEST_CASE("Database secret provider borrows transactions and returns owning binary values")
+{
+    Fixture fixture;
+    fixture.faults->calls.clear();
+    jb::jobu::detail::DatabaseSecretProvider provider{fixture.storage.database};
+    CHECK(fixture.faults->calls.empty());
+    check_error(provider.resolve("token"), ErrorCategory::NotFound, "jobu.secret.not_found");
+
+    auto const value = ByteBuffer{std::byte{0}, std::byte{0xff}, std::byte{7}};
+    {
+        auto begun = Transaction::begin(fixture.storage.database);
+        REQUIRE(begun);
+        auto transaction = std::move(begun).value();
+        REQUIRE(fixture.repository.set("token", value, fixture.time.utc_now()));
+        fixture.faults->calls.clear();
+        auto resolved = provider.resolve("token");
+        REQUIRE(resolved);
+        CHECK(*resolved == value);
+        for (auto const& call : fixture.faults->calls) {
+            CHECK(call.operation != Operation::Begin);
+            CHECK(call.operation != Operation::Commit);
+            CHECK(call.operation != Operation::Rollback);
+        }
+        REQUIRE(fixture.repository.set("token", {}, fixture.time.utc_now()));
+        auto empty = provider.resolve("token");
+        REQUIRE(empty);
+        CHECK(empty->empty());
+        CHECK(*resolved == value);
+        // Scope rollback proves neither lookup committed the caller's writes.
+    }
+    check_error(provider.resolve("token"), ErrorCategory::NotFound, "jobu.secret.not_found");
+}
+
+TEST_CASE("Database preparation preserves durable data and propagates lookup failure provenance")
+{
+    using namespace jb::jobu::detail;
+    Fixture                fixture;
+    DatabaseSecretProvider provider{fixture.storage.database};
+    REQUIRE(fixture.service.set({.name = "token", .value = {std::byte{0xff}}}));
+    auto       original = payload(R"({"url":"https://example.test/","method":"POST","body":{"secret":"token"}})");
+    auto const before   = storage_snapshot(fixture.storage.database);
+    REQUIRE(prepare_payload_template(JobType::Http, original, provider));
+    CHECK(storage_snapshot(fixture.storage.database) == before);
+
+    for (auto operation : {Operation::Prepare, Operation::Bind, Operation::Execute, Operation::Fetch}) {
+        fixture.arm({.boundary = "read", .operation = operation});
+        auto prepared = prepare_payload_template(JobType::Http, original, provider);
+        REQUIRE_FALSE(prepared);
+        CHECK(prepared.error().kind == PayloadPreparationFailureKind::Storage);
+        check_safe_error(prepared.error().error, "db.io");
+        CHECK(storage_snapshot(fixture.storage.database) == before);
+    }
+    require_consumed_faults(*fixture.faults);
+
+    for (auto const* value : {"'private-backend-marker'", "zeroblob(65537)"}) {
+        {
+            Query query{fixture.storage.database};
+            // Simulate externally corrupted storage, bypassing only its value constraint.
+            REQUIRE(query.exec("PRAGMA ignore_check_constraints = ON"));
+            REQUIRE(query.exec(std::string{"UPDATE jobu_secrets SET value_blob = "} + value));
+            REQUIRE(query.exec("PRAGMA ignore_check_constraints = OFF"));
+        }
+        auto prepared = prepare_payload_template(JobType::Http, original, provider);
+        REQUIRE_FALSE(prepared);
+        CHECK(prepared.error().kind == PayloadPreparationFailureKind::PersistedData);
+        CHECK(prepared.error().error.message.find("private-backend-marker") == std::string::npos);
+        CHECK(prepared.error().error.detail.find("private-backend-marker") == std::string::npos);
+    }
 }
