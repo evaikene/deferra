@@ -113,11 +113,20 @@ struct QueueListRequest {
     PageOptions               page;
 };
 
+/// Creation-only request for a once occurrence at the service's current UTC time.
+/// Resolved inside the creation transaction after idempotency replay has been ruled out.
+/// The planned instant is rounded down to the durable microsecond precision.
+struct ImmediateSchedule {};
+
+/// Creation input; immediate schedules become concrete OnceSchedule values before persistence.
+using JobCreationSchedule = std::variant<ImmediateSchedule, OnceSchedule, CronSchedule>;
+
 /// Values used to create one active job and its first scheduled run.
 ///
 /// Cron schedules are validated and evaluated by ManagementService. The supplied job attribute layer is materialized
 /// over built-in, daemon, and resolved queue defaults before persistence. The payload remains owning and preserves
-/// unknown additive members.
+/// unknown additive members. Immediate creation remains ordinary scheduled work subject to queue suspension,
+/// capacity, and retry policy. Idempotency retains the symbolic request and replays the original concrete result.
 ///
 struct CreateJobRequest {
     /// Existing non-deleted queue selected by UUID or exact user-facing name.
@@ -126,8 +135,9 @@ struct CreateJobRequest {
     std::optional<std::string> name;
     /// Runner family whose structural payload rules are applied.
     JobType                    type{JobType::Cli};
-    /// One-time schedule or recurring cron schedule used to plan the first occurrence.
-    JobSchedule                schedule;
+    /// Immediate, explicit one-time, or recurring schedule used to plan the first occurrence.
+    /// The default retains the explicit epoch schedule; wire requests must supply a schedule.
+    JobCreationSchedule        schedule{OnceSchedule{}};
     /// Signed scheduling priority copied into the run snapshot.
     std::int32_t               priority{0};
     /// Partial job-specific attribute layer.
@@ -327,7 +337,8 @@ public:
     /// @param request Queue selector, definition fields, partial attributes, owning payload, and optional idempotency
     /// key consumed after validation. A matching key in the resolved queue scope replays the original successful
     /// result and its unchanged first occurrence. A fresh cron request is validated and evaluated strictly after the
-    /// transaction's sampled current time.
+    /// transaction's sampled current time. ImmediateSchedule resolves to that time only for a fresh creation;
+    /// its canonical request remains symbolic so retrying the same key cannot move the planned instant.
     /// Recognized payload references require existing secret names, checked without reading values. Reference rows
     /// commit with the definition; missing names return jobu.secret.not_found. Replay neither checks current secret
     /// existence nor recreates reference rows, so later secret rotation or deletion does not alter its result.

@@ -146,6 +146,7 @@ enum class Mutation : std::uint8_t {
     ResumeQueue,
     DeleteQueue,
     CreateJob,
+    CreateImmediateJob,
     UpdateJob,
     SuspendJob,
     ResumeJob,
@@ -160,6 +161,7 @@ constexpr auto mutations = {Mutation::CreateQueue,
                             Mutation::ResumeQueue,
                             Mutation::DeleteQueue,
                             Mutation::CreateJob,
+                            Mutation::CreateImmediateJob,
                             Mutation::UpdateJob,
                             Mutation::SuspendJob,
                             Mutation::ResumeJob,
@@ -221,10 +223,16 @@ struct MutationFixture : Fixture {
             case Mutation::DeleteQueue:
                 return service.delete_queue(queue.id);
             case Mutation::CreateJob:
+            case Mutation::CreateImmediateJob: {
+                auto schedule = JobCreationSchedule{std::get<OnceSchedule>(job.schedule)};
+                if (mutation == Mutation::CreateImmediateJob) {
+                    schedule = ImmediateSchedule{};
+                }
                 return discard_value(service.create_job({.queue           = queue.id,
-                                                         .schedule        = job.schedule,
+                                                         .schedule        = std::move(schedule),
                                                          .payload         = job.payload,
                                                          .idempotency_key = "create"}));
+            }
             case Mutation::UpdateJob: {
                 auto payload = parse_json(
                     R"({"command":"/bin/tool","arguments":[{"secret":"new.token"},{"secret":"new.token"}]})");
@@ -261,6 +269,7 @@ auto mutation_writes(Mutation mutation) -> std::vector<std::string>
         case Mutation::DeleteQueue:
             return {"references.delete", "job.update", "run.update", "queue.update"};
         case Mutation::CreateJob:
+        case Mutation::CreateImmediateJob:
             return {"job.insert", "references.delete", "references.insert", "run.insert", "idempotency.insert"};
         case Mutation::UpdateJob:
             return {"job.update", "references.delete", "references.insert", "run.update"};
@@ -517,12 +526,13 @@ TEST_CASE("Missing job secret names stay ordinary unless rollback poisons the co
                 if (poison) {
                     fixture.arm({.boundary = "connection", .operation = Operation::Rollback}, "db.rollback_failed");
                 }
-                auto result = create ? fixture.service.create_job({.queue           = fixture.queue.id,
-                                                                   .schedule        = fixture.job.schedule,
-                                                                   .payload         = *payload,
-                                                                   .idempotency_key = "missing"})
-                                     : fixture.service.update_job(
-                                           {.job_id = fixture.job.id, .expected_revision = 1, .payload = *payload});
+                auto result = create
+                                ? fixture.service.create_job({.queue    = fixture.queue.id,
+                                                              .schedule = std::get<OnceSchedule>(fixture.job.schedule),
+                                                              .payload  = *payload,
+                                                              .idempotency_key = "missing"})
+                                : fixture.service.update_job(
+                                      {.job_id = fixture.job.id, .expected_revision = 1, .payload = *payload});
                 REQUIRE_FALSE(result);
                 if (poison) {
                     fixture.require_faults_fired();

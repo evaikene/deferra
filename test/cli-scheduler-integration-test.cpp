@@ -543,7 +543,7 @@ struct MixedSchedulerFixture {
                 JobType                    type,
                 JsonValue                  payload,
                 AttributeSet               attributes      = {},
-                JobSchedule                schedule        = OnceSchedule{.planned_at = at_seconds(90)},
+                JobCreationSchedule        schedule        = OnceSchedule{.planned_at = at_seconds(90)},
                 std::optional<std::string> idempotency_key = std::nullopt) -> CreatedJob
     {
         // Keep assertion-unwind cancellation bounded even for helpers that deliberately ignore TERM.

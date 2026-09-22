@@ -348,6 +348,41 @@ auto schedule_from_json(jb::core::JsonValue const& value, bool request) -> Conve
     return invalid<JobSchedule>(request);
 }
 
+// Creation has a symbolic input that must never be accepted by update or response codecs.
+auto creation_schedule_to_json(JobCreationSchedule const& schedule) -> ConversionResult<jb::core::JsonValue>
+{
+    if (std::holds_alternative<ImmediateSchedule>(schedule)) {
+        return ConversionResult<jb::core::JsonValue>::success(make_json(jb::core::JsonValue::Object{
+            {"at",   make_json(std::string{"now"}) },
+            {"kind", make_json(std::string{"once"})},
+        }));
+    }
+    if (auto const* once = std::get_if<OnceSchedule>(&schedule)) {
+        return schedule_to_json(*once, true);
+    }
+    return schedule_to_json(std::get<CronSchedule>(schedule), true);
+}
+
+auto creation_schedule_from_json(jb::core::JsonValue const& value) -> ConversionResult<JobCreationSchedule>
+{
+    if (value.is_object()) {
+        auto const& object = value.as_object();
+        auto const* kind   = find_member(object, "kind");
+        auto const* at     = find_member(object, "at");
+        if (kind != nullptr && kind->is_string() && kind->as_string() == "once" && at != nullptr && at->is_string() &&
+            at->as_string() == "now" && has_only_members(object, {"kind", "at"})) {
+            return ConversionResult<JobCreationSchedule>::success(ImmediateSchedule{});
+        }
+    }
+
+    auto concrete = schedule_from_json(value, true);
+    if (!concrete) {
+        return invalid<JobCreationSchedule>(true);
+    }
+    return ConversionResult<JobCreationSchedule>::success(
+        std::visit([](auto schedule) -> JobCreationSchedule { return schedule; }, std::move(*concrete)));
+}
+
 auto add_selector_members(jb::core::JsonValue::Object& object,
                           QueueSelector const&         selector,
                           std::string                  id_name   = "queue_id",
@@ -1086,7 +1121,7 @@ auto create_job_request_to_json(CreateJobRequest const& request, AttributeRegist
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
     auto const type       = job_type_text(request.type);
-    auto       schedule   = schedule_to_json(request.schedule, true);
+    auto       schedule   = creation_schedule_to_json(request.schedule);
     auto       attributes = attribute_set_to_json(request.attributes, registry, AttributeScope::Job);
     if (!type || !schedule || !attributes || !request.payload.is_object()) {
         return invalid<jb::core::JsonValue>(true);
@@ -1131,7 +1166,7 @@ auto create_job_request_from_json(jb::core::JsonValue const& value, AttributeReg
     if (!selector || !schedule || !payload || !payload->is_object()) {
         return invalid<CreateJobRequest>(true);
     }
-    auto decoded_schedule = schedule_from_json(*schedule, true);
+    auto decoded_schedule = creation_schedule_from_json(*schedule);
     if (!decoded_schedule) {
         return invalid<CreateJobRequest>(true);
     }
