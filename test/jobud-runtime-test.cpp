@@ -10,6 +10,7 @@
 #include "query.hpp"
 #include "run_repository_priv.hpp"
 #include "server.hpp"
+#include "sqlite/sqlite_schema.hpp"
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_event_loop_backend.hpp"
 #include "support/fake_http_client.hpp"
@@ -107,7 +108,11 @@ private:
 };
 
 struct RuntimeFixture {
-    RuntimeFixture()
+    explicit RuntimeFixture(RecoveryFixtureSchema schema = RecoveryFixtureSchema::Current)
+        : storage{[this](std::unique_ptr<jb::db::Driver> driver) {
+                      return std::make_unique<FaultDatabaseDriver>(std::move(driver), faults);
+                  },
+                  schema}
     {
         faults->classify = [this](std::string_view sql) -> std::string {
             if (sql.starts_with("SELECT id FROM jobu_runs WHERE 1 = 1") &&
@@ -196,9 +201,7 @@ struct RuntimeFixture {
     jb::core::priv::FakeEventLoop          loop{jb::core::priv::make_fake_event_loop()};
     jb::core::priv::ScopedCurrentEventLoop current{loop.loop.get()};
     std::shared_ptr<DatabaseFaultState>    faults = std::make_shared<DatabaseFaultState>();
-    RecoveryFixture                        storage{[this](std::unique_ptr<jb::db::Driver> driver) {
-        return std::make_unique<FaultDatabaseDriver>(std::move(driver), faults);
-    }};
+    RecoveryFixture                        storage;
     FakeTimeSource                         time;
     FakeCronEngine                         cron;
     UuidV7Generator                        generator{time};
@@ -670,4 +673,36 @@ TEST_CASE("Daemon runner factory failure never enters serving")
     REQUIRE(fixture.record.starts.empty());
     REQUIRE(fixture.record.destruction == std::vector<std::string>{"executor", "http"});
     REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
+}
+
+TEST_CASE("Daemon schema rollback poisoning prevents recovery and serving")
+{
+    RuntimeFixture fixture{RecoveryFixtureSchema::VersionOne};
+    fixture.seed(1, JobType::Http, RunState::Running);
+    fixture.create_runtime();
+    fixture.faults->faults.push_back({
+        .at    = {.boundary = "connection", .operation = DatabaseOperation::Commit},
+        .error = fault_error()
+    });
+    fixture.faults->faults.push_back({
+        .at    = {.boundary = "connection", .operation = DatabaseOperation::Rollback},
+        .error = fault_error()
+    });
+
+    // Exercise the same schema-result/fatal gate used in main, with a real SQLite rollback failure.
+    auto schema = jb::jobu::sqlite::ensure_schema(fixture.storage.database);
+    REQUIRE_FALSE(schema);
+    REQUIRE(fixture.storage.database.is_poisoned());
+    require_consumed_faults(*fixture.faults);
+    fixture.runtime->fail("schema", schema.error());
+    auto const calls_before_run = fixture.faults->calls.size();
+    CHECK(fixture.run([] {
+        FAIL("schema failure must not enter the event loop");
+        return EXIT_SUCCESS;
+    }) == EXIT_FAILURE);
+    CHECK(fixture.faults->calls.size() == calls_before_run);
+    CHECK(fixture.factory_calls == 0);
+    CHECK(fixture.record.starts.empty());
+    CHECK_FALSE(std::filesystem::exists(fixture.options.socket_path));
+    CHECK(fixture.runtime->state() == RuntimeState::Stopped);
 }

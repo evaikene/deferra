@@ -196,7 +196,7 @@ auto mark_schema_newer(std::filesystem::path const& database_path) -> bool
     auto finished = false;
     {
         jb::db::Query query{database};
-        auto          executed = query.exec("UPDATE jobu_schema SET version = 2 WHERE singleton = 1");
+        auto          executed = query.exec("UPDATE jobu_schema SET version = 3 WHERE singleton = 1");
         updated                = executed && query.num_rows_affected() == 1;
         finished               = static_cast<bool>(query.finish());
     }

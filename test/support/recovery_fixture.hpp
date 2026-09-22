@@ -39,6 +39,12 @@ struct RecoveryRunFixture {
                                   jobu::QueueState     state  = jobu::QueueState::Active,
                                   jobu::RecoveryPolicy policy = jobu::RecoveryPolicy::FailInterrupted) -> jobu::Queue;
 
+/// Selects a fresh schema or an original schema awaiting a production upgrade.
+enum class RecoveryFixtureSchema : std::uint8_t {
+    Current,
+    VersionOne
+};
+
 /// Owns a real SQLite database and its directory on the calling test thread.
 ///
 /// Builders use fixed times, materialized attributes and valid inert payloads; no runner is invoked. Persistence
@@ -47,7 +53,9 @@ struct RecoveryRunFixture {
 class RecoveryFixture final {
 public:
     /// Optionally decorates the closed SQLite driver; the wrapper must preserve exclusive ownership and file identity.
-    explicit RecoveryFixture(std::function<std::unique_ptr<db::Driver>(std::unique_ptr<db::Driver>)> wrap_driver = {});
+    /// VersionOne seeds original DDL for tests that exercise schema handling before recovery.
+    explicit RecoveryFixture(std::function<std::unique_ptr<db::Driver>(std::unique_ptr<db::Driver>)> wrap_driver = {},
+                             RecoveryFixtureSchema schema = RecoveryFixtureSchema::Current);
 
     /// Builds an active one-time definition with three allowed attempts; callers may edit the returned value.
     [[nodiscard]] auto make_job(core::Uuid id, core::Uuid queue_id, jobu::JobType type = jobu::JobType::Cli) const
