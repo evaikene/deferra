@@ -16,7 +16,8 @@ namespace {
 template <typename T>
 using RepositoryResult = jb::core::Result<T, jb::core::Error>;
 
-constexpr std::size_t kMaximumMetadataRows = 200;
+// Public pages contain at most 200 items; the service needs one additional metadata-only lookahead row.
+constexpr std::size_t kMaximumMetadataRows = 201;
 constexpr std::size_t kMaximumReferences   = 256;
 
 auto repository_error(jb::core::ErrorCategory category, std::string_view code, std::string_view message)
@@ -147,6 +148,12 @@ auto SecretRepository::set(std::string_view name, jb::core::ByteView value, jb::
     if (!is_valid_secret_name(name)) {
         return RepositoryResult<SecretMetadata>::failure(invalid_name());
     }
+    if (value.size() > kMaximumSecretValueBytes) {
+        return RepositoryResult<SecretMetadata>::failure(repository_error(jb::core::ErrorCategory::ResourceExhausted,
+                                                                          "jobu.secret.too_large",
+                                                                          "Secret exceeds its raw byte limit"));
+    }
+
     auto timestamp = timestamp_to_storage(updated_at);
     if (!timestamp) {
         return RepositoryResult<SecretMetadata>::failure(std::move(timestamp).error());
@@ -220,6 +227,44 @@ auto SecretRepository::set(std::string_view name, jb::core::ByteView value, jb::
         .created_at = updated_at,
         .updated_at = updated_at,
     });
+}
+
+auto SecretRepository::find_value(std::string_view name) -> RepositoryResult<jb::core::ByteBuffer>
+{
+    if (!is_valid_secret_name(name)) {
+        return RepositoryResult<jb::core::ByteBuffer>::failure(invalid_name());
+    }
+
+    jb::db::Query query{_database};
+    auto          prepared = query.prepare("SELECT value_blob FROM jobu_secrets WHERE name = :name");
+    if (!prepared) {
+        return RepositoryResult<jb::core::ByteBuffer>::failure(std::move(prepared).error());
+    }
+    auto bound = query.bind_value(":name", jb::db::make_text(name));
+    if (!bound) {
+        return RepositoryResult<jb::core::ByteBuffer>::failure(std::move(bound).error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return RepositoryResult<jb::core::ByteBuffer>::failure(std::move(executed).error());
+    }
+    auto next = query.next();
+    if (!next) {
+        return RepositoryResult<jb::core::ByteBuffer>::failure(std::move(next).error());
+    }
+    if (!*next) {
+        return RepositoryResult<jb::core::ByteBuffer>::failure(not_found());
+    }
+
+    // A zero-length BLOB is a valid secret. NULL, non-BLOB and oversized values indicate damaged durable data.
+    auto value = read_optional_blob(query.record(), "value_blob");
+    if (!value) {
+        return RepositoryResult<jb::core::ByteBuffer>::failure(std::move(value).error());
+    }
+    if (!value->has_value() || value->value().size() > kMaximumSecretValueBytes) {
+        return RepositoryResult<jb::core::ByteBuffer>::failure(invalid_record("invalid_value"));
+    }
+    return RepositoryResult<jb::core::ByteBuffer>::success(std::move(**value));
 }
 
 auto SecretRepository::list_metadata(std::size_t limit, std::optional<std::string_view> after_name)

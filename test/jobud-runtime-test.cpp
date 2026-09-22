@@ -9,6 +9,7 @@
 #include "protocol_priv.hpp"
 #include "query.hpp"
 #include "run_repository_priv.hpp"
+#include "secret_service.hpp"
 #include "server.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "support/fake_cron_engine.hpp"
@@ -37,6 +38,8 @@ namespace jb::jobud::detail {
 
 struct RuntimeTestAccess {
     static auto management(DaemonRuntime& runtime) { return runtime.management(); }
+
+    static auto secrets(DaemonRuntime& runtime) { return runtime.secrets(); }
 
     static auto scheduler(DaemonRuntime& runtime) { return runtime.scheduler(); }
 
@@ -125,6 +128,9 @@ struct RuntimeFixture {
             }
             if (sql.starts_with("INSERT INTO jobu_attempt_output")) {
                 return "recovery.output";
+            }
+            if (sql.starts_with("INSERT INTO jobu_secrets")) {
+                return "secrets.insert";
             }
             if (sql.starts_with("INSERT INTO jobu_queues")) {
                 return "management.queue";
@@ -410,6 +416,9 @@ TEST_CASE("Daemon gates remain latched through final task drains and retained co
                 auto created = management->create_queue({.name = "late"});
                 REQUIRE_FALSE(created);
                 REQUIRE(created.error().code == "jobu.service.stopping");
+                auto secret = RuntimeTestAccess::secrets(*fixture.runtime)->set({.name = "late"});
+                REQUIRE_FALSE(secret);
+                REQUIRE(secret.error().code == "jobu.service.stopping");
                 fixture.record.completions.front()(success(fixture.record.starts.front().key));
                 fixture.require_running(seeded);
             }));
@@ -441,6 +450,9 @@ TEST_CASE("Daemon HTTP shared failure wins before failed completion persistence"
         auto rejected = RuntimeTestAccess::management(*fixture.runtime)->create_queue({.name = "late"});
         REQUIRE_FALSE(rejected);
         REQUIRE(rejected.error().code == "jobu.service.stopping");
+        auto secret = RuntimeTestAccess::secrets(*fixture.runtime)->set({.name = "late"});
+        REQUIRE_FALSE(secret);
+        REQUIRE(secret.error().code == "jobu.service.stopping");
         REQUIRE(fixture.faults->calls.size() == calls);
         REQUIRE(fixture.record.starts.size() == 1);
         REQUIRE(fixture.http->start_records().size() == 1);
@@ -465,6 +477,9 @@ TEST_CASE("Daemon scheduler failure shuts management admission before the notify
         fixture.record.completions.front()(success({.run_id = recovery_id(999), .attempt_number = 1}));
         REQUIRE(fixture.runtime->state() == RuntimeState::Stopping);
         REQUIRE(RuntimeTestAccess::scheduler(*fixture.runtime)->state() == SchedulerState::Failed);
+        auto secret = RuntimeTestAccess::secrets(*fixture.runtime)->erase("late");
+        REQUIRE_FALSE(secret);
+        REQUIRE(secret.error().code == "jobu.service.stopping");
         auto rejected = RuntimeTestAccess::management(*fixture.runtime)->create_queue({.name = "late"});
         REQUIRE_FALSE(rejected);
         REQUIRE(rejected.error().code == "jobu.service.stopping");
@@ -587,6 +602,9 @@ TEST_CASE("Daemon injected mutation failures gate buffered requests and retained
                 CHECK(peer->written_data().find("jobu.service.stopping") != std::string::npos);
                 CHECK(peer->written_data().find("private-backend-marker") == std::string::npos);
                 fixture.record.completions.front()(success(fixture.record.starts.front().key));
+                auto secret = RuntimeTestAccess::secrets(*fixture.runtime)->set({.name = "late"});
+                CHECK_FALSE(secret);
+                CHECK(secret.error().code == "jobu.service.stopping");
                 CHECK(fixture.faults->calls.size() == calls_at_failure);
                 connection.disconnect();
                 return EXIT_SUCCESS;
@@ -705,4 +723,106 @@ TEST_CASE("Daemon schema rollback poisoning prevents recovery and serving")
     CHECK(fixture.record.starts.empty());
     CHECK_FALSE(std::filesystem::exists(fixture.options.socket_path));
     CHECK(fixture.runtime->state() == RuntimeState::Stopped);
+}
+
+TEST_CASE("Daemon secret failures gate management and retained completion persistence before failure returns")
+{
+    for (auto const* scenario : {"write", "acknowledgement", "missing_rollback"}) {
+        DYNAMIC_SECTION(scenario)
+        {
+            RuntimeFixture fixture;
+            auto           seeded = fixture.seed();
+            fixture.create_runtime();
+            auto result = fixture.run([&] {
+                auto* secrets    = RuntimeTestAccess::secrets(*fixture.runtime);
+                auto* management = RuntimeTestAccess::management(*fixture.runtime);
+                auto* server     = RuntimeTestAccess::rpc(*fixture.runtime);
+                auto  device     = std::make_unique<MemoryIODevice>();
+                auto* peer       = device.get();
+                device->open();
+                REQUIRE(server->add_connection(std::move(device)));
+                bool       observed        = false;
+                auto       connection      = secrets->failed.connect(secrets, [&](Error const& error) {
+                    // The runtime's earlier receiver must close every gate without destroying the active service.
+                    observed = true;
+                    check_safe_error(error, "db.io");
+                    CHECK(fixture.runtime->state() == RuntimeState::Stopping);
+                    CHECK(RuntimeTestAccess::scheduler(*fixture.runtime)->state() == SchedulerState::Shutdown);
+                    CHECK(fixture.record.destruction.empty());
+                    auto const calls = fixture.faults->calls.size();
+                    fixture.record.completions.front()(success(fixture.record.starts.front().key));
+                    CHECK(fixture.faults->calls.size() == calls);
+                });
+                bool const missing         = std::string_view{scenario} == "missing_rollback";
+                bool const acknowledgement = std::string_view{scenario} == "acknowledgement";
+                auto       fault = DatabaseCall{.boundary = "secrets.insert", .operation = DatabaseOperation::Execute};
+                if (missing || acknowledgement) {
+                    fault = {.boundary  = "connection",
+                             .operation = missing ? DatabaseOperation::Rollback : DatabaseOperation::Commit,
+                             .phase = acknowledgement ? DatabaseFaultPhase::AfterSuccess : DatabaseFaultPhase::Before};
+                }
+                fixture.faults->faults.push_back({.at = fault, .error = fault_error()});
+                if (missing) {
+                    auto erased = secrets->erase("missing");
+                    REQUIRE_FALSE(erased);
+                    check_safe_error(erased.error(), "db.io");
+                }
+                else {
+                    auto set = secrets->set({.name = "token"});
+                    REQUIRE_FALSE(set);
+                    check_safe_error(set.error(), "db.io");
+                }
+                REQUIRE(observed);
+                auto const calls    = fixture.faults->calls.size();
+                auto       rejected = management->create_queue({.name = "late"});
+                REQUIRE_FALSE(rejected);
+                CHECK(rejected.error().code == "jobu.service.stopping");
+                auto late_secret = secrets->set({.name = "late"});
+                REQUIRE_FALSE(late_secret);
+                CHECK(late_secret.error().code == "jobu.service.stopping");
+                // The existing connection can still deliver buffered frames before teardown; service admission wins.
+                peer->inject_input(request("queue.create", "buffered"));
+                CHECK(peer->written_data().find("jobu.service.stopping") != std::string::npos);
+                CHECK(fixture.faults->calls.size() == calls);
+                connection.disconnect();
+                return EXIT_SUCCESS;
+            });
+            CHECK(result == EXIT_FAILURE);
+            require_consumed_faults(*fixture.faults);
+            CHECK(fixture.runtime->state() == RuntimeState::Stopped);
+            fixture.runtime.reset();
+            fixture.storage.reopen();
+            fixture.require_running(seeded);
+        }
+    }
+}
+
+TEST_CASE("Daemon secret writes request later scheduling without adding secret RPC capabilities")
+{
+    RuntimeFixture fixture;
+    auto           seeded = fixture.seed();
+    fixture.create_runtime();
+    auto result = fixture.run([&] {
+        auto* secrets = RuntimeTestAccess::secrets(*fixture.runtime);
+        REQUIRE(secrets->set({.name = "token"}));
+        REQUIRE(secrets->erase("token"));
+        CHECK(fixture.runtime->state() == RuntimeState::Serving);
+        CHECK(fixture.record.starts.size() == 1);
+        fixture.require_running(seeded);
+
+        auto  device = std::make_unique<MemoryIODevice>();
+        auto* peer   = device.get();
+        device->open();
+        REQUIRE(RuntimeTestAccess::rpc(*fixture.runtime)->add_connection(std::move(device)));
+        auto frame = jb::rpc::frame_message(R"({"jsonrpc":"2.0","method":"system.info","id":1,"params":{}})");
+        REQUIRE(frame);
+        peer->inject_input(*frame);
+        CHECK(peer->written_data().find("queue.create") != std::string::npos);
+        CHECK(peer->written_data().find("secret.set") == std::string::npos);
+        CHECK(peer->written_data().find("secret.list") == std::string::npos);
+        CHECK(peer->written_data().find("secret.delete") == std::string::npos);
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == EXIT_SUCCESS);
 }

@@ -76,6 +76,7 @@ target_sources(${TARGET}
         scheduler_repository_priv.hpp
         secret_repository_priv.cpp
         secret_repository_priv.hpp
+        secret_service.cpp
         storage_failure_priv.cpp
         storage_failure_priv.hpp
         system_info.cpp
@@ -100,6 +101,7 @@ target_sources(${TARGET}
         run.hpp
         scheduler.hpp
         secret.hpp
+        secret_service.hpp
         system_info.hpp
         system_info_rpc.hpp
         utc_timestamp.hpp
