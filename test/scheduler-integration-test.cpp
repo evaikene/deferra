@@ -12,6 +12,7 @@
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_event_loop_backend.hpp"
 #include "support/fake_time_source.hpp"
+#include "support/rejecting_secret_provider.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
 
@@ -130,7 +131,7 @@ struct SchedulerFixture {
         REQUIRE(jb::jobu::sqlite::ensure_schema(database));
         time.set_utc(at_seconds(100));
         management = std::make_unique<ManagementService>(database, registry, cron, generator, time);
-        scheduler  = std::make_unique<Scheduler>(database, registry, cron, generator, time, executor, options);
+        scheduler  = std::make_unique<Scheduler>(database, registry, cron, generator, time, executor, secrets, options);
     }
 
     ~SchedulerFixture()
@@ -206,6 +207,7 @@ struct SchedulerFixture {
     TemporaryDirectory                     directory;
     std::filesystem::path                  database_file;
     Database                               database;
+    RejectingSecretProvider                secrets;
     StandardAttributeRegistry              registry;
     FakeCronEngine                         cron;
     SequenceUuidGenerator                  generator;

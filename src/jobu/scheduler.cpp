@@ -81,6 +81,7 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
             jb::core::UuidGenerator& uuid_generator,
             jb::core::TimeSource&    time_source,
             AttemptExecutor&         executor,
+            SecretProvider&          secrets,
             SchedulerOptions         options_value)
         : database{
               database_value
@@ -93,6 +94,7 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
                uuid_generator,
                time_source,
                executor,
+               secrets,
                {.cli_concurrency      = options.cli_concurrency,
                 .http_concurrency     = options.http_concurrency,
                 .candidate_batch_size = options.candidate_batch_size},
@@ -270,9 +272,10 @@ Scheduler::Scheduler(jb::db::Database&        database,
                      jb::core::UuidGenerator& uuid_generator,
                      jb::core::TimeSource&    time_source,
                      AttemptExecutor&         executor,
+                     SecretProvider&          secrets,
                      SchedulerOptions         options,
                      jb::core::Object*        parent)
-    : Object(*new Private{database, attributes, cron, uuid_generator, time_source, executor, options}, parent)
+    : Object(*new Private{database, attributes, cron, uuid_generator, time_source, executor, secrets, options}, parent)
 {
     // Complete the owner back-reference only after the Object base owns the private block and tracks its lifetime.
     d_ptr<Private>()->bind_owner(*this);

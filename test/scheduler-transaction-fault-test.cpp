@@ -7,12 +7,15 @@
 #include "queue_repository_priv.hpp"
 #include "run_repository_priv.hpp"
 #include "scheduler_core_priv.hpp"
+#include "secret_provider_priv.hpp"
+#include "secret_repository_priv.hpp"
 #include "support/fake_attempt_executor.hpp"
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_event_loop_backend.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/fault_database_driver.hpp"
 #include "support/recovery_fixture.hpp"
+#include "support/rejecting_secret_provider.hpp"
 #include "support/sequence_uuid_generator.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -65,6 +68,9 @@ auto successor_error() -> Error
 // so a repository rewrite cannot silently turn a rollback case into a successful control.
 auto boundary(std::string_view sql) -> std::string
 {
+    if (sql.starts_with("SELECT value_blob FROM jobu_secrets")) {
+        return "dispatch.secret";
+    }
     if (sql.find("AS running_run_count") != std::string_view::npos) {
         return "startup.running_state";
     }
@@ -196,6 +202,8 @@ struct Fixture {
     SequenceUuidGenerator                  generator{
         {recovery_id(100), recovery_id(101)}
     };
+    RejectingSecretProvider    secrets;
+    DatabaseSecretProvider     database_secrets{store.database};
     FakeTimeSource             time;
     ObservingExecutor          executor{faults};
     std::vector<Error>         failures;
@@ -204,15 +212,23 @@ struct Fixture {
     JobDefinition              job;
     RecoveryRunFixture         original;
 
-    explicit Fixture(Scenario      scenario = Scenario::Terminal,
-                     RunState      initial  = RunState::Scheduled,
-                     std::uint32_t capacity = 1)
+    explicit Fixture(Scenario      scenario   = Scenario::Terminal,
+                     RunState      initial    = RunState::Scheduled,
+                     std::uint32_t capacity   = 1,
+                     bool          references = false)
     {
         faults->classify = boundary;
         time.set_utc(at(100));
         queue.concurrency_limit = capacity;
         store.insert_queue(queue);
-        job                                      = store.make_job(recovery_id(2), queue.id);
+        job = store.make_job(recovery_id(2), queue.id);
+        if (references) {
+            auto payload = parse_json(R"({"command":"/bin/tool","arguments":[{"secret":"token"}]})");
+            REQUIRE(payload);
+            job.payload = std::move(*payload);
+            SecretRepository repository{store.database};
+            REQUIRE(repository.set("token", as_bytes("private-secret-sentinel"), at(100)));
+        }
         job.attributes.at("output.capture").data = std::string{"always"};
         job.attributes.at("retry.mode").data =
             std::string{scenario == Scenario::BlockingRetry ? "blocking" : "reschedule"};
@@ -232,7 +248,9 @@ struct Fixture {
         waiting.run.priority = -1;
         store.insert_run(waiting);
         executor.fake.set_available(JobType::Cli, true);
-        scheduler = std::make_unique<Scheduler>(store.database, store.registry, cron, generator, time, executor);
+        auto& provider = references ? static_cast<SecretProvider&>(database_secrets) : secrets;
+        scheduler =
+            std::make_unique<Scheduler>(store.database, store.registry, cron, generator, time, executor, provider);
         scheduler->failed.connect(scheduler.get(), [this](Error const& error) { failures.push_back(error); });
     }
 
@@ -850,6 +868,7 @@ TEST_CASE("Scheduler core latches cancellation cleanup failure without asynchron
                     fixture.generator,
                     fixture.time,
                     fixture.executor,
+                    fixture.secrets,
                     {},
                     {.failure_reported = [&](Error const& error) { fixture.failures.push_back(error); }}};
                 REQUIRE(core.process_cycle());
@@ -890,6 +909,129 @@ TEST_CASE("Scheduler core latches cancellation cleanup failure without asynchron
             fixture.reopen();
             CHECK(snapshot(fixture.store.database) == before);
             fixture.store.require_run(pending);
+        }
+    }
+}
+
+TEST_CASE("Secret dispatch faults preserve the durable snapshot and close scheduler admission",
+          "[jobu][scheduler][fault][secret][sqlite]")
+{
+    auto faults = dispatch_faults();
+    for (auto operation :
+         {Operation::Prepare, Operation::Bind, Operation::Execute, Operation::Fetch, Operation::Finish}) {
+        faults.push_back({.boundary = "dispatch.secret", .operation = operation});
+    }
+    for (auto initial : {RunState::Scheduled, RunState::RetryWait}) {
+        for (auto const& fault : faults) {
+            DYNAMIC_SECTION(static_cast<int>(initial)
+                            << ' ' << fault.boundary << ' ' << static_cast<int>(fault.operation) << ' '
+                            << static_cast<int>(fault.phase))
+            {
+                Fixture fixture{Scenario::Terminal, initial, 1, true};
+                auto    before = snapshot(fixture.store.database);
+                fixture.arm(fault);
+                auto started = fixture.scheduler->start();
+                REQUIRE_FALSE(started);
+                fixture.require_failure();
+                CHECK(fixture.failures.front().detail == "operation=dispatch reason=state_operation_failed");
+                CHECK(fixture.executor.fake.start_requests().empty());
+                fixture.require_closed_gate();
+                fixture.reopen();
+                CHECK(snapshot(fixture.store.database) == before);
+            }
+        }
+    }
+}
+
+TEST_CASE("Secret preparation cannot bypass commit acknowledgement or poisoned rollback",
+          "[jobu][scheduler][fault][secret][sqlite]")
+{
+    for (bool missing : {false, true}) {
+        for (bool lost_acknowledgement : {false, true}) {
+            DYNAMIC_SECTION(missing << ' ' << lost_acknowledgement)
+            {
+                Fixture fixture{Scenario::Terminal, RunState::Scheduled, 1, true};
+                if (missing) {
+                    execute(fixture.store.database, "DELETE FROM jobu_secrets");
+                }
+                auto before = snapshot(fixture.store.database);
+                if (lost_acknowledgement) {
+                    fixture.arm(
+                        {.boundary = "connection", .operation = Operation::Commit, .phase = Phase::AfterSuccess});
+                }
+                else {
+                    fixture.arm({.boundary = "dispatch.attempt", .operation = Operation::Execute});
+                    fixture.arm({.boundary = "connection", .operation = Operation::Rollback}, "db.rollback_failed");
+                }
+                auto started = fixture.scheduler->start();
+                REQUIRE_FALSE(started);
+                fixture.require_failure();
+                CHECK(fixture.executor.fake.start_requests().empty());
+                if (!lost_acknowledgement) {
+                    CHECK(fixture.store.database.is_poisoned());
+                }
+                fixture.require_closed_gate();
+                fixture.reopen();
+                if (!lost_acknowledgement) {
+                    CHECK(snapshot(fixture.store.database) == before);
+                }
+                else {
+                    // SQLite committed even though its acknowledgement was lost. Recovery owns these Running rows;
+                    // neither an executor launch nor a synthetic preparation completion may cross that uncertainty.
+                    RunRepository runs{fixture.store.database, fixture.store.registry};
+                    auto          run = runs.find_by_id(fixture.original.run.id);
+                    REQUIRE(run);
+                    REQUIRE(run->has_value());
+                    CHECK(run->value().state == RunState::Running);
+                    AttemptRepository attempts{fixture.store.database};
+                    auto              attempt = attempts.find(fixture.original.run.id, 1);
+                    REQUIRE(attempt);
+                    REQUIRE(attempt->has_value());
+                    CHECK(attempt->value().state == AttemptState::Running);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Synthetic preparation completion faults leave the committed attempt for recovery",
+          "[jobu][scheduler][fault][secret][sqlite]")
+{
+    for (auto scenario : {Scenario::Terminal, Scenario::Recurring}) {
+        for (auto const& fault : completion_faults(scenario)) {
+            // Preparation produced no captured output. Begin/commit are faulted in dispatch by the separate matrix;
+            // this case targets the completion transaction's own reads and terminal/recurrence writes.
+            if (fault.boundary == "completion.output" || fault.boundary == "connection") {
+                continue;
+            }
+            DYNAMIC_SECTION(static_cast<int>(scenario)
+                            << ' ' << fault.boundary << ' ' << static_cast<int>(fault.operation) << ' '
+                            << static_cast<int>(fault.phase))
+            {
+                Fixture fixture{scenario, RunState::Scheduled, 1, true};
+                execute(fixture.store.database, "DELETE FROM jobu_secrets");
+                fixture.arm(fault);
+                auto started = fixture.scheduler->start();
+                REQUIRE_FALSE(started);
+                fixture.require_failure();
+                CHECK(fixture.executor.fake.start_requests().empty());
+                fixture.require_closed_gate();
+                fixture.reopen();
+                RunRepository runs{fixture.store.database, fixture.store.registry};
+                auto          run = runs.find_by_id(fixture.original.run.id);
+                REQUIRE(run);
+                REQUIRE(run->has_value());
+                CHECK(run->value().state == RunState::Running);
+                AttemptRepository attempts{fixture.store.database};
+                auto              attempt = attempts.find(fixture.original.run.id, 1);
+                REQUIRE(attempt);
+                REQUIRE(attempt->has_value());
+                CHECK(attempt->value().state == AttemptState::Running);
+                CHECK_FALSE(attempt->value().result);
+                auto successor = runs.find_by_id(recovery_id(100));
+                REQUIRE(successor);
+                CHECK_FALSE(successor->has_value());
+            }
         }
     }
 }

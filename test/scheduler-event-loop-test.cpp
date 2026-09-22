@@ -13,6 +13,7 @@
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_event_loop_backend.hpp"
 #include "support/fake_time_source.hpp"
+#include "support/rejecting_secret_provider.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
 
@@ -117,7 +118,7 @@ struct SchedulerFixture {
         REQUIRE(jb::jobu::sqlite::ensure_schema(database));
         time.set_utc(at_seconds(100));
         management = std::make_unique<ManagementService>(database, registry, cron, generator, time);
-        scheduler  = std::make_unique<Scheduler>(database, registry, cron, generator, time, executor, options);
+        scheduler  = std::make_unique<Scheduler>(database, registry, cron, generator, time, executor, secrets, options);
     }
 
     auto create_queue(std::string name = "queue", std::uint32_t concurrency = 1) const -> Queue
@@ -147,6 +148,7 @@ struct SchedulerFixture {
     TemporaryDirectory                     directory;
     std::filesystem::path                  database_file;
     Database                               database;
+    RejectingSecretProvider                secrets;
     StandardAttributeRegistry              registry;
     FakeCronEngine                         cron;
     SequenceUuidGenerator                  generator;
@@ -249,12 +251,13 @@ TEST_CASE("Scheduler start rejects invalid construction and startup recovery sta
         auto                                   database = make_database(directory.path() / "jobu.sqlite");
         REQUIRE(database.open());
         REQUIRE(jb::jobu::sqlite::ensure_schema(database));
+        RejectingSecretProvider   secrets;
         StandardAttributeRegistry registry;
         FakeCronEngine            cron;
         SequenceUuidGenerator     generator{test_ids()};
         FakeTimeSource            time;
         FakeAttemptExecutor       executor;
-        Scheduler                 scheduler{database, registry, cron, generator, time, executor};
+        Scheduler                 scheduler{database, registry, cron, generator, time, executor, secrets};
 
         auto started = scheduler.start();
         REQUIRE_FALSE(started);
@@ -602,7 +605,13 @@ TEST_CASE("Scheduler does not dispatch again or rearm after reentrant shutdown d
     fixture.create_job(queue, JobType::Cli, at_seconds(200));
     executor.fake.set_available(JobType::Cli, true);
     executor.fake.set_available(JobType::Http, true);
-    Scheduler scheduler{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time, executor};
+    Scheduler scheduler{fixture.database,
+                        fixture.registry,
+                        fixture.cron,
+                        fixture.generator,
+                        fixture.time,
+                        executor,
+                        fixture.secrets};
     executor.started = [&]() { scheduler.shutdown(); };
 
     auto started = scheduler.start();

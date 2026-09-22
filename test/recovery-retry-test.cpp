@@ -1,5 +1,6 @@
 #include "support/fake_attempt_executor.hpp"
 #include "support/recovery_fixture.hpp"
+#include "support/rejecting_secret_provider.hpp"
 
 #include "attempt_repository_priv.hpp"
 #include "attribute_codec_priv.hpp"
@@ -277,12 +278,14 @@ TEST_CASE("Normal dispatch creates the next recovered attempt from the original 
 
     FakeAttemptExecutor executor;
     executor.set_available(type, true);
-    auto early = dispatch_selected(fixture.database,
-                                   fixture.registry,
-                                   executor,
-                                   original.run.id,
-                                   UtcTimePoint{103s},
-                                   [](AttemptCompletion const&) {});
+    RejectingSecretProvider secrets;
+    auto                    early = dispatch_selected(fixture.database,
+                                                      fixture.registry,
+                                                      executor,
+                                                      secrets,
+                                                      original.run.id,
+                                                      UtcTimePoint{103s},
+                                                      [](AttemptCompletion const&) {});
     REQUIRE(early);
     CHECK_FALSE(*early);
     CHECK(executor.start_requests().empty());
@@ -291,6 +294,7 @@ TEST_CASE("Normal dispatch creates the next recovered attempt from the original 
     auto dispatched = dispatch_selected(fixture.database,
                                         fixture.registry,
                                         executor,
+                                        secrets,
                                         original.run.id,
                                         UtcTimePoint{104s},
                                         [](AttemptCompletion const&) {});

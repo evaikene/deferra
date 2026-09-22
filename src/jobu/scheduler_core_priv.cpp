@@ -703,6 +703,7 @@ auto load_candidate_batch(SchedulerRepository&   repository,
 auto dispatch_visit(jb::db::Database&                        database,
                     AttributeRegistry const&                 attributes,
                     AttemptExecutor&                         executor,
+                    SecretProvider&                          secrets,
                     SchedulerRepository&                     repository,
                     std::vector<QueueRuntime> const&         queues,
                     JobType                                  type,
@@ -800,7 +801,8 @@ auto dispatch_visit(jb::db::Database&                        database,
                 auto handled = processor(expected_run_id, value);
                 (void)handled;
             };
-            auto dispatched = dispatch_selected(database, attributes, executor, run_id, now, std::move(completion));
+            auto dispatched =
+                dispatch_selected(database, attributes, executor, secrets, run_id, now, std::move(completion));
             if (!dispatched) {
                 return CoreResult<bool>::failure(std::move(dispatched).error());
             }
@@ -825,7 +827,7 @@ auto dispatch_visit(jb::db::Database&                        database,
                 return CoreResult<bool>::failure(std::move(recorded).error());
             }
             if (dispatched->value().immediate_completion) {
-                // Executor start errors enter the same completion path after correlation and occupancy are recorded.
+                // Preparation and executor start errors complete only after correlation and occupancy are recorded.
                 auto completed = completion_processor(run_id, *dispatched->value().immediate_completion);
                 if (!completed) {
                     return CoreResult<bool>::failure(std::move(completed).error());
@@ -885,6 +887,7 @@ SchedulerCore::SchedulerCore(jb::db::Database&        database,
                              jb::core::UuidGenerator& uuid_generator,
                              jb::core::TimeSource&    time_source,
                              AttemptExecutor&         executor,
+                             SecretProvider&          secrets,
                              SchedulerCoreOptions     options,
                              SchedulerCoreCallbacks   callbacks)
     : _database{database}
@@ -893,6 +896,7 @@ SchedulerCore::SchedulerCore(jb::db::Database&        database,
     , _uuid_generator{uuid_generator}
     , _time_source{time_source}
     , _executor{executor}
+    , _secrets{secrets}
     , _options{options}
     , _callbacks{std::move(callbacks)}
     , _completion_token{std::make_shared<CompletionToken>(CompletionToken{.owner = this})}
@@ -1176,6 +1180,7 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
         auto first = dispatch_visit(_database,
                                     _attributes,
                                     _executor,
+                                    _secrets,
                                     repository,
                                     *queues,
                                     first_type,
@@ -1200,6 +1205,7 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
         auto second = dispatch_visit(_database,
                                      _attributes,
                                      _executor,
+                                     _secrets,
                                      repository,
                                      *queues,
                                      second_type,
