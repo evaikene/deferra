@@ -16,6 +16,10 @@
 
 namespace jb::test {
 
+/// Returns whether an IPv6 TCP socket can bind to ::1 on an ephemeral port.
+/// Socket or bind failure returns false; the probe always closes its socket.
+[[nodiscard]] auto ipv6_loopback_available() noexcept -> bool;
+
 struct HttpTestTlsContext;
 
 enum class HttpTestTransport : std::uint8_t {

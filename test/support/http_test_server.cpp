@@ -447,6 +447,24 @@ auto bind_loopback_port(int fd, HttpTestAddressFamily address_family) -> std::op
 
 } // anonymous namespace
 
+auto ipv6_loopback_available() noexcept -> bool
+{
+    auto const fd = ::socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return false;
+    }
+
+    // An available address family does not guarantee that IPv6 loopback is usable.
+    auto address        = sockaddr_in6{};
+    address.sin6_family = AF_INET6;
+    address.sin6_addr   = in6addr_loopback;
+    address.sin6_port   = 0;
+    auto const bound    = ::bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
+
+    close_fd(fd);
+    return bound;
+}
+
 HttpTestServer::HttpTestServer(HttpTestTransport transport, HttpTestAddressFamily address_family)
     : _transport{transport}
     , _address_family{address_family}
