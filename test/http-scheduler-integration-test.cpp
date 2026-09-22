@@ -11,12 +11,15 @@
 #include "json.hpp"
 #include "management.hpp"
 #include "run_repository_priv.hpp"
+#include "secret_provider_priv.hpp"
+#include "secret_service.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/http_test_server.hpp"
 #include "support/rejecting_secret_provider.hpp"
+#include "support/secret_execution_checks.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
 
@@ -134,10 +137,11 @@ struct CreatedJob {
 };
 
 struct RealSchedulerFixture {
-    explicit RealSchedulerFixture(SchedulerOptions options = {})
+    explicit RealSchedulerFixture(SchedulerOptions options = {}, bool resolve_secrets = false)
         : app{0, nullptr}
         , database_file{directory.path() / "jobu.sqlite"}
         , database{make_database(database_file)}
+        , database_secrets{database}
         , generator{test_ids()}
         , runs{database, registry}
         , attempts{database}
@@ -151,7 +155,15 @@ struct RealSchedulerFixture {
         client     = std::move(created_client).value();
         executor   = std::make_unique<HttpAttemptExecutor>(*client, time);
         management = std::make_unique<ManagementService>(database, registry, cron, generator, time);
-        scheduler = std::make_unique<Scheduler>(database, registry, cron, generator, time, *executor, secrets, options);
+        scheduler =
+            std::make_unique<Scheduler>(database,
+                                        registry,
+                                        cron,
+                                        generator,
+                                        time,
+                                        *executor,
+                                        resolve_secrets ? static_cast<SecretProvider&>(database_secrets) : secrets,
+                                        options);
     }
 
     ~RealSchedulerFixture()
@@ -263,17 +275,21 @@ struct RealSchedulerFixture {
         scheduler->stop();
     }
 
-private:
-    auto create_job(Queue const& queue, JobType type, JsonValue payload, AttributeSet attributes, std::int32_t priority)
-        -> CreatedJob
+    auto create_job(Queue const&               queue,
+                    JobType                    type,
+                    JsonValue                  payload,
+                    AttributeSet               attributes,
+                    std::int32_t               priority        = 0,
+                    std::optional<std::string> idempotency_key = std::nullopt) -> CreatedJob
     {
         auto definition = management->create_job({
-            .queue      = queue.id,
-            .type       = type,
-            .schedule   = OnceSchedule{.planned_at = at_seconds(90)},
-            .priority   = priority,
-            .attributes = std::move(attributes),
-            .payload    = std::move(payload),
+            .queue           = queue.id,
+            .type            = type,
+            .schedule        = OnceSchedule{.planned_at = at_seconds(90)},
+            .priority        = priority,
+            .attributes      = std::move(attributes),
+            .payload         = std::move(payload),
+            .idempotency_key = std::move(idempotency_key),
         });
         REQUIRE(definition);
         auto run = runs.find_schedule_owned(definition->id);
@@ -286,22 +302,23 @@ private:
     }
 
 public:
-    Application                          app;
-    HttpTestServer                       server;
-    TemporaryDirectory                   directory;
-    std::filesystem::path                database_file;
-    Database                             database;
-    RejectingSecretProvider              secrets;
-    StandardAttributeRegistry            registry;
-    FakeCronEngine                       cron;
-    SequenceUuidGenerator                generator;
-    FakeTimeSource                       time;
-    RunRepository                        runs;
-    AttemptRepository                    attempts;
-    std::unique_ptr<SystemHttpClient>    client;
-    std::unique_ptr<HttpAttemptExecutor> executor;
-    std::unique_ptr<ManagementService>   management;
-    std::unique_ptr<Scheduler>           scheduler;
+    Application                              app;
+    HttpTestServer                           server;
+    TemporaryDirectory                       directory;
+    std::filesystem::path                    database_file;
+    Database                                 database;
+    jb::jobu::detail::DatabaseSecretProvider database_secrets;
+    RejectingSecretProvider                  secrets;
+    StandardAttributeRegistry                registry;
+    FakeCronEngine                           cron;
+    SequenceUuidGenerator                    generator;
+    FakeTimeSource                           time;
+    RunRepository                            runs;
+    AttemptRepository                        attempts;
+    std::unique_ptr<SystemHttpClient>        client;
+    std::unique_ptr<HttpAttemptExecutor>     executor;
+    std::unique_ptr<ManagementService>       management;
+    std::unique_ptr<Scheduler>               scheduler;
 };
 
 auto all_terminal(RealSchedulerFixture& fixture, std::vector<CreatedJob> const& jobs) -> bool
@@ -637,4 +654,202 @@ TEST_CASE("real HTTP cancellation retains capacity until durable completion",
         [&fixture, &follower]() -> bool { return fixture.has_run_state(follower.run.id, RunState::Succeeded); }));
     CHECK(fixture.server.requests().size() == 2U);
     fixture.stop_after_idle();
+}
+
+namespace {
+
+// An ordinary header name and explicit false flag prove sensitivity comes from resolution, not credential heuristics.
+auto secret_http_payload(std::string url) -> JsonValue
+{
+    return json_object({
+        {"url",     json_string(std::move(url))                                                                      },
+        {"method",  json_string("POST")                                                                              },
+        {"headers",
+         {.data = JsonValue::Array{json_object({{"name", json_string("X-Execution-Token")},
+                                                {"value", secret_reference("execution.token")},
+                                                {"sensitive", {.data = false}}}),
+                                   json_object(
+                                       {{"name", json_string("X-Public")}, {"value", json_string("public-value")}})}}},
+        {"body",    secret_reference("execution.body")                                                               },
+    });
+}
+
+auto recorded_header(HttpTestRequest const& request, std::string_view name) -> std::optional<std::string>
+{
+    for (auto const& header : request.headers) {
+        if (header.name == name) {
+            return header.value;
+        }
+    }
+    return std::nullopt;
+}
+
+} // namespace
+
+TEST_CASE("real HTTP secret headers and binary bodies rotate per retry with faithful response capture",
+          "[jobu][scheduler][http][secrets][integration][sqlite]")
+{
+    for (auto const* mode : {"blocking", "reschedule"}) {
+        for (auto const* capture : {"always", "on_error", "none"}) {
+            CAPTURE(mode, capture);
+            SecretExecutionLogGuard logs;
+            RealSchedulerFixture    fixture{{}, true};
+            SecretService           secrets{fixture.database, fixture.time};
+            auto const              first_body  = bytes(std::string{"stage89-private-first-body"} + '\0' + '\xff');
+            auto const              second_body = bytes(std::string{"stage89-private-second-body"} + '\xff' + '\0');
+            REQUIRE(secrets.set({.name = "execution.token", .value = bytes("stage89-private-first-header")}));
+            REQUIRE(secrets.set({.name = "execution.body", .value = first_body}));
+            fixture.server.enqueue_response({.status_code = 503,
+                                             .reason      = "Unavailable",
+                                             .headers = {{.name = "X-Echo", .value = "stage89-private-first-header"}},
+                                             .body    = first_body});
+            fixture.server.enqueue_response(
+                {.headers = {{.name = "X-Echo", .value = "stage89-private-second-header"}}, .body = second_body});
+            fixture.server.release_responses();
+            auto const payload = secret_http_payload(fixture.server.url("/secret-rotation"));
+            auto       job     = fixture.create_job(fixture.create_queue("secret-rotation", 1, 1),
+                                                    JobType::Http,
+                                                    payload,
+                                                    {
+                                                        {"retry.initial_delay", {.data = Duration{10s}}       },
+                                                        {"retry.max_delay",     {.data = Duration{10s}}       },
+                                                        {"retry.max_attempts",  {.data = std::int64_t{2}}     },
+                                                        {"retry.jitter",        {.data = 0.0}                 },
+                                                        {"retry.mode",          {.data = std::string{mode}}   },
+                                                        {"output.capture",      {.data = std::string{capture}}},
+                                                        {"http.tls_verify",     {.data = false}               }
+            },
+                                                    0,
+                                                    "secret-http-create");
+            REQUIRE(fixture.scheduler->start());
+            REQUIRE(fixture.process_until([&] { return fixture.has_run_state(job.run.id, RunState::RetryWait); }));
+            REQUIRE(fixture.server.requests().size() == 1U);
+
+            // Rotation happens only after the first completion commits, before the second attempt becomes eligible.
+            REQUIRE(secrets.set({.name = "execution.token", .value = bytes("stage89-private-second-header")}));
+            REQUIRE(secrets.set({.name = "execution.body", .value = second_body}));
+            fixture.time.set_utc(at_seconds(109));
+            fixture.scheduler->request_rescan();
+            REQUIRE(fixture.app.process_events(EventFlag::Timers, 0) != ProcessEventsResult::Failed);
+            CHECK(fixture.server.requests().size() == 1U);
+            fixture.time.set_utc(at_seconds(110));
+            fixture.scheduler->request_rescan();
+            REQUIRE(fixture.process_until([&] { return fixture.has_run_state(job.run.id, RunState::Succeeded); }));
+            auto requests = fixture.server.requests();
+            REQUIRE(requests.size() == 2U);
+            CHECK(recorded_header(requests[0], "X-Execution-Token") == "stage89-private-first-header");
+            CHECK(recorded_header(requests[1], "X-Execution-Token") == "stage89-private-second-header");
+            CHECK(requests[0].body == first_body);
+            CHECK(requests[1].body == second_body);
+
+            for (AttemptNumber number : {1U, 2U}) {
+                auto       output = fixture.find_output({.run_id = job.run.id, .attempt_number = number});
+                auto const retained =
+                    std::string_view{capture} == "always" || (std::string_view{capture} == "on_error" && number == 1U);
+                if (retained) {
+                    REQUIRE(output);
+                    CHECK(output->stdout_bytes == (number == 1U ? first_body : second_body));
+                    REQUIRE(output->stderr_bytes);
+                    CHECK(byte_text(*output->stderr_bytes)
+                              .find(number == 1U ? "stage89-private-first-header" : "stage89-private-second-header") !=
+                          std::string_view::npos);
+                }
+                else {
+                    CHECK_FALSE(output);
+                }
+            }
+            CHECK(fixture.find_run(job.run.id).payload == payload);
+            auto definition = fixture.management->get_job(job.definition.id);
+            REQUIRE(definition);
+            CHECK(definition->payload == payload);
+            check_secret_create_record(fixture.database, payload);
+            check_secret_execution_metadata(fixture.database);
+            fixture.stop_after_idle();
+            logs.check("HTTP TLS verification disabled for job");
+        }
+    }
+}
+
+TEST_CASE("real HTTP redirects retain same-origin secret headers and permanently remove them across origins",
+          "[jobu][scheduler][http][secrets][integration][sqlite]")
+{
+    SecretExecutionLogGuard logs;
+    RealSchedulerFixture    fixture{{}, true};
+    HttpTestServer          other_origin;
+    SecretService           secrets{fixture.database, fixture.time};
+    REQUIRE(secrets.set({.name = "execution.token", .value = bytes("stage89-private-redirect-header")}));
+    REQUIRE(secrets.set({.name = "execution.body", .value = bytes("stage89-private-redirect-body")}));
+
+    // A -> A -> B -> A also proves a removed header cannot reappear on a later return to its original origin.
+    fixture.server.enqueue_response({.status_code = 302,
+                                     .reason      = "Found",
+                                     .headers = {{.name = "Location", .value = fixture.server.url("/same-origin")}}});
+    fixture.server.enqueue_response({.status_code = 302,
+                                     .reason      = "Found",
+                                     .headers = {{.name = "Location", .value = other_origin.url("/other-origin")}}});
+    other_origin.enqueue_response({.status_code = 302,
+                                   .reason      = "Found",
+                                   .headers     = {{.name = "Location", .value = fixture.server.url("/return")}}});
+    fixture.server.enqueue_response({});
+    fixture.server.release_responses();
+    other_origin.release_responses();
+    auto job = fixture.create_job(fixture.create_queue("secret-redirect", 1, 1),
+                                  JobType::Http,
+                                  secret_http_payload(fixture.server.url("/initial")),
+                                  {
+                                      {"http.follow_redirects", {.data = true}}
+    });
+    REQUIRE(fixture.scheduler->start());
+    REQUIRE(fixture.process_until([&] { return fixture.has_run_state(job.run.id, RunState::Succeeded); }));
+    auto original_requests = fixture.server.requests();
+    auto other_requests    = other_origin.requests();
+    REQUIRE(original_requests.size() == 3U);
+    REQUIRE(other_requests.size() == 1U);
+    CHECK(recorded_header(original_requests[0], "X-Execution-Token") == "stage89-private-redirect-header");
+    CHECK(recorded_header(original_requests[1], "X-Execution-Token") == "stage89-private-redirect-header");
+    CHECK_FALSE(recorded_header(other_requests[0], "X-Execution-Token"));
+    CHECK_FALSE(recorded_header(original_requests[2], "X-Execution-Token"));
+    CHECK(recorded_header(other_requests[0], "X-Public") == "public-value");
+    check_secret_execution_metadata(fixture.database);
+    fixture.stop_after_idle();
+    logs.check();
+}
+
+TEST_CASE("real HTTP secret preparation and transport failures leave safe generated diagnostics",
+          "[jobu][scheduler][http][secrets][integration][sqlite]")
+{
+    for (auto const invalid_value : {false, true}) {
+        CAPTURE(invalid_value);
+        SecretExecutionLogGuard logs;
+        RealSchedulerFixture    fixture{{}, true};
+        SecretService           secrets{fixture.database, fixture.time};
+        REQUIRE(secrets.set({.name  = "execution.token",
+                             .value = bytes(invalid_value ? "stage89-private-rejected\r\nInjected: value"
+                                                          : "stage89-private-transport-header")}));
+        REQUIRE(secrets.set({.name = "execution.body", .value = bytes("stage89-private-transport-body")}));
+        fixture.server.reset_next_request_after_headers();
+        auto job = fixture.create_job(fixture.create_queue("secret-failure", 1, 1),
+                                      JobType::Http,
+                                      secret_http_payload(fixture.server.url("/failure")),
+                                      {
+                                          {"retry.max_attempts", {.data = std::int64_t{1}}}
+        });
+        REQUIRE(fixture.scheduler->start());
+        REQUIRE(fixture.process_until([&] { return fixture.has_run_state(job.run.id, RunState::Failed); }));
+        auto attempt = fixture.find_attempt({.run_id = job.run.id, .attempt_number = 1});
+        REQUIRE(attempt.result);
+        auto result = serialize_json(*attempt.result);
+        REQUIRE(result);
+        if (invalid_value) {
+            CHECK(fixture.server.accepted_connection_count() == 0U);
+            CHECK(result->find("jobu.secret.invalid_value") != std::string::npos);
+        }
+        else {
+            CHECK(fixture.server.accepted_connection_count() >= 1U);
+            CHECK(result_string(*attempt.result, "outcome") == "transport_error");
+        }
+        check_secret_execution_metadata(fixture.database);
+        fixture.stop_after_idle();
+        logs.check();
+    }
 }
