@@ -74,6 +74,8 @@ target_sources(${TARGET}
         scheduler_dispatch_priv.hpp
         scheduler_repository_priv.cpp
         scheduler_repository_priv.hpp
+        secret_provider_priv.cpp
+        secret_provider_priv.hpp
         secret_repository_priv.cpp
         secret_repository_priv.hpp
         secret_service.cpp
@@ -101,6 +103,7 @@ target_sources(${TARGET}
         run.hpp
         scheduler.hpp
         secret.hpp
+        secret_provider.hpp
         secret_service.hpp
         system_info.hpp
         system_info_rpc.hpp

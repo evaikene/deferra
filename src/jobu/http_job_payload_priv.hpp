@@ -55,6 +55,10 @@ struct HttpJobPayload {
 [[nodiscard]] auto decode_http_job_payload(jb::core::JsonValue const& payload)
     -> jb::core::Result<HttpJobPayload, JobPayloadIssue>;
 
+/// Runs concrete decoding checks, distinguishing expanded header-size failure from invalid header bytes.
+/// Existing concrete decoder error identities remain unchanged for its callers.
+[[nodiscard]] auto prepared_http_payload_issue(jb::core::JsonValue const& payload) -> JobPayloadIssue;
+
 /// Shares literal and structural checks with concrete decoding, without resolving secret values.
 [[nodiscard]] auto validate_http_payload_template(jb::core::JsonValue const& payload,
                                                   PayloadTemplateReferences& references) -> JobPayloadIssue;

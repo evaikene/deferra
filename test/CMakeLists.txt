@@ -176,6 +176,10 @@ target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # Shared durable template grammar and concrete-decoder boundary.
+add_executable(payload-preparation-test payload-preparation-test.cpp)
+target_link_libraries(payload-preparation-test PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME payload-preparation-test COMMAND $<TARGET_FILE:payload-preparation-test>)
+
 add_executable(payload-template-test payload-template-test.cpp)
 target_link_libraries(payload-template-test PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME payload-template-test COMMAND $<TARGET_FILE:payload-template-test>)
@@ -536,6 +540,7 @@ foreach(JOBU_DOMAIN_HEADER IN ITEMS
         scheduler
         secret
         secret-service
+        secret-provider
         system-info-rpc
         utc-timestamp
 )

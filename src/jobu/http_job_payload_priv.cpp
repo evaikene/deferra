@@ -356,8 +356,9 @@ auto HttpStatusSet::contains(std::uint16_t status) const noexcept -> bool
 
 namespace {
 
-auto parse_http_payload(jb::core::JsonValue const& payload, PayloadTemplateReferences* references)
-    -> DecodeResult<ParsedHttpPayload>
+auto parse_http_payload(jb::core::JsonValue const& payload,
+                        PayloadTemplateReferences* references,
+                        bool                       distinguish_size_failure = false) -> DecodeResult<ParsedHttpPayload>
 {
     if (!payload.is_object()) {
         return DecodeResult<ParsedHttpPayload>::failure(JobPayloadIssue::NotObject);
@@ -419,6 +420,10 @@ auto parse_http_payload(jb::core::JsonValue const& payload, PayloadTemplateRefer
                                                       fields,
                                                       request.body.has_value() || request.body_is_reference);
     if (!validation) {
+        // Preparation distinguishes expansion limits without changing existing decoder error identities.
+        if (distinguish_size_failure && validation.error().detail == "headers.too_large") {
+            return DecodeResult<ParsedHttpPayload>::failure(JobPayloadIssue::PreparedRequestTooLarge);
+        }
         return DecodeResult<ParsedHttpPayload>::failure(generic_request_issue(validation.error()));
     }
     request.expected_statuses = std::move(statuses).value();
@@ -426,6 +431,12 @@ auto parse_http_payload(jb::core::JsonValue const& payload, PayloadTemplateRefer
 }
 
 } // namespace
+
+auto prepared_http_payload_issue(jb::core::JsonValue const& payload) -> JobPayloadIssue
+{
+    auto parsed = parse_http_payload(payload, nullptr, true);
+    return parsed ? JobPayloadIssue::None : parsed.error();
+}
 
 auto decode_http_job_payload(jb::core::JsonValue const& payload) -> DecodeResult<HttpJobPayload>
 {
