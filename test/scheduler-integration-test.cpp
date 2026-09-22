@@ -158,11 +158,11 @@ struct SchedulerFixture {
         return std::move(created).value();
     }
 
-    auto create_job(Queue const& queue,
-                    JobSchedule  schedule,
-                    std::string  command,
-                    std::int32_t priority   = 0,
-                    AttributeSet attributes = {}) -> CreatedJob
+    auto create_job(Queue const&        queue,
+                    JobCreationSchedule schedule,
+                    std::string         command,
+                    std::int32_t        priority   = 0,
+                    AttributeSet        attributes = {}) -> CreatedJob
     {
         auto definition = management->create_job({
             .queue      = queue.id,
@@ -373,4 +373,59 @@ TEST_CASE("Scheduler integrates deterministic Phase 4 behavior", "[jobu][schedul
     CHECK(fixture.scheduler->state() == SchedulerState::Running);
     CHECK_FALSE(fixture.scheduler->failure());
     fixture.scheduler->stop();
+}
+
+TEST_CASE("Immediate creation respects suspension capacity and retry scheduling", "[jobu][scheduler][immediate]")
+{
+    SchedulerFixture fixture{
+        {.cli_concurrency = 1, .http_concurrency = 1}
+    };
+    fixture.executor.set_available(JobType::Cli, true);
+    auto queue = fixture.create_queue("immediate", 1, 1);
+    REQUIRE(fixture.management->suspend_queue(queue.id));
+    auto retry_attributes = AttributeSet{
+        {"retry.initial_delay", {.data = Duration{5s}}   },
+        {"retry.max_attempts",  {.data = std::int64_t{2}}},
+    };
+    auto first  = fixture.create_job(queue, ImmediateSchedule{}, "first", 1, std::move(retry_attributes));
+    auto second = fixture.create_job(queue, ImmediateSchedule{}, "second");
+    CHECK(first.run.planned_at == at_seconds(100));
+    REQUIRE(fixture.scheduler->start());
+    CHECK(fixture.executor.pending_keys().empty());
+
+    // Queue suspension holds due-now work. Once resumed, only one run can own the available slot.
+    REQUIRE(fixture.management->resume_queue(queue.id));
+    fixture.scheduler->request_rescan();
+    fixture.process_timers();
+    REQUIRE(fixture.executor.pending_keys().size() == 1);
+    auto key = fixture.executor.pending_keys().front();
+    CHECK(key.run_id == first.run.id);
+    CHECK(fixture.find_run(second.run.id).state == RunState::Scheduled);
+    REQUIRE(fixture.executor.complete(key, retryable_failure(key)));
+    fixture.process_timers();
+    CHECK(fixture.find_run(first.run.id).state == RunState::RetryWait);
+    CHECK(fixture.find_run(first.run.id).runnable_at == at_seconds(105));
+
+    // Suspension also holds a due retry; it does not turn creation into a manual bypass.
+    REQUIRE(fixture.management->suspend_job(first.definition.id));
+    fixture.time.set_utc(at_seconds(105));
+    REQUIRE(fixture.executor.pending_keys().size() == 1);
+    auto other = fixture.executor.pending_keys().front();
+    CHECK(other.run_id == second.run.id);
+    REQUIRE(fixture.executor.complete(other, succeeded(other)));
+    fixture.scheduler->request_rescan();
+    fixture.process_timers();
+    CHECK(fixture.find_run(first.run.id).state == RunState::RetryWait);
+    CHECK(fixture.executor.pending_keys().empty());
+
+    REQUIRE(fixture.management->resume_job(first.definition.id));
+    fixture.scheduler->request_rescan();
+    fixture.process_timers();
+    REQUIRE(fixture.executor.pending_keys().size() == 1);
+    key = fixture.executor.pending_keys().front();
+    CHECK(key.run_id == first.run.id);
+    CHECK(key.attempt_number == 2);
+    REQUIRE(fixture.executor.complete(key, succeeded(key)));
+    fixture.process_timers();
+    CHECK(fixture.find_run(first.run.id).state == RunState::Succeeded);
 }

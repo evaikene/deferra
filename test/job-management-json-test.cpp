@@ -851,3 +851,50 @@ TEST_CASE("Move and delete job parameters share revision and selector rules",
     object(unknown_delete).emplace("future", make_json(true));
     check_invalid_request(delete_job_request_from_json(unknown_delete));
 }
+
+TEST_CASE("Immediate schedules are symbolic creation input only", "[jobu][management][json][immediate]")
+{
+    StandardAttributeRegistry registry;
+    auto                      request =
+        CreateJobRequest{.queue = std::string{"default"}, .schedule = ImmediateSchedule{}, .payload = cli_payload()};
+    auto encoded = create_job_request_to_json(request, registry);
+    REQUIRE(encoded);
+    auto const symbolic = encoded->as_object().at("schedule");
+    REQUIRE(symbolic.as_object().size() == 2);
+    CHECK(symbolic.as_object().at("kind").as_string() == "once");
+    CHECK(symbolic.as_object().at("at").as_string() == "now");
+    auto decoded = create_job_request_from_json(*encoded, registry);
+    REQUIRE(decoded);
+    CHECK(std::holds_alternative<ImmediateSchedule>(decoded->schedule));
+
+    SECTION("strict creation shape")
+    {
+        for (auto const& invalid_at : {make_json(std::string{"NOW"}),
+                                       make_json(std::string{" now"}),
+                                       make_json(JsonNull{}),
+                                       make_json(std::int64_t{0})}) {
+            auto invalid                                    = *encoded;
+            object(object(invalid).at("schedule")).at("at") = invalid_at;
+            check_invalid_request(create_job_request_from_json(invalid, registry));
+        }
+        auto extra = *encoded;
+        object(object(extra).at("schedule")).emplace("timezone", make_json(std::string{"UTC"}));
+        check_invalid_request(create_job_request_from_json(extra, registry));
+        auto wrong_kind                                      = *encoded;
+        object(object(wrong_kind).at("schedule")).at("kind") = make_json(std::string{"cron"});
+        check_invalid_request(create_job_request_from_json(wrong_kind, registry));
+    }
+    SECTION("updates and responses require concrete times")
+    {
+        auto update = update_job_request_to_json({.job_id            = sample_job(registry).id,
+                                                  .expected_revision = 1,
+                                                  .schedule          = OnceSchedule{.planned_at = UtcTimePoint{1s}}},
+                                                 registry);
+        REQUIRE(update);
+        object(*update).at("schedule") = symbolic;
+        check_invalid_request(update_job_request_from_json(*update, registry));
+        auto response                   = valid_job_json(registry);
+        object(response).at("schedule") = symbolic;
+        check_invalid_response(job_from_json(response, registry));
+    }
+}

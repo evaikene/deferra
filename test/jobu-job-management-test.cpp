@@ -5,8 +5,11 @@
 #include "attribute_registry.hpp"
 #include "database.hpp"
 #include "domain_storage_priv.hpp"
+#include "idempotency_repository_priv.hpp"
 #include "query.hpp"
+#include "recovery.hpp"
 #include "run_repository_priv.hpp"
+#include "secret_service.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "support/fake_cron_engine.hpp"
@@ -228,7 +231,7 @@ auto updated_queue_defaults() -> AttributeSet
     };
 }
 
-auto once_at(UtcTimePoint time) -> JobSchedule
+auto once_at(UtcTimePoint time) -> OnceSchedule
 {
     return OnceSchedule{.planned_at = time};
 }
@@ -1687,4 +1690,176 @@ TEST_CASE("Job templates survive definition updates snapshots and idempotency re
     auto error = require_error(rejected, ErrorCategory::InvalidArgument, "jobu.job.invalid_payload");
     CHECK(error.detail == "reason=invalid_secret_name");
     CHECK(error.message.find("private marker") == std::string::npos);
+}
+
+TEST_CASE("Immediate creation persists the sampled UTC instant as ordinary scheduled work", "[jobu][job][immediate]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              queue = service.create_queue({.name = "immediate"});
+    REQUIRE(queue);
+    REQUIRE(service.suspend_queue(queue->id));
+    fixture.time.set_utc(UtcTimePoint{123456789012ns});
+
+    auto created =
+        service.create_job({.queue = queue->id, .schedule = ImmediateSchedule{}, .payload = cli_payload("/bin/tool")});
+    REQUIRE(created);
+    CHECK(std::get<OnceSchedule>(created->schedule).planned_at == UtcTimePoint{123456789us});
+    CHECK(created->created_at == fixture.time.utc_now());
+    detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                  run = runs.find_schedule_owned(created->id);
+    REQUIRE(run);
+    REQUIRE(*run);
+    CHECK((**run).origin == RunOrigin::Scheduled);
+    CHECK((**run).state == RunState::Scheduled);
+    CHECK((**run).schedule_owned);
+    CHECK((**run).planned_at == std::get<OnceSchedule>(created->schedule).planned_at);
+    CHECK((**run).runnable_at == (**run).planned_at);
+    CHECK(count_rows(fixture.database, "jobu_idempotency") == 0);
+}
+
+TEST_CASE("Immediate create replay survives clock changes recovery and secret deletion",
+          "[jobu][job][immediate][idempotency]")
+{
+    // Exactly enough identities for the first create; replay cannot allocate another job or run.
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    SecretService     secrets{fixture.database, fixture.time};
+    auto              queue = service.create_queue({.name = "immediate"});
+    REQUIRE(queue);
+    REQUIRE(secrets.set({.name = "service.token", .value = {}}));
+    auto payload = parse_json(R"({"command":"/bin/tool","arguments":[{"secret":"service.token"}]})");
+    REQUIRE(payload);
+    auto request = CreateJobRequest{.queue           = queue->id,
+                                    .schedule        = ImmediateSchedule{},
+                                    .payload         = *payload,
+                                    .idempotency_key = "now-key"};
+    fixture.time.set_utc(UtcTimePoint{123456789012ns});
+    auto created = service.create_job(request);
+    REQUIRE(created);
+    auto const original_time = UtcTimePoint{123456789us};
+    CHECK(std::get<OnceSchedule>(created->schedule).planned_at == original_time);
+
+    // Check the durable asymmetry explicitly: the request stays symbolic and the result is concrete.
+    detail::IdempotencyRepository records{fixture.database};
+    auto                          record = records.find("job.create", queue->id, "now-key");
+    REQUIRE(record);
+    REQUIRE(*record);
+    auto canonical = parse_json((**record).request_json);
+    auto result    = parse_json((**record).result_json);
+    REQUIRE(canonical);
+    REQUIRE(result);
+    CHECK(canonical->as_object().at("schedule").as_object().at("at").as_string() == "now");
+    CHECK(result->as_object().at("schedule").as_object().at("at").as_string() != "now");
+    CHECK(canonical->as_object().at("payload") == *payload);
+    CHECK(result->as_object().at("payload") == *payload);
+
+    fixture.time.set_utc(UtcTimePoint{500s});
+    REQUIRE(secrets.set({.name = "service.token", .value = {std::byte{1}}}));
+    // A replay with live reference rows must not rewrite their ownership.
+    execute(fixture.database,
+            "CREATE TRIGGER forbid_replay_refs_insert BEFORE INSERT ON jobu_secret_refs "
+            "BEGIN SELECT RAISE(ABORT, 'unexpected reference insert'); END");
+    execute(fixture.database,
+            "CREATE TRIGGER forbid_replay_refs_delete BEFORE DELETE ON jobu_secret_refs "
+            "BEGIN SELECT RAISE(ABORT, 'unexpected reference delete'); END");
+    auto replay = service.create_job(request);
+    REQUIRE(replay);
+    CHECK(replay->id == created->id);
+    CHECK(std::get<OnceSchedule>(replay->schedule).planned_at == original_time);
+    CHECK(replay->payload == *payload);
+
+    execute(fixture.database, "DROP TRIGGER forbid_replay_refs_insert");
+    execute(fixture.database, "DROP TRIGGER forbid_replay_refs_delete");
+
+    // A later definition and pending snapshot release the reference; replay must retain the original result.
+    REQUIRE(
+        service.update_job({.job_id = created->id, .expected_revision = 1, .payload = cli_payload("/replacement")}));
+    REQUIRE(secrets.erase("service.token"));
+    REQUIRE(fixture.database.close());
+    REQUIRE(fixture.database.open());
+    REQUIRE(recover_startup(fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time));
+
+    replay = service.create_job(request);
+    REQUIRE(replay);
+    CHECK(replay->id == created->id);
+    CHECK(replay->revision == 1);
+    CHECK(replay->created_at == original_time);
+    CHECK(std::get<OnceSchedule>(replay->schedule).planned_at == original_time);
+    CHECK(replay->payload == *payload);
+    detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                  run = runs.find_schedule_owned(created->id);
+    REQUIRE(run);
+    REQUIRE(*run);
+    CHECK((**run).id == sequence_id(3));
+    CHECK((**run).planned_at == original_time);
+    CHECK(count_rows(fixture.database, "jobu_jobs") == 1);
+    CHECK(count_rows(fixture.database, "jobu_runs") == 1);
+    CHECK(count_rows(fixture.database, "jobu_secret_refs") == 0);
+    CHECK(count_rows(fixture.database, "jobu_idempotency") == 1);
+
+    auto different     = request;
+    different.schedule = OnceSchedule{.planned_at = original_time};
+    require_error(service.create_job(different), ErrorCategory::Conflict, "jobu.idempotency.conflict");
+    different          = request;
+    different.priority = 1;
+    require_error(service.create_job(different), ErrorCategory::Conflict, "jobu.idempotency.conflict");
+    auto unchanged = records.find("job.create", queue->id, "now-key");
+    REQUIRE(unchanged);
+    REQUIRE(*unchanged);
+    CHECK((**unchanged).request_json == (**record).request_json);
+    CHECK((**unchanged).result_json == (**record).result_json);
+}
+
+TEST_CASE("Immediate replay rejects malformed request records and symbolic results",
+          "[jobu][job][immediate][idempotency]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              queue = service.create_queue({.name = "immediate"});
+    REQUIRE(queue);
+    auto request = CreateJobRequest{.queue           = queue->id,
+                                    .schedule        = ImmediateSchedule{},
+                                    .payload         = cli_payload("/bin/tool"),
+                                    .idempotency_key = "now-key"};
+    REQUIRE(service.create_job(request));
+    detail::IdempotencyRepository records{fixture.database};
+    auto                          record = records.find("job.create", queue->id, "now-key");
+    REQUIRE(record);
+    REQUIRE(*record);
+    auto column   = std::string{"request_json"};
+    auto document = parse_json((**record).request_json);
+    REQUIRE(document);
+
+    SECTION("noncanonical spelling")
+    {
+        object(object(*document).at("schedule")).at("at") = json_string("NOW");
+    }
+    SECTION("unknown schedule field")
+    {
+        object(object(*document).at("schedule")).emplace("extra", json_bool(true));
+    }
+    SECTION("symbolic recorded result")
+    {
+        column   = "result_json";
+        document = parse_json((**record).result_json);
+        REQUIRE(document);
+        object(object(*document).at("schedule")).at("at") = json_string("now");
+    }
+    auto serialized = serialize_json(*document);
+    REQUIRE(serialized);
+    {
+        Query query{fixture.database};
+        REQUIRE(query.prepare("UPDATE jobu_idempotency SET " + column + " = :document WHERE method = 'job.create'"));
+        REQUIRE(query.bind_value(":document", *serialized));
+        REQUIRE(query.exec());
+    }
+    require_error(service.create_job(request), ErrorCategory::Internal, "jobu.idempotency.invalid_record");
+    require_error(service.create_job(request), ErrorCategory::Unavailable, "jobu.service.stopping");
 }

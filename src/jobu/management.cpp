@@ -1260,8 +1260,15 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
     // the initial run owns an immutable snapshot of revision one.
     auto const now        = data->time_source.utc_now();
     auto       planned_at = jb::core::UtcTimePoint{};
-    if (auto const* once = std::get_if<OnceSchedule>(&request.schedule)) {
+    auto       schedule   = JobSchedule{};
+    if (std::holds_alternative<ImmediateSchedule>(request.schedule)) {
+        // Keep the canonical request symbolic. Match durable precision so the first C++ result and replay agree.
+        planned_at = std::chrono::floor<std::chrono::microseconds>(now);
+        schedule   = OnceSchedule{.planned_at = planned_at};
+    }
+    else if (auto const* once = std::get_if<OnceSchedule>(&request.schedule)) {
         planned_at = once->planned_at;
+        schedule   = *once;
     }
     else {
         auto const& cron_schedule = std::get<CronSchedule>(request.schedule);
@@ -1274,6 +1281,7 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
             return ServiceResult<JobDefinition>::failure(std::move(next).error());
         }
         planned_at = *next;
+        schedule   = cron_schedule;
     }
 
     auto materialized =
@@ -1296,7 +1304,7 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
         .name       = std::move(request.name),
         .state      = JobState::Active,
         .type       = request.type,
-        .schedule   = std::move(request.schedule),
+        .schedule   = std::move(schedule),
         .priority   = request.priority,
         .attributes = std::move(materialized).value(),
         .payload    = std::move(request.payload),

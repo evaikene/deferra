@@ -225,6 +225,13 @@ public:
         return take_response(*_device);
     }
 
+    void call_losing_response(std::string_view method, JsonValue const& params)
+    {
+        // Process a real framed request, then drop the response bytes before the caller can observe them.
+        _device->inject_input(request_frame(_next_id++, method, params));
+        REQUIRE_FALSE(_device->take_written_data().empty());
+    }
+
     [[nodiscard]] auto call_buffered(std::string_view method, JsonValue const& first, JsonValue const& second)
         -> std::vector<ResponseEnvelope>
     {
@@ -264,7 +271,7 @@ auto max_attempts(std::int64_t value) -> AttributeSet
     };
 }
 
-auto once_at(UtcTimePoint planned_at) -> JobSchedule
+auto once_at(UtcTimePoint planned_at) -> OnceSchedule
 {
     return OnceSchedule{.planned_at = planned_at};
 }
@@ -887,4 +894,49 @@ TEST_CASE("Buffered management RPC conflicts do not close mutation admission", "
     CHECK(require_result(responses[1]).is_object());
     CHECK(failures.empty());
     CHECK(committed == 1);
+}
+
+TEST_CASE("Immediate create RPC replays a lost response on a new connection", "[jobu][management-rpc][immediate]")
+{
+    Application    app{0, nullptr};
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    auto const original_time = fixture.time.utc_now();
+    auto       params        = encode_create(CreateJobRequest{.queue           = std::string{"immediate"},
+                                                              .schedule        = ImmediateSchedule{},
+                                                              .payload         = cli_payload("/bin/tool"),
+                                                              .idempotency_key = "lost-response"},
+                                             fixture.registry);
+    {
+        RpcEndpoint endpoint{fixture};
+        (void)decode_queue(
+            endpoint.call("queue.create", encode_create(CreateQueueRequest{.name = "immediate"}, fixture.registry)),
+            fixture.registry);
+        endpoint.call_losing_response("job.create", params);
+    }
+
+    // A new connection uses the same params after the service clock has advanced.
+    fixture.time.set_utc(UtcTimePoint{500s});
+    RpcEndpoint endpoint{fixture};
+    auto        replay = decode_job(endpoint.call("job.create", params), fixture.registry);
+    CHECK(replay.id == sequence_id(2));
+    CHECK(replay.created_at == original_time);
+    CHECK(std::get<OnceSchedule>(replay.schedule).planned_at == original_time);
+    jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                            run = runs.find_schedule_owned(replay.id);
+    REQUIRE(run);
+    REQUIRE(*run);
+    CHECK((**run).id == sequence_id(3));
+    CHECK((**run).planned_at == original_time);
+
+    auto update = make_json(JsonValue::Object{
+        {"job_id",   make_json(replay.id.to_string()) },
+        {"revision", make_json(std::uint64_t{1})      },
+        {"schedule", params.as_object().at("schedule")},
+    });
+    require_standard_error(endpoint.call("job.update", update), ErrorCode::InvalidParams);
+    auto changed = params;
+    std::get<JsonValue::Object>(changed.data).insert_or_assign("priority", make_json(std::int64_t{1}));
+    require_application_error(endpoint.call("job.create", changed), "conflict", "jobu.idempotency.conflict");
 }

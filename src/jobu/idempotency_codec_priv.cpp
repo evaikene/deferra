@@ -324,6 +324,42 @@ auto decode_schedule(jb::core::JsonValue const& value) -> CodecResult<JobSchedul
     return CodecResult<JobSchedule>::failure(invalid_record("invalid_schedule_kind"));
 }
 
+// Only canonical creation requests may retain "now". Stored results use the concrete codec above.
+auto encode_creation_schedule(JobCreationSchedule const& schedule) -> CodecResult<jb::core::JsonValue>
+{
+    if (std::holds_alternative<ImmediateSchedule>(schedule)) {
+        return CodecResult<jb::core::JsonValue>::success(json_object({
+            {"at",   json_string("now") },
+            {"kind", json_string("once")},
+        }));
+    }
+    if (auto const* once = std::get_if<OnceSchedule>(&schedule)) {
+        return encode_schedule(*once);
+    }
+    return encode_schedule(std::get<CronSchedule>(schedule));
+}
+
+auto validate_creation_schedule(jb::core::JsonValue const& value) -> CodecResult<void>
+{
+    if (value.is_object()) {
+        auto kind = text_member(value.as_object(), "kind");
+        auto at   = text_member(value.as_object(), "at");
+        if (kind && *kind == "once" && at && *at == "now") {
+            auto object = object_with_members(value, {"at", "kind"});
+            if (!object) {
+                return CodecResult<void>::failure(std::move(object).error());
+            }
+            return CodecResult<void>::success();
+        }
+    }
+
+    auto concrete = decode_schedule(value);
+    if (!concrete) {
+        return CodecResult<void>::failure(std::move(concrete).error());
+    }
+    return CodecResult<void>::success();
+}
+
 auto encode_attributes(AttributeSet const& values, AttributeRegistry const& attributes, AttributeScope scope)
     -> CodecResult<jb::core::JsonValue>
 {
@@ -602,7 +638,7 @@ auto encode_job_create_idempotency_request(CreateJobRequest const&  request,
                                            AttributeRegistry const& attributes)
     -> jb::core::Result<std::string, jb::core::Error>
 {
-    auto schedule           = encode_schedule(request.schedule);
+    auto schedule           = encode_creation_schedule(request.schedule);
     auto encoded_attributes = encode_attributes(request.attributes, attributes, AttributeScope::Job);
     if (!schedule || !encoded_attributes || job_type_text(request.type).empty()) {
         return CodecResult<std::string>::failure(invalid_record("invalid_job_request"));
@@ -635,7 +671,7 @@ auto validate_job_create_idempotency_request(std::string_view request_json, Attr
     auto type_text = text_member(**object, "type");
     auto type =
         type_text ? decode_job_type(*type_text) : CodecResult<JobType>::failure(invalid_record("invalid_job_type"));
-    auto schedule         = decode_schedule((**object).at("schedule"));
+    auto schedule         = validate_creation_schedule((**object).at("schedule"));
     auto priority         = signed_member(**object, "priority");
     auto attributes_value = decode_attributes((**object).at("attributes"), attributes, AttributeScope::Job);
     if (!queue_id || !name || !type || !schedule || !priority || *priority < std::numeric_limits<std::int32_t>::min() ||

@@ -235,7 +235,8 @@ namespace jb::jobu {
 /// Encodes job.create parameters.
 ///
 /// Job attributes are encoded through @p registry at AttributeScope::Job. Both one-time and cron schedules are
-/// representable. The optional name and idempotency key are omitted when absent. ManagementService remains responsible
+/// representable; ImmediateSchedule encodes as {"kind":"once","at":"now"} without reading a clock.
+/// The optional name and idempotency key are omitted when absent. ManagementService remains responsible
 /// for name, cron validation and occurrence calculation, payload-semantic, size, and idempotency policy.
 ///
 /// @param request Typed create request to encode without retaining it.
@@ -250,6 +251,7 @@ namespace jb::jobu {
 /// Exactly one queue selector, `schedule`, and object-valued `payload` are required. Omitted `type`, `priority`, and
 /// `attributes` members use their typed request defaults. Unknown request and nested schedule members are rejected.
 /// Cron schedules are structurally accepted for service-level validation and occurrence calculation.
+/// A once schedule with at:"now" is creation-only; update requests and job responses require concrete timestamps.
 ///
 /// @param value JSON request object to decode without retaining references to it.
 /// @param registry Attribute registry borrowed while decoding partial Job-scope attributes.
