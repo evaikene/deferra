@@ -20,6 +20,12 @@ namespace jb::jobu::detail {
 
 inline constexpr std::size_t kMaximumSecretValueBytes = std::size_t{64} * 1024U;
 
+/// One immutable run's recognized references. No payload, result, output or secret bytes are retained.
+struct RunSecretReferences {
+    jb::core::Uuid               run_id;
+    std::vector<SecretReference> references;
+};
+
 class SecretRepository final {
 public:
     explicit SecretRepository(jb::db::Database& database) noexcept;
@@ -32,6 +38,15 @@ public:
     [[nodiscard]] auto find_value(std::string_view name) -> jb::core::Result<jb::core::ByteBuffer, jb::core::Error>;
     [[nodiscard]] auto list_metadata(std::size_t limit, std::optional<std::string_view> after_name = std::nullopt)
         -> jb::core::Result<std::vector<SecretMetadata>, jb::core::Error>;
+    /// Checks distinct names using metadata only; missing names return jobu.secret.not_found.
+    /// The caller holds the same transaction through definition/reference writes. Never starts a transaction.
+    [[nodiscard]] auto require_existing_references(std::span<SecretReference const> references)
+        -> jb::core::Result<void, jb::core::Error>;
+    /// Scans all nonterminal snapshots regardless of owner state or run origin, in stored UUID order.
+    /// Pages own their references and retain no query; limit is 1..200 and after_id is exclusive.
+    /// Malformed durable templates fail the whole page. Hold one transaction across all pages and deletion.
+    [[nodiscard]] auto list_nonterminal_references(std::size_t limit, std::optional<jb::core::Uuid> after_id = {})
+        -> jb::core::Result<std::vector<RunSecretReferences>, jb::core::Error>;
     [[nodiscard]] auto erase(std::string_view name) -> jb::core::Result<void, jb::core::Error>;
     [[nodiscard]] auto replace_references_for_job(jb::core::Uuid const&            job_id,
                                                   std::span<SecretReference const> references)

@@ -10,6 +10,7 @@
 #include "job_validation_priv.hpp"
 #include "json.hpp"
 #include "object_priv.hpp"
+#include "payload_template_priv.hpp"
 #include "queue_repository_priv.hpp"
 #include "queue_validation_priv.hpp"
 #include "run_repository_priv.hpp"
@@ -1244,6 +1245,17 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
         }
     }
 
+    // Replay returns above without checking today's secret state or recreating reference ownership.
+    // First-time creation protects every referenced name through the same transaction as the definition.
+    auto references = detail::validate_payload_template(request.type, request.payload);
+    if (!references) {
+        return ServiceResult<JobDefinition>::failure(invalid_job_payload(references.error()));
+    }
+    auto existing = data->secrets.require_existing_references(*references);
+    if (!existing) {
+        return ServiceResult<JobDefinition>::failure(std::move(existing).error());
+    }
+
     // Resolve one planned instant and materialize the effective attributes so
     // the initial run owns an immutable snapshot of revision one.
     auto const now        = data->time_source.utc_now();
@@ -1305,11 +1317,15 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
         .payload_json    = payload->serialized(),
     };
 
-    // Commit the definition, first schedule-owned run, and optional replay
+    // Commit the definition, its secret references, first schedule-owned run, and optional replay
     // result atomically so none can exist without the others.
     auto inserted_job = data->jobs.insert(job, *serialized_attributes, *payload);
     if (!inserted_job) {
         return ServiceResult<JobDefinition>::failure(std::move(inserted_job).error());
+    }
+    auto referenced = data->secrets.replace_references_for_job(job.id, *references);
+    if (!referenced) {
+        return ServiceResult<JobDefinition>::failure(std::move(referenced).error());
     }
     auto inserted_run = data->runs.insert_schedule_owned(run);
     if (!inserted_run) {
@@ -1630,6 +1646,16 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
     if (!payload) {
         return ServiceResult<JobDefinition>::failure(std::move(payload).error());
     }
+
+    // Validate the complete replacement, including a retained payload when only its type or other fields change.
+    auto references = detail::validate_payload_template(replacement.type, replacement.payload);
+    if (!references) {
+        return ServiceResult<JobDefinition>::failure(invalid_job_payload(references.error()));
+    }
+    auto existing = data->secrets.require_existing_references(*references);
+    if (!existing) {
+        return ServiceResult<JobDefinition>::failure(std::move(existing).error());
+    }
     auto serialized_attributes = serialize_attributes(data->attributes,
                                                       replacement.attributes,
                                                       AttributeScope::Job,
@@ -1665,6 +1691,13 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
             return ServiceResult<JobDefinition>::failure(job_revision_conflict());
         }
         return ServiceResult<JobDefinition>::failure(data->persisted_error(job_state_conflict()));
+    }
+
+    // Replacing the index before successor refresh is safe only within this transaction: every later failure
+    // restores the previous references together with the definition revision and snapshot.
+    auto referenced = data->secrets.replace_references_for_job(replacement.id, *references);
+    if (!referenced) {
+        return ServiceResult<JobDefinition>::failure(std::move(referenced).error());
     }
 
     if (refresh_snapshot) {

@@ -129,6 +129,12 @@ struct RuntimeFixture {
             if (sql.starts_with("INSERT INTO jobu_attempt_output")) {
                 return "recovery.output";
             }
+            if (sql.starts_with("SELECT id AS run_id, type AS run_type, payload_json AS run_payload_json")) {
+                return "secrets.snapshots";
+            }
+            if (sql.starts_with("INSERT INTO jobu_secret_refs")) {
+                return "management.references";
+            }
             if (sql.starts_with("INSERT INTO jobu_secrets")) {
                 return "secrets.insert";
             }
@@ -727,7 +733,7 @@ TEST_CASE("Daemon schema rollback poisoning prevents recovery and serving")
 
 TEST_CASE("Daemon secret failures gate management and retained completion persistence before failure returns")
 {
-    for (auto const* scenario : {"write", "acknowledgement", "missing_rollback"}) {
+    for (auto const* scenario : {"write", "acknowledgement", "missing_rollback", "snapshot_read", "reference_write"}) {
         DYNAMIC_SECTION(scenario)
         {
             RuntimeFixture fixture;
@@ -741,8 +747,13 @@ TEST_CASE("Daemon secret failures gate management and retained completion persis
                 auto* peer       = device.get();
                 device->open();
                 REQUIRE(server->add_connection(std::move(device)));
+                bool const references = std::string_view{scenario} == "reference_write";
+                if (references) {
+                    REQUIRE(secrets->set({.name = "token"}));
+                }
                 bool       observed        = false;
-                auto       connection      = secrets->failed.connect(secrets, [&](Error const& error) {
+                auto&      failure_signal  = references ? management->failed : secrets->failed;
+                auto       connection      = failure_signal.connect(secrets, [&](Error const& error) {
                     // The runtime's earlier receiver must close every gate without destroying the active service.
                     observed = true;
                     check_safe_error(error, "db.io");
@@ -761,8 +772,25 @@ TEST_CASE("Daemon secret failures gate management and retained completion persis
                              .operation = missing ? DatabaseOperation::Rollback : DatabaseOperation::Commit,
                              .phase = acknowledgement ? DatabaseFaultPhase::AfterSuccess : DatabaseFaultPhase::Before};
                 }
+                bool const snapshot = std::string_view{scenario} == "snapshot_read";
+                if (snapshot) {
+                    fault = {.boundary = "secrets.snapshots", .operation = DatabaseOperation::Fetch};
+                }
+                if (references) {
+                    fault = {.boundary  = "management.references",
+                             .operation = DatabaseOperation::Execute,
+                             .phase     = DatabaseFaultPhase::AfterSuccess};
+                }
                 fixture.faults->faults.push_back({.at = fault, .error = fault_error()});
-                if (missing) {
+                if (references) {
+                    auto payload = parse_json(R"({"command":"/bin/tool","arguments":[{"secret":"token"}]})");
+                    REQUIRE(payload);
+                    auto created = management->create_job(
+                        {.queue = recovery_id(1), .schedule = OnceSchedule{UtcTimePoint{180s}}, .payload = *payload});
+                    REQUIRE_FALSE(created);
+                    check_safe_error(created.error(), "db.io");
+                }
+                else if (missing || snapshot) {
                     auto erased = secrets->erase("missing");
                     REQUIRE_FALSE(erased);
                     check_safe_error(erased.error(), "db.io");

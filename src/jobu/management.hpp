@@ -328,6 +328,9 @@ public:
     /// key consumed after validation. A matching key in the resolved queue scope replays the original successful
     /// result and its unchanged first occurrence. A fresh cron request is validated and evaluated strictly after the
     /// transaction's sampled current time.
+    /// Recognized payload references require existing secret names, checked without reading values. Reference rows
+    /// commit with the definition; missing names return jobu.secret.not_found. Replay neither checks current secret
+    /// existence nor recreates reference rows, so later secret rotation or deletion does not alter its result.
     /// @return Committed or replayed revision-1 definition, or a queue, schedule, validation, idempotency, generator,
     /// attribute, run, or database Error. No attempt is created and no runner execution starts.
     ///
@@ -337,6 +340,9 @@ public:
     /// @param request Non-empty patch consumed after validation. expected_revision must match the durable positive
     /// revision. Updates preserve stored attributes not named in attribute_changes and never reapply defaults. A
     /// replacement cron schedule is validated synchronously without retaining its strings.
+    /// The complete replacement payload/type must reference existing secret names (jobu.secret.not_found otherwise).
+    /// Current-definition references are replaced atomically; older nonterminal snapshots still protect their own
+    /// references from secret deletion. No secret values are read or substituted into the definition or snapshot.
     /// @return Committed definition with its revision incremented once, or a validation, not-found, deleted, revision,
     /// state, immutable, schedule-snapshot, cron, attribute, payload, or database Error. An unstarted occurrence keeps
     /// its run identity and receives the new revision, snapshot, and schedule time atomically. A running or
