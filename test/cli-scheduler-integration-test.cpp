@@ -19,6 +19,7 @@
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/http_test_server.hpp"
+#include "support/rejecting_secret_provider.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
 
@@ -470,7 +471,7 @@ struct MixedSchedulerFixture {
             JobType::Http,
             std::make_unique<ObservedExecutor>(std::make_unique<HttpAttemptExecutor>(*client, time), probe)));
         management = std::make_unique<ManagementService>(database, registry, cron, generator, time);
-        scheduler  = std::make_unique<Scheduler>(database, registry, cron, generator, time, *group, options);
+        scheduler  = std::make_unique<Scheduler>(database, registry, cron, generator, time, *group, secrets, options);
     }
 
     ~MixedSchedulerFixture()
@@ -616,6 +617,7 @@ struct MixedSchedulerFixture {
     std::filesystem::path                       database_file;
     Database                                    database;
     DurableReader                               observer;
+    RejectingSecretProvider                     secrets;
     StandardAttributeRegistry                   registry;
     FakeCronEngine                              cron;
     SequenceUuidGenerator                       generator;

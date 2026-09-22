@@ -6,6 +6,7 @@
 #include "support/fake_event_loop_backend.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/recovery_fixture.hpp"
+#include "support/rejecting_secret_provider.hpp"
 #include "support/sequence_uuid_generator.hpp"
 
 #include "attempt_repository_priv.hpp"
@@ -17,6 +18,7 @@
 #include "run_repository_priv.hpp"
 #include "scheduler.hpp"
 #include "scheduler_repository_priv.hpp"
+#include "secret_provider_priv.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -489,13 +491,15 @@ TEST_CASE("Successful recovery satisfies scheduler startup and recovered retry d
     fixture.storage.insert_job(job);
     auto original = fixture.storage.make_run(recovery_id(3), job, RunState::Running);
     fixture.storage.insert_run(original);
-    Scheduler scheduler{fixture.storage.database,
-                        fixture.storage.registry,
-                        fixture.cron,
-                        fixture.generator,
-                        fixture.time,
-                        executor};
-    auto      before = scheduler.start();
+    RejectingSecretProvider secrets;
+    Scheduler               scheduler{fixture.storage.database,
+                                      fixture.storage.registry,
+                                      fixture.cron,
+                                      fixture.generator,
+                                      fixture.time,
+                                      executor,
+                                      secrets};
+    auto                    before = scheduler.start();
     REQUIRE_FALSE(before);
     CHECK(executor.start_requests().empty());
     auto recovered = fixture.recover();
@@ -619,6 +623,28 @@ TEST_CASE("Recovery retains templates across reopen without secret lookup", "[jo
     CHECK(fixture.job(job.id).payload == *payload);
     fixture.storage.require_run(run);
     REQUIRE(fixture.recover());
+
+    // Resolution belongs to the first dispatch after recovery, not to the recovery scan. The still-missing name
+    // becomes a durable terminal attempt without an external launch.
+    auto                                   loop = jb::core::priv::make_fake_event_loop();
+    jb::core::priv::ScopedCurrentEventLoop current{loop.loop.get()};
+    DatabaseSecretProvider                 provider{fixture.storage.database};
+    FakeAttemptExecutor                    executor;
+    executor.set_available(type, true);
+    Scheduler scheduler{fixture.storage.database,
+                        fixture.storage.registry,
+                        fixture.cron,
+                        fixture.generator,
+                        fixture.time,
+                        executor,
+                        provider};
+    REQUIRE(scheduler.start());
+    CHECK(executor.start_requests().empty());
+    auto failed = fixture.run(run.run.id);
+    CHECK(failed.state == RunState::Failed);
+    CHECK(failed.payload == *payload);
+    REQUIRE(failed.result);
+    CHECK(failed.result->as_object().at("error_code").as_string() == "jobu.secret.not_found");
 }
 
 TEST_CASE("Recovery fails closed on malformed job or immutable run templates", "[jobu][recovery][template]")

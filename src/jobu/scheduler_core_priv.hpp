@@ -22,6 +22,7 @@ namespace jb::jobu {
 
 class AttemptExecutor;
 class AttributeRegistry;
+class SecretProvider;
 class CronEngine;
 
 namespace detail {
@@ -50,6 +51,7 @@ public:
                   jb::core::UuidGenerator& uuid_generator,
                   jb::core::TimeSource&    time_source,
                   AttemptExecutor&         executor,
+                  SecretProvider&          secrets,
                   SchedulerCoreOptions     options   = {},
                   SchedulerCoreCallbacks   callbacks = {});
     ~SchedulerCore();
@@ -82,6 +84,7 @@ private:
     jb::core::UuidGenerator&                _uuid_generator;
     jb::core::TimeSource&                   _time_source;
     AttemptExecutor&                        _executor;
+    SecretProvider&                         _secrets;
     SchedulerCoreOptions                    _options;
     SchedulerCoreCallbacks                  _callbacks;
     std::shared_ptr<CompletionToken>        _completion_token;

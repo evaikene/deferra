@@ -8,11 +8,14 @@
 #include "management.hpp"
 #include "query.hpp"
 #include "run_repository_priv.hpp"
+#include "secret_provider_priv.hpp"
+#include "secret_repository_priv.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "support/fake_attempt_executor.hpp"
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
+#include "support/rejecting_secret_provider.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
 #include "transaction.hpp"
@@ -81,13 +84,14 @@ struct CoreFixture {
 
     [[nodiscard]] auto process(SchedulerCoreOptions options) -> Result<SchedulerCycleResult, Error>
     {
-        SchedulerCore core{database, registry, cron, generator, time, executor, options};
+        SchedulerCore core{database, registry, cron, generator, time, executor, secrets, options};
         return core.process_cycle();
     }
 
     TemporaryDirectory        directory;
     std::filesystem::path     database_file{directory.path() / "jobu.sqlite"};
     Database                  database{make_database(database_file)};
+    RejectingSecretProvider   secrets;
     StandardAttributeRegistry registry;
     FakeCronEngine            cron;
     SequenceUuidGenerator     generator;
@@ -95,6 +99,28 @@ struct CoreFixture {
     FakeAttemptExecutor       executor;
     AttemptRepository         attempts;
     RunRepository             runs;
+};
+
+class CountingSecretProvider final : public SecretProvider {
+public:
+    explicit CountingSecretProvider(Database& database)
+        : _provider{database}
+    {}
+
+    std::vector<std::string> names;
+    std::optional<Error>     error;
+
+    auto resolve(std::string_view name) -> Result<ByteBuffer, Error> override
+    {
+        names.emplace_back(name);
+        if (error) {
+            return Result<ByteBuffer, Error>::failure(*error);
+        }
+        return _provider.resolve(name);
+    }
+
+private:
+    DatabaseSecretProvider _provider;
 };
 
 void insert_queue(Database& database, Uuid const& queue_id, std::uint32_t concurrency_limit, std::uint32_t weight = 1)
@@ -624,6 +650,7 @@ TEST_CASE("Single-queue scheduler core preserves strict order across bounded bat
         fixture.generator,
         time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 10, .http_concurrency = 10, .candidate_batch_size = 2}
     };
     REQUIRE(core.process_cycle());
@@ -685,6 +712,7 @@ TEST_CASE("Scheduler core resets idle credit and applies dynamic weights", "[job
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 7, .http_concurrency = 1, .candidate_batch_size = 3}
     };
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
@@ -745,6 +773,7 @@ TEST_CASE("Scheduler core alternates the first type across mixed-capacity rounds
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 2, .http_concurrency = 2, .candidate_batch_size = 2}
     };
 
@@ -788,6 +817,7 @@ TEST_CASE("Scheduler core reconciles suspension and resume by queue UUID", "[job
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 3, .http_concurrency = 1, .candidate_batch_size = 2}
     };
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
@@ -827,6 +857,7 @@ TEST_CASE("Scheduler core observes dynamic queue concurrency", "[jobu][scheduler
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 4, .http_concurrency = 1, .candidate_batch_size = 2}
     };
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
@@ -870,6 +901,7 @@ TEST_CASE("Scheduler core completes service-requested suspension drains",
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
         ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
@@ -924,6 +956,7 @@ TEST_CASE("Scheduler core completes service-requested suspension drains",
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
         };
         ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
@@ -972,6 +1005,7 @@ TEST_CASE("Scheduler core completes service-requested suspension drains",
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 2, .http_concurrency = 1, .candidate_batch_size = 2}
         };
         ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
@@ -1136,6 +1170,7 @@ TEST_CASE("Single-queue scheduler core treats dispatch revalidation loss as a no
         fixture.generator,
         fixture.time,
         executor,
+        fixture.secrets,
         {.cli_concurrency = 2, .http_concurrency = 2, .candidate_batch_size = 2}
     };
     REQUIRE(core.process_cycle());
@@ -1163,6 +1198,7 @@ TEST_CASE("Scheduler core falls through when the selected queue loses eligibilit
         fixture.generator,
         fixture.time,
         executor,
+        fixture.secrets,
         {.cli_concurrency = 2, .http_concurrency = 2, .candidate_batch_size = 2}
     };
     REQUIRE(core.process_cycle());
@@ -1189,6 +1225,7 @@ TEST_CASE("Scheduler core commits terminal success before releasing capacity",
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
     };
 
@@ -1247,6 +1284,7 @@ TEST_CASE("Scheduler core persists runner output with success retry and terminal
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -1321,6 +1359,7 @@ TEST_CASE("Scheduler core creates one recurring successor from the newest defini
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
     };
 
@@ -1392,6 +1431,7 @@ TEST_CASE("Scheduler core uses the later planned time as the recurring cancellat
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
     };
 
@@ -1433,6 +1473,7 @@ TEST_CASE("Scheduler core omits recurring successors for excluded terminal work"
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -1471,6 +1512,7 @@ TEST_CASE("Scheduler core omits recurring successors for excluded terminal work"
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -1503,6 +1545,7 @@ TEST_CASE("Scheduler core omits recurring successors for excluded terminal work"
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -1572,6 +1615,7 @@ TEST_CASE("Scheduler core rolls recurring successor failures back and fails clos
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
         REQUIRE(core.process_cycle());
@@ -1643,6 +1687,7 @@ TEST_CASE("Scheduler core retries the same run and terminally exhausts its polic
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
     };
 
@@ -1704,6 +1749,7 @@ TEST_CASE("Scheduler core combines policy delays with executor retry deadlines",
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -1738,6 +1784,7 @@ TEST_CASE("Scheduler core accounts for blocking and rescheduled retry waits",
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -1800,6 +1847,7 @@ TEST_CASE("Scheduler core releases and reacquires blocking retry occupancy acros
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
     };
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
@@ -1873,6 +1921,7 @@ TEST_CASE("Scheduler core completes executor start errors through the normal ter
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
     };
 
@@ -1911,6 +1960,7 @@ TEST_CASE("Scheduler core rejects invalid executor completion protocol and fails
             fixture.generator,
             fixture.time,
             executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -1942,6 +1992,7 @@ TEST_CASE("Scheduler core rejects invalid executor completion protocol and fails
             fixture.generator,
             fixture.time,
             executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -1968,6 +2019,7 @@ TEST_CASE("Scheduler core rejects invalid executor completion protocol and fails
             fixture.generator,
             fixture.time,
             executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -1994,6 +2046,7 @@ TEST_CASE("Scheduler core rejects invalid executor completion protocol and fails
             fixture.generator,
             fixture.time,
             executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -2035,6 +2088,7 @@ TEST_CASE("Scheduler core rejects invalid executor completion protocol and fails
             fixture.generator,
             fixture.time,
             executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -2072,6 +2126,7 @@ TEST_CASE("Scheduler core rejects invalid executor completion protocol and fails
             fixture.generator,
             fixture.time,
             executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -2115,6 +2170,7 @@ TEST_CASE("Scheduler core enforces the Phase 6 diagnostic retention ceiling",
             fixture.generator,
             fixture.time,
             executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -2149,6 +2205,7 @@ TEST_CASE("Scheduler core enforces the Phase 6 diagnostic retention ceiling",
             fixture.generator,
             fixture.time,
             executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -2186,6 +2243,7 @@ TEST_CASE("Scheduler core rejects completion invoked synchronously from start",
         fixture.generator,
         fixture.time,
         executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
     };
 
@@ -2213,6 +2271,7 @@ TEST_CASE("Scheduler core rolls completion writes back and stops later dispatch 
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
     };
 
@@ -2258,6 +2317,7 @@ TEST_CASE("Scheduler core rolls output writes back and retains capacity on failu
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2},
         {.failure_reported = [&](Error const& error) { reported.push_back(error); }}
     };
@@ -2323,6 +2383,7 @@ TEST_CASE("Scheduler core rolls suspension-drain failures back and fails closed"
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
         };
         ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
@@ -2422,6 +2483,7 @@ TEST_CASE("Scheduler core runs a service-created manual retry before releasing i
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
     };
     REQUIRE(core.process_cycle());
@@ -2498,6 +2560,7 @@ TEST_CASE("Scheduler core delays a service-created manual run until its queue re
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
     };
     REQUIRE(core.process_cycle());
@@ -2590,6 +2653,7 @@ TEST_CASE("Scheduler core completes pending cancellation atomically",
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
 
@@ -2627,6 +2691,7 @@ TEST_CASE("Scheduler core completes pending cancellation atomically",
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
         };
 
@@ -2660,6 +2725,7 @@ TEST_CASE("Scheduler core retains running cancellation until forced terminal com
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
         };
 
@@ -2737,6 +2803,7 @@ TEST_CASE("Scheduler core handles cancellation errors and invalid run states",
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
         REQUIRE(core.process_cycle());
@@ -2778,6 +2845,7 @@ TEST_CASE("Scheduler core handles cancellation errors and invalid run states",
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
         };
         auto missing = core.cancel_run(id(42));
         REQUIRE_FALSE(missing);
@@ -2799,6 +2867,7 @@ TEST_CASE("Scheduler core handles cancellation errors and invalid run states",
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
         REQUIRE(core.process_cycle());
@@ -2824,6 +2893,7 @@ TEST_CASE("Scheduler core handles cancellation errors and invalid run states",
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
         };
 
         auto recovered = core.cancel_run(id(46));
@@ -2853,6 +2923,7 @@ TEST_CASE("Scheduler core handles cancellation errors and invalid run states",
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
         };
 
         auto invalid = core.cancel_run(id(48));
@@ -2879,6 +2950,7 @@ TEST_CASE("Scheduler core retains cancelled running state when completion persis
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
     };
 
@@ -2922,6 +2994,7 @@ TEST_CASE("Scheduler core still validates executor protocol after accepting canc
         fixture.generator,
         fixture.time,
         executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
     };
 
@@ -2965,6 +3038,7 @@ TEST_CASE("Scheduler core creates recurring successors during immediate cancella
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
     };
 
     fixture.time.set_utc(at(130));
@@ -3043,6 +3117,7 @@ TEST_CASE("Scheduler core rolls immediate recurring cancellation failures back",
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
         };
         auto failed = core.cancel_run(run_id);
         REQUIRE_FALSE(failed);
@@ -3103,6 +3178,7 @@ TEST_CASE("Scheduler cancellation releases manual barriers and completes suspens
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
         };
 
@@ -3132,6 +3208,7 @@ TEST_CASE("Scheduler cancellation releases manual barriers and completes suspens
             fixture.generator,
             fixture.time,
             fixture.executor,
+            fixture.secrets,
             {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
         };
         ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
@@ -3191,6 +3268,7 @@ TEST_CASE("Scheduler core returns the earliest future wake for available executo
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
     };
 
@@ -3224,9 +3302,10 @@ TEST_CASE("Scheduler core notifies its adapter after asynchronous completion",
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1},
         {.rescan_requested = [&rescan_count]() -> void { ++rescan_count; },
-                   .failure_reported = [&failures](Error const& error) -> void { failures.push_back(error); }}
+                  .failure_reported = [&failures](Error const& error) -> void { failures.push_back(error); }}
     };
 
     REQUIRE(core.process_cycle());
@@ -3253,6 +3332,7 @@ TEST_CASE("Scheduler core reports one sticky asynchronous completion failure",
         fixture.generator,
         fixture.time,
         executor,
+        fixture.secrets,
         {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1},
         {.failure_reported = [&reported](Error const& error) -> void { reported.push_back(error); }}
     };
@@ -3289,6 +3369,7 @@ TEST_CASE("Scheduler core shutdown preserves running work and permanently reject
         fixture.generator,
         fixture.time,
         fixture.executor,
+        fixture.secrets,
         {},
         {.rescan_requested = [&]() { ++rescans; }, .failure_reported = [&](Error const&) { ++failures; }}
     };
@@ -3342,9 +3423,10 @@ TEST_CASE("Scheduler core retained completion outlives the core and all its borr
             fixture.generator,
             fixture.time,
             executor,
+            fixture.secrets,
             {},
             {.rescan_requested = [&]() { ++notifications; },
-              .failure_reported = [&](Error const&) { ++notifications; }}
+                      .failure_reported = [&](Error const&) { ++notifications; }}
         };
         REQUIRE(core.process_cycle());
         REQUIRE(executor.requests.size() == 1U);
@@ -3374,9 +3456,10 @@ TEST_CASE("Scheduler core invalidates later completions before reporting the fir
         fixture.generator,
         time,
         fixture.executor,
+        fixture.secrets,
         {},
         {.rescan_requested = [&]() { ++rescans; },
-                   .failure_reported =
+                  .failure_reported =
              [&](Error const& error) {
                  failures.push_back(error);
                  // A fresh transaction proves the failed completion's guard unwound before notification.
@@ -3446,6 +3529,7 @@ TEST_CASE("Scheduler core stops between dispatch opportunities after an immediat
                        fixture.generator,
                        fixture.time,
                        fixture.executor,
+                       fixture.secrets,
                        {},
                        {.rescan_requested = [&]() {
                            ++notifications;
@@ -3465,5 +3549,269 @@ TEST_CASE("Scheduler core stops between dispatch opportunities after an immediat
         REQUIRE(run);
         REQUIRE(run->has_value());
         CHECK(run->value().state == (run_id == id(2) ? RunState::Failed : RunState::Scheduled));
+    }
+}
+
+TEST_CASE("Scheduler resolves immutable templates afresh for each retry", "[jobu][scheduler][secret][sqlite]")
+{
+    for (auto const* mode : {"blocking", "reschedule"}) {
+        DYNAMIC_SECTION(mode)
+        {
+            CoreFixture            fixture;
+            CountingSecretProvider provider{fixture.database};
+            SecretRepository       secrets{fixture.database};
+            auto const             queue_id = id(1);
+            auto const             job_id   = id(2);
+            auto const             run_id   = id(3);
+            auto const* const      payload =
+                R"({"command":"/test","arguments":[{"secret":"token"},{"secret":"token"}],"environment":{"TOKEN":{"secret":"token"}}})";
+            insert_queue(fixture.database, queue_id, 1);
+            insert_job(fixture.database,
+                       job_id,
+                       queue_id,
+                       JobType::Cli,
+                       JobState::Active,
+                       {},
+                       1,
+                       0,
+                       attribute_document(fixture.registry, mode),
+                       payload);
+            auto run            = default_run(fixture, run_id, job_id, queue_id, JobType::Cli);
+            run.attributes_json = attribute_document(fixture.registry, mode);
+            run.payload_json    = payload;
+            insert_run(fixture.database, run);
+            REQUIRE(secrets.set("token", as_bytes("first-secret-sentinel"), at(100)));
+            fixture.executor.set_available(JobType::Cli, true);
+            SchedulerCore core{fixture.database,
+                               fixture.registry,
+                               fixture.cron,
+                               fixture.generator,
+                               fixture.time,
+                               fixture.executor,
+                               provider};
+
+            REQUIRE(core.process_cycle());
+            REQUIRE(fixture.executor.start_requests().size() == 1);
+            CHECK(provider.names == std::vector<std::string>{"token"});
+            auto const  first    = fixture.executor.pending_keys().front();
+            auto const& concrete = fixture.executor.start_requests().front().payload.as_object();
+            CHECK(concrete.at("arguments").as_array()[0].as_string() == "first-secret-sentinel");
+            CHECK(concrete.at("arguments").as_array()[1].as_string() == "first-secret-sentinel");
+            CHECK(concrete.at("environment").as_object().at("TOKEN").as_string() == "first-secret-sentinel");
+            REQUIRE(fixture.executor.complete(first, failure(first, FailureDisposition::Retryable)));
+
+            REQUIRE(secrets.set("token", as_bytes("rotated-secret-sentinel"), at(120)));
+            REQUIRE(core.process_cycle());
+            REQUIRE(fixture.executor.start_requests().size() == 2);
+            CHECK(provider.names == std::vector<std::string>{"token", "token"});
+            auto const second = fixture.executor.pending_keys().front();
+            CHECK(second == AttemptKey{.run_id = run_id, .attempt_number = 2});
+            CHECK(fixture.executor.start_requests()
+                      .back()
+                      .payload.as_object()
+                      .at("arguments")
+                      .as_array()[0]
+                      .as_string() == "rotated-secret-sentinel");
+            REQUIRE(fixture.executor.complete(second, success(second)));
+
+            // Only executor requests carry resolved data. Durable definitions, snapshots and generated results
+            // retain references or safe outcome metadata after both attempts have completed.
+            Query query{fixture.database};
+            REQUIRE(query.exec("SELECT payload_json AS document FROM jobu_jobs UNION ALL "
+                               "SELECT payload_json FROM jobu_runs UNION ALL "
+                               "SELECT result_json FROM jobu_runs UNION ALL SELECT result_json FROM jobu_attempts"));
+            while (true) {
+                auto next = query.next();
+                REQUIRE(next);
+                if (!*next) {
+                    break;
+                }
+                auto const& document = std::get<std::string>(query.value(0));
+                CHECK(document.find("secret-sentinel") == std::string::npos);
+            }
+            REQUIRE(query.finish());
+            auto stored = fixture.runs.find_by_id(run_id);
+            REQUIRE(stored);
+            REQUIRE(stored->has_value());
+            CHECK(stored->value()
+                      .payload.as_object()
+                      .at("arguments")
+                      .as_array()[0]
+                      .as_object()
+                      .at("secret")
+                      .as_string() == "token");
+        }
+    }
+}
+
+TEST_CASE("Scheduler preparation failures complete once and preserve recurrence and capacity",
+          "[jobu][scheduler][secret][sqlite]")
+{
+    for (auto const* scenario : {"missing", "invalid", "expanded"}) {
+        DYNAMIC_SECTION(scenario)
+        {
+            CoreFixture            fixture{{id(20)}};
+            DatabaseSecretProvider provider{fixture.database};
+            SecretRepository       secrets{fixture.database};
+            auto const             queue_id = id(1);
+            auto const             job_id   = id(2);
+            auto const             run_id   = id(3);
+            auto const             schedule = CronSchedule{.expression = "* * * * *", .timezone = "UTC"};
+            fixture.cron.set_occurrences(schedule, {at(500)});
+            auto payload       = std::string{R"({"command":"/test","arguments":[{"secret":"token"}]})"};
+            auto expected_code = std::string{"jobu.secret.not_found"};
+            if (std::string_view{scenario} == "invalid") {
+                REQUIRE(secrets.set("token", ByteBuffer{std::byte{0}}, at(100)));
+                expected_code = "jobu.secret.invalid_value";
+            }
+            if (std::string_view{scenario} == "expanded") {
+                REQUIRE(secrets.set("token", ByteBuffer(65536, std::byte{'x'}), at(100)));
+                payload =
+                    R"({"command":"/test","arguments":[{"secret":"token"},{"secret":"token"},{"secret":"token"},{"secret":"token"},{"secret":"token"}]})";
+                expected_code = "jobu.secret.resolved_payload_too_large";
+            }
+            insert_queue(fixture.database, queue_id, 1);
+            insert_job(fixture.database,
+                       job_id,
+                       queue_id,
+                       JobType::Cli,
+                       JobState::Active,
+                       schedule,
+                       1,
+                       0,
+                       attribute_document(fixture.registry),
+                       payload);
+            auto run         = default_run(fixture, run_id, job_id, queue_id, JobType::Cli);
+            run.payload_json = payload;
+            insert_run(fixture.database, run);
+            insert_scheduled(fixture, queue_id, 4, JobType::Cli, -1);
+            fixture.executor.set_available(JobType::Cli, true);
+            SchedulerCore core{fixture.database,
+                               fixture.registry,
+                               fixture.cron,
+                               fixture.generator,
+                               fixture.time,
+                               fixture.executor,
+                               provider};
+
+            REQUIRE(core.process_cycle());
+            REQUIRE(fixture.executor.start_requests().size() == 1);
+            CHECK(fixture.executor.start_requests().front().key.run_id == id(4));
+            auto attempts = fixture.attempts.list_for_run(run_id, 10);
+            REQUIRE(attempts);
+            REQUIRE(attempts->size() == 1);
+            CHECK(attempts->front().state == AttemptState::Completed);
+            CHECK(attempts->front().outcome == AttemptOutcome::Failed);
+            REQUIRE(attempts->front().result);
+            CHECK(attempts->front().result->as_object().at("error_code").as_string() == expected_code);
+            auto stored = fixture.runs.find_by_id(run_id);
+            REQUIRE(stored);
+            REQUIRE(stored->has_value());
+            CHECK(stored->value().state == RunState::Failed);
+            auto successor = fixture.runs.find_by_id(id(20));
+            REQUIRE(successor);
+            REQUIRE(successor->has_value());
+            CHECK(successor->value().planned_at == at(500));
+            REQUIRE(core.process_cycle());
+            attempts = fixture.attempts.list_for_run(run_id, 10);
+            REQUIRE(attempts);
+            CHECK(attempts->size() == 1);
+        }
+    }
+}
+
+TEST_CASE("Scheduler fails closed for storage persisted-data and unexpected provider failures",
+          "[jobu][scheduler][secret][sqlite]")
+{
+    for (auto const* code : {"db.io", "jobu.storage.invalid_json", "test.provider.unexpected"}) {
+        DYNAMIC_SECTION(code)
+        {
+            CoreFixture            fixture;
+            CountingSecretProvider provider{fixture.database};
+            provider.error = Error{.category = ErrorCategory::Internal,
+                                   .code     = code,
+                                   .message  = "private-secret-sentinel",
+                                   .detail   = "private-secret-sentinel"};
+            insert_queue(fixture.database, id(1), 1);
+            insert_job(fixture.database, id(2), id(1), JobType::Cli);
+            auto run         = default_run(fixture, id(3), id(2), id(1), JobType::Cli);
+            run.payload_json = R"({"command":"/test","arguments":[{"secret":"token"}]})";
+            insert_run(fixture.database, run);
+            fixture.executor.set_available(JobType::Cli, true);
+            SchedulerCore core{fixture.database,
+                               fixture.registry,
+                               fixture.cron,
+                               fixture.generator,
+                               fixture.time,
+                               fixture.executor,
+                               provider};
+            auto          result = core.process_cycle();
+            REQUIRE_FALSE(result);
+            CHECK(result.error().code ==
+                  (std::string_view{code} == "test.provider.unexpected" ? "jobu.secret.provider_failed" : code));
+            CHECK(result.error().message.find("private-secret-sentinel") == std::string::npos);
+            CHECK(result.error().detail.find("private-secret-sentinel") == std::string::npos);
+            CHECK(fixture.executor.start_requests().empty());
+            auto attempts = fixture.attempts.list_for_run(id(3), 10);
+            REQUIRE(attempts);
+            CHECK(attempts->empty());
+            auto repeated = core.process_cycle();
+            REQUIRE_FALSE(repeated);
+            CHECK(repeated.error() == result.error());
+            CHECK(provider.names.size() == 1);
+        }
+    }
+}
+
+TEST_CASE("Invalid rotated secrets terminate retries and release blocking or rescheduled capacity",
+          "[jobu][scheduler][secret][retry][sqlite]")
+{
+    for (auto const* mode : {"blocking", "reschedule"}) {
+        DYNAMIC_SECTION(mode)
+        {
+            CoreFixture            fixture;
+            DatabaseSecretProvider provider{fixture.database};
+            SecretRepository       secrets{fixture.database};
+            insert_queue(fixture.database, id(1), 1);
+            insert_job(fixture.database, id(2), id(1), JobType::Cli);
+            auto run            = default_run(fixture, id(3), id(2), id(1), JobType::Cli);
+            run.payload_json    = R"({"command":"/test","arguments":[{"secret":"token"}]})";
+            run.attributes_json = attribute_document(fixture.registry, mode);
+            insert_run(fixture.database, run);
+            insert_scheduled(fixture, id(1), 4, JobType::Cli, -1);
+            REQUIRE(secrets.set("token", as_bytes("first-value"), at(100)));
+            fixture.executor.set_available(JobType::Cli, true);
+            SchedulerCore core{fixture.database,
+                               fixture.registry,
+                               fixture.cron,
+                               fixture.generator,
+                               fixture.time,
+                               fixture.executor,
+                               provider};
+            REQUIRE(core.process_cycle());
+            auto const first = fixture.executor.pending_keys().front();
+            REQUIRE(fixture.executor.complete(first, failure(first, FailureDisposition::Retryable)));
+
+            // The retry retains its original reference, but the current value is no longer valid for a CLI argument.
+            REQUIRE(secrets.set("token", ByteBuffer{std::byte{0}}, at(120)));
+            REQUIRE(core.process_cycle());
+            REQUIRE(fixture.executor.start_requests().size() == 2);
+            CHECK(fixture.executor.start_requests().back().key.run_id == id(4));
+            auto attempts = fixture.attempts.list_for_run(id(3), 10);
+            REQUIRE(attempts);
+            REQUIRE(attempts->size() == 2);
+            for (auto const& attempt : *attempts) {
+                CHECK(attempt.state == AttemptState::Completed);
+                CHECK(attempt.outcome == AttemptOutcome::Failed);
+                if (attempt.attempt_number == 2) {
+                    REQUIRE(attempt.result);
+                    CHECK(attempt.result->as_object().at("error_code").as_string() == "jobu.secret.invalid_value");
+                }
+            }
+            auto stored = fixture.runs.find_by_id(id(3));
+            REQUIRE(stored);
+            REQUIRE(stored->has_value());
+            CHECK(stored->value().state == RunState::Failed);
+        }
     }
 }

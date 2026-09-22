@@ -25,6 +25,7 @@ class Database;
 namespace jb::jobu {
 
 class AttributeRegistry;
+class SecretProvider;
 
 /// Controls scheduler capacity, candidate paging, and wall-clock reevaluation.
 ///
@@ -77,10 +78,16 @@ struct CancelRunResult {
 
 /// Centralizes durable JobU dispatch on one owner-thread event loop.
 ///
-/// Scheduler borrows its database, attribute registry, cron engine, UUID generator, time source, and attempt executor;
-/// every dependency must outlive it. The database must already be open and idle. Construct and use the scheduler on the
-/// database and executor owner thread after that thread's EventLoop has been installed. Passing @p parent transfers
-/// normal `jb::core::Object` lifetime ownership but does not transfer ownership of any scheduler dependency.
+/// Scheduler borrows its database, attribute registry, cron engine, UUID generator, time source, attempt executor, and
+/// secret provider; every dependency must outlive it. The database must already be open and idle. Construct and use the
+/// scheduler on the database and executor owner thread after that thread's EventLoop has been installed. Passing @p
+/// parent transfers normal `jb::core::Object` lifetime ownership but does not transfer ownership of any scheduler
+/// dependency.
+///
+/// Each attempt resolves its immutable payload template inside the durable-start transaction. Resolved values are
+/// transient executor input; retries resolve again and literal payloads perform no lookups. Missing names, invalid
+/// destination bytes, and expanded limits produce a committed terminal Failed attempt without starting the executor.
+/// Storage, persisted-data, and unexpected provider failures instead fail the scheduler before external execution.
 ///
 /// Scheduling is event-driven and uses one non-repeating timer. Executor completion handlers remain valid after stop()
 /// so their durable outcomes can commit, but they do not restart dispatch while stopped. Shutdown, fatal failure, and
@@ -96,6 +103,7 @@ public:
     /// @param uuid_generator UUID source borrowed for recurring successors.
     /// @param time_source Wall-clock source borrowed for durable scheduler timestamps and wake calculations.
     /// @param executor Attempt executor borrowed for availability, start, and cancellation operations.
+    /// @param secrets Synchronous provider borrowed for fresh per-attempt resolution; must not invoke callbacks.
     /// @param options Copied scheduler limits and wake policy. Invalid values are retained for start() to report.
     /// @param parent Optional Object that owns this scheduler and supplies its event-loop affinity.
     /// @warning Every argument and the constructor call itself belong to the same owner thread.
@@ -106,6 +114,7 @@ public:
               jb::core::UuidGenerator& uuid_generator,
               jb::core::TimeSource&    time_source,
               AttemptExecutor&         executor,
+              SecretProvider&          secrets,
               SchedulerOptions         options = {},
               jb::core::Object*        parent  = nullptr);
 

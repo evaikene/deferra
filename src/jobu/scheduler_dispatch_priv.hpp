@@ -12,6 +12,7 @@ class Database;
 namespace jb::jobu {
 
 class AttributeRegistry;
+class SecretProvider;
 
 namespace detail {
 
@@ -23,6 +24,7 @@ struct DispatchStart {
 [[nodiscard]] auto dispatch_selected(jb::db::Database&        database,
                                      AttributeRegistry const& attributes,
                                      AttemptExecutor&         executor,
+                                     SecretProvider&          secrets,
                                      jb::core::Uuid const&    run_id,
                                      jb::core::UtcTimePoint   started_at,
                                      AttemptCompletionHandler completion)

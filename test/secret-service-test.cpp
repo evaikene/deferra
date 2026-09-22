@@ -497,7 +497,8 @@ TEST_CASE("Private secret lookup obeys caller transaction and propagates represe
         // Lookup must not commit the caller's uncommitted secret on return.
     }
     check_error(fixture.repository.find_value("token"), ErrorCategory::NotFound, "jobu.secret.not_found");
-    for (auto operation : {Operation::Prepare, Operation::Bind, Operation::Execute, Operation::Fetch}) {
+    for (auto operation :
+         {Operation::Prepare, Operation::Bind, Operation::Execute, Operation::Fetch, Operation::Finish}) {
         fixture.arm({.boundary = "read", .operation = operation});
         auto value = fixture.repository.find_value("token");
         REQUIRE_FALSE(value);
@@ -915,7 +916,8 @@ TEST_CASE("Database preparation preserves durable data and propagates lookup fai
     REQUIRE(prepare_payload_template(JobType::Http, original, provider));
     CHECK(storage_snapshot(fixture.storage.database) == before);
 
-    for (auto operation : {Operation::Prepare, Operation::Bind, Operation::Execute, Operation::Fetch}) {
+    for (auto operation :
+         {Operation::Prepare, Operation::Bind, Operation::Execute, Operation::Fetch, Operation::Finish}) {
         fixture.arm({.boundary = "read", .operation = operation});
         auto prepared = prepare_payload_template(JobType::Http, original, provider);
         REQUIRE_FALSE(prepared);

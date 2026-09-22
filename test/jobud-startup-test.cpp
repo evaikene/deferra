@@ -16,6 +16,7 @@
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "support/fake_http_client.hpp"
+#include "support/rejecting_secret_provider.hpp"
 #include "support/temporary_directory.hpp"
 #include "time_source.hpp"
 #include "uuid.hpp"
@@ -296,7 +297,8 @@ TEST_CASE("root daemon composition leaves CLI pending while HTTP and management 
     REQUIRE(register_attempt_executors(group, client, time, false, std::make_unique<ObservedIdentity>(identity)));
     auto startup = parse({"--http-concurrency", "1"});
     REQUIRE(startup);
-    Scheduler         scheduler{database, registry, cron, generator, time, group, scheduler_options(*startup)};
+    jb::test::RejectingSecretProvider secrets;
+    Scheduler         scheduler{database, registry, cron, generator, time, group, secrets, scheduler_options(*startup)};
     ManagementService management{database, registry, cron, generator, time};
     jb::jobu::detail::RunRepository runs{database, registry};
 

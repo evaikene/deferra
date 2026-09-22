@@ -11,6 +11,7 @@
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "support/fake_attempt_executor.hpp"
+#include "support/rejecting_secret_provider.hpp"
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -71,6 +72,7 @@ struct RepositoryFixture {
     TemporaryDirectory        directory;
     std::filesystem::path     database_file{directory.path() / "jobu.sqlite"};
     Database                  database{make_database(database_file)};
+    RejectingSecretProvider   secrets;
     StandardAttributeRegistry registry;
     SchedulerRepository       repository;
     AttemptRepository         attempts;
@@ -679,6 +681,7 @@ TEST_CASE("Atomic scheduler dispatch persists the running attempt before executo
         auto dispatched      = dispatch_selected(fixture.database,
                                                  fixture.registry,
                                                  executor,
+                                                 fixture.secrets,
                                                  run_id,
                                                  at(120),
                                                  [&](AttemptCompletion const&) { callback_called = true; });
@@ -702,6 +705,7 @@ TEST_CASE("Atomic scheduler dispatch persists the running attempt before executo
         auto dispatched = dispatch_selected(fixture.database,
                                             fixture.registry,
                                             executor,
+                                            fixture.secrets,
                                             run_id,
                                             at(120),
                                             [](AttemptCompletion const&) {});
@@ -747,9 +751,13 @@ TEST_CASE("Retry dispatch preserves first start and allocates the next attempt m
 
     FakeAttemptExecutor executor;
     executor.set_available(JobType::Cli, true);
-    auto dispatched =
-        dispatch_selected(fixture.database, fixture.registry, executor, run_id, at(120), [](AttemptCompletion const&) {
-        });
+    auto dispatched = dispatch_selected(fixture.database,
+                                        fixture.registry,
+                                        executor,
+                                        fixture.secrets,
+                                        run_id,
+                                        at(120),
+                                        [](AttemptCompletion const&) {});
     REQUIRE(dispatched);
     REQUIRE(dispatched->has_value());
     CHECK(dispatched->value().key == AttemptKey{.run_id = run_id, .attempt_number = 2});
@@ -795,6 +803,7 @@ TEST_CASE("Dispatch revalidation enforces queue capacity and checked attempt exh
         auto dispatched = dispatch_selected(fixture.database,
                                             fixture.registry,
                                             executor,
+                                            fixture.secrets,
                                             candidate_run,
                                             at(120),
                                             [](AttemptCompletion const&) {});
@@ -821,6 +830,7 @@ TEST_CASE("Dispatch revalidation enforces queue capacity and checked attempt exh
         auto dispatched = dispatch_selected(fixture.database,
                                             fixture.registry,
                                             executor,
+                                            fixture.secrets,
                                             run_id,
                                             at(120),
                                             [](AttemptCompletion const&) {});
@@ -849,6 +859,7 @@ TEST_CASE("Dispatch revalidation enforces queue capacity and checked attempt exh
         auto dispatched = dispatch_selected(fixture.database,
                                             fixture.registry,
                                             executor,
+                                            fixture.secrets,
                                             run_id,
                                             at(120),
                                             [](AttemptCompletion const&) {});

@@ -6,6 +6,7 @@
 #include "domain_storage_priv.hpp"
 #include "support/fake_attempt_executor.hpp"
 #include "support/fake_database_driver.hpp"
+#include "support/rejecting_secret_provider.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -16,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -53,7 +55,8 @@ auto materialized_attributes(StandardAttributeRegistry const& registry) -> std::
     return std::string{document->serialized()};
 }
 
-auto dispatch_record(StandardAttributeRegistry const& registry) -> Record
+auto dispatch_record(StandardAttributeRegistry const& registry, std::string_view payload = R"({"command":"/test"})")
+    -> Record
 {
     return Record{
         {
@@ -70,7 +73,7 @@ auto dispatch_record(StandardAttributeRegistry const& registry) -> Record
          Field{"run_type", make_text("cli")},
          Field{"run_priority", std::int64_t{7}},
          Field{"run_attributes_json", make_text(materialized_attributes(registry))},
-         Field{"run_payload_json", make_text(R"({"command":"/test"})")},
+         Field{"run_payload_json", make_text(payload)},
          Field{"run_state", make_text("scheduled")},
          Field{"run_result_json", Null{}},
          Field{"job_queue_id", uuid_to_storage(id(3))},
@@ -187,6 +190,7 @@ struct DispatchFixture {
     std::shared_ptr<FakeDatabaseDriverState> state{std::make_shared<FakeDatabaseDriverState>()};
     Database                                 database{std::make_unique<FakeDatabaseDriver>(state)};
     StandardAttributeRegistry                registry;
+    RejectingSecretProvider                  secrets;
     TracingExecutor                          executor{state};
 
     DispatchFixture()
@@ -197,9 +201,49 @@ struct DispatchFixture {
     }
 };
 
-auto dispatch(DispatchFixture& fixture) -> Result<std::optional<DispatchStart>, Error>
+auto dispatch(DispatchFixture& fixture, SecretProvider* provider = nullptr)
+    -> Result<std::optional<DispatchStart>, Error>
 {
-    return dispatch_selected(fixture.database, fixture.registry, fixture.executor, id(1), at(120), [](auto const&) {});
+    return dispatch_selected(fixture.database,
+                             fixture.registry,
+                             fixture.executor,
+                             provider ? *provider : fixture.secrets,
+                             id(1),
+                             at(120),
+                             [](auto const&) { FAIL("Dispatch must return immediate completion to the core"); });
+}
+
+class PreparingProvider final : public SecretProvider {
+public:
+    explicit PreparingProvider(FakeDatabaseDriverState& state)
+        : _state{state}
+    {}
+
+    ByteBuffer           value{std::byte{'x'}};
+    std::optional<Error> error;
+
+    auto resolve(std::string_view name) -> Result<ByteBuffer, Error> override
+    {
+        CHECK(name == "token");
+        // The four eligibility reads have finished; no attempt/run start write has been created yet.
+        CHECK(_state.next_query_plan_index == 4);
+        CHECK(std::ranges::find(_state.calls, "driver.commit") == _state.calls.end());
+        _state.calls.emplace_back("provider.resolve");
+        if (error) {
+            return Result<ByteBuffer, Error>::failure(*error);
+        }
+        return Result<ByteBuffer, Error>::success(value);
+    }
+
+private:
+    FakeDatabaseDriverState& _state;
+};
+
+void use_template(
+    DispatchFixture& fixture,
+    std::string_view payload = R"({"command":"/test","arguments":[{"secret":"token"},{"secret":"token"}]})")
+{
+    fixture.state->query_plans.front().records = {dispatch_record(fixture.registry, payload)};
 }
 
 void require_no_start(DispatchFixture& fixture)
@@ -362,4 +406,156 @@ TEST_CASE("Atomic dispatch never starts after transaction or storage failure", "
         require_no_start(fixture);
         CHECK(call_position(*fixture.state, "driver.rollback") > call_position(*fixture.state, "driver.commit"));
     }
+}
+
+TEST_CASE("Atomic dispatch prepares once after eligibility and launches concrete data only after commit",
+          "[jobu][scheduler][dispatch][secret]")
+{
+    DispatchFixture   fixture;
+    PreparingProvider provider{*fixture.state};
+    use_template(fixture);
+    auto result = dispatch(fixture, &provider);
+    REQUIRE(result);
+    REQUIRE(result->has_value());
+    CHECK(std::ranges::count(fixture.state->calls, "provider.resolve") == 1);
+    CHECK(call_position(*fixture.state, "driver.begin") < call_position(*fixture.state, "provider.resolve"));
+    CHECK(call_position(*fixture.state, "provider.resolve") < call_position(*fixture.state, "driver.commit"));
+    CHECK(call_position(*fixture.state, "driver.commit") < call_position(*fixture.state, "executor.start"));
+    REQUIRE(fixture.executor.fake.start_requests().size() == 1);
+    auto const& arguments =
+        fixture.executor.fake.start_requests().front().payload.as_object().at("arguments").as_array();
+    CHECK(arguments[0].as_string() == "x");
+    CHECK(arguments[1].as_string() == "x");
+}
+
+TEST_CASE("Atomic dispatch commits ordinary preparation failures without starting or calling completion",
+          "[jobu][scheduler][dispatch][secret]")
+{
+    for (auto const* scenario : {"missing", "invalid", "expanded"}) {
+        DYNAMIC_SECTION(scenario)
+        {
+            DispatchFixture   fixture;
+            PreparingProvider provider{*fixture.state};
+            use_template(fixture);
+            auto expected = std::string{"jobu.secret.not_found"};
+            if (std::string_view{scenario} == "missing") {
+                provider.error = test_error(expected);
+            }
+            else if (std::string_view{scenario} == "invalid") {
+                provider.value = {std::byte{0}};
+                expected       = "jobu.secret.invalid_value";
+            }
+            else {
+                provider.value.assign(65536, std::byte{'x'});
+                use_template(
+                    fixture,
+                    R"({"command":"/test","arguments":[{"secret":"token"},{"secret":"token"},{"secret":"token"},{"secret":"token"},{"secret":"token"}]})");
+                expected = "jobu.secret.resolved_payload_too_large";
+            }
+            auto result = dispatch(fixture, &provider);
+            REQUIRE(result);
+            REQUIRE(result->has_value());
+            REQUIRE(result->value().immediate_completion);
+            auto const& completion = *result->value().immediate_completion;
+            CHECK(completion.outcome == AttemptOutcome::Failed);
+            CHECK(completion.failure_disposition == FailureDisposition::Terminal);
+            CHECK(completion.result.as_object().at("error_code").as_string() == expected);
+            CHECK(completion.result.as_object().at("message").as_string() != "Injected dispatch failure");
+            CHECK(call_position(*fixture.state, "provider.resolve") < call_position(*fixture.state, "driver.commit"));
+            require_no_start(fixture);
+        }
+    }
+}
+
+TEST_CASE("Prepared dispatch never launches or completes after failed durable start",
+          "[jobu][scheduler][dispatch][secret]")
+{
+    for (bool ordinary : {false, true}) {
+        for (auto const* boundary : {"insert", "transition", "commit", "rollback"}) {
+            DYNAMIC_SECTION(ordinary << ' ' << boundary)
+            {
+                DispatchFixture   fixture;
+                PreparingProvider provider{*fixture.state};
+                use_template(fixture);
+                if (ordinary) {
+                    provider.error = test_error("jobu.secret.not_found");
+                }
+                auto expected = std::string{"db.io"};
+                if (std::string_view{boundary} == "insert") {
+                    fixture.state->query_plans[4].exec_error = test_error(expected);
+                }
+                else if (std::string_view{boundary} == "transition") {
+                    fixture.state->query_plans[5].exec_error = test_error(expected);
+                }
+                else if (std::string_view{boundary} == "commit") {
+                    fixture.state->commit_error = test_error(expected);
+                }
+                else {
+                    // Revalidation loss after preparation must still detect failed rollback. A non-storage
+                    // cleanup code witnesses promotion rather than reliance on the normal db.* classifier.
+                    fixture.state->query_plans[5].execution_info.rows_affected = 0;
+                    fixture.state->rollback_error                              = test_error("test.cleanup.failed");
+                    expected                                                   = "db.connection_failed";
+                }
+                auto result = dispatch(fixture, &provider);
+                REQUIRE_FALSE(result);
+                CHECK(result.error().code == expected);
+                require_no_start(fixture);
+                CHECK(std::ranges::count(fixture.state->calls, "provider.resolve") == 1);
+                CHECK(std::ranges::count(fixture.state->calls, "driver.rollback") == 1);
+                if (std::string_view{boundary} == "rollback") {
+                    CHECK(fixture.database.is_poisoned());
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Provider failure provenance survives rollback failure", "[jobu][scheduler][dispatch][secret]")
+{
+    for (auto const* code : {"db.io", "jobu.storage.invalid_json", "test.provider.failed", "oversized"}) {
+        DYNAMIC_SECTION(code)
+        {
+            DispatchFixture   fixture;
+            PreparingProvider provider{*fixture.state};
+            use_template(fixture);
+            if (std::string_view{code} == "oversized") {
+                provider.value.assign(65537, std::byte{'x'});
+            }
+            else {
+                provider.error = test_error(code);
+            }
+            fixture.state->rollback_error = test_error("db.rollback_failed");
+            auto result                   = dispatch(fixture, &provider);
+            REQUIRE_FALSE(result);
+            CHECK(result.error().code ==
+                  (std::string_view{code} == "oversized" || std::string_view{code} == "test.provider.failed"
+                       ? "jobu.secret.provider_failed"
+                       : code));
+            CHECK(result.error().detail.find("private-detail") == std::string::npos);
+            CHECK(fixture.database.is_poisoned());
+            require_no_start(fixture);
+            CHECK(fixture.state->next_query_plan_index == 4);
+        }
+    }
+}
+
+TEST_CASE("Ineligible and malformed templates never reach the provider", "[jobu][scheduler][dispatch][secret]")
+{
+    DispatchFixture fixture;
+    SECTION("ineligible")
+    {
+        fixture.state->query_plans.front().records.clear();
+        auto result = dispatch(fixture);
+        REQUIRE(result);
+        CHECK_FALSE(result->has_value());
+    }
+    SECTION("malformed")
+    {
+        use_template(fixture, R"({"command":"/test","arguments":[{"secret":"bad name"}]})");
+        auto result = dispatch(fixture);
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code.starts_with("jobu.storage."));
+    }
+    require_no_start(fixture);
 }

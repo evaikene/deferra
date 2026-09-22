@@ -118,6 +118,9 @@ struct RuntimeFixture {
                   schema}
     {
         faults->classify = [this](std::string_view sql) -> std::string {
+            if (sql.starts_with("SELECT value_blob FROM jobu_secrets")) {
+                return "dispatch.secret";
+            }
             if (sql.starts_with("SELECT id FROM jobu_runs WHERE 1 = 1") &&
                 sql.find("AND state = :state") == std::string_view::npos) {
                 auto committed = std::ranges::find(faults->calls,
@@ -849,6 +852,105 @@ TEST_CASE("Daemon secret writes request later scheduling without adding secret R
         CHECK(peer->written_data().find("secret.set") == std::string::npos);
         CHECK(peer->written_data().find("secret.list") == std::string::npos);
         CHECK(peer->written_data().find("secret.delete") == std::string::npos);
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == EXIT_SUCCESS);
+}
+
+TEST_CASE("Daemon secret lookup failure closes admission before retained completions can persist")
+{
+    RuntimeFixture fixture;
+    fixture.options.cli_concurrency = 2;
+    auto seeded                     = fixture.seed();
+    fixture.create_runtime();
+    auto result = fixture.run([&] {
+        auto* scheduler  = RuntimeTestAccess::scheduler(*fixture.runtime);
+        auto* secrets    = RuntimeTestAccess::secrets(*fixture.runtime);
+        auto* management = RuntimeTestAccess::management(*fixture.runtime);
+        auto  value      = as_bytes("runtime-secret-sentinel");
+        REQUIRE(secrets->set({
+            .name  = "token",
+            .value = ByteBuffer{value.begin(), value.end()}
+        }));
+        auto payload = parse_json(R"({"command":"/bin/tool","arguments":[{"secret":"token"}]})");
+        REQUIRE(payload);
+        REQUIRE(management->create_job(
+            {.queue = recovery_id(1), .schedule = OnceSchedule{fixture.time.utc_now()}, .payload = *payload}));
+        bool observed   = false;
+        auto connection = scheduler->failed.connect(scheduler, [&](Error const& error) {
+            observed = true;
+            check_safe_error(error, "db.io");
+            CHECK(error.detail == "operation=dispatch reason=state_operation_failed");
+            CHECK(fixture.runtime->state() == RuntimeState::Stopping);
+            CHECK(scheduler->state() == SchedulerState::Failed);
+            CHECK(fixture.record.destruction.empty());
+            auto const calls = fixture.faults->calls.size();
+            fixture.record.completions.front()(success(fixture.record.starts.front().key));
+            auto queue = management->create_queue({.name = "late"});
+            REQUIRE_FALSE(queue);
+            CHECK(queue.error().code == "jobu.service.stopping");
+            auto secret = secrets->set({.name = "late"});
+            REQUIRE_FALSE(secret);
+            CHECK(secret.error().code == "jobu.service.stopping");
+            CHECK(fixture.faults->calls.size() == calls);
+        });
+        fixture.faults->faults.push_back({
+            .at    = {.boundary = "dispatch.secret", .operation = DatabaseOperation::Fetch},
+            .error = fault_error()
+        });
+        static_cast<void>(fixture.loop.loop->process_events(EventFlag::All));
+        REQUIRE(observed);
+        CHECK(fixture.record.starts.size() == 1);
+        connection.disconnect();
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == EXIT_FAILURE);
+    require_consumed_faults(*fixture.faults);
+    fixture.runtime.reset();
+    fixture.storage.reopen();
+    fixture.require_running(seeded);
+}
+
+TEST_CASE("Daemon resolves recovered templates through its database provider")
+{
+    RuntimeFixture fixture;
+    auto           job     = fixture.storage.make_job(recovery_id(11), recovery_id(1));
+    auto           payload = parse_json(R"({"command":"/bin/tool","environment":{"TOKEN":{"secret":"token"}}})");
+    REQUIRE(payload);
+    job.payload = *payload;
+    fixture.storage.insert_job(job);
+    auto run = fixture.storage.make_run(recovery_id(101), job);
+    fixture.storage.insert_run(run);
+    fixture.create_runtime();
+    // Recovery sees the original reference even though the secret is absent. Install its value only once Serving;
+    // the first dispatch must record a safe failure rather than preventing daemon startup.
+    auto result = fixture.run([&] {
+        CHECK(fixture.runtime->state() == RuntimeState::Serving);
+        CHECK(fixture.record.starts.empty());
+        detail::RunRepository runs{fixture.storage.database, fixture.storage.registry};
+        auto                  stored = runs.find_by_id(run.run.id);
+        REQUIRE(stored);
+        REQUIRE(stored->has_value());
+        CHECK(stored->value().state == RunState::Failed);
+        CHECK(stored->value().payload == *payload);
+        REQUIRE(stored->value().result);
+        CHECK(stored->value().result->as_object().at("error_code").as_string() == "jobu.secret.not_found");
+
+        auto bytes = as_bytes("runtime-secret-sentinel");
+        REQUIRE(RuntimeTestAccess::secrets(*fixture.runtime)
+                    ->set({
+                        .name  = "token",
+                        .value = ByteBuffer{bytes.begin(), bytes.end()}
+        }));
+        REQUIRE(
+            RuntimeTestAccess::management(*fixture.runtime)
+                ->create_job(
+                    {.queue = recovery_id(1), .schedule = OnceSchedule{fixture.time.utc_now()}, .payload = *payload}));
+        static_cast<void>(fixture.loop.loop->process_events(EventFlag::All));
+        REQUIRE(fixture.record.starts.size() == 1);
+        CHECK(fixture.record.starts.front().payload.as_object().at("environment").as_object().at("TOKEN").as_string() ==
+              "runtime-secret-sentinel");
         fixture.runtime->request_stop();
         return EXIT_SUCCESS;
     });

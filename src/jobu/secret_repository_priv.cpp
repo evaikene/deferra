@@ -254,6 +254,11 @@ auto SecretRepository::find_value(std::string_view name) -> RepositoryResult<jb:
         return RepositoryResult<jb::core::ByteBuffer>::failure(std::move(next).error());
     }
     if (!*next) {
+        // A missing name is ordinary only after the value query has released its execution state successfully.
+        auto finished = query.finish();
+        if (!finished) {
+            return RepositoryResult<jb::core::ByteBuffer>::failure(std::move(finished).error());
+        }
         return RepositoryResult<jb::core::ByteBuffer>::failure(not_found());
     }
 
@@ -264,6 +269,11 @@ auto SecretRepository::find_value(std::string_view name) -> RepositoryResult<jb:
     }
     if (!value->has_value() || value->value().size() > kMaximumSecretValueBytes) {
         return RepositoryResult<jb::core::ByteBuffer>::failure(invalid_record("invalid_value"));
+    }
+    // Dispatch may write its Running rows next. Do not hide a failed read finish behind successfully decoded bytes.
+    auto finished = query.finish();
+    if (!finished) {
+        return RepositoryResult<jb::core::ByteBuffer>::failure(std::move(finished).error());
     }
     return RepositoryResult<jb::core::ByteBuffer>::success(std::move(**value));
 }

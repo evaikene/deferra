@@ -1,7 +1,10 @@
 #include "scheduler_dispatch_priv.hpp"
 
 #include "attempt_repository_priv.hpp"
+#include "database.hpp"
+#include "payload_template_priv.hpp"
 #include "scheduler_repository_priv.hpp"
+#include "storage_failure_priv.hpp"
 #include "transaction.hpp"
 
 #include <utility>
@@ -22,7 +25,7 @@ auto rollback_ineligible(jb::db::Transaction& transaction) -> DispatchResult<std
     return DispatchResult<std::optional<DispatchStart>>::success(std::nullopt);
 }
 
-auto executor_start_failure(AttemptKey key, jb::core::Error const& error) -> AttemptCompletion
+auto terminal_start_failure(AttemptKey key, jb::core::Error const& error) -> AttemptCompletion
 {
     auto error_code = jb::core::JsonValue{};
     error_code.data = error.code;
@@ -41,14 +44,13 @@ auto executor_start_failure(AttemptKey key, jb::core::Error const& error) -> Att
     };
 }
 
-} // anonymous namespace
-
-auto dispatch_selected(jb::db::Database&        database,
-                       AttributeRegistry const& attributes,
-                       AttemptExecutor&         executor,
-                       jb::core::Uuid const&    run_id,
-                       jb::core::UtcTimePoint   started_at,
-                       AttemptCompletionHandler completion)
+auto dispatch_selected_impl(jb::db::Database&        database,
+                            AttributeRegistry const& attributes,
+                            AttemptExecutor&         executor,
+                            SecretProvider&          secrets,
+                            jb::core::Uuid const&    run_id,
+                            jb::core::UtcTimePoint   started_at,
+                            AttemptCompletionHandler completion)
     -> jb::core::Result<std::optional<DispatchStart>, jb::core::Error>
 {
     // Revalidate the optimistic candidate under an immediate transaction and make the attempt plus run transition one
@@ -68,9 +70,16 @@ auto dispatch_selected(jb::db::Database&        database,
         return rollback_ineligible(guard);
     }
 
-    // Persist the running attempt before transitioning its run so every committed running run has a concrete owner.
     auto& selected = context->value();
-    auto  attempt  = JobAttempt{
+    auto  prepared = prepare_payload_template(selected.run.type, selected.run.payload, secrets);
+    if (!prepared && prepared.error().kind != PayloadPreparationFailureKind::Ordinary) {
+        // Only Ordinary becomes an attempt outcome. Storage/PersistedData retain their sanitized identities;
+        // Provider failures also abort the cycle, whose error boundary unconditionally closes acceptance.
+        return DispatchResult<std::optional<DispatchStart>>::failure(std::move(prepared).error().error);
+    }
+
+    // Persist the running attempt before transitioning its run so every committed running run has a concrete owner.
+    auto attempt = JobAttempt{
         .run_id         = selected.run.id,
         .attempt_number = selected.next_attempt,
         .due_at         = selected.run.runnable_at,
@@ -96,14 +105,22 @@ auto dispatch_selected(jb::db::Database&        database,
         return DispatchResult<std::optional<DispatchStart>>::failure(std::move(committed).error());
     }
 
-    auto const key     = AttemptKey{.run_id = selected.run.id, .attempt_number = selected.next_attempt};
-    auto       request = AttemptStartRequest{
+    auto const key = AttemptKey{.run_id = selected.run.id, .attempt_number = selected.next_attempt};
+    if (!prepared) {
+        // The core must record correlation and capacity before accepting this terminal preparation outcome.
+        return DispatchResult<std::optional<DispatchStart>>::success(DispatchStart{
+            .key                  = key,
+            .immediate_completion = terminal_start_failure(key, prepared.error().error),
+        });
+    }
+
+    auto request = AttemptStartRequest{
         .key        = key,
         .job_id     = selected.run.job_id,
         .queue_id   = selected.run.queue_id,
         .type       = selected.run.type,
         .attributes = std::move(selected.run.attributes),
-        .payload    = std::move(selected.run.payload),
+        .payload    = std::move(prepared).value(),
         .started_at = started_at,
     };
     auto started = executor.start(std::move(request), std::move(completion));
@@ -111,10 +128,46 @@ auto dispatch_selected(jb::db::Database&        database,
         // The durable start cannot be rolled back now; route executor start failure through the normal completion path.
         return DispatchResult<std::optional<DispatchStart>>::success(DispatchStart{
             .key                  = key,
-            .immediate_completion = executor_start_failure(key, started.error()),
+            .immediate_completion = terminal_start_failure(key, started.error()),
         });
     }
     return DispatchResult<std::optional<DispatchStart>>::success(DispatchStart{.key = key});
+}
+
+} // anonymous namespace
+
+auto dispatch_selected(jb::db::Database&        database,
+                       AttributeRegistry const& attributes,
+                       AttemptExecutor&         executor,
+                       SecretProvider&          secrets,
+                       jb::core::Uuid const&    run_id,
+                       jb::core::UtcTimePoint   started_at,
+                       AttemptCompletionHandler completion)
+    -> jb::core::Result<std::optional<DispatchStart>, jb::core::Error>
+{
+    auto dispatched =
+        dispatch_selected_impl(database, attributes, executor, secrets, run_id, started_at, std::move(completion));
+
+    // Inspect cleanup only after the transaction guard has unwound. Preserve a first fatal storage/provider error;
+    // an otherwise ordinary result cannot hide a rollback failure that made the connection unusable.
+    if (database.is_poisoned()) {
+        auto const already_fatal =
+            !dispatched && (classify_storage_failure(dispatched.error(), StorageOperation::Dispatch) ==
+                                StorageFailureDisposition::Fatal ||
+                            dispatched.error().code == "jobu.secret.provider_failed");
+        if (!already_fatal) {
+            auto error = database.last_error();
+            if (!error ||
+                classify_storage_failure(*error, StorageOperation::Dispatch) != StorageFailureDisposition::Fatal) {
+                error = jb::core::Error{.category = jb::core::ErrorCategory::Internal,
+                                        .code     = "db.connection_failed",
+                                        .message  = "The database connection is unusable after transaction cleanup"};
+            }
+            return DispatchResult<std::optional<DispatchStart>>::failure(
+                sanitized_storage_error(*error, StorageOperation::Dispatch));
+        }
+    }
+    return dispatched;
 }
 
 } // namespace jb::jobu::detail

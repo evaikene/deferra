@@ -10,6 +10,7 @@
 #include "object_priv.hpp"
 #include "protocol.hpp"
 #include "recovery_priv.hpp"
+#include "secret_provider_priv.hpp"
 #include "secret_service.hpp"
 #include "server.hpp"
 #include "system_info.hpp"
@@ -51,6 +52,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         , options{std::move(options_value)}
         , should_stop{std::move(stop_value)}
         , execution{*this}
+        , secret_provider{database_value}
     {}
 
     /// The HTTP fatal notification may follow queued failed completions. Observe the stored failure
@@ -181,6 +183,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
                                                  uuid_generator,
                                                  time_source,
                                                  execution,
+                                                 secret_provider,
                                                  scheduler_options(options));
         management = std::make_unique<ManagementService>(database, attributes, cron, uuid_generator, time_source);
         secrets    = std::make_unique<SecretService>(database, time_source);
@@ -297,6 +300,8 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
     int                                          exit_code{EXIT_SUCCESS};
     RuntimeRunners                               runners;
     ExecutionBoundary                            execution;
+    // The provider borrows the database and outlives every scheduler dispatch.
+    jb::jobu::detail::DatabaseSecretProvider     secret_provider;
     std::unique_ptr<jb::jobu::Scheduler>         scheduler;
     std::unique_ptr<jb::jobu::ManagementService> management;
     std::unique_ptr<jb::jobu::SecretService>     secrets;

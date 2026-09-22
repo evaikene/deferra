@@ -16,6 +16,7 @@
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/http_test_server.hpp"
+#include "support/rejecting_secret_provider.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
 
@@ -150,7 +151,7 @@ struct RealSchedulerFixture {
         client     = std::move(created_client).value();
         executor   = std::make_unique<HttpAttemptExecutor>(*client, time);
         management = std::make_unique<ManagementService>(database, registry, cron, generator, time);
-        scheduler  = std::make_unique<Scheduler>(database, registry, cron, generator, time, *executor, options);
+        scheduler = std::make_unique<Scheduler>(database, registry, cron, generator, time, *executor, secrets, options);
     }
 
     ~RealSchedulerFixture()
@@ -290,6 +291,7 @@ public:
     TemporaryDirectory                   directory;
     std::filesystem::path                database_file;
     Database                             database;
+    RejectingSecretProvider              secrets;
     StandardAttributeRegistry            registry;
     FakeCronEngine                       cron;
     SequenceUuidGenerator                generator;
