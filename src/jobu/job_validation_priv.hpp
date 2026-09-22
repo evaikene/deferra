@@ -33,8 +33,12 @@ enum class JobPayloadIssue : std::uint8_t {
     InvalidHttpRequest,
     InvalidJson,
     TooLarge,
+    InvalidSecretReference,
+    InvalidSecretName,
+    TooManySecretReferences,
 };
 
+/// Bounded original JSON validated as a durable template; it may still require secret resolution before execution.
 class ValidatedJobPayload final {
 public:
     ValidatedJobPayload(ValidatedJobPayload&&) noexcept                    = default;

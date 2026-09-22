@@ -224,7 +224,7 @@ struct RunSpec {
     JobType                     type{JobType::Cli};
     std::int32_t                priority{0};
     std::string                 attributes_json;
-    std::string                 payload_json{"{}"};
+    std::string                 payload_json;
     RunOrigin                   origin{RunOrigin::Scheduled};
     bool                        schedule_owned{true};
     RunState                    state{RunState::Scheduled};
@@ -262,7 +262,13 @@ void insert_run(Database& database, RunSpec const& run)
     REQUIRE(query.bind_value(":type", make_text(storage_text(run.type))));
     REQUIRE(query.bind_value(":priority", int32_to_storage(run.priority)));
     REQUIRE(query.bind_value(":attributes_json", make_text(run.attributes_json)));
-    REQUIRE(query.bind_value(":payload_json", make_text(run.payload_json)));
+    // Low-level scheduler fixtures still need structurally valid durable run snapshots.
+    auto payload = std::string_view{run.payload_json};
+    if (payload.empty()) {
+        payload = run.type == JobType::Cli ? std::string_view{R"({"command":"/test"})"}
+                                           : std::string_view{R"({"url":"https://example.test"})"};
+    }
+    REQUIRE(query.bind_value(":payload_json", make_text(payload)));
     REQUIRE(query.bind_value(":state", make_text(storage_text(run.state))));
     REQUIRE(query.exec());
 }

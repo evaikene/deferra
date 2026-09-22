@@ -13,6 +13,8 @@
 
 namespace jb::jobu::detail {
 
+class PayloadTemplateReferences;
+
 inline constexpr std::size_t maximum_cli_path_bytes{4096};
 inline constexpr std::size_t maximum_cli_arguments{1024};
 inline constexpr std::size_t maximum_cli_environment_entries{256};
@@ -33,5 +35,9 @@ struct CliJobPayload {
 
 [[nodiscard]] auto decode_cli_job_payload(jb::core::JsonValue const& payload)
     -> jb::core::Result<CliJobPayload, JobPayloadIssue>;
+
+/// Shares literal and structural checks with concrete decoding, without resolving secret values.
+[[nodiscard]] auto validate_cli_payload_template(jb::core::JsonValue const& payload,
+                                                 PayloadTemplateReferences& references) -> JobPayloadIssue;
 
 } // namespace jb::jobu::detail

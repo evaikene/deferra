@@ -175,6 +175,11 @@ add_executable(${TARGET} cli-job-payload-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Shared durable template grammar and concrete-decoder boundary.
+add_executable(payload-template-test payload-template-test.cpp)
+target_link_libraries(payload-template-test PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME payload-template-test COMMAND $<TARGET_FILE:payload-template-test>)
+
 # JobU CLI exit-code selector and normalized retry membership test
 set(TARGET "cli-exit-policy-test")
 add_executable(${TARGET} cli-exit-policy-test.cpp)

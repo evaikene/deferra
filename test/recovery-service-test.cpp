@@ -31,8 +31,8 @@
 #include <utility>
 #include <vector>
 
+#include <csignal> // IWYU pragma: keep - SIGKILL for the child-process recovery fixture
 #include <poll.h>
-#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -593,4 +593,55 @@ TEST_CASE("Recovery converges after abrupt process exit between committed units"
     auto again = fixture.recover();
     REQUIRE(again);
     require_report(*again);
+}
+
+TEST_CASE("Recovery retains templates across reopen without secret lookup", "[jobu][recovery][template]")
+{
+    auto const     type = GENERATE(JobType::Cli, JobType::Http);
+    ServiceFixture fixture;
+    auto           queue   = recovery_queue(recovery_id(1));
+    auto           job     = fixture.storage.make_job(recovery_id(2), queue.id, type);
+    auto           payload = parse_json(
+        type == JobType::Cli ? R"({"command":"/bin/tool","environment":{"TOKEN":{"secret":"missing.token"}}})"
+                             : R"({"url":"https://example.test/","method":"POST","body":{"secret":"missing.body"}})");
+    REQUIRE(payload);
+    job.payload = *payload;
+    fixture.storage.insert_queue(queue);
+    fixture.storage.insert_job(job);
+    auto run = fixture.storage.make_run(recovery_id(3), job);
+    fixture.storage.insert_run(run);
+    fixture.storage.reopen();
+
+    // No secret rows exist. Recovery must validate immutable templates without resolving their names.
+    auto recovered = fixture.recover();
+    REQUIRE(recovered);
+    CHECK(recovered->interrupted_attempts == 0);
+    CHECK(fixture.job(job.id).payload == *payload);
+    fixture.storage.require_run(run);
+    REQUIRE(fixture.recover());
+}
+
+TEST_CASE("Recovery fails closed on malformed job or immutable run templates", "[jobu][recovery][template]")
+{
+    auto const     corrupt_job = GENERATE(false, true);
+    ServiceFixture fixture;
+    auto           queue = recovery_queue(recovery_id(1));
+    auto           job   = fixture.storage.make_job(recovery_id(2), queue.id);
+    fixture.storage.insert_queue(queue);
+    fixture.storage.insert_job(job);
+    fixture.storage.insert_run(fixture.storage.make_run(recovery_id(3), job));
+    {
+        // Corrupt only one document, leaving the other valid so both durable boundaries are exercised.
+        Query query{fixture.storage.database};
+        REQUIRE(query.exec(
+            corrupt_job
+                ? R"(UPDATE jobu_jobs SET payload_json = '{"command":"/bin/tool","arguments":[{"secret":"private marker"}]}')"
+                : R"(UPDATE jobu_runs SET payload_json = '{"command":"/bin/tool","arguments":[{"secret":"private marker"}]}')"));
+    }
+    fixture.storage.reopen();
+    auto recovered = fixture.recover();
+    REQUIRE_FALSE(recovered);
+    CHECK(recovered.error().code == "jobu.recovery.invariant");
+    CHECK(recovered.error().message.find("private marker") == std::string::npos);
+    CHECK(recovered.error().detail.find("private marker") == std::string::npos);
 }

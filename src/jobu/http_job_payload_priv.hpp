@@ -14,6 +14,8 @@
 
 namespace jb::jobu::detail {
 
+class PayloadTemplateReferences;
+
 struct HttpJobPayload;
 
 struct HttpStatusRange {
@@ -52,5 +54,9 @@ struct HttpJobPayload {
 
 [[nodiscard]] auto decode_http_job_payload(jb::core::JsonValue const& payload)
     -> jb::core::Result<HttpJobPayload, JobPayloadIssue>;
+
+/// Shares literal and structural checks with concrete decoding, without resolving secret values.
+[[nodiscard]] auto validate_http_payload_template(jb::core::JsonValue const& payload,
+                                                  PayloadTemplateReferences& references) -> JobPayloadIssue;
 
 } // namespace jb::jobu::detail

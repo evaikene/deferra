@@ -1,6 +1,7 @@
 #pragma once
 
 #include "byte_buffer.hpp"
+#include "payload_template_priv.hpp" // IWYU pragma: export - shared reference row type
 #include "result.hpp"
 #include "secret.hpp"
 #include "uuid.hpp"
@@ -8,7 +9,6 @@
 #include <cstddef>
 #include <optional>
 #include <span>
-#include <string>
 #include <string_view>
 #include <vector>
 
@@ -17,11 +17,6 @@ class Database;
 }
 
 namespace jb::jobu::detail {
-
-struct SecretReference {
-    std::string secret_name;
-    std::string field_path;
-};
 
 class SecretRepository final {
 public:

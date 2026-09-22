@@ -2,6 +2,7 @@
 
 #include "attempt.hpp"
 #include "http_validation_priv.hpp"
+#include "payload_template_priv.hpp"
 #include "text_validation_priv.hpp"
 
 #include <algorithm>
@@ -20,6 +21,20 @@ namespace {
 
 template <typename T>
 using DecodeResult = jb::core::Result<T, JobPayloadIssue>;
+
+struct ParsedHeader {
+    jb::net::detail::HttpHeaderFields fields;
+    bool                              sensitive{};
+};
+
+struct ParsedHttpPayload {
+    std::string                         url;
+    std::string                         method{"GET"};
+    std::vector<ParsedHeader>           headers;
+    std::optional<jb::core::ByteBuffer> body;
+    bool                                body_is_reference{};
+    std::vector<HttpStatusRange>        expected_statuses;
+};
 
 constexpr std::size_t kMaximumExpectedStatusSelectors{64};
 
@@ -60,34 +75,37 @@ auto forced_sensitive_header(std::string_view name) noexcept -> bool
            ascii_equal(name, "Proxy-Authorization");
 }
 
-void append_maximum_metadata_headers(std::vector<jb::net::HttpHeader>& headers)
+void append_maximum_metadata_headers(std::vector<jb::net::detail::HttpHeaderFields>& headers)
 {
     constexpr auto uuid_text = std::string_view{"00000000-0000-0000-0000-000000000000"};
 
+    // Views borrow static strings, including the maximum-width attempt number.
+    static auto const maximum_attempt = std::to_string(std::numeric_limits<AttemptNumber>::max());
     headers.reserve(headers.size() + 4U);
-    headers.push_back({.name = "X-JobU-Job-ID", .value = std::string{uuid_text}});
-    headers.push_back({.name = "X-JobU-Run-ID", .value = std::string{uuid_text}});
+    headers.push_back({.name = "X-JobU-Job-ID", .value = uuid_text});
+    headers.push_back({.name = "X-JobU-Run-ID", .value = uuid_text});
     headers.push_back({
         .name  = "X-JobU-Attempt",
-        .value = std::to_string(std::numeric_limits<AttemptNumber>::max()),
+        .value = maximum_attempt,
     });
-    headers.push_back({.name = "Idempotency-Key", .value = std::string{uuid_text}});
+    headers.push_back({.name = "Idempotency-Key", .value = uuid_text});
 }
 
-auto decode_headers(jb::core::JsonValue const* value) -> DecodeResult<std::vector<jb::net::HttpHeader>>
+auto decode_headers(jb::core::JsonValue const* value, PayloadTemplateReferences* references)
+    -> DecodeResult<std::vector<ParsedHeader>>
 {
-    auto headers = std::vector<jb::net::HttpHeader>{};
+    auto headers = std::vector<ParsedHeader>{};
     if (value == nullptr) {
-        return DecodeResult<std::vector<jb::net::HttpHeader>>::success(std::move(headers));
+        return DecodeResult<std::vector<ParsedHeader>>::success(std::move(headers));
     }
     if (!value->is_array()) {
-        return DecodeResult<std::vector<jb::net::HttpHeader>>::failure(JobPayloadIssue::InvalidHeaders);
+        return DecodeResult<std::vector<ParsedHeader>>::failure(JobPayloadIssue::InvalidHeaders);
     }
 
     headers.reserve(value->as_array().size());
     for (auto const& entry : value->as_array()) {
         if (!entry.is_object()) {
-            return DecodeResult<std::vector<jb::net::HttpHeader>>::failure(JobPayloadIssue::InvalidHeaders);
+            return DecodeResult<std::vector<ParsedHeader>>::failure(JobPayloadIssue::InvalidHeaders);
         }
         auto const& object           = entry.as_object();
         auto const* name             = member(object, "name");
@@ -95,20 +113,25 @@ auto decode_headers(jb::core::JsonValue const* value) -> DecodeResult<std::vecto
         auto const* sensitive        = member(object, "sensitive");
         auto const  expected_members = std::size_t{2} + (sensitive == nullptr ? 0U : 1U);
         if (object.size() != expected_members || name == nullptr || !name->is_string() || data == nullptr ||
-            !data->is_string() || (sensitive != nullptr && !sensitive->is_bool()) ||
-            jobu_reserved_header(name->as_string())) {
-            return DecodeResult<std::vector<jb::net::HttpHeader>>::failure(JobPayloadIssue::InvalidHeaders);
+            (sensitive != nullptr && !sensitive->is_bool()) || jobu_reserved_header(name->as_string())) {
+            return DecodeResult<std::vector<ParsedHeader>>::failure(JobPayloadIssue::InvalidHeaders);
         }
 
-        // Credential fields are sensitive even when the persisted flag is
-        // absent or false, so later redirect policy cannot trust that input.
+        auto text = parse_payload_text(*data,
+                                       JobPayloadIssue::InvalidHeaders,
+                                       references,
+                                       "/headers/" + std::to_string(headers.size()) + "/value");
+        if (!text) {
+            return DecodeResult<std::vector<ParsedHeader>>::failure(text.error());
+        }
+
+        // Credential fields are sensitive even when the persisted flag is absent or false.
         headers.push_back({
-            .name      = name->as_string(),
-            .value     = data->as_string(),
+            .fields    = {.name = name->as_string(), .value = *text},
             .sensitive = forced_sensitive_header(name->as_string()) || (sensitive != nullptr && sensitive->as_bool()),
         });
     }
-    return DecodeResult<std::vector<jb::net::HttpHeader>>::success(std::move(headers));
+    return DecodeResult<std::vector<ParsedHeader>>::success(std::move(headers));
 }
 
 constexpr auto base64_value(unsigned char value) noexcept -> std::optional<std::uint8_t>
@@ -331,59 +354,108 @@ auto HttpStatusSet::contains(std::uint16_t status) const noexcept -> bool
     });
 }
 
-auto decode_http_job_payload(jb::core::JsonValue const& payload) -> DecodeResult<HttpJobPayload>
+namespace {
+
+auto parse_http_payload(jb::core::JsonValue const& payload, PayloadTemplateReferences* references)
+    -> DecodeResult<ParsedHttpPayload>
 {
     if (!payload.is_object()) {
-        return DecodeResult<HttpJobPayload>::failure(JobPayloadIssue::NotObject);
+        return DecodeResult<ParsedHttpPayload>::failure(JobPayloadIssue::NotObject);
     }
     auto const& object = payload.as_object();
     auto const* url    = member(object, "url");
     if (url == nullptr || !url->is_string() || url->as_string().empty()) {
-        return DecodeResult<HttpJobPayload>::failure(JobPayloadIssue::MissingUrl);
+        return DecodeResult<ParsedHttpPayload>::failure(JobPayloadIssue::MissingUrl);
     }
 
-    auto request = jb::net::HttpRequest{.url = url->as_string()};
+    auto request = ParsedHttpPayload{.url = url->as_string()};
     if (auto const* method = member(object, "method"); method != nullptr) {
         if (!method->is_string()) {
-            return DecodeResult<HttpJobPayload>::failure(JobPayloadIssue::InvalidMethod);
+            return DecodeResult<ParsedHttpPayload>::failure(JobPayloadIssue::InvalidMethod);
         }
         request.method = method->as_string();
     }
 
-    auto headers = decode_headers(member(object, "headers"));
+    auto headers = decode_headers(member(object, "headers"), references);
     if (!headers) {
-        return DecodeResult<HttpJobPayload>::failure(headers.error());
+        return DecodeResult<ParsedHttpPayload>::failure(headers.error());
     }
     request.headers = std::move(headers).value();
 
-    auto body = decode_body(member(object, "body"));
-    if (!body) {
-        return DecodeResult<HttpJobPayload>::failure(body.error());
+    auto const* body_value = member(object, "body");
+    // The body object has two disjoint grammars. Any secret member selects the closed reference grammar.
+    if (references != nullptr && body_value != nullptr && body_value->is_object() &&
+        body_value->as_object().contains("secret")) {
+        auto const issue = references->add(*body_value, "/body");
+        if (issue != JobPayloadIssue::None) {
+            return DecodeResult<ParsedHttpPayload>::failure(issue);
+        }
+        request.body_is_reference = true;
     }
-    request.body = std::move(body).value();
+    else {
+        auto body = decode_body(body_value);
+        if (!body) {
+            return DecodeResult<ParsedHttpPayload>::failure(body.error());
+        }
+        request.body = std::move(body).value();
+    }
 
     auto statuses = decode_expected_statuses(member(object, "expected_statuses"));
     if (!statuses) {
-        return DecodeResult<HttpJobPayload>::failure(statuses.error());
+        return DecodeResult<ParsedHttpPayload>::failure(statuses.error());
     }
 
-    // Validate the worst-case final request so JobU's required metadata cannot
-    // push an accepted durable payload beyond the generic header limits.
-    auto const payload_header_count = request.headers.size();
-    append_maximum_metadata_headers(request.headers);
-    auto generic_validation = jb::net::detail::validate_http_request(request);
-    if (!generic_validation) {
-        return DecodeResult<HttpJobPayload>::failure(generic_request_issue(generic_validation.error()));
+    // Reserve metadata and check all known bytes. Unresolved header values remain absent views,
+    // and a referenced body still counts as present for the HEAD restriction.
+    auto fields = std::vector<jb::net::detail::HttpHeaderFields>{};
+    fields.reserve(request.headers.size() + 4U);
+    for (auto const& header : request.headers) {
+        fields.push_back(header.fields);
     }
-    request.headers.resize(payload_header_count);
+    append_maximum_metadata_headers(fields);
+    auto validation =
+        jb::net::detail::validate_http_request_fields(request.method,
+                                                      request.url,
+                                                      fields,
+                                                      request.body.has_value() || request.body_is_reference);
+    if (!validation) {
+        return DecodeResult<ParsedHttpPayload>::failure(generic_request_issue(validation.error()));
+    }
+    request.expected_statuses = std::move(statuses).value();
+    return DecodeResult<ParsedHttpPayload>::success(std::move(request));
+}
 
+} // namespace
+
+auto decode_http_job_payload(jb::core::JsonValue const& payload) -> DecodeResult<HttpJobPayload>
+{
+    auto parsed = parse_http_payload(payload, nullptr);
+    if (!parsed) {
+        return DecodeResult<HttpJobPayload>::failure(parsed.error());
+    }
+
+    // Only the concrete path constructs execution-ready owning headers and body bytes.
+    auto headers = std::vector<jb::net::HttpHeader>{};
+    headers.reserve(parsed->headers.size());
+    for (auto const& header : parsed->headers) {
+        headers.push_back({.name      = std::string{header.fields.name},
+                           .value     = std::string{*header.fields.value},
+                           .sensitive = header.sensitive});
+    }
     return DecodeResult<HttpJobPayload>::success({
-        .url               = std::move(request.url),
-        .method            = std::move(request.method),
-        .headers           = std::move(request.headers),
-        .body              = std::move(request.body),
-        .expected_statuses = HttpStatusSet{std::move(statuses).value()},
+        .url               = std::move(parsed->url),
+        .method            = std::move(parsed->method),
+        .headers           = std::move(headers),
+        .body              = std::move(parsed->body),
+        .expected_statuses = HttpStatusSet{std::move(parsed->expected_statuses)},
     });
+}
+
+auto validate_http_payload_template(jb::core::JsonValue const& payload, PayloadTemplateReferences& references)
+    -> JobPayloadIssue
+{
+    auto parsed = parse_http_payload(payload, &references);
+    return parsed ? JobPayloadIssue::None : parsed.error();
 }
 
 } // namespace jb::jobu::detail

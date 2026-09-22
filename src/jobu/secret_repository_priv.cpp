@@ -1,6 +1,5 @@
 #include "secret_repository_priv.hpp"
 
-#include "attribute.hpp"
 #include "domain_storage_priv.hpp"
 #include "query.hpp"
 #include "text_validation_priv.hpp"
@@ -17,9 +16,8 @@ namespace {
 template <typename T>
 using RepositoryResult = jb::core::Result<T, jb::core::Error>;
 
-constexpr std::size_t kMaximumSecretNameBytes = 128;
-constexpr std::size_t kMaximumMetadataRows    = 200;
-constexpr std::size_t kMaximumReferences      = 256;
+constexpr std::size_t kMaximumMetadataRows = 200;
+constexpr std::size_t kMaximumReferences   = 256;
 
 auto repository_error(jb::core::ErrorCategory category, std::string_view code, std::string_view message)
     -> jb::core::Error
@@ -68,11 +66,6 @@ auto invalid_record(std::string_view reason) -> jb::core::Error
     return error;
 }
 
-auto valid_name(std::string_view name) noexcept -> bool
-{
-    return name.size() <= kMaximumSecretNameBytes && is_valid_attribute_name(name);
-}
-
 auto valid_field_path(std::string_view path) noexcept -> bool
 {
     return !path.empty() && is_valid_utf8(path) && !has_ascii_control(path);
@@ -93,7 +86,7 @@ auto decode_metadata(jb::db::Record const& row) -> RepositoryResult<SecretMetada
     if (!name) {
         return RepositoryResult<SecretMetadata>::failure(std::move(name).error());
     }
-    if (!valid_name(*name)) {
+    if (!is_valid_secret_name(*name)) {
         return RepositoryResult<SecretMetadata>::failure(invalid_record("invalid_name"));
     }
     auto created = read_timestamp(row, "secret_created_at_us");
@@ -151,7 +144,7 @@ SecretRepository::SecretRepository(jb::db::Database& database) noexcept
 auto SecretRepository::set(std::string_view name, jb::core::ByteView value, jb::core::UtcTimePoint updated_at)
     -> jb::core::Result<SecretMetadata, jb::core::Error>
 {
-    if (!valid_name(name)) {
+    if (!is_valid_secret_name(name)) {
         return RepositoryResult<SecretMetadata>::failure(invalid_name());
     }
     auto timestamp = timestamp_to_storage(updated_at);
@@ -282,7 +275,7 @@ auto SecretRepository::list_metadata(std::size_t limit, std::optional<std::strin
 
 auto SecretRepository::erase(std::string_view name) -> jb::core::Result<void, jb::core::Error>
 {
-    if (!valid_name(name)) {
+    if (!is_valid_secret_name(name)) {
         return RepositoryResult<void>::failure(invalid_name());
     }
     jb::db::Query query{_database};
@@ -324,7 +317,7 @@ auto SecretRepository::replace_references_for_job(jb::core::Uuid const&         
     }
     auto unique = std::set<std::pair<std::string_view, std::string_view>>{};
     for (auto const& reference : references) {
-        if (!valid_name(reference.secret_name) || !valid_field_path(reference.field_path) ||
+        if (!is_valid_secret_name(reference.secret_name) || !valid_field_path(reference.field_path) ||
             !unique.emplace(reference.secret_name, reference.field_path).second) {
             return RepositoryResult<std::size_t>::failure(invalid_record("invalid_secret_reference"));
         }
@@ -395,7 +388,7 @@ auto SecretRepository::erase_references_for_queue(jb::core::Uuid const& queue_id
 
 auto SecretRepository::reference_count(std::string_view name) -> jb::core::Result<std::uint64_t, jb::core::Error>
 {
-    if (!valid_name(name)) {
+    if (!is_valid_secret_name(name)) {
         return RepositoryResult<std::uint64_t>::failure(invalid_name());
     }
     jb::db::Query query{_database};
