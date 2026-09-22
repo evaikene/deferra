@@ -738,6 +738,10 @@ TEST_CASE("system HTTP client ignores ambient proxies and enforces explicit prox
 
 TEST_CASE("system HTTP client supports plain and verified TLS over IPv6 loopback", "[net][http]")
 {
+    if (!jb::test::ipv6_loopback_available()) {
+        SKIP("IPv6 loopback is not available on this system");
+    }
+
     auto app = jb::core::Application{0, nullptr};
 
     SECTION("plain HTTP")
