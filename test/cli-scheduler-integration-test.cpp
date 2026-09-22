@@ -14,12 +14,15 @@
 #include "management.hpp"
 #include "process.hpp"
 #include "run_repository_priv.hpp"
+#include "secret_provider_priv.hpp"
+#include "secret_service.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/http_test_server.hpp"
 #include "support/rejecting_secret_provider.hpp"
+#include "support/secret_execution_checks.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
 
@@ -446,10 +449,11 @@ private:
 };
 
 struct MixedSchedulerFixture {
-    explicit MixedSchedulerFixture(SchedulerOptions options = {})
+    explicit MixedSchedulerFixture(SchedulerOptions options = {}, bool resolve_secrets = false)
         : app{0, nullptr}
         , database_file{directory.path() / "jobu.sqlite"}
         , database{make_database(database_file)}
+        , database_secrets{database}
         , generator{test_ids()}
         , runs{database, registry}
         , attempts{database}
@@ -471,7 +475,15 @@ struct MixedSchedulerFixture {
             JobType::Http,
             std::make_unique<ObservedExecutor>(std::make_unique<HttpAttemptExecutor>(*client, time), probe)));
         management = std::make_unique<ManagementService>(database, registry, cron, generator, time);
-        scheduler  = std::make_unique<Scheduler>(database, registry, cron, generator, time, *group, secrets, options);
+        scheduler =
+            std::make_unique<Scheduler>(database,
+                                        registry,
+                                        cron,
+                                        generator,
+                                        time,
+                                        *group,
+                                        resolve_secrets ? static_cast<SecretProvider&>(database_secrets) : secrets,
+                                        options);
     }
 
     ~MixedSchedulerFixture()
@@ -527,21 +539,23 @@ struct MixedSchedulerFixture {
         return std::move(result).value();
     }
 
-    auto create(Queue const& queue,
-                JobType      type,
-                JsonValue    payload,
-                AttributeSet attributes = {},
-                JobSchedule  schedule   = OnceSchedule{.planned_at = at_seconds(90)}) -> CreatedJob
+    auto create(Queue const&               queue,
+                JobType                    type,
+                JsonValue                  payload,
+                AttributeSet               attributes      = {},
+                JobSchedule                schedule        = OnceSchedule{.planned_at = at_seconds(90)},
+                std::optional<std::string> idempotency_key = std::nullopt) -> CreatedJob
     {
         // Keep assertion-unwind cancellation bounded even for helpers that deliberately ignore TERM.
         if (type == JobType::Cli) {
             attributes.try_emplace("cli.termination_grace", AttributeValue{.data = Duration{100ms}});
         }
-        auto definition = management->create_job({.queue      = queue.id,
-                                                  .type       = type,
-                                                  .schedule   = std::move(schedule),
-                                                  .attributes = std::move(attributes),
-                                                  .payload    = std::move(payload)});
+        auto definition = management->create_job({.queue           = queue.id,
+                                                  .type            = type,
+                                                  .schedule        = std::move(schedule),
+                                                  .attributes      = std::move(attributes),
+                                                  .payload         = std::move(payload),
+                                                  .idempotency_key = std::move(idempotency_key)});
         REQUIRE(definition);
         auto run = runs.find_schedule_owned(definition->id);
         REQUIRE(run);
@@ -617,6 +631,7 @@ struct MixedSchedulerFixture {
     std::filesystem::path                       database_file;
     Database                                    database;
     DurableReader                               observer;
+    jb::jobu::detail::DatabaseSecretProvider    database_secrets;
     RejectingSecretProvider                     secrets;
     StandardAttributeRegistry                   registry;
     FakeCronEngine                              cron;
@@ -1108,4 +1123,119 @@ TEST_CASE("real mixed completions preserve recurring successors and suspension d
     fixture.release_helpers();
     fixture.until([&] { return fixture.run(successor_id).state == RunState::Succeeded; });
     fixture.finish();
+}
+
+TEST_CASE("real CLI secret arguments and environment rotate per retry and remain raw in captured output",
+          "[jobu][scheduler][cli][secrets][integration][sqlite]")
+{
+    for (auto const* mode : {"blocking", "reschedule"}) {
+        for (auto const* capture : {"always", "on_error", "none"}) {
+            CAPTURE(mode, capture);
+            SecretExecutionLogGuard logs;
+            MixedSchedulerFixture   fixture{{}, true};
+            SecretService           secrets{fixture.database, fixture.time};
+            auto                    set_value = [&](std::string_view value) {
+                auto view = as_bytes(value);
+                REQUIRE(secrets.set({
+                    .name  = "execution.token",
+                    .value = ByteBuffer{view.begin(), view.end()}
+                }));
+            };
+            set_value("stage89-private-first");
+
+            // inspect-daemon echoes argv/environment and exits 37, deliberately triggering the normal retry policy.
+            auto payload = helper_payload({"inspect-daemon"});
+            std::get<JsonValue::Array>(std::get<JsonValue::Object>(payload.data).at("arguments").data)
+                .push_back(secret_reference("execution.token"));
+            std::get<JsonValue::Object>(payload.data)
+                .emplace(
+                    "environment",
+                    JsonValue{.data = JsonValue::Object{{"EXECUTION_TOKEN", secret_reference("execution.token")}}});
+            auto attributes = retry_attributes(mode);
+            attributes.emplace("output.capture", AttributeValue{.data = std::string{capture}});
+            auto job = fixture.create(fixture.queue("secret-rotation"),
+                                      JobType::Cli,
+                                      payload,
+                                      attributes,
+                                      OnceSchedule{.planned_at = at_seconds(90)},
+                                      "secret-cli-create");
+            REQUIRE(fixture.scheduler->start());
+            fixture.until([&] { return fixture.has_state(job, RunState::RetryWait); });
+            CHECK(fixture.probe.starts.size() == 1U);
+
+            set_value("stage89-private-second");
+            fixture.time.set_utc(at_seconds(109));
+            fixture.rescan();
+            CHECK(fixture.probe.starts.size() == 1U);
+            fixture.time.set_utc(at_seconds(110));
+            fixture.rescan();
+            fixture.until([&] { return fixture.has_state(job, RunState::Failed); });
+            REQUIRE(fixture.probe.starts.size() == 2U);
+
+            for (AttemptNumber number : {1U, 2U}) {
+                auto output = fixture.attempts.find_output(job.run.id, number);
+                REQUIRE(output);
+                if (std::string_view{capture} == "none") {
+                    CHECK_FALSE(output->has_value());
+                    continue;
+                }
+                REQUIRE(output->has_value());
+                REQUIRE(output->value().stdout_bytes);
+                auto report = parse_json(as_string_view(*output->value().stdout_bytes));
+                REQUIRE(report);
+                auto const* expected = number == 1U ? "stage89-private-first" : "stage89-private-second";
+                CHECK(report->as_object().at("arguments").as_array().at(0).as_string() == expected);
+                CHECK(report->as_object().at("environment").as_object().at("EXECUTION_TOKEN").as_string() == expected);
+            }
+            CHECK(fixture.run(job.run.id).payload == payload);
+            auto definition = fixture.management->get_job(job.definition.id);
+            REQUIRE(definition);
+            CHECK(definition->payload == payload);
+            check_secret_create_record(fixture.database, payload);
+            check_secret_execution_metadata(fixture.database);
+            fixture.finish();
+            logs.check();
+        }
+    }
+}
+
+TEST_CASE("real CLI secret preparation and process launch failures expose only safe metadata",
+          "[jobu][scheduler][cli][secrets][integration][sqlite]")
+{
+    for (auto const invalid_value : {false, true}) {
+        CAPTURE(invalid_value);
+        SecretExecutionLogGuard logs;
+        MixedSchedulerFixture   fixture{{}, true};
+        SecretService           secrets{fixture.database, fixture.time};
+        auto                    value = std::string{"stage89-private-rejected"};
+        if (invalid_value) {
+            value.push_back('\0');
+        }
+        auto view = as_bytes(value);
+        REQUIRE(secrets.set({
+            .name  = "execution.token",
+            .value = ByteBuffer{view.begin(), view.end()}
+        }));
+        auto payload = helper_payload({"inspect-daemon"});
+        std::get<JsonValue::Array>(std::get<JsonValue::Object>(payload.data).at("arguments").data)
+            .push_back(secret_reference("execution.token"));
+        if (!invalid_value) {
+            std::get<JsonValue::Object>(payload.data).at("command") =
+                json_string((fixture.directory.path() / "absent-program").string());
+        }
+        auto job = fixture.create(fixture.queue("secret-failure"), JobType::Cli, payload);
+        REQUIRE(fixture.scheduler->start());
+        fixture.until([&] { return fixture.has_state(job, RunState::Failed); });
+        CHECK(fixture.probe.starts.size() == (invalid_value ? 0U : 1U));
+        auto attempt = fixture.attempt(job.run.id);
+        REQUIRE(attempt.result);
+        auto result = serialize_json(*attempt.result);
+        REQUIRE(result);
+        CHECK(result->find(invalid_value ? "jobu.secret.invalid_value" : "core.process.exec_failed") !=
+              std::string::npos);
+        check_secret_execution_metadata(fixture.database);
+        CHECK_FALSE(fixture.scheduler->failure());
+        fixture.scheduler->stop();
+        logs.check();
+    }
 }
