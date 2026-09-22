@@ -10,6 +10,7 @@
 #include "management_json.hpp"
 #include "process.hpp"
 #include "protocol.hpp"
+#include "query.hpp"
 #include "queue_repository_priv.hpp"
 #include "run_repository_priv.hpp"
 #include "support/http_test_server.hpp"
@@ -101,8 +102,9 @@ private:
 /// The live observer is read-only and keeps no statement/transaction between readiness polls.
 class CrashFixture final {
 public:
-    CrashFixture()
-        : report{storage.directory.path() / "report"}
+    explicit CrashFixture(RecoveryFixtureSchema schema = RecoveryFixtureSchema::Current)
+        : storage{{}, schema}
+        , report{storage.directory.path() / "report"}
         , release{storage.directory.path() / "release"}
     {}
 
@@ -127,7 +129,7 @@ public:
         REQUIRE(predicate());
     }
 
-    void start(bool allow_root_cli = false)
+    void launch(bool allow_root_cli)
     {
         REQUIRE_FALSE(daemon);
         REQUIRE(storage.database.close());
@@ -151,14 +153,19 @@ public:
             arguments.emplace_back("--allow-root-cli");
         }
 
-        // A successful real client round trip proves recovery and scheduler startup have both returned.
         started_after = std::chrono::time_point_cast<std::chrono::microseconds>(UtcClock::now());
         REQUIRE(daemon->start(
             {.executable = JOBUD_EXECUTABLE, .arguments = std::move(arguments), .termination_grace = 0ms}));
+    }
+
+    void start(bool allow_root_cli = false)
+    {
+        launch(allow_root_cli);
         until([&] {
             std::error_code error;
             return std::filesystem::is_socket(socket_path, error);
         });
+        // A successful real client round trip proves recovery and scheduler startup have both returned.
         control_info();
         ready_before = UtcClock::now();
 
@@ -167,6 +174,19 @@ public:
         observer.reset(raw);
         REQUIRE(opened == SQLITE_OK);
         REQUIRE(sqlite3_busy_timeout(raw, 100) == SQLITE_OK);
+    }
+
+    void require_schema_startup_failure()
+    {
+        launch(false);
+        until([&] { return exit.has_value(); }, true);
+        INFO(log);
+        REQUIRE(exit->kind == ProcessExitKind::Exited);
+        CHECK(exit->exit_code == EXIT_FAILURE);
+        CHECK(log.find("jobu.schema.") != std::string::npos);
+        CHECK_FALSE(std::filesystem::exists(socket_path));
+        daemon.reset();
+        REQUIRE(storage.database.open());
     }
 
     void crash()
@@ -620,4 +640,57 @@ TEST_CASE("daemon crash recovery repairs recurrence and finishes owner suspensio
         fixture.storage.require_run(expected);
     }
     fixture.unchanged_restart();
+}
+
+TEST_CASE("daemon upgrades version one before recovery and serving", "[jobud][recovery][schema][integration]")
+{
+    CrashFixture fixture{RecoveryFixtureSchema::VersionOne};
+    auto         queue   = recovery_queue(recovery_id(1));
+    auto         job     = fixture.storage.make_job(recovery_id(2), queue.id, JobType::Http);
+    auto         running = fixture.storage.make_run(recovery_id(3), job, RunState::Running);
+    fixture.storage.insert_queue(queue);
+    fixture.storage.insert_job(job);
+    fixture.storage.insert_run(running);
+
+    // start() includes a real system.info round trip; the stopped parent never upgrades this database.
+    fixture.start();
+    CHECK(fixture.count("SELECT version FROM jobu_schema") == 2);
+    CHECK(fixture.count("SELECT count(*) FROM sqlite_schema WHERE name IN ('jobu_runs_planned_id_idx', "
+                        "'jobu_runs_queue_planned_id_idx', 'jobu_runs_job_planned_id_idx')") == 3);
+    CHECK(fixture.count("SELECT count(*) FROM jobu_attempts WHERE state = 'running'") == 0);
+    fixture.crash();
+    require_interrupted(fixture, running, false);
+    fixture.unchanged_restart();
+}
+
+TEST_CASE("daemon schema rejection leaves recovery rows untouched and never listens",
+          "[jobud][recovery][schema][integration]")
+{
+    auto const* const corrupt = GENERATE("DROP INDEX jobu_runs_job_state_idx",
+                                         "CREATE INDEX jobu_runs_job_planned_id_idx ON jobu_runs(id)",
+                                         "UPDATE jobu_schema SET version = 3");
+    CAPTURE(corrupt);
+    CrashFixture fixture{RecoveryFixtureSchema::VersionOne};
+    auto         queue   = recovery_queue(recovery_id(1));
+    auto         job     = fixture.storage.make_job(recovery_id(2), queue.id, JobType::Http);
+    auto         running = fixture.storage.make_run(recovery_id(3), job, RunState::Running);
+    fixture.storage.insert_queue(queue);
+    fixture.storage.insert_job(job);
+    fixture.storage.insert_run(running);
+    {
+        jb::db::Query query{fixture.storage.database};
+        REQUIRE(query.exec(corrupt));
+    }
+    auto const before = storage_snapshot(fixture.storage.database);
+    fixture.require_schema_startup_failure();
+    CHECK(storage_snapshot(fixture.storage.database) == before);
+    fixture.storage.require_run(running);
+    // Collision at the third added index must also roll back the first two DDL statements.
+    jb::db::Query query{fixture.storage.database};
+    REQUIRE(query.exec("SELECT count(*) FROM sqlite_schema WHERE name IN "
+                       "('jobu_runs_planned_id_idx', 'jobu_runs_queue_planned_id_idx')"));
+    auto next = query.next();
+    REQUIRE(next);
+    REQUIRE(*next);
+    CHECK(query.value(0) == jb::db::Value{std::int64_t{0}});
 }

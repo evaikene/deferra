@@ -1,5 +1,7 @@
 #include "recovery_fixture.hpp"
 
+#include "sqlite_schema_fixture.hpp"
+
 #include "attribute_codec_priv.hpp"
 #include "domain_storage_priv.hpp"
 #include "job_repository_priv.hpp"
@@ -81,7 +83,8 @@ auto recovery_queue(core::Uuid id, QueueState state, RecoveryPolicy policy) -> Q
             .deleted_at      = state == QueueState::Deleted ? std::optional{at(2)} : std::nullopt};
 }
 
-RecoveryFixture::RecoveryFixture(std::function<std::unique_ptr<db::Driver>(std::unique_ptr<db::Driver>)> wrap_driver)
+RecoveryFixture::RecoveryFixture(std::function<std::unique_ptr<db::Driver>(std::unique_ptr<db::Driver>)> wrap_driver,
+                                 RecoveryFixtureSchema                                                   schema)
     : database{[&]() -> std::unique_ptr<db::Driver> {
         auto driver =
             std::make_unique<db::sqlite::Driver>(db::sqlite::Options{.database_file = database_file,
@@ -91,7 +94,12 @@ RecoveryFixture::RecoveryFixture(std::function<std::unique_ptr<db::Driver>(std::
     }()}
 {
     REQUIRE(database.open());
-    REQUIRE(jobu::sqlite::ensure_schema(database));
+    if (schema == RecoveryFixtureSchema::VersionOne) {
+        create_version_one_schema(database);
+    }
+    else {
+        REQUIRE(jobu::sqlite::ensure_schema(database));
+    }
 }
 
 auto RecoveryFixture::make_job(core::Uuid id, core::Uuid queue_id, JobType type) const -> JobDefinition

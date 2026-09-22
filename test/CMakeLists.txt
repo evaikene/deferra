@@ -488,6 +488,7 @@ if(TARGET jobu-sqlite)
     set(TARGET "jobu-sqlite-schema-test")
     add_executable(${TARGET}
         jobu-sqlite-schema-test.cpp
+        support/fault_database_driver.cpp
         support/fake_database_driver.cpp
         support/temporary_directory.cpp
     )

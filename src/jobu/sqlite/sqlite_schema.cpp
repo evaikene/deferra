@@ -20,7 +20,24 @@ namespace {
 
 using VoidResult = jb::core::Result<void, jb::core::Error>;
 
-constexpr std::array schema_objects{
+constexpr std::array planned_columns{
+    detail::IndexColumn{.name = "planned_at_us", .descending = true},
+    detail::IndexColumn{.name = "id",            .descending = true}
+};
+constexpr std::array queue_planned_columns{
+    detail::IndexColumn{.name = "queue_id"},
+    detail::IndexColumn{.name = "planned_at_us", .descending = true},
+    detail::IndexColumn{.name = "id", .descending = true}
+};
+constexpr std::array job_planned_columns{
+    detail::IndexColumn{.name = "job_id"},
+    detail::IndexColumn{.name = "planned_at_us", .descending = true},
+    detail::IndexColumn{.name = "id", .descending = true}
+};
+
+// The first 18 objects are the unchanged version-1 schema. Upgrades add only the trailing history indexes.
+constexpr std::size_t version_one_object_count{18};
+constexpr std::array  schema_objects{
     detail::SchemaObject{
                          .kind         = detail::SchemaObjectKind::Table,
                          .name         = "jobu_schema",
@@ -238,7 +255,7 @@ constexpr std::array schema_objects{
                          .name         = "jobu_runs_queue_state_runnable_priority_planned_id_idx",
                          .owner        = "jobu_runs",
                          .ddl          = "CREATE INDEX jobu_runs_queue_state_runnable_priority_planned_id_idx "
-                        "ON jobu_runs(queue_id, state, runnable_at_us, priority DESC, planned_at_us, id)",                                                             .column_probe = {},
+                        "ON jobu_runs(queue_id, state, runnable_at_us, priority DESC, planned_at_us, id)", .column_probe = {},
                          },
     detail::SchemaObject{
                          .kind         = detail::SchemaObjectKind::Index,
@@ -280,13 +297,38 @@ constexpr std::array schema_objects{
                          .name         = "jobu_runs_schedule_owned_non_terminal_uidx",
                          .owner        = "jobu_runs",
                          .ddl          = "CREATE UNIQUE INDEX jobu_runs_schedule_owned_non_terminal_uidx ON jobu_runs(job_id) "
-                        "WHERE schedule_owned = 1 AND state IN ('scheduled', 'running', 'retry_wait')",                                                                     .column_probe = {},
+                        "WHERE schedule_owned = 1 AND state IN ('scheduled', 'running', 'retry_wait')", .column_probe = {},
+                         },
+    detail::SchemaObject{
+                         .kind          = detail::SchemaObjectKind::Index,
+                         .name          = "jobu_runs_planned_id_idx",
+                         .owner         = "jobu_runs",
+                         .ddl           = "CREATE INDEX jobu_runs_planned_id_idx ON jobu_runs(planned_at_us DESC, id DESC)",
+                         .column_probe  = {},
+                         .index_columns = planned_columns,
+                         },
+    detail::SchemaObject{
+                         .kind  = detail::SchemaObjectKind::Index,
+                         .name  = "jobu_runs_queue_planned_id_idx",
+                         .owner = "jobu_runs",
+                         .ddl   = "CREATE INDEX jobu_runs_queue_planned_id_idx ON jobu_runs(queue_id, planned_at_us DESC, id DESC)",
+                         .column_probe  = {},
+                         .index_columns = queue_planned_columns,
+                         },
+    detail::SchemaObject{
+                         .kind          = detail::SchemaObjectKind::Index,
+                         .name          = "jobu_runs_job_planned_id_idx",
+                         .owner         = "jobu_runs",
+                         .ddl           = "CREATE INDEX jobu_runs_job_planned_id_idx ON jobu_runs(job_id, planned_at_us DESC, id DESC)",
+                         .column_probe  = {},
+                         .index_columns = job_planned_columns,
                          },
 };
 
 enum class FailurePhase : std::uint8_t {
     Precondition,
     Creation,
+    Upgrade,
     Validation,
 };
 
@@ -330,6 +372,11 @@ auto schema_error(FailurePhase phase, std::string_view context = {}, jb::core::E
             error.category = jb::core::ErrorCategory::Internal;
             error.code     = "jobu.schema.create_failed";
             error.message  = "The JobU database schema could not be created";
+            break;
+        case FailurePhase::Upgrade:
+            error.category = jb::core::ErrorCategory::Internal;
+            error.code     = "jobu.schema.upgrade_failed";
+            error.message  = "The JobU database schema could not be upgraded";
             break;
         case FailurePhase::Validation:
             error.category = jb::core::ErrorCategory::Internal;
@@ -627,9 +674,90 @@ auto validate_foreign_keys(jb::db::Database& database, FailurePhase phase) -> Vo
     return VoidResult::success();
 }
 
-auto validate_schema_v1(jb::db::Database& database, FailurePhase phase) -> VoidResult
+// Inspect SQLite metadata rather than matching SQL text: spelling and whitespace are not index semantics.
+auto validate_history_index(jb::db::Database& database, detail::SchemaObject const& object, FailurePhase phase)
+    -> VoidResult
 {
-    for (auto const& object : schema_objects) {
+    if (object.index_columns.empty()) {
+        return VoidResult::success();
+    }
+
+    // A partial or unique index with the right columns still changes the promised history/insert behavior.
+    {
+        jb::db::Query query{database};
+        auto          prepared =
+            query.prepare(R"sql(SELECT "unique", partial FROM pragma_index_list(:owner) WHERE name = :name)sql");
+        if (!prepared) {
+            return schema_failure<void>(phase, object.name, &prepared.error());
+        }
+        auto owner_bound = query.bind_value(":owner", jb::db::make_text(object.owner));
+        if (!owner_bound) {
+            return schema_failure<void>(phase, object.name, &owner_bound.error());
+        }
+        auto name_bound = query.bind_value(":name", jb::db::make_text(object.name));
+        if (!name_bound) {
+            return schema_failure<void>(phase, object.name, &name_bound.error());
+        }
+        auto executed = query.exec();
+        if (!executed) {
+            return schema_failure<void>(phase, object.name, &executed.error());
+        }
+        auto next = query.next();
+        if (!next) {
+            return schema_failure<void>(phase, object.name, &next.error());
+        }
+        if (!*next || query.record().count() != 2 || query.value(0) != jb::db::Value{std::int64_t{0}} ||
+            query.value(1) != jb::db::Value{std::int64_t{0}}) {
+            return schema_failure<void>(phase, object.name);
+        }
+    }
+
+    jb::db::Query query{database};
+    auto          prepared =
+        query.prepare("SELECT name, desc, coll FROM pragma_index_xinfo(:name) WHERE key = 1 ORDER BY seqno");
+    if (!prepared) {
+        return schema_failure<void>(phase, object.name, &prepared.error());
+    }
+    auto bound = query.bind_value(":name", jb::db::make_text(object.name));
+    if (!bound) {
+        return schema_failure<void>(phase, object.name, &bound.error());
+    }
+    auto executed = query.exec();
+    if (!executed) {
+        return schema_failure<void>(phase, object.name, &executed.error());
+    }
+    std::size_t column = 0;
+    for (;;) {
+        auto next = query.next();
+        if (!next) {
+            return schema_failure<void>(phase, object.name, &next.error());
+        }
+        if (!*next) {
+            break;
+        }
+        if (column == object.index_columns.size() || query.record().count() != 3) {
+            return schema_failure<void>(phase, object.name);
+        }
+        auto const& expected   = object.index_columns[column];
+        auto const* name       = std::get_if<std::string>(&query.value(0));
+        auto const* descending = std::get_if<std::int64_t>(&query.value(1));
+        auto const* collation  = std::get_if<std::string>(&query.value(2));
+        if (name == nullptr || *name != expected.name || descending == nullptr ||
+            *descending != (expected.descending ? 1 : 0) || collation == nullptr || *collation != "BINARY") {
+            return schema_failure<void>(phase, object.name);
+        }
+        ++column;
+    }
+    if (column != object.index_columns.size()) {
+        return schema_failure<void>(phase, object.name);
+    }
+    return VoidResult::success();
+}
+
+auto validate_schema(jb::db::Database& database, std::span<detail::SchemaObject const> objects, FailurePhase phase)
+    -> VoidResult
+{
+    for (auto const& object : objects) {
         auto valid_object = validate_object(database, object, phase);
         if (!valid_object) {
             return valid_object;
@@ -638,46 +766,74 @@ auto validate_schema_v1(jb::db::Database& database, FailurePhase phase) -> VoidR
         if (!valid_columns) {
             return valid_columns;
         }
+        auto valid_index = validate_history_index(database, object, phase);
+        if (!valid_index) {
+            return valid_index;
+        }
     }
     return validate_foreign_keys(database, phase);
 }
 
-auto create_schema_v1(jb::db::Database& database, detail::CreationStepObserver observer) -> VoidResult
+auto create_objects(jb::db::Database&                     database,
+                    std::span<detail::SchemaObject const> objects,
+                    FailurePhase                          phase,
+                    detail::CreationStepObserver          observer) -> VoidResult
 {
-    auto completed_statements = std::size_t{0};
-    for (auto const& object : schema_objects) {
+    std::size_t completed_statements = 0;
+    for (auto const& object : objects) {
         {
             jb::db::Query query{database};
             auto          executed = query.exec(object.ddl);
             if (!executed) {
-                return schema_failure<void>(FailurePhase::Creation, object.name, &executed.error());
+                return schema_failure<void>(phase, object.name, &executed.error());
             }
         }
         ++completed_statements;
         if (observer != nullptr) {
             auto observed = observer(completed_statements, object.name);
             if (!observed) {
-                return schema_failure<void>(FailurePhase::Creation, object.name, &observed.error());
+                return schema_failure<void>(phase, object.name, &observed.error());
             }
+        }
+        auto validated = validate_history_index(database, object, phase);
+        if (!validated) {
+            return validated;
+        }
+    }
+    return VoidResult::success();
+}
+
+auto write_marker(jb::db::Database& database, FailurePhase phase) -> VoidResult
+{
+    {
+        jb::db::Query query{database};
+        auto prepared = query.prepare(phase == FailurePhase::Creation
+                                          ? "INSERT INTO jobu_schema(singleton, version) VALUES (:singleton, :version)"
+                                          : "UPDATE jobu_schema SET version = :version WHERE singleton = :singleton");
+        if (!prepared) {
+            return schema_failure<void>(phase, "jobu_schema version", &prepared.error());
+        }
+        auto singleton_bound = query.bind_value(":singleton", std::int64_t{1});
+        if (!singleton_bound) {
+            return schema_failure<void>(phase, "jobu_schema version", &singleton_bound.error());
+        }
+        auto version_bound = query.bind_value(":version", static_cast<std::int64_t>(current_schema_version));
+        if (!version_bound) {
+            return schema_failure<void>(phase, "jobu_schema version", &version_bound.error());
+        }
+        auto executed = query.exec();
+        if (!executed) {
+            return schema_failure<void>(phase, "jobu_schema version", &executed.error());
         }
     }
 
-    jb::db::Query query{database};
-    auto          prepared = query.prepare("INSERT INTO jobu_schema(singleton, version) VALUES (:singleton, :version)");
-    if (!prepared) {
-        return schema_failure<void>(FailurePhase::Creation, "jobu_schema version", &prepared.error());
+    // An accepted UPDATE must actually leave the singleton at the current version before committing indexes.
+    auto marker = inspect_marker(database);
+    if (!marker) {
+        return schema_failure<void>(phase, "jobu_schema version", &marker.error());
     }
-    auto singleton_bound = query.bind_value(":singleton", std::int64_t{1});
-    if (!singleton_bound) {
-        return schema_failure<void>(FailurePhase::Creation, "jobu_schema version", &singleton_bound.error());
-    }
-    auto version_bound = query.bind_value(":version", static_cast<std::int64_t>(current_schema_version));
-    if (!version_bound) {
-        return schema_failure<void>(FailurePhase::Creation, "jobu_schema version", &version_bound.error());
-    }
-    auto executed = query.exec();
-    if (!executed) {
-        return schema_failure<void>(FailurePhase::Creation, "jobu_schema version", &executed.error());
+    if (marker->kind != MarkerKind::Current) {
+        return schema_failure<void>(phase, "jobu_schema version");
     }
     return VoidResult::success();
 }
@@ -685,6 +841,11 @@ auto create_schema_v1(jb::db::Database& database, detail::CreationStepObserver o
 } // anonymous namespace
 
 namespace detail {
+
+auto schema_v1_object_manifest() noexcept -> std::span<SchemaObject const>
+{
+    return std::span{schema_objects}.first(version_one_object_count);
+}
 
 auto schema_object_manifest() noexcept -> std::span<SchemaObject const>
 {
@@ -711,7 +872,9 @@ auto ensure_schema_impl(jb::db::Database& database, CreationStepObserver observe
         return SchemaResult::failure(std::move(marker).error());
     }
 
-    auto created = false;
+    auto created  = false;
+    auto upgraded = false;
+    auto phase    = FailurePhase::Validation;
     if (marker->kind == MarkerKind::Absent) {
         auto user_object = find_unmarked_user_object(database);
         if (!user_object) {
@@ -723,11 +886,16 @@ auto ensure_schema_impl(jb::db::Database& database, CreationStepObserver observe
                                                        "The unmarked database already contains schema objects",
                                                        **user_object));
         }
-        auto created_schema = create_schema_v1(database, observer);
+        phase               = FailurePhase::Creation;
+        auto created_schema = create_objects(database, schema_objects, phase, observer);
         if (!created_schema) {
             return SchemaResult::failure(std::move(created_schema).error());
         }
-        auto validated = validate_schema_v1(database, FailurePhase::Creation);
+        auto marked = write_marker(database, phase);
+        if (!marked) {
+            return SchemaResult::failure(std::move(marked).error());
+        }
+        auto validated = validate_schema(database, schema_objects, phase);
         if (!validated) {
             return SchemaResult::failure(std::move(validated).error());
         }
@@ -739,11 +907,33 @@ auto ensure_schema_impl(jb::db::Database& database, CreationStepObserver observe
                                                    "The database schema is newer than this JobU version",
                                                    "jobu_schema"));
     }
+    else if (marker->kind == MarkerKind::Older && marker->version == 1) {
+        // Validate the old contract before any writes. All added indexes and the marker share this transaction.
+        auto valid_old = validate_schema(database, schema_v1_object_manifest(), FailurePhase::Validation);
+        if (!valid_old) {
+            return SchemaResult::failure(std::move(valid_old).error());
+        }
+        phase = FailurePhase::Upgrade;
+        auto added =
+            create_objects(database, std::span{schema_objects}.subspan(version_one_object_count), phase, observer);
+        if (!added) {
+            return SchemaResult::failure(std::move(added).error());
+        }
+        auto marked = write_marker(database, phase);
+        if (!marked) {
+            return SchemaResult::failure(std::move(marked).error());
+        }
+        auto validated = validate_schema(database, schema_objects, phase);
+        if (!validated) {
+            return SchemaResult::failure(std::move(validated).error());
+        }
+        upgraded = true;
+    }
     else if (marker->kind == MarkerKind::Malformed || marker->kind == MarkerKind::Older) {
         return schema_failure<SchemaStatus>(FailurePhase::Validation, "jobu_schema version");
     }
     else {
-        auto validated = validate_schema_v1(database, FailurePhase::Validation);
+        auto validated = validate_schema(database, schema_objects, phase);
         if (!validated) {
             return SchemaResult::failure(std::move(validated).error());
         }
@@ -751,11 +941,9 @@ auto ensure_schema_impl(jb::db::Database& database, CreationStepObserver observe
 
     auto committed = transaction.commit();
     if (!committed) {
-        return schema_failure<SchemaStatus>(created ? FailurePhase::Creation : FailurePhase::Validation,
-                                            "transaction commit",
-                                            &committed.error());
+        return schema_failure<SchemaStatus>(phase, "transaction commit", &committed.error());
     }
-    return SchemaResult::success({.version = current_schema_version, .created = created});
+    return SchemaResult::success({.version = current_schema_version, .created = created, .upgraded = upgraded});
 }
 
 } // namespace detail

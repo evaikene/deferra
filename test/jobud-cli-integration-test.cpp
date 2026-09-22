@@ -256,7 +256,7 @@ public:
                 SQLITE_OK);
         auto statement = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>{version, sqlite3_finalize};
         REQUIRE(sqlite3_step(version) == SQLITE_ROW);
-        REQUIRE(sqlite3_column_int(version, 0) == 1);
+        REQUIRE(sqlite3_column_int(version, 0) == 2);
         REQUIRE(sqlite3_step(version) == SQLITE_DONE);
     }
 
