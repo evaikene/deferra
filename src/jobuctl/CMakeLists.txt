@@ -8,6 +8,20 @@ configure_file(
     @ONLY
 )
 
+# Private implementation shared by the executable and direct command parsing tests.
+add_library(jobuctl-private STATIC
+    command_line_priv.cpp
+    command_helpers_priv.cpp
+    output_priv.cpp
+    session_priv.cpp
+    commands/system_commands.cpp
+    commands/queue_commands.cpp
+    commands/job_commands.cpp
+)
+target_include_directories(jobuctl-private PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_features(jobuctl-private PUBLIC cxx_std_20)
+target_link_libraries(jobuctl-private PUBLIC jobu)
+
 add_executable(${TARGET} main.cpp)
 
 target_include_directories(${TARGET}
@@ -17,4 +31,4 @@ target_include_directories(${TARGET}
 
 target_compile_features(${TARGET} PRIVATE cxx_std_20)
 
-target_link_libraries(${TARGET} PRIVATE jobu)
+target_link_libraries(${TARGET} PRIVATE jobuctl-private)
