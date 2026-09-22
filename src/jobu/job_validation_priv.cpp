@@ -1,8 +1,7 @@
 #include "job_validation_priv.hpp"
 
-#include "cli_job_payload_priv.hpp"
-#include "http_job_payload_priv.hpp"
 #include "json.hpp"
+#include "payload_template_priv.hpp"
 #include "text_validation_priv.hpp"
 
 #include <cstddef>
@@ -27,21 +26,8 @@ ValidatedJobPayload::ValidatedJobPayload(std::string serialized) noexcept
 
 auto job_payload_structure_issue(JobType type, jb::core::JsonValue const& payload) -> JobPayloadIssue
 {
-    if (!payload.is_object()) {
-        return JobPayloadIssue::NotObject;
-    }
-
-    switch (type) {
-        case JobType::Cli: {
-            auto decoded = decode_cli_job_payload(payload);
-            return decoded ? JobPayloadIssue::None : decoded.error();
-        }
-        case JobType::Http: {
-            auto decoded = decode_http_job_payload(payload);
-            return decoded ? JobPayloadIssue::None : decoded.error();
-        }
-    }
-    return JobPayloadIssue::UnknownType;
+    auto validated = validate_payload_template(type, payload);
+    return validated ? JobPayloadIssue::None : validated.error();
 }
 
 auto validate_and_serialize_job_payload(JobType type, jb::core::JsonValue const& payload)
@@ -105,6 +91,12 @@ auto job_payload_issue_text(JobPayloadIssue issue) noexcept -> std::string_view
             return "invalid_http_request";
         case JobPayloadIssue::InvalidJson:
             return "invalid_json";
+        case JobPayloadIssue::InvalidSecretReference:
+            return "invalid_secret_reference";
+        case JobPayloadIssue::InvalidSecretName:
+            return "invalid_secret_name";
+        case JobPayloadIssue::TooManySecretReferences:
+            return "too_many_secret_references";
         case JobPayloadIssue::TooLarge:
             return "too_large";
     }

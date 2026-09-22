@@ -6,7 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <string_view>
+#include <vector>
 
 namespace jb::net::detail {
 
@@ -206,7 +208,7 @@ auto validate_method(std::string_view method) -> std::string_view
     return {};
 }
 
-auto validate_headers(std::vector<HttpHeader> const& headers) -> std::string_view
+auto validate_headers(std::span<HttpHeaderFields const> headers) -> std::string_view
 {
     if (headers.size() > kMaximumHeaderCount) {
         return "headers.too_many";
@@ -218,7 +220,7 @@ auto validate_headers(std::vector<HttpHeader> const& headers) -> std::string_vie
         if (!is_token(header.name)) {
             return "headers.invalid_name";
         }
-        if (header.value.find_first_of("\r\n\0", 0U, 3U) != std::string::npos) {
+        if (header.value && header.value->find_first_of("\r\n\0", 0U, 3U) != std::string::npos) {
             return "headers.invalid_value";
         }
         if (std::ranges::any_of(kReservedHeaders,
@@ -234,10 +236,10 @@ auto validate_headers(std::vector<HttpHeader> const& headers) -> std::string_vie
             return "headers.too_large";
         }
         total_bytes += header.name.size();
-        if (header.value.size() > kMaximumHeaderBytes - total_bytes) {
+        if (header.value && header.value->size() > kMaximumHeaderBytes - total_bytes) {
             return "headers.too_large";
         }
-        total_bytes += header.value.size();
+        total_bytes += header.value ? header.value->size() : 0U;
     }
     return {};
 }
@@ -257,20 +259,37 @@ auto validate_http_url(std::string_view url) -> jb::core::Result<void, jb::core:
     return jb::core::Result<void, jb::core::Error>::success();
 }
 
+auto validate_http_request_fields(std::string_view                  method,
+                                  std::string_view                  url,
+                                  std::span<HttpHeaderFields const> headers,
+                                  bool                              has_body) -> jb::core::Result<void, jb::core::Error>
+{
+    if (auto const reason = validate_method(method); !reason.empty()) {
+        return invalid_request(reason);
+    }
+    auto validated_url = validate_http_url(url);
+    if (!validated_url) {
+        return validated_url;
+    }
+    if (auto const reason = validate_headers(headers); !reason.empty()) {
+        return invalid_request(reason);
+    }
+    if (method == "HEAD" && has_body) {
+        return invalid_request("body.head_forbidden");
+    }
+    return jb::core::Result<void, jb::core::Error>::success();
+}
+
 auto validate_http_request(HttpRequest const& request) -> jb::core::Result<void, jb::core::Error>
 {
-    if (auto const reason = validate_method(request.method); !reason.empty()) {
-        return invalid_request(reason);
+    auto fields = std::vector<HttpHeaderFields>{};
+    fields.reserve(request.headers.size());
+    for (auto const& header : request.headers) {
+        fields.push_back({.name = header.name, .value = header.value});
     }
-    auto url = validate_http_url(request.url);
-    if (!url) {
-        return url;
-    }
-    if (auto const reason = validate_headers(request.headers); !reason.empty()) {
-        return invalid_request(reason);
-    }
-    if (request.method == "HEAD" && request.body.has_value()) {
-        return invalid_request("body.head_forbidden");
+    auto validated = validate_http_request_fields(request.method, request.url, fields, request.body.has_value());
+    if (!validated) {
+        return validated;
     }
     if (request.timeout < std::chrono::milliseconds{1} || request.timeout > std::chrono::days{30}) {
         return invalid_request("timeout.out_of_range");

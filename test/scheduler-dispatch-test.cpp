@@ -70,7 +70,7 @@ auto dispatch_record(StandardAttributeRegistry const& registry) -> Record
          Field{"run_type", make_text("cli")},
          Field{"run_priority", std::int64_t{7}},
          Field{"run_attributes_json", make_text(materialized_attributes(registry))},
-         Field{"run_payload_json", make_text("{}")},
+         Field{"run_payload_json", make_text(R"({"command":"/test"})")},
          Field{"run_state", make_text("scheduled")},
          Field{"run_result_json", Null{}},
          Field{"job_queue_id", uuid_to_storage(id(3))},

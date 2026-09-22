@@ -47,6 +47,8 @@ target_sources(${TARGET}
         management.cpp
         management_json.cpp
         management_rpc.cpp
+        payload_template_priv.cpp
+        payload_template_priv.hpp
         queue_repository_priv.cpp
         queue_repository_priv.hpp
         queue_validation_priv.cpp

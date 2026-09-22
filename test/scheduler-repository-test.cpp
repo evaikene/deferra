@@ -195,7 +195,7 @@ void insert_run(Database& database, RunSpec const& run)
         "INSERT INTO jobu_runs(id, job_id, job_revision, queue_id, origin, schedule_owned, planned_at_us, "
         "runnable_at_us, started_at_us, completed_at_us, type, priority, attributes_json, payload_json, state, "
         "result_json) VALUES(:id, :job_id, 1, :queue_id, :origin, :schedule_owned, :planned_at_us, "
-        ":runnable_at_us, :started_at_us, NULL, :type, :priority, :attributes_json, '{}', :state, NULL)"));
+        ":runnable_at_us, :started_at_us, NULL, :type, :priority, :attributes_json, :payload_json, :state, NULL)"));
     REQUIRE(query.bind_value(":id", uuid_to_storage(run.id)));
     REQUIRE(query.bind_value(":job_id", uuid_to_storage(run.job_id)));
     REQUIRE(query.bind_value(":queue_id", uuid_to_storage(run.queue_id)));
@@ -214,6 +214,9 @@ void insert_run(Database& database, RunSpec const& run)
     REQUIRE(query.bind_value(":type", make_text(storage_text(run.type))));
     REQUIRE(query.bind_value(":priority", int32_to_storage(run.priority)));
     REQUIRE(query.bind_value(":attributes_json", make_text(run.attributes_json)));
+    auto payload = run.type == JobType::Cli ? std::string_view{R"({"command":"/test"})"}
+                                            : std::string_view{R"({"url":"https://example.test"})"};
+    REQUIRE(query.bind_value(":payload_json", make_text(payload)));
     REQUIRE(query.bind_value(":state", make_text(storage_text(run.state))));
     REQUIRE(query.exec());
 }

@@ -1,6 +1,7 @@
 #include "domain_storage_priv.hpp"
 
 #include "attribute_codec_priv.hpp"
+#include "job_validation_priv.hpp"
 #include "json.hpp"
 
 #include <algorithm>
@@ -553,6 +554,11 @@ auto read_job_run(jb::db::Record const& record, AttributeRegistry const& attribu
     auto payload = read_json(record, "run_payload_json", true, kMaximumJsonDocumentBytes);
     if (!payload) {
         return StorageResult<JobRun>::failure(std::move(payload).error());
+    }
+    // Immutable run snapshots must satisfy the same template contract as current definitions.
+    auto const payload_issue = job_payload_structure_issue(*type, *payload);
+    if (payload_issue != JobPayloadIssue::None) {
+        return StorageResult<JobRun>::failure(invalid_run(job_payload_issue_text(payload_issue)));
     }
     auto state = read_run_state(record, "run_state");
     if (!state) {

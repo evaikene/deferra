@@ -1623,3 +1623,65 @@ TEST_CASE("Job mutations signal fresh replayed and lifecycle success", "[jobu][j
     require_error(service.resume_job(job_id), ErrorCategory::Conflict, "jobu.job.deleted");
     CHECK(emissions == 10);
 }
+
+TEST_CASE("Job templates survive definition updates snapshots and idempotency replay", "[jobu][job][template]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              queue = service.create_queue({.name = "templates"});
+    REQUIRE(queue);
+
+    // Template admission and replay are structural operations, independent of secret storage or resolution.
+    auto original_payload = jb::core::parse_json(
+        R"({"command":"/bin/tool","arguments":[{"secret":"service.token"}],"future":{"secret":"ignored"}})");
+    REQUIRE(original_payload);
+    auto request = CreateJobRequest{.queue           = queue->id,
+                                    .type            = JobType::Cli,
+                                    .schedule        = once_at(UtcTimePoint{20s}),
+                                    .payload         = *original_payload,
+                                    .idempotency_key = "template-create"};
+    auto created = service.create_job(request);
+    REQUIRE(created);
+    CHECK(created->payload == *original_payload);
+
+    detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                  initial_run = runs.find_schedule_owned(created->id);
+    REQUIRE(initial_run);
+    REQUIRE(*initial_run);
+    CHECK((**initial_run).payload == *original_payload);
+
+    auto replacement =
+        jb::core::parse_json(R"({"url":"https://example.test/","method":"POST","body":{"secret":"request.bytes"}})");
+    REQUIRE(replacement);
+    auto updated = service.update_job({.job_id            = created->id,
+                                       .expected_revision = created->revision,
+                                       .type              = JobType::Http,
+                                       .payload           = *replacement});
+    REQUIRE(updated);
+    auto fetched = service.get_job(created->id);
+    REQUIRE(fetched);
+    CHECK(fetched->payload == *replacement);
+    auto refreshed_run = runs.find_schedule_owned(created->id);
+    REQUIRE(refreshed_run);
+    REQUIRE(*refreshed_run);
+    CHECK((**refreshed_run).payload == *replacement);
+
+    auto replay = service.create_job(request);
+    REQUIRE(replay);
+    CHECK(replay->id == created->id);
+    CHECK(replay->revision == created->revision);
+    CHECK(replay->payload == *original_payload);
+    CHECK(count_rows(fixture.database, "jobu_jobs") == 1);
+    CHECK(count_rows(fixture.database, "jobu_runs") == 1);
+    CHECK(count_rows(fixture.database, "jobu_secrets") == 0);
+
+    auto malformed = jb::core::parse_json(R"({"command":"/bin/tool","arguments":[{"secret":"private marker"}]})");
+    REQUIRE(malformed);
+    auto rejected = service.update_job(
+        {.job_id = created->id, .expected_revision = updated->revision, .type = JobType::Cli, .payload = *malformed});
+    auto error = require_error(rejected, ErrorCategory::InvalidArgument, "jobu.job.invalid_payload");
+    CHECK(error.detail == "reason=invalid_secret_name");
+    CHECK(error.message.find("private marker") == std::string::npos);
+}
