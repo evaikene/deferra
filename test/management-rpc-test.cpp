@@ -227,8 +227,7 @@ public:
         return take_response(*_device);
     }
 
-    [[nodiscard]] auto call_split_batch(std::string_view method, JsonValue const& params)
-        -> std::vector<ResponseEnvelope>
+    [[nodiscard]] auto call_batch(std::string_view method, JsonValue const& params) -> std::vector<ResponseEnvelope>
     {
         auto batch = make_json(JsonValue::Array{
             encode_request(_next_id++, method, params),
@@ -239,18 +238,15 @@ public:
         StreamFramer framer{_framing_limits};
         auto         bodies = framer.append(_device->take_written_data());
         REQUIRE(bodies);
-        REQUIRE(bodies->size() == 2U);
+        REQUIRE(bodies->size() == 1U);
 
-        auto responses = std::vector<ResponseEnvelope>{};
-        for (auto const& body : *bodies) {
-            auto parsed = parse_json(body);
-            REQUIRE(parsed);
-            auto decoded = decode_response_document(*parsed);
-            REQUIRE(decoded);
-            REQUIRE(decoded->entries.size() == 1U);
-            responses.push_back(std::move(decoded->entries.front()));
-        }
-        return responses;
+        auto parsed = parse_json(bodies->front());
+        REQUIRE(parsed);
+        auto decoded = decode_response_document(*parsed);
+        REQUIRE(decoded);
+        REQUIRE(decoded->kind == ResponseDocumentKind::Batch);
+        REQUIRE(decoded->entries.size() == 2U);
+        return std::move(decoded->entries);
     }
 
     void call_losing_response(std::string_view method, JsonValue const& params)
@@ -462,12 +458,13 @@ TEST_CASE("Management RPC reports oversized results without closing the stream",
                               "resource_exhausted",
                               "jobu.response.too_large");
 
-    auto batch_responses = endpoint.call_split_batch("queue.get", encode_selector(queue_id));
+    auto batch_responses = endpoint.call_batch("queue.get", encode_selector(queue_id));
     REQUIRE(batch_responses.size() == 2U);
     CHECK(batch_responses[0].id == RequestId{std::uint64_t{2}});
     CHECK(batch_responses[1].id == RequestId{std::uint64_t{3}});
     for (auto const& response : batch_responses) {
-        require_application_error(response, "resource_exhausted", "jobu.response.too_large");
+        require_standard_error(response, ErrorCode::InternalError);
+        CHECK(require_error(response).message == "Batch response too large");
     }
 
     require_application_error(endpoint.call("queue.get", encode_selector(sequence_id(99))),

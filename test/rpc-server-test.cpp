@@ -707,16 +707,20 @@ TEST_CASE("Server preserves JSON-RPC batch response shapes and order", "[rpc][se
     CHECK(require_error(require_response(values.front())).code == static_cast<std::int64_t>(ErrorCode::InvalidRequest));
 }
 
-TEST_CASE("Server splits batch responses that exceed the body limit", "[rpc][server][batch]")
+TEST_CASE("Server preserves batch response shape when results exceed the body limit", "[rpc][server][batch]")
 {
     Application app{0, nullptr};
     auto        options            = ServerOptions{};
     options.framing.max_body_bytes = 256U;
     Server server{options};
 
-    auto const result = make_json(std::string(100U, 'x'));
-    REQUIRE(
-        server.register_method("value", [&result](auto const&, auto const&) { return MethodResult::success(result); }));
+    auto const result  = make_json(std::string(140U, 'x'));
+    auto       calls   = 0;
+    auto       handler = [&result, &calls](auto const&, auto const&) {
+        ++calls;
+        return MethodResult::success(result);
+    };
+    REQUIRE(server.register_method("value", handler));
     auto connection = attach(server);
 
     auto requests       = make_json(JsonValue::Array{
@@ -733,20 +737,53 @@ TEST_CASE("Server splits batch responses that exceed the body limit", "[rpc][ser
 
     connection.device->inject_input(encode_frame(requests, options.framing));
     auto values = take_values(*connection.device);
-    REQUIRE(values.size() == 2U);
-    for (auto index = std::size_t{0}; index < values.size(); ++index) {
-        auto response = require_response(values[index]);
+    REQUIRE(values.size() == 1U);
+    REQUIRE(values.front().is_array());
+    auto decoded = decode_response_document(values.front());
+    REQUIRE(decoded);
+    REQUIRE(decoded->entries.size() == 2U);
+    for (auto index = std::size_t{0}; index < decoded->entries.size(); ++index) {
+        auto const& response = decoded->entries[index];
         CHECK(response.id == RequestId{std::uint64_t{index + 1U}});
-        CHECK(require_result(response) == result);
-        auto body = serialize_json(values[index]);
-        REQUIRE(body);
-        CHECK(body->size() <= options.framing.max_body_bytes);
+        CHECK(require_error(response).code == static_cast<std::int64_t>(ErrorCode::InternalError));
+        CHECK(require_error(response).message == "Batch response too large");
     }
+    CHECK(calls == 2);
 
     connection.device->inject_input(request_frame(std::uint64_t{3}, "value", std::nullopt, options.framing));
     values = take_values(*connection.device);
     REQUIRE(values.size() == 1U);
     CHECK(require_response(values.front()).id == RequestId{std::uint64_t{3}});
+    CHECK(calls == 3);
+
+    auto oversized_batch = JsonValue::Array{};
+    for (auto request_id = std::uint64_t{4}; request_id <= 7U; ++request_id) {
+        oversized_batch.push_back(encode_request(request_id, "value"));
+    }
+    connection.device->inject_input(encode_frame(make_json(oversized_batch), options.framing));
+    values = take_values(*connection.device);
+    REQUIRE(values.size() == 1U);
+    CHECK(values.front().is_object());
+    auto rejected = require_response(values.front());
+    CHECK(rejected.id == RequestId{NullRequestId{}});
+    CHECK(require_error(rejected).code == static_cast<std::int64_t>(ErrorCode::InvalidRequest));
+    CHECK(calls == 3);
+
+    auto mixed = make_json(JsonValue::Array{
+        make_json(std::string{"invalid"}),
+        encode_request(std::uint64_t{8}, "value"),
+    });
+    connection.device->inject_input(encode_frame(mixed, options.framing));
+    values = take_values(*connection.device);
+    REQUIRE(values.size() == 1U);
+    decoded = decode_response_document(values.front());
+    REQUIRE(decoded);
+    REQUIRE(decoded->entries.size() == 2U);
+    CHECK(decoded->entries[0].id == RequestId{NullRequestId{}});
+    CHECK(require_error(decoded->entries[0]).code == static_cast<std::int64_t>(ErrorCode::InvalidRequest));
+    CHECK(decoded->entries[1].id == RequestId{std::uint64_t{8}});
+    CHECK(require_error(decoded->entries[1]).code == static_cast<std::int64_t>(ErrorCode::InternalError));
+    CHECK(calls == 4);
     CHECK(server.connection_count() == 1U);
 }
 

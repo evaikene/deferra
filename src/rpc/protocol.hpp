@@ -94,7 +94,7 @@ struct RequestContext {
     /// Identity and authentication context associated with the connection.
     OperationContext           operation;
     /// Maximum serialized success-result bytes that fit this request's ID and the configured response body limit.
-    /// Absent for notifications, which have no response. Oversized batch arrays are sent as individual response frames.
+    /// Absent for notifications, which have no response. Batch envelopes may impose an additional shared limit.
     std::optional<std::size_t> success_result_max_bytes;
 };
 

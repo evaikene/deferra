@@ -3,6 +3,7 @@
 #include "logging.hpp"
 #include "server_priv.hpp"
 
+#include <cstdint>
 #include <exception>
 #include <limits>
 #include <utility>
@@ -117,6 +118,15 @@ auto batch_fits_body(std::vector<JsonValue> const& responses, std::size_t limit)
     return true;
 }
 
+auto batch_limit_error_response(RequestId const& id) -> JsonValue
+{
+    return detail::encode_error_response(id,
+                                         {
+                                             .code    = static_cast<std::int64_t>(ErrorCode::InternalError),
+                                             .message = "Batch response too large",
+                                         });
+}
+
 } // anonymous namespace
 
 Server::Private::ConnectionState::ConnectionState(ConnectionId         connection_id,
@@ -226,18 +236,37 @@ void Server::Private::process_body(ConnectionId id, std::string const& body)
         return;
     }
 
-    auto document  = detail::decode_request_document(parsed.value(), options.max_batch_entries);
-    auto responses = dispatch_document(id, document);
-    for (auto const& response : responses) {
-        if (!connections.contains(id) || !write_response(id, response)) {
-            return;
-        }
+    auto document = detail::decode_request_document(parsed.value(), options.max_batch_entries);
+    auto response = dispatch_document(id, document);
+    if (response && connections.contains(id)) {
+        static_cast<void>(write_response(id, *response));
     }
 }
 
 auto Server::Private::dispatch_document(ConnectionId id, detail::RequestDocument const& document)
-    -> std::vector<JsonValue>
+    -> std::optional<JsonValue>
 {
+    auto bounded_errors = std::vector<JsonValue>{};
+    if (document.kind == detail::RequestDocumentKind::Batch) {
+        bounded_errors.reserve(document.entries.size());
+        for (auto const& entry : document.entries) {
+            if (std::holds_alternative<detail::InvalidRequest>(entry)) {
+                bounded_errors.push_back(
+                    detail::encode_error_response(NullRequestId{},
+                                                  detail::make_standard_error(ErrorCode::InvalidRequest)));
+            }
+            else if (auto const& request = std::get<detail::RequestEnvelope>(entry); request.id) {
+                bounded_errors.push_back(batch_limit_error_response(*request.id));
+            }
+        }
+
+        // Reject before running handlers if even a bounded response for every entry cannot fit.
+        if (!bounded_errors.empty() && !batch_fits_body(bounded_errors, options.framing.max_body_bytes)) {
+            return detail::encode_error_response(NullRequestId{},
+                                                 detail::make_standard_error(ErrorCode::InvalidRequest));
+        }
+    }
+
     auto responses = std::vector<JsonValue>{};
     responses.reserve(document.entries.size());
 
@@ -245,7 +274,7 @@ auto Server::Private::dispatch_document(ConnectionId id, detail::RequestDocument
         auto response = dispatch_entry(id, entry);
         auto iterator = connections.find(id);
         if (iterator == connections.end() || iterator->second.closing) {
-            return {};
+            return std::nullopt;
         }
         if (response) {
             responses.push_back(std::move(*response));
@@ -254,18 +283,20 @@ auto Server::Private::dispatch_document(ConnectionId id, detail::RequestDocument
 
     if (document.kind == detail::RequestDocumentKind::Batch) {
         if (responses.empty()) {
-            return {};
+            return std::nullopt;
         }
 
         if (batch_fits_body(responses, options.framing.max_body_bytes)) {
-            auto batch = detail::encode_batch(std::move(responses));
-            return {std::move(*batch)};
+            return detail::encode_batch(std::move(responses));
         }
 
-        // Individual envelopes retain their request IDs when the combined array cannot fit one frame.
-        return responses;
+        // Preserve the batch envelope and every response ID when full results exceed the shared limit.
+        return detail::encode_batch(std::move(bounded_errors));
     }
-    return responses;
+    if (responses.empty()) {
+        return std::nullopt;
+    }
+    return std::move(responses.front());
 }
 
 auto Server::Private::dispatch_entry(ConnectionId id, detail::RequestEntry const& entry) -> std::optional<JsonValue>
