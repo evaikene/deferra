@@ -88,6 +88,8 @@ target_sources(${TARGET}
         scheduler_repository_priv.hpp
         secret_provider_priv.cpp
         secret_provider_priv.hpp
+        secret_json.cpp
+        secret_rpc.cpp
         secret_repository_priv.cpp
         secret_repository_priv.hpp
         secret_service.cpp
@@ -125,7 +127,9 @@ target_sources(${TARGET}
         run.hpp
         scheduler.hpp
         secret.hpp
+        secret_json.hpp
         secret_provider.hpp
+        secret_rpc.hpp
         secret_service.hpp
         statistics.hpp
         statistics_service.hpp
