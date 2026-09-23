@@ -207,8 +207,9 @@ void require_application_error(ResponseEnvelope const& response, std::string_vie
 
 class RpcEndpoint {
 public:
-    explicit RpcEndpoint(ServiceFixture& fixture)
+    explicit RpcEndpoint(ServiceFixture& fixture, ServerOptions options = {})
         : _service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time}
+        , _server{options}
     {
         REQUIRE(register_management_methods(_server, _service, fixture.registry));
 
@@ -414,6 +415,27 @@ TEST_CASE("Management RPC notifies a committed mutation before response encoding
     CHECK(persisted.name == "encoding-failure");
     CHECK(std::get<std::int64_t>(persisted.defaults.at("retry.max_attempts").data) == 4);
     CHECK(rescans.request_count() == 1U);
+}
+
+TEST_CASE("Management RPC reports oversized results without closing the stream", "[jobu][management-rpc][sqlite]")
+{
+    Application    app{0, nullptr};
+    auto const     queue_id = sequence_id(1);
+    ServiceFixture fixture{{queue_id}};
+    auto           options         = ServerOptions{};
+    options.framing.max_body_bytes = 256;
+    RpcEndpoint endpoint{fixture, options};
+
+    auto created = endpoint.service().create_queue({.name = std::string(128, 'q')});
+    REQUIRE(created);
+    CHECK(created->id == queue_id);
+
+    require_application_error(endpoint.call("queue.get", encode_selector(queue_id)),
+                              "resource_exhausted",
+                              "jobu.response.too_large");
+    require_application_error(endpoint.call("queue.get", encode_selector(sequence_id(99))),
+                              "not_found",
+                              "jobu.queue.not_found");
 }
 
 TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "[jobu][management-rpc][sqlite]")

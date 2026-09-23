@@ -32,6 +32,9 @@ class ManagementService;
 ///
 /// A successful mutating service call emits ManagementService::mutation_committed before the adapter begins response
 /// encoding. The adapter does not own a second mutation-notification mechanism.
+/// A success result that exceeds the configured RPC body limit with its actual envelope returns
+/// `jobu.response.too_large` (ResourceExhausted) for that operation. A committed mutation remains durable; callers
+/// should reconcile with an idempotency replay or a get request when they cannot observe its full result.
 ///
 /// The function stops at the first rejected Server registration. Earlier registrations remain installed; callers must
 /// discard the partially configured Server instead of listening with an incomplete capability set.

@@ -265,6 +265,19 @@ auto Server::Private::dispatch_entry(ConnectionId id, detail::RequestEntry const
         .operation     = iterator->second.operation,
     };
 
+    if (request.id) {
+        auto empty_result = JsonValue{.data = jb::core::JsonNull{}};
+        auto envelope     = detail::encode_success_response(*request.id, empty_result);
+        auto serialized   = serialize_json(envelope);
+        if (!serialized) {
+            return internal_error_response(*request.id);
+        }
+        // Subtract the four bytes of JSON null. This accounts for escaped IDs and the exact envelope shape.
+        auto const overhead              = serialized->size() - std::size_t{4};
+        auto const limit                 = options.framing.max_body_bytes;
+        context.success_result_max_bytes = overhead <= limit ? limit - overhead : 0;
+    }
+
     try {
         auto result = handler(context, request.params);
 
