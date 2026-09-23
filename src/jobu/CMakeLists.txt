@@ -35,6 +35,12 @@ target_sources(${TARGET}
         http_job_payload_priv.hpp
         http_retry_priv.cpp
         http_retry_priv.hpp
+        history_cursor_priv.cpp
+        history_cursor_priv.hpp
+        history_json.cpp
+        history_scalar_codec_priv.cpp
+        history_scalar_codec_priv.hpp
+        history_service.cpp
         idempotency_codec_priv.cpp
         idempotency_codec_priv.hpp
         idempotency_repository_priv.cpp
@@ -93,6 +99,9 @@ target_sources(${TARGET}
         attribute.hpp
         attribute_registry.hpp
         cron.hpp
+        history.hpp
+        history_json.hpp
+        history_service.hpp
         job.hpp
         jobu.hpp
         management.hpp
