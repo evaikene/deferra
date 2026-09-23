@@ -3,7 +3,8 @@
 ///
 #pragma once
 
-#include "attempt.hpp"
+#include "attempt_executor.hpp"
+#include "byte_buffer.hpp"
 #include "run.hpp"
 
 #include <cstddef>
@@ -152,6 +153,68 @@ struct AttemptPage {
     std::vector<AttemptSummary> items;
     /// Server-owned continuation when more attempts may remain.
     std::optional<std::string>  next_cursor;
+};
+
+/// Public output channel names. HTTP body/headers use the same durable slots as CLI stdout/stderr.
+enum class OutputChannel : std::uint8_t {
+    Stdout,
+    Stderr,
+    Body,
+    Headers
+};
+
+/// Availability of one retained channel at the time of the read.
+enum class OutputStatus : std::uint8_t {
+    Available,
+    Pending,
+    NotCaptured,
+    Lost
+};
+
+/// Wire representation selected for the returned slice; typed data remains raw bytes.
+enum class OutputEncoding : std::uint8_t {
+    Utf8,
+    Base64
+};
+
+/// Requests up to 65,536 raw retained bytes from one attempt channel.
+/// Offset addresses retained bytes, including a retained suffix after truncation, rather than original stream offsets.
+struct AttemptOutputRequest {
+    /// Positive attempt identity.
+    AttemptKey    attempt;
+    /// Stdout/stderr for CLI, or body/headers for HTTP.
+    OutputChannel channel{OutputChannel::Stdout};
+    /// Zero-based retained-byte offset; the retained length itself requests EOF.
+    std::uint64_t offset{0};
+    /// Maximum raw bytes to return, from 1 through 65,536.
+    std::size_t   limit{std::size_t{16} * 1024U};
+};
+
+/// One immutable retained-output slice and its durable availability evidence.
+/// `data` owns raw bytes; the JSON codec represents them as UTF-8 text or padded base64 according to `encoding`.
+/// Lost capture may still have retained bytes. Unknown observation counts remain absent, including after recovery.
+struct AttemptOutputChunk {
+    /// Requested attempt and channel.
+    AttemptKey                   attempt;
+    OutputChannel                channel{OutputChannel::Stdout};
+    /// Availability based on attempt state, output rows, and explicit loss evidence.
+    OutputStatus                 status{OutputStatus::Pending};
+    /// Requested retained-byte offset and actual raw-byte count.
+    std::uint64_t                offset{0};
+    std::size_t                  bytes_returned{0};
+    /// Next retained-byte offset, absent at EOF or when no bytes are available.
+    std::optional<std::uint64_t> next_offset;
+    /// Retained channel size, excluding omitted content.
+    std::uint64_t                retained_bytes{0};
+    /// Observed stream size and omitted count, only when trustworthy.
+    std::optional<std::uint64_t> total_bytes;
+    std::optional<std::uint64_t> omitted_bytes;
+    /// Explicit truncation and capture-loss evidence; neither implies that absent data was captured successfully.
+    bool                         truncated{false};
+    bool                         capture_lost{false};
+    /// Chosen wire encoding and raw bytes that callers may concatenate without text decoding.
+    OutputEncoding               encoding{OutputEncoding::Utf8};
+    jb::core::ByteBuffer         data;
 };
 
 } // namespace jb::jobu

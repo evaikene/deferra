@@ -7,7 +7,10 @@
 #include "json.hpp"
 #include "object_priv.hpp"
 #include "storage_failure_priv.hpp"
+#include "text_validation_priv.hpp"
 
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -20,8 +23,11 @@ using ServiceResult = jb::core::Result<T, jb::core::Error>;
 constexpr std::size_t result_budget_bytes = std::size_t{512} * 1024U;
 // The complete page wrapper and a UUID cursor use less than this reserve.
 constexpr std::size_t page_wrapper_bytes  = 128;
+constexpr std::size_t maximum_output_slice_bytes =
+    65'536;
 
-auto error(jb::core::ErrorCategory category, std::string_view code, std::string_view message) -> jb::core::Error
+    auto
+    error(jb::core::ErrorCategory category, std::string_view code, std::string_view message) -> jb::core::Error
 {
     return {.category = category, .code = std::string{code}, .message = std::string{message}};
 }
@@ -67,6 +73,109 @@ auto valid_query(jb::jobu::RunQuery const& query) -> bool
 auto valid_query(jb::jobu::AttemptQuery const& query) -> bool
 {
     return jb::jobu::attempt_list_request_to_json(jb::jobu::AttemptListRequest{query}).has_value();
+}
+
+auto valid_output_request(jb::jobu::AttemptOutputRequest const& request) -> bool
+{
+    auto const maximum_sql_offset = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() - 1);
+    return request.attempt.attempt_number > 0 && request.limit >= 1 && request.limit <= maximum_output_slice_bytes &&
+           request.offset <= maximum_sql_offset;
+}
+
+auto persisted_output_error(std::string_view reason) -> jb::core::Error
+{
+    return {.category = jb::core::ErrorCategory::Internal,
+            .code     = "jobu.storage.invariant",
+            .message  = "Persisted output metadata is invalid",
+            .detail   = std::string{reason}};
+}
+
+auto observed_count(jb::core::JsonValue const& value) -> std::optional<std::uint64_t>
+{
+    if (value.is_uint()) {
+        return value.as_uint();
+    }
+    if (value.is_int() && value.as_int() >= 0) {
+        return static_cast<std::uint64_t>(value.as_int());
+    }
+    return std::nullopt;
+}
+
+auto channel_metadata_name(jb::jobu::OutputChannel channel) -> std::string_view
+{
+    switch (channel) {
+        case jb::jobu::OutputChannel::Stdout:
+            return "stdout";
+        case jb::jobu::OutputChannel::Stderr:
+            return "stderr";
+        case jb::jobu::OutputChannel::Body:
+            return "body";
+        case jb::jobu::OutputChannel::Headers:
+            return "headers";
+    }
+    return {};
+}
+
+struct CaptureEvidence {
+    std::optional<std::uint64_t> total_bytes;
+    std::optional<std::uint64_t> captured_bytes;
+    bool                         truncated{false};
+    bool                         capture_lost{false};
+};
+
+auto capture_evidence(jb::jobu::detail::OutputRead const& read, jb::jobu::OutputChannel channel)
+    -> ServiceResult<CaptureEvidence>
+{
+    auto evidence = CaptureEvidence{};
+    if (!read.attempt.result) {
+        return ServiceResult<CaptureEvidence>::success(evidence);
+    }
+    auto const& result = read.attempt.result->as_object();
+    if (auto found = result.find("capture_lost"); found != result.end()) {
+        if (!found->second.is_bool()) {
+            return ServiceResult<CaptureEvidence>::failure(persisted_output_error("invalid_capture_loss"));
+        }
+        evidence.capture_lost = found->second.as_bool();
+    }
+
+    auto const expected_type = read.type == jb::jobu::JobType::Cli ? std::string_view{"cli"} : std::string_view{"http"};
+    if (auto found = result.find("type");
+        found != result.end() && (!found->second.is_string() || found->second.as_string() != expected_type)) {
+        return ServiceResult<CaptureEvidence>::failure(persisted_output_error("mismatched_result_type"));
+    }
+
+    auto const name  = channel_metadata_name(channel);
+    auto const found = result.find(name);
+    if (found == result.end()) {
+        return ServiceResult<CaptureEvidence>::success(evidence);
+    }
+    if (!found->second.is_object()) {
+        return ServiceResult<CaptureEvidence>::failure(persisted_output_error("invalid_channel_metadata"));
+    }
+    auto const& object    = found->second.as_object();
+    auto const  total     = object.find("total_bytes");
+    auto const  captured  = object.find("captured_bytes");
+    auto const  truncated = object.find("truncated");
+    if (total == object.end() || captured == object.end() || truncated == object.end() ||
+        !truncated->second.is_bool()) {
+        return ServiceResult<CaptureEvidence>::failure(persisted_output_error("incomplete_channel_metadata"));
+    }
+    evidence.total_bytes    = observed_count(total->second);
+    evidence.captured_bytes = observed_count(captured->second);
+    if (!evidence.total_bytes || !evidence.captured_bytes || *evidence.captured_bytes > *evidence.total_bytes) {
+        return ServiceResult<CaptureEvidence>::failure(persisted_output_error("invalid_channel_counts"));
+    }
+    evidence.truncated = truncated->second.as_bool();
+    if (evidence.truncated != (*evidence.captured_bytes < *evidence.total_bytes)) {
+        return ServiceResult<CaptureEvidence>::failure(persisted_output_error("inconsistent_truncation"));
+    }
+    if (read.channel_present && *evidence.captured_bytes != read.retained_bytes) {
+        return ServiceResult<CaptureEvidence>::failure(persisted_output_error("retained_count_mismatch"));
+    }
+    if (read.channel_present && evidence.truncated != read.truncated) {
+        return ServiceResult<CaptureEvidence>::failure(persisted_output_error("retained_truncation_mismatch"));
+    }
+    return ServiceResult<CaptureEvidence>::success(evidence);
 }
 
 } // namespace
@@ -312,6 +421,67 @@ auto HistoryService::list_attempts(AttemptListRequest const& request) -> Service
             page.next_cursor = std::move(next).value();
         }
         return ServiceResult<AttemptPage>::success(std::move(page));
+    });
+}
+
+auto HistoryService::read_output(AttemptOutputRequest const& request) -> ServiceResult<AttemptOutputChunk>
+{
+    auto* data = d_ptr<Private>();
+    return data->invoke<AttemptOutputChunk>(*this, [&] {
+        if (!valid_output_request(request)) {
+            return ServiceResult<AttemptOutputChunk>::failure(invalid_request());
+        }
+
+        auto found = data->repository.read_output(request);
+        if (!found) {
+            return ServiceResult<AttemptOutputChunk>::failure(std::move(found).error());
+        }
+        if (!found->has_value()) {
+            return ServiceResult<AttemptOutputChunk>::failure(
+                error(jb::core::ErrorCategory::NotFound, "jobu.attempt.not_found", "Attempt was not found"));
+        }
+        auto& read     = **found;
+        auto  evidence = capture_evidence(read, request.channel);
+        if (!evidence) {
+            return ServiceResult<AttemptOutputChunk>::failure(std::move(evidence).error());
+        }
+
+        auto chunk = AttemptOutputChunk{
+            .attempt        = request.attempt,
+            .channel        = request.channel,
+            .offset         = request.offset,
+            .retained_bytes = read.retained_bytes,
+            .truncated      = read.truncated || evidence->truncated,
+            .capture_lost   = read.capture_lost || evidence->capture_lost,
+        };
+        // Loss outranks a retained BLOB: recovery can persist an empty BLOB when capture is unknown.
+        if (read.attempt.state != AttemptState::Completed) {
+            chunk.status = OutputStatus::Pending;
+        }
+        else if (chunk.capture_lost) {
+            chunk.status = OutputStatus::Lost;
+        }
+        else if (read.channel_present) {
+            chunk.status = OutputStatus::Available;
+        }
+        else {
+            chunk.status = OutputStatus::NotCaptured;
+        }
+
+        // Never turn a missing observation into a measured zero or a fabricated omitted-byte count.
+        if (evidence->total_bytes && *evidence->total_bytes >= chunk.retained_bytes) {
+            chunk.total_bytes   = evidence->total_bytes;
+            chunk.omitted_bytes = *evidence->total_bytes - chunk.retained_bytes;
+        }
+        chunk.data           = std::move(read.bytes);
+        chunk.bytes_returned = chunk.data.size();
+        auto const end       = chunk.offset + chunk.bytes_returned;
+        if (end < chunk.retained_bytes) {
+            chunk.next_offset = end;
+        }
+        chunk.encoding =
+            detail::is_valid_utf8(jb::core::as_string_view(chunk.data)) ? OutputEncoding::Utf8 : OutputEncoding::Base64;
+        return ServiceResult<AttemptOutputChunk>::success(std::move(chunk));
     });
 }
 

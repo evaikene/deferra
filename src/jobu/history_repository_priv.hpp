@@ -20,6 +20,17 @@ namespace jb::jobu::detail {
 
 struct RunCursorKey;
 
+/// Evidence gathered without selecting an entire captured-output BLOB.
+struct OutputRead {
+    AttemptDetails       attempt;
+    JobType              type{JobType::Cli};
+    bool                 channel_present{false};
+    std::uint64_t        retained_bytes{0};
+    bool                 truncated{false};
+    bool                 capture_lost{false};
+    jb::core::ByteBuffer bytes;
+};
+
 /// Reads retained history through projections suited to each public view.
 /// The list queries never select attributes, payload, result, or output columns.
 class HistoryRepository final {
@@ -38,6 +49,10 @@ public:
     [[nodiscard]] auto
     list_attempts(AttemptQuery const& query, std::optional<AttemptNumber> before_number, std::size_t limit)
         -> jb::core::Result<std::vector<AttemptSummary>, jb::core::Error>;
+
+    /// Finishes metadata reads before projecting only the requested BLOB slice.
+    [[nodiscard]] auto read_output(AttemptOutputRequest const& request)
+        -> jb::core::Result<std::optional<OutputRead>, jb::core::Error>;
 
 private:
     jb::db::Database&        _database;
