@@ -25,6 +25,7 @@ class AttributeRegistry;
 class CronEngine;
 class ManagementService;
 class SecretService;
+class StatisticsService;
 } // namespace jb::jobu
 
 namespace jb::rpc {
@@ -90,6 +91,7 @@ private:
     struct Private;
     auto management() -> jb::jobu::ManagementService*;
     auto secrets() -> jb::jobu::SecretService*;
+    auto statistics() -> jb::jobu::StatisticsService*;
     auto scheduler() -> jb::jobu::Scheduler*;
     auto rpc_server() -> jb::rpc::Server*;
 };

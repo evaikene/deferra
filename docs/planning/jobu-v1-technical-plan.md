@@ -1066,6 +1066,7 @@ Exit criteria: kill/restart and write-failure end-to-end tests prove no job star
 - Implement all v1 RPC method families.
 - Add idempotent creation semantics and optimistic revisions.
 - Implement history filtering/cursors and separate output retrieval.
+- Provide retained-history counts and wall-clock-derived statistics, with runnable wait explicitly unavailable.
 - Complete command UX and machine-readable output mode.
 - Publish protocol documentation and a reusable C++ client API.
 
@@ -1074,7 +1075,7 @@ Exit criteria: all v1 administrative and application submission workflows are po
 ### Phase 9: Retention, observability, security, and packaging
 
 - Implement incremental 30-day cleanup.
-- Implement delay tracking/warnings and history-derived statistics.
+- Measure eligible-capacity runnable wait and implement delay warnings; add broader observability and rollups as needed.
 - Implement privilege dropping/root safeguards.
 - Finalize INI parsing/validation and safe defaults.
 - Add systemd unit and `launchd` plist.

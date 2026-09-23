@@ -89,6 +89,11 @@ target_sources(${TARGET}
         secret_repository_priv.cpp
         secret_repository_priv.hpp
         secret_service.cpp
+        statistics_cursor_priv.cpp
+        statistics_cursor_priv.hpp
+        statistics_repository_priv.cpp
+        statistics_repository_priv.hpp
+        statistics_service.cpp
         storage_failure_priv.cpp
         storage_failure_priv.hpp
         system_info.cpp
@@ -118,6 +123,8 @@ target_sources(${TARGET}
         secret.hpp
         secret_provider.hpp
         secret_service.hpp
+        statistics.hpp
+        statistics_service.hpp
         system_info.hpp
         system_info_rpc.hpp
         utc_timestamp.hpp

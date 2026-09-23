@@ -13,6 +13,7 @@
 #include "secret_provider_priv.hpp"
 #include "secret_service.hpp"
 #include "server.hpp"
+#include "statistics_service.hpp"
 #include "system_info.hpp"
 #include "system_info_rpc.hpp"
 
@@ -116,6 +117,9 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         if (secrets) {
             secrets->stop_mutations();
         }
+        if (statistics) {
+            statistics->shutdown();
+        }
         if (scheduler) {
             scheduler->shutdown();
         }
@@ -190,12 +194,14 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
                                                  scheduler_options(options));
         management = std::make_unique<ManagementService>(database, attributes, cron, uuid_generator, time_source);
         secrets    = std::make_unique<SecretService>(database, time_source);
+        statistics = std::make_unique<StatisticsService>(database, uuid_generator, time_source);
         listener   = std::make_unique<jb::net::LocalServer>();
         rpc        = std::make_unique<jb::rpc::Server>(std::move(rpc_options));
 
         scheduler->failed.connect(owner, [this](jb::core::Error const& error) { fail("scheduler", error); });
         management->failed.connect(owner, [this](jb::core::Error const& error) { fail("management", error); });
         secrets->failed.connect(owner, [this](jb::core::Error const& error) { fail("secrets", error); });
+        statistics->failed.connect(owner, [this](jb::core::Error const& error) { fail("statistics", error); });
         runners.http->failed.connect(owner, [this](jb::core::Error const& error) { fail("http", error); });
         management->mutation_committed.connect(scheduler.get(), [this] { scheduler->request_rescan(); });
         secrets->mutation_committed.connect(scheduler.get(), [this] { scheduler->request_rescan(); });
@@ -283,6 +289,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         runners.http.reset();
         rpc.reset();
         listener.reset();
+        statistics.reset();
         secrets.reset();
         management.reset();
         scheduler.reset();
@@ -308,6 +315,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
     std::unique_ptr<jb::jobu::Scheduler>         scheduler;
     std::unique_ptr<jb::jobu::ManagementService> management;
     std::unique_ptr<jb::jobu::SecretService>     secrets;
+    std::unique_ptr<jb::jobu::StatisticsService> statistics;
     std::unique_ptr<jb::net::LocalServer>        listener;
     std::unique_ptr<jb::rpc::Server>             rpc;
     jb::core::Connection                         admission;
@@ -392,6 +400,11 @@ auto DaemonRuntime::management() -> jb::jobu::ManagementService*
 auto DaemonRuntime::secrets() -> jb::jobu::SecretService*
 {
     return d_ptr<Private>()->secrets.get();
+}
+
+auto DaemonRuntime::statistics() -> jb::jobu::StatisticsService*
+{
+    return d_ptr<Private>()->statistics.get();
 }
 
 auto DaemonRuntime::scheduler() -> jb::jobu::Scheduler*
