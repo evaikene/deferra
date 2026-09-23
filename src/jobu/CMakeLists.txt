@@ -24,6 +24,8 @@ target_sources(${TARGET}
         cli_exit_policy_priv.hpp
         cli_job_payload_priv.cpp
         cli_job_payload_priv.hpp
+        control_json.cpp
+        control_rpc.cpp
         cron.cpp
         cron_expression_priv.cpp
         cron_expression_priv.hpp
@@ -107,6 +109,8 @@ target_sources(${TARGET}
         attempt_executor_group.hpp
         attribute.hpp
         attribute_registry.hpp
+        control_json.hpp
+        control_rpc.hpp
         cron.hpp
         history.hpp
         history_json.hpp

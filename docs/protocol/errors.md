@@ -61,3 +61,29 @@ There is no public secret-value read API.
 | `jobu.history.cursor_unavailable` | ResourceExhausted | The server could not issue a unique continuation token. The current query fails; the connection remains usable. |
 
 Neither error includes stored filters, SQL, or token internals. Cursor lifetime is fixed at five minutes from the initial page. Earlier eviction or server restart can invalidate it sooner.
+
+## Run controls and cron preview
+
+The following existing service and engine errors are now reachable through
+`job.run_now`, `run.cancel`, `schedule.validate`, and `schedule.next` as
+application error `-32000`. Its `data` contains only `category` and `code`;
+backend detail and submitted payloads are not echoed.
+
+| Code | Category | Meaning |
+| --- | --- | --- |
+| `jobu.run.manual_conflict` | Conflict | Run Now's manual barrier or eligible schedule condition is not satisfied. |
+| `jobu.idempotency.conflict` | Conflict | A retained key was reused with different canonical Run Now input. |
+| `jobu.run.not_found` | NotFound | Cancellation's run ID does not exist. |
+| `jobu.run.state_conflict` | Conflict | Cancellation found a run that is already terminal or otherwise cannot be cancelled. |
+| `jobu.scheduler.stopping` | Unavailable | Cancellation was rejected after fatal failure or shutdown. |
+| `jobu.schedule.invalid_expression` | InvalidArgument | Cron grammar is invalid or unsupported. |
+| `jobu.schedule.invalid_timezone` | InvalidArgument | The timezone name is invalid or unavailable. |
+| `jobu.schedule.invalid_count` | InvalidArgument | Preview count is outside 1–200. |
+| `jobu.schedule.no_future_occurrence` | InvalidArgument | No later occurrence exists in the bounded calendar search. |
+| `jobu.schedule.out_of_range` | ResourceExhausted | A requested occurrence cannot be represented. |
+| `jobu.response.too_large` | ResourceExhausted | An otherwise successful result does not fit the configured RPC body limit. A mutation may already have committed. |
+
+Malformed parameter shapes, wrong JSON types, and non-UTC `after` text return
+JSON-RPC invalid params (`-32602`) without application `data`. Cancellation
+storage failures pass through the scheduler's fatal gate; a poisoned rollback
+closes daemon admission before the handler returns its safe error.

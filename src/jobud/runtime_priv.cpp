@@ -1,6 +1,7 @@
 #include "runtime_priv.hpp"
 
 #include "connection.hpp"
+#include "control_rpc.hpp"
 #include "event_loop.hpp"
 #include "jobu_version_priv.hpp"
 #include "local_server.hpp"
@@ -210,13 +211,17 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         for (auto method : management_rpc_method_names()) {
             capabilities.emplace_back(method);
         }
+        for (auto method : control_rpc_method_names()) {
+            capabilities.emplace_back(method);
+        }
         auto info = SystemInfo{
             .daemon_version = std::string{jb::jobu::detail::project_version},
             .api_version    = {.major = 1, .minor = 2},
             .capabilities   = std::move(capabilities)
         };
         if (!register_system_info_method(*rpc, std::move(info)) ||
-            !register_management_methods(*rpc, *management, attributes)) {
+            !register_management_methods(*rpc, *management, attributes) ||
+            !register_control_methods(*rpc, *management, *scheduler, cron, attributes)) {
             fail("rpc_registration", runtime_error("jobud.rpc.registration_failed"));
             return false;
         }
