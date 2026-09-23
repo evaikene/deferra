@@ -1701,7 +1701,7 @@ TEST_CASE("Immediate creation persists the sampled UTC instant as ordinary sched
     auto              queue = service.create_queue({.name = "immediate"});
     REQUIRE(queue);
     REQUIRE(service.suspend_queue(queue->id));
-    fixture.time.set_utc(UtcTimePoint{123456789012ns});
+    fixture.time.set_utc(UtcTimePoint{std::chrono::duration_cast<UtcTimePoint::duration>(123456789012ns)});
 
     auto created =
         service.create_job({.queue = queue->id, .schedule = ImmediateSchedule{}, .payload = cli_payload("/bin/tool")});
@@ -1738,7 +1738,7 @@ TEST_CASE("Immediate create replay survives clock changes recovery and secret de
                                     .schedule        = ImmediateSchedule{},
                                     .payload         = *payload,
                                     .idempotency_key = "now-key"};
-    fixture.time.set_utc(UtcTimePoint{123456789012ns});
+    fixture.time.set_utc(UtcTimePoint{std::chrono::duration_cast<UtcTimePoint::duration>(123456789012ns)});
     auto created = service.create_job(request);
     REQUIRE(created);
     auto const original_time = UtcTimePoint{123456789us};
