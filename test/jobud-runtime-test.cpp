@@ -1002,11 +1002,16 @@ TEST_CASE("Daemon advertises and serves cron preview controls without changing A
         REQUIRE(cyclic);
         CHECK(rpc_result(endpoint.call("schedule.validate", *cyclic)).as_object().at("valid").as_bool());
 
-        auto const last_year = parse_utc_timestamp("9999-12-31T23:59:59Z");
-        REQUIRE(last_year);
+        // The clock's range ends before year 9999 on platforms with nanosecond time points.
+        auto last_time = UtcTimePoint::max();
+        if (!format_utc_timestamp(last_time)) {
+            auto last_wire_time = parse_utc_timestamp("9999-12-31T23:59:59Z");
+            REQUIRE(last_wire_time);
+            last_time = *last_wire_time;
+        }
         auto at_limit = schedule_next_request_to_json({
             .schedule = {.expression = "* * * * *", .timezone = "UTC"},
-            .after    = *last_year,
+            .after    = last_time,
             .count    = 1
         });
         REQUIRE(at_limit);
