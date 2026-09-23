@@ -299,7 +299,9 @@ public:
 
     /// Lists a bounded page using ascending UUID-byte keyset order.
     /// @param request Optional state/deletion filters and a limit from 1 through 200.
-    /// @return At most the requested number of queues and a cursor only when another row exists, or an Error.
+    /// @return At most the requested number of queues within the 512 KiB serialized result budget and an after-ID
+    /// continuation when more rows remain. An item too large for an otherwise empty page returns
+    /// `jobu.response.too_large` (ResourceExhausted) without stopping the service.
     ///
     [[nodiscard]] auto list_queues(QueueListRequest const& request) -> jb::core::Result<QueuePage, jb::core::Error>;
 
@@ -420,7 +422,9 @@ public:
     /// Lists a bounded page using ascending UUID-byte keyset order.
     /// @param request Optional queue/state/type/deletion filters and a limit from 1 through 200. A queue name is
     /// resolved exactly before listing; deleted queues require include_deleted.
-    /// @return At most the requested number of definitions and a cursor only when another row exists, or an Error.
+    /// @return At most the requested number of definitions within the 512 KiB serialized result budget and an after-ID
+    /// continuation when more rows remain. An item too large for an otherwise empty page returns
+    /// `jobu.response.too_large` (ResourceExhausted) without stopping the service.
     ///
     [[nodiscard]] auto list_jobs(JobListRequest const& request) -> jb::core::Result<JobPage, jb::core::Error>;
 

@@ -207,8 +207,10 @@ void require_application_error(ResponseEnvelope const& response, std::string_vie
 
 class RpcEndpoint {
 public:
-    explicit RpcEndpoint(ServiceFixture& fixture)
+    explicit RpcEndpoint(ServiceFixture& fixture, ServerOptions const& options = {})
         : _service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time}
+        , _server{options}
+        , _framing_limits{options.framing}
     {
         REQUIRE(register_management_methods(_server, _service, fixture.registry));
 
@@ -223,6 +225,29 @@ public:
     {
         _device->inject_input(request_frame(_next_id++, method, params));
         return take_response(*_device);
+    }
+
+    [[nodiscard]] auto call_batch(std::string_view first_method,
+                                  JsonValue const& first,
+                                  std::string_view second_method,
+                                  JsonValue const& second) -> ResponseDocument
+    {
+        auto batch = make_json(JsonValue::Array{
+            encode_request(_next_id++, first_method, first),
+            encode_request(_next_id++, second_method, second),
+        });
+        _device->inject_input(encode_frame(batch));
+
+        StreamFramer framer{_framing_limits};
+        auto         bodies = framer.append(_device->take_written_data());
+        REQUIRE(bodies);
+        REQUIRE(bodies->size() == 1U);
+
+        auto parsed = parse_json(bodies->front());
+        REQUIRE(parsed);
+        auto decoded = decode_response_document(*parsed);
+        REQUIRE(decoded);
+        return std::move(decoded).value();
     }
 
     void call_losing_response(std::string_view method, JsonValue const& params)
@@ -260,6 +285,7 @@ public:
 private:
     ManagementService _service;
     Server            _server;
+    FramingLimits     _framing_limits;
     MemoryIODevice*   _device{nullptr};
     std::uint64_t     _next_id{1};
 };
@@ -414,6 +440,86 @@ TEST_CASE("Management RPC notifies a committed mutation before response encoding
     CHECK(persisted.name == "encoding-failure");
     CHECK(std::get<std::int64_t>(persisted.defaults.at("retry.max_attempts").data) == 4);
     CHECK(rescans.request_count() == 1U);
+}
+
+TEST_CASE("Management RPC reports oversized results without closing the stream", "[jobu][management-rpc][sqlite]")
+{
+    Application    app{0, nullptr};
+    auto const     queue_id = sequence_id(1);
+    ServiceFixture fixture{{queue_id}};
+    auto           options            = ServerOptions{};
+    options.framing.max_body_bytes    = 256;
+    options.response_limit_error_code = "jobu.response.too_large";
+    RpcEndpoint endpoint{fixture, options};
+
+    auto created = endpoint.service().create_queue({.name = std::string(128, 'q')});
+    REQUIRE(created);
+    CHECK(created->id == queue_id);
+
+    require_application_error(endpoint.call("queue.get", encode_selector(queue_id)),
+                              "resource_exhausted",
+                              "jobu.response.too_large");
+
+    auto selector       = encode_selector(queue_id);
+    auto batch_response = endpoint.call_batch("queue.get", selector, "queue.get", selector);
+    CHECK(batch_response.kind == ResponseDocumentKind::Single);
+    REQUIRE(batch_response.entries.size() == 1U);
+    CHECK(batch_response.entries.front().id == RequestId{NullRequestId{}});
+    require_application_error(batch_response.entries.front(), "resource_exhausted", "jobu.response.too_large");
+
+    require_application_error(endpoint.call("queue.get", encode_selector(sequence_id(99))),
+                              "not_found",
+                              "jobu.queue.not_found");
+}
+
+TEST_CASE("Management RPC uses resource errors for oversized batch results", "[jobu][management-rpc][sqlite]")
+{
+    Application    app{0, nullptr};
+    auto const     queue_id = sequence_id(1);
+    ServiceFixture fixture{{queue_id}};
+    auto           options            = ServerOptions{};
+    options.framing.max_body_bytes    = 512;
+    options.response_limit_error_code = "jobu.response.too_large";
+    RpcEndpoint endpoint{fixture, options};
+
+    auto created = endpoint.service().create_queue({.name = std::string(128, 'q')});
+    REQUIRE(created);
+    auto selector = encode_selector(queue_id);
+    CHECK(decode_queue(endpoint.call("queue.get", selector), fixture.registry).id == queue_id);
+
+    auto batch_response = endpoint.call_batch("queue.get", selector, "queue.get", selector);
+    CHECK(batch_response.kind == ResponseDocumentKind::Batch);
+    REQUIRE(batch_response.entries.size() == 2U);
+    CHECK(batch_response.entries[0].id == RequestId{std::uint64_t{2}});
+    CHECK(batch_response.entries[1].id == RequestId{std::uint64_t{3}});
+    for (auto const& response : batch_response.entries) {
+        require_application_error(response, "resource_exhausted", "jobu.response.too_large");
+    }
+}
+
+TEST_CASE("Management RPC retains committed batch mutations after response exhaustion",
+          "[jobu][management-rpc][sqlite]")
+{
+    Application    app{0, nullptr};
+    auto const     queue_id = sequence_id(1);
+    ServiceFixture fixture{{queue_id}};
+    auto           options            = ServerOptions{};
+    options.framing.max_body_bytes    = 512;
+    options.response_limit_error_code = "jobu.response.too_large";
+    RpcEndpoint endpoint{fixture, options};
+
+    auto create         = encode_create(CreateQueueRequest{.name = std::string(128, 'a')}, fixture.registry);
+    auto selector       = encode_selector(queue_id);
+    auto batch_response = endpoint.call_batch("queue.create", create, "queue.get", selector);
+    CHECK(batch_response.kind == ResponseDocumentKind::Batch);
+    REQUIRE(batch_response.entries.size() == 2U);
+    CHECK(batch_response.entries[0].id == RequestId{std::uint64_t{1}});
+    CHECK(batch_response.entries[1].id == RequestId{std::uint64_t{2}});
+    for (auto const& response : batch_response.entries) {
+        require_application_error(response, "resource_exhausted", "jobu.response.too_large");
+    }
+
+    CHECK(decode_queue(endpoint.call("queue.get", selector), fixture.registry).name == std::string(128, 'a'));
 }
 
 TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "[jobu][management-rpc][sqlite]")

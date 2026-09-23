@@ -30,6 +30,11 @@ struct ServerOptions {
     jb::core::JsonLimits json;
     /// Maximum accepted entries in one request batch; defaults to 64, while zero rejects every non-empty batch.
     std::size_t          max_batch_entries{64};
+    /// Stable application error code for response-body exhaustion; defaults to `rpc.response.too_large`.
+    /// A batch whose full results cannot fit returns a single array of resource-exhaustion errors in request order;
+    /// handlers may already have completed. If even that array cannot fit, the batch is rejected before dispatch with
+    /// one null-ID resource-exhaustion error.
+    std::string          response_limit_error_code{"rpc.response.too_large"};
     /// Maximum simultaneously live connections; defaults to 128, while zero rejects every connection.
     std::size_t          max_connections{128};
     /// Maximum unacknowledged framed-output bytes per connection; defaults to 2 MiB, while zero permits no reply.

@@ -7,6 +7,7 @@
 #include "json.hpp"
 #include "result.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -89,9 +90,12 @@ using ConnectionId = std::uint64_t;
 /// Supplies connection and operation metadata to a method handler.
 struct RequestContext {
     /// Identifier of the connection on which the request arrived; zero is the unassigned default.
-    ConnectionId     connection_id{0};
+    ConnectionId               connection_id{0};
     /// Identity and authentication context associated with the connection.
-    OperationContext operation;
+    OperationContext           operation;
+    /// Maximum serialized success-result bytes that fit this request's ID and the configured response body limit.
+    /// Absent for notifications, which have no response. Batch envelopes may impose an additional shared limit.
+    std::optional<std::size_t> success_result_max_bytes;
 };
 
 /// Owning success value or represented RPC error returned synchronously by a method handler.

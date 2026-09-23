@@ -97,6 +97,36 @@ auto internal_error_response(RequestId const& id) -> JsonValue
     return detail::encode_error_response(id, detail::make_standard_error(ErrorCode::InternalError));
 }
 
+auto batch_fits_body(std::vector<JsonValue> const& responses, std::size_t limit) -> bool
+{
+    if (limit < 2U) {
+        return false;
+    }
+
+    auto remaining = limit - 2U; // Array brackets.
+    auto first     = true;
+    for (auto const& response : responses) {
+        auto       serialized = serialize_json(response);
+        auto const separator  = first ? 0U : 1U;
+        if (!serialized || separator > remaining || serialized->size() > remaining - separator) {
+            return false;
+        }
+        remaining -= separator + serialized->size();
+        first      = false;
+    }
+    return true;
+}
+
+auto batch_limit_error_response(RequestId const& id, std::string const& code) -> JsonValue
+{
+    return detail::encode_error_response(id,
+                                         application_error({
+                                             .category = ErrorCategory::ResourceExhausted,
+                                             .code     = code,
+                                             .message  = "Resource result exceeds the configured response limit",
+                                         }));
+}
+
 } // anonymous namespace
 
 Server::Private::ConnectionState::ConnectionState(ConnectionId         connection_id,
@@ -110,7 +140,7 @@ Server::Private::ConnectionState::ConnectionState(ConnectionId         connectio
 {}
 
 Server::Private::Private(ServerOptions server_options)
-    : options(server_options)
+    : options(std::move(server_options))
 {}
 
 void Server::Private::bind_owner(Server& server)
@@ -216,6 +246,26 @@ void Server::Private::process_body(ConnectionId id, std::string const& body)
 auto Server::Private::dispatch_document(ConnectionId id, detail::RequestDocument const& document)
     -> std::optional<JsonValue>
 {
+    auto bounded_errors = std::vector<JsonValue>{};
+    if (document.kind == detail::RequestDocumentKind::Batch) {
+        bounded_errors.reserve(document.entries.size());
+        for (auto const& entry : document.entries) {
+            if (std::holds_alternative<detail::InvalidRequest>(entry)) {
+                bounded_errors.push_back(
+                    detail::encode_error_response(NullRequestId{},
+                                                  detail::make_standard_error(ErrorCode::InvalidRequest)));
+            }
+            else if (auto const& request = std::get<detail::RequestEnvelope>(entry); request.id) {
+                bounded_errors.push_back(batch_limit_error_response(*request.id, options.response_limit_error_code));
+            }
+        }
+
+        // Reject before running handlers if even a bounded response for every entry cannot fit.
+        if (!bounded_errors.empty() && !batch_fits_body(bounded_errors, options.framing.max_body_bytes)) {
+            return batch_limit_error_response(NullRequestId{}, options.response_limit_error_code);
+        }
+    }
+
     auto responses = std::vector<JsonValue>{};
     responses.reserve(document.entries.size());
 
@@ -231,7 +281,16 @@ auto Server::Private::dispatch_document(ConnectionId id, detail::RequestDocument
     }
 
     if (document.kind == detail::RequestDocumentKind::Batch) {
-        return detail::encode_batch(std::move(responses));
+        if (responses.empty()) {
+            return std::nullopt;
+        }
+
+        if (batch_fits_body(responses, options.framing.max_body_bytes)) {
+            return detail::encode_batch(std::move(responses));
+        }
+
+        // Preserve the batch envelope and every response ID when full results exceed the shared limit.
+        return detail::encode_batch(std::move(bounded_errors));
     }
     if (responses.empty()) {
         return std::nullopt;
@@ -264,6 +323,19 @@ auto Server::Private::dispatch_entry(ConnectionId id, detail::RequestEntry const
         .connection_id = id,
         .operation     = iterator->second.operation,
     };
+
+    if (request.id) {
+        auto empty_result = JsonValue{.data = jb::core::JsonNull{}};
+        auto envelope     = detail::encode_success_response(*request.id, empty_result);
+        auto serialized   = serialize_json(envelope);
+        if (!serialized) {
+            return internal_error_response(*request.id);
+        }
+        // Subtract the four bytes of JSON null. This accounts for escaped IDs and the exact envelope shape.
+        auto const overhead              = serialized->size() - std::size_t{4};
+        auto const limit                 = options.framing.max_body_bytes;
+        context.success_result_max_bytes = overhead <= limit ? limit - overhead : 0;
+    }
 
     try {
         auto result = handler(context, request.params);
@@ -420,7 +492,7 @@ void Server::Private::retire_connection(ConnectionId id)
 }
 
 Server::Server(ServerOptions options, jb::core::Object* parent)
-    : Object(*new Private{options}, parent)
+    : Object(*new Private{std::move(options)}, parent)
 {
     // Bind only after Object is fully constructed so Private never receives a partially constructed Server.
     d_ptr<Private>()->bind_owner(*this);

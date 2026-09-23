@@ -1,5 +1,7 @@
 #include "management.hpp"
 
+#include "management_json.hpp"
+
 #include "attempt_repository_priv.hpp"
 #include "attribute_codec_priv.hpp"
 #include "attribute_registry.hpp"
@@ -34,6 +36,9 @@ using ServiceResult = jb::core::Result<T, jb::core::Error>;
 
 constexpr std::size_t kMaximumAttributeDocumentBytes = std::size_t{256} * 1024U;
 constexpr std::size_t kMaximumPageSize               = 200;
+constexpr std::size_t kListResultBudgetBytes         = std::size_t{512} * 1024U;
+// This exceeds the serialized page wrapper with one UUID continuation token.
+constexpr std::size_t kListWrapperReserveBytes       = 128;
 // JobRevision is unsigned publicly, but schema version 1 stores revisions in a positive signed 64-bit INTEGER.
 constexpr JobRevision kMaximumPersistedJobRevision = static_cast<JobRevision>(std::numeric_limits<std::int64_t>::max());
 
@@ -44,6 +49,51 @@ auto service_error(jb::core::ErrorCategory category, std::string_view code, std:
         .code     = std::string{code},
         .message  = std::string{message},
     };
+}
+
+auto response_too_large() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::ResourceExhausted,
+                         "jobu.response.too_large",
+                         "A resource cannot fit within the response limit");
+}
+
+auto invalid_stored_response() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::Internal,
+                         "jobu.storage.invariant",
+                         "Persisted resource cannot be encoded");
+}
+
+template <typename Item, typename Encode>
+auto fitting_page_items(std::vector<Item> const& items, std::size_t limit, Encode&& encode)
+    -> ServiceResult<std::size_t>
+{
+    auto bytes = kListWrapperReserveBytes;
+    auto count = std::size_t{0};
+    for (auto const& item : items) {
+        if (count == limit) {
+            break;
+        }
+
+        auto json = encode(item);
+        if (!json) {
+            return ServiceResult<std::size_t>::failure(invalid_stored_response());
+        }
+        auto serialized = jb::core::serialize_json(*json);
+        if (!serialized) {
+            return ServiceResult<std::size_t>::failure(invalid_stored_response());
+        }
+        if (serialized->size() + 1U > kListResultBudgetBytes - bytes) {
+            break;
+        }
+        bytes += serialized->size() + 1U;
+        ++count;
+    }
+    if (count == 0 && !items.empty()) {
+        return ServiceResult<std::size_t>::failure(response_too_large());
+    }
+    return ServiceResult<std::size_t>::success(count);
 }
 
 auto invalid_name() -> jb::core::Error
@@ -807,9 +857,19 @@ auto ManagementService::list_queues_impl(QueueListRequest const& request)
         return ServiceResult<QueuePage>::failure(data->repository_read_error(std::move(listed).error()));
     }
 
-    auto page = QueuePage{.items = std::move(listed).value()};
-    if (page.items.size() > request.page.limit) {
-        page.items.resize(request.page.limit);
+    auto page    = QueuePage{.items = std::move(listed).value()};
+    auto fitting = fitting_page_items(page.items, request.page.limit, [&](Queue const& queue) {
+        return queue_to_json(queue, data->attributes);
+    });
+    if (!fitting) {
+        auto failure = std::move(fitting).error();
+        if (failure.code == "jobu.storage.invariant") {
+            failure = data->persisted_error(std::move(failure));
+        }
+        return ServiceResult<QueuePage>::failure(std::move(failure));
+    }
+    if (page.items.size() > *fitting) {
+        page.items.resize(*fitting);
         page.next_after_id = page.items.back().id;
     }
     return ServiceResult<QueuePage>::success(std::move(page));
@@ -2132,9 +2192,19 @@ auto ManagementService::list_jobs_impl(JobListRequest const& request) -> jb::cor
         return ServiceResult<JobPage>::failure(data->repository_read_error(std::move(listed).error()));
     }
 
-    auto page = JobPage{.items = std::move(listed).value()};
-    if (page.items.size() > request.page.limit) {
-        page.items.resize(request.page.limit);
+    auto page    = JobPage{.items = std::move(listed).value()};
+    auto fitting = fitting_page_items(page.items, request.page.limit, [&](JobDefinition const& job) {
+        return job_to_json(job, data->attributes);
+    });
+    if (!fitting) {
+        auto failure = std::move(fitting).error();
+        if (failure.code == "jobu.storage.invariant") {
+            failure = data->persisted_error(std::move(failure));
+        }
+        return ServiceResult<JobPage>::failure(std::move(failure));
+    }
+    if (page.items.size() > *fitting) {
+        page.items.resize(*fitting);
         page.next_after_id = page.items.back().id;
     }
     return ServiceResult<JobPage>::success(std::move(page));

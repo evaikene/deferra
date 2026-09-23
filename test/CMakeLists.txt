@@ -318,6 +318,12 @@ if(TARGET jobu-sqlite)
     target_link_libraries(secret-service-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME secret-service-test COMMAND $<TARGET_FILE:secret-service-test>)
 
+    add_executable(history-service-test
+        history-service-test.cpp support/fault_database_driver.cpp
+        support/recovery_fixture.cpp support/temporary_directory.cpp)
+    target_link_libraries(history-service-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME history-service-test COMMAND $<TARGET_FILE:history-service-test>)
+
     # JobU SQLite-backed run, attempt, and output repository test
     set(TARGET "jobu-run-attempt-repository-test")
     add_executable(${TARGET}
