@@ -29,10 +29,12 @@ struct ServerOptions {
     /// Per-message JSON nesting limits; the default permits 64 nested containers.
     jb::core::JsonLimits json;
     /// Maximum accepted entries in one request batch; defaults to 64, while zero rejects every non-empty batch.
-    /// Batch responses remain arrays. If full results cannot fit, requests with IDs receive `InternalError` while
-    /// invalid elements retain `InvalidRequest`; handlers may already have completed. A batch whose bounded error array
-    /// cannot fit is rejected before dispatch with `InvalidRequest`.
     std::size_t          max_batch_entries{64};
+    /// Stable application error code for response-body exhaustion; defaults to `rpc.response.too_large`.
+    /// A batch whose full results cannot fit returns a single array of resource-exhaustion errors in request order;
+    /// handlers may already have completed. If even that array cannot fit, the batch is rejected before dispatch with
+    /// one null-ID resource-exhaustion error.
+    std::string          response_limit_error_code{"rpc.response.too_large"};
     /// Maximum simultaneously live connections; defaults to 128, while zero rejects every connection.
     std::size_t          max_connections{128};
     /// Maximum unacknowledged framed-output bytes per connection; defaults to 2 MiB, while zero permits no reply.

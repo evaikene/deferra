@@ -92,6 +92,17 @@ auto require_error(ResponseEnvelope const& response) -> RpcError const&
     return std::get<RpcError>(response.payload);
 }
 
+void require_response_limit_error(ResponseEnvelope const& response)
+{
+    auto const& error = require_error(response);
+    CHECK(error.code == static_cast<std::int64_t>(ErrorCode::ApplicationError));
+    REQUIRE(error.data);
+    REQUIRE(error.data->is_object());
+    auto const& data = error.data->as_object();
+    CHECK(data.at("category").as_string() == "resource_exhausted");
+    CHECK(data.at("code").as_string() == "rpc.response.too_large");
+}
+
 auto require_result(ResponseEnvelope const& response) -> JsonValue const&
 {
     REQUIRE(std::holds_alternative<JsonValue>(response.payload));
@@ -196,6 +207,7 @@ TEST_CASE("Server public defaults and object contract are stable", "[rpc][server
     CHECK(options.framing.max_body_bytes == std::size_t{1024} * 1024U);
     CHECK(options.json.max_depth == 64U);
     CHECK(options.max_batch_entries == 64U);
+    CHECK(options.response_limit_error_code == "rpc.response.too_large");
     CHECK(options.max_connections == 128U);
     CHECK(options.max_queued_output_bytes == std::size_t{2} * 1024U * 1024U);
 
@@ -711,10 +723,10 @@ TEST_CASE("Server preserves batch response shape when results exceed the body li
 {
     Application app{0, nullptr};
     auto        options            = ServerOptions{};
-    options.framing.max_body_bytes = 256U;
+    options.framing.max_body_bytes = 512U;
     Server server{options};
 
-    auto const result  = make_json(std::string(140U, 'x'));
+    auto const result  = make_json(std::string(410U, 'x'));
     auto       calls   = 0;
     auto       handler = [&result, &calls](auto const&, auto const&) {
         ++calls;
@@ -734,6 +746,9 @@ TEST_CASE("Server preserves batch response shape when results exceed the body li
     auto serialized     = serialize_json(expected_batch);
     REQUIRE(serialized);
     CHECK(serialized->size() > options.framing.max_body_bytes);
+    auto individual = serialize_json(encode_success_response(std::uint64_t{1}, result));
+    REQUIRE(individual);
+    CHECK(individual->size() <= options.framing.max_body_bytes);
 
     connection.device->inject_input(encode_frame(requests, options.framing));
     auto values = take_values(*connection.device);
@@ -745,8 +760,7 @@ TEST_CASE("Server preserves batch response shape when results exceed the body li
     for (auto index = std::size_t{0}; index < decoded->entries.size(); ++index) {
         auto const& response = decoded->entries[index];
         CHECK(response.id == RequestId{std::uint64_t{index + 1U}});
-        CHECK(require_error(response).code == static_cast<std::int64_t>(ErrorCode::InternalError));
-        CHECK(require_error(response).message == "Batch response too large");
+        require_response_limit_error(response);
     }
     CHECK(calls == 2);
 
@@ -766,7 +780,7 @@ TEST_CASE("Server preserves batch response shape when results exceed the body li
     CHECK(values.front().is_object());
     auto rejected = require_response(values.front());
     CHECK(rejected.id == RequestId{NullRequestId{}});
-    CHECK(require_error(rejected).code == static_cast<std::int64_t>(ErrorCode::InvalidRequest));
+    require_response_limit_error(rejected);
     CHECK(calls == 3);
 
     auto mixed = make_json(JsonValue::Array{
@@ -782,7 +796,7 @@ TEST_CASE("Server preserves batch response shape when results exceed the body li
     CHECK(decoded->entries[0].id == RequestId{NullRequestId{}});
     CHECK(require_error(decoded->entries[0]).code == static_cast<std::int64_t>(ErrorCode::InvalidRequest));
     CHECK(decoded->entries[1].id == RequestId{std::uint64_t{8}});
-    CHECK(require_error(decoded->entries[1]).code == static_cast<std::int64_t>(ErrorCode::InternalError));
+    require_response_limit_error(decoded->entries[1]);
     CHECK(calls == 4);
     CHECK(server.connection_count() == 1U);
 }

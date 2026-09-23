@@ -35,6 +35,8 @@ class ManagementService;
 /// A success result that exceeds the configured RPC body limit with its actual envelope returns
 /// `jobu.response.too_large` (ResourceExhausted) for that operation. A committed mutation remains durable; callers
 /// should reconcile with an idempotency replay or a get request when they cannot observe its full result.
+/// The server must use `jobu.response.too_large` as its response-limit error code so oversized batch outcomes retain
+/// that error identity. A batch rejected before dispatch has a null-ID error and executes no management handlers.
 ///
 /// The function stops at the first rejected Server registration. Earlier registrations remain installed; callers must
 /// discard the partially configured Server instead of listening with an incomplete capability set.

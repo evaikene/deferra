@@ -3,7 +3,6 @@
 #include "logging.hpp"
 #include "server_priv.hpp"
 
-#include <cstdint>
 #include <exception>
 #include <limits>
 #include <utility>
@@ -118,13 +117,14 @@ auto batch_fits_body(std::vector<JsonValue> const& responses, std::size_t limit)
     return true;
 }
 
-auto batch_limit_error_response(RequestId const& id) -> JsonValue
+auto batch_limit_error_response(RequestId const& id, std::string const& code) -> JsonValue
 {
     return detail::encode_error_response(id,
-                                         {
-                                             .code    = static_cast<std::int64_t>(ErrorCode::InternalError),
-                                             .message = "Batch response too large",
-                                         });
+                                         application_error({
+                                             .category = ErrorCategory::ResourceExhausted,
+                                             .code     = code,
+                                             .message  = "Resource result exceeds the configured response limit",
+                                         }));
 }
 
 } // anonymous namespace
@@ -140,7 +140,7 @@ Server::Private::ConnectionState::ConnectionState(ConnectionId         connectio
 {}
 
 Server::Private::Private(ServerOptions server_options)
-    : options(server_options)
+    : options(std::move(server_options))
 {}
 
 void Server::Private::bind_owner(Server& server)
@@ -256,14 +256,13 @@ auto Server::Private::dispatch_document(ConnectionId id, detail::RequestDocument
                                                   detail::make_standard_error(ErrorCode::InvalidRequest)));
             }
             else if (auto const& request = std::get<detail::RequestEnvelope>(entry); request.id) {
-                bounded_errors.push_back(batch_limit_error_response(*request.id));
+                bounded_errors.push_back(batch_limit_error_response(*request.id, options.response_limit_error_code));
             }
         }
 
         // Reject before running handlers if even a bounded response for every entry cannot fit.
         if (!bounded_errors.empty() && !batch_fits_body(bounded_errors, options.framing.max_body_bytes)) {
-            return detail::encode_error_response(NullRequestId{},
-                                                 detail::make_standard_error(ErrorCode::InvalidRequest));
+            return batch_limit_error_response(NullRequestId{}, options.response_limit_error_code);
         }
     }
 
@@ -493,7 +492,7 @@ void Server::Private::retire_connection(ConnectionId id)
 }
 
 Server::Server(ServerOptions options, jb::core::Object* parent)
-    : Object(*new Private{options}, parent)
+    : Object(*new Private{std::move(options)}, parent)
 {
     // Bind only after Object is fully constructed so Private never receives a partially constructed Server.
     d_ptr<Private>()->bind_owner(*this);

@@ -176,6 +176,9 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
     {
         using namespace jb::jobu;
 
+        auto rpc_options                      = jb::rpc::ServerOptions{};
+        rpc_options.response_limit_error_code = "jobu.response.too_large";
+
         // Recovery is complete. Establish all failure receivers before start() can dispatch synchronously.
         scheduler  = std::make_unique<Scheduler>(database,
                                                  attributes,
@@ -188,7 +191,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         management = std::make_unique<ManagementService>(database, attributes, cron, uuid_generator, time_source);
         secrets    = std::make_unique<SecretService>(database, time_source);
         listener   = std::make_unique<jb::net::LocalServer>();
-        rpc        = std::make_unique<jb::rpc::Server>();
+        rpc        = std::make_unique<jb::rpc::Server>(std::move(rpc_options));
 
         scheduler->failed.connect(owner, [this](jb::core::Error const& error) { fail("scheduler", error); });
         management->failed.connect(owner, [this](jb::core::Error const& error) { fail("management", error); });
