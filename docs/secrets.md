@@ -4,9 +4,12 @@ JobU stores named byte values separately from job payloads. A job refers to a na
 the scheduler resolves its current value immediately before each execution attempt.
 Job definitions, run snapshots, and idempotency records keep the original references.
 
-The C++ `SecretService` supports setting, listing metadata, and deleting secrets.
-Secret administration through JSON-RPC and `jobuctl` is planned but is not yet
-implemented. The examples below describe payload templates, not CLI commands.
+The C++ `SecretService` and the public JSON-RPC methods `secret.set`,
+`secret.list`, and `secret.delete` support setting, listing metadata, and
+deleting secrets. See [Secret administration methods](protocol/methods/secret.md)
+for wire requests and results. `jobuctl secret` commands are planned for a
+later Phase 8 stage. The examples below describe payload templates, not CLI
+commands.
 
 ## Values and references
 

@@ -135,6 +135,9 @@ auto expected_system_info(std::string_view version) -> std::string
                        "  run.cancel\n"
                        "  schedule.next\n"
                        "  schedule.validate\n"
+                       "  secret.delete\n"
+                       "  secret.list\n"
+                       "  secret.set\n"
                        "  system.info\n",
                        version);
 }

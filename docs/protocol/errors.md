@@ -1,10 +1,18 @@
 # Operation errors
 
 This page records implemented error identities as services are added. Secret
-operations currently exist through the C++ `SecretService`; secret RPC methods
-are not yet registered or advertised. Their wire codecs are a later stage.
+operations are available through the C++ `SecretService` and the registered
+`secret.set`, `secret.list`, and `secret.delete` RPC methods. See
+[secret method requests and results](methods/secret.md).
 
 ## Secret service
+
+Malformed RPC parameter shape, type, or encoding returns JSON-RPC invalid
+params (`-32602`) with no application data. Base64 size checks precede syntax
+validation: an apparently oversized value returns `jobu.secret.too_large`
+even if its base64 is also malformed. Other malformed base64 returns `-32602`.
+Secret operation errors use `-32000` and expose only safe `category` and
+`code` data.
 
 | Code | Category | Meaning |
 | --- | --- | --- |

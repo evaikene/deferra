@@ -12,6 +12,7 @@
 #include "protocol_priv.hpp"
 #include "query.hpp"
 #include "run_repository_priv.hpp"
+#include "secret_json.hpp"
 #include "secret_service.hpp"
 #include "server.hpp"
 #include "sqlite/sqlite_schema.hpp"
@@ -31,6 +32,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -934,7 +936,8 @@ TEST_CASE("Daemon secret failures gate management and retained completion persis
     }
 }
 
-TEST_CASE("Daemon secret writes request later scheduling without adding secret RPC capabilities")
+TEST_CASE("Daemon secret RPC capabilities follow registered handlers and preserve the API minor",
+          "[jobud][secret][rpc]")
 {
     RuntimeFixture fixture;
     auto           seeded = fixture.seed();
@@ -947,18 +950,44 @@ TEST_CASE("Daemon secret writes request later scheduling without adding secret R
         CHECK(fixture.record.starts.size() == 1);
         fixture.require_running(seeded);
 
-        auto  device = std::make_unique<MemoryIODevice>();
-        auto* peer   = device.get();
-        device->open();
-        REQUIRE(RuntimeTestAccess::rpc(*fixture.runtime)->add_connection(std::move(device)));
-        auto frame = jb::rpc::frame_message(R"({"jsonrpc":"2.0","method":"system.info","id":1,"params":{}})");
-        REQUIRE(frame);
-        peer->inject_input(*frame);
-        CHECK(peer->written_data().find("queue.create") != std::string::npos);
-        CHECK(peer->written_data().find("secret.set") == std::string::npos);
-        CHECK(peer->written_data().find("secret.list") == std::string::npos);
-        CHECK(peer->written_data().find("secret.delete") == std::string::npos);
+        RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
+        auto               info    = endpoint.call("system.info", JsonValue{.data = JsonValue::Object{}});
+        auto const&        fields  = rpc_result(info).as_object();
+        auto const&        methods = fields.at("capabilities").as_array();
+        CHECK(fields.at("api_version").as_object().at("minor").as_uint() == 2);
+        REQUIRE(methods.size() == 23U);
+        for (auto index = std::size_t{1}; index < methods.size(); ++index) {
+            CHECK(methods[index - 1U].as_string() < methods[index].as_string());
+        }
+        for (auto const* name : {"secret.set", "secret.list", "secret.delete"}) {
+            CHECK(RuntimeTestAccess::rpc(*fixture.runtime)->has_method(name));
+            CHECK(std::ranges::count_if(methods,
+                                        [name](JsonValue const& value) { return value.as_string() == name; }) == 1);
+        }
+        CHECK_FALSE(RuntimeTestAccess::rpc(*fixture.runtime)->has_method("secret.get"));
+
+        auto set_request = set_secret_request_to_json({
+            .name  = "rpc.token",
+            .value = {std::byte{0x00}, std::byte{0xff}}
+        });
+        REQUIRE(set_request);
+        auto set = endpoint.call("secret.set", *set_request);
+        CHECK(rpc_result(set).as_object().at("name").as_string() == "rpc.token");
+        auto listed = endpoint.call("secret.list", JsonValue{.data = JsonValue::Object{}});
+        CHECK_FALSE(rpc_result(listed).as_object().at("items").as_array().empty());
+        auto delete_request = secret_delete_request_to_json("rpc.token");
+        REQUIRE(delete_request);
+        auto removed = endpoint.call("secret.delete", *delete_request);
+        CHECK(rpc_result(removed).is_null());
+
         fixture.runtime->request_stop();
+        auto blocked_set = set_secret_request_to_json({.name = "blocked"});
+        REQUIRE(blocked_set);
+        check_application_error(endpoint.call("secret.set", *blocked_set), "unavailable", "jobu.service.stopping");
+        check_application_error(endpoint.call("secret.delete", *delete_request),
+                                "unavailable",
+                                "jobu.service.stopping");
+        CHECK(rpc_result(endpoint.call("secret.list", JsonValue{.data = JsonValue::Object{}})).is_object());
         return EXIT_SUCCESS;
     });
     CHECK(result == EXIT_SUCCESS);

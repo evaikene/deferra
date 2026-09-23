@@ -12,6 +12,7 @@
 #include "protocol.hpp"
 #include "recovery_priv.hpp"
 #include "secret_provider_priv.hpp"
+#include "secret_rpc.hpp"
 #include "secret_service.hpp"
 #include "server.hpp"
 #include "statistics_service.hpp"
@@ -214,6 +215,9 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         for (auto method : control_rpc_method_names()) {
             capabilities.emplace_back(method);
         }
+        for (auto method : secret_rpc_method_names()) {
+            capabilities.emplace_back(method);
+        }
         auto info = SystemInfo{
             .daemon_version = std::string{jb::jobu::detail::project_version},
             .api_version    = {.major = 1, .minor = 2},
@@ -221,7 +225,8 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         };
         if (!register_system_info_method(*rpc, std::move(info)) ||
             !register_management_methods(*rpc, *management, attributes) ||
-            !register_control_methods(*rpc, *management, *scheduler, cron, attributes)) {
+            !register_control_methods(*rpc, *management, *scheduler, cron, attributes) ||
+            !register_secret_methods(*rpc, *secrets)) {
             fail("rpc_registration", runtime_error("jobud.rpc.registration_failed"));
             return false;
         }
