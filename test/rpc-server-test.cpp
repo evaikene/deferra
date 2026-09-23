@@ -707,6 +707,49 @@ TEST_CASE("Server preserves JSON-RPC batch response shapes and order", "[rpc][se
     CHECK(require_error(require_response(values.front())).code == static_cast<std::int64_t>(ErrorCode::InvalidRequest));
 }
 
+TEST_CASE("Server splits batch responses that exceed the body limit", "[rpc][server][batch]")
+{
+    Application app{0, nullptr};
+    auto        options            = ServerOptions{};
+    options.framing.max_body_bytes = 256U;
+    Server server{options};
+
+    auto const result = make_json(std::string(100U, 'x'));
+    REQUIRE(
+        server.register_method("value", [&result](auto const&, auto const&) { return MethodResult::success(result); }));
+    auto connection = attach(server);
+
+    auto requests       = make_json(JsonValue::Array{
+        encode_request(std::uint64_t{1}, "value"),
+        encode_request(std::uint64_t{2}, "value"),
+    });
+    auto expected_batch = make_json(JsonValue::Array{
+        encode_success_response(std::uint64_t{1}, result),
+        encode_success_response(std::uint64_t{2}, result),
+    });
+    auto serialized     = serialize_json(expected_batch);
+    REQUIRE(serialized);
+    CHECK(serialized->size() > options.framing.max_body_bytes);
+
+    connection.device->inject_input(encode_frame(requests, options.framing));
+    auto values = take_values(*connection.device);
+    REQUIRE(values.size() == 2U);
+    for (auto index = std::size_t{0}; index < values.size(); ++index) {
+        auto response = require_response(values[index]);
+        CHECK(response.id == RequestId{std::uint64_t{index + 1U}});
+        CHECK(require_result(response) == result);
+        auto body = serialize_json(values[index]);
+        REQUIRE(body);
+        CHECK(body->size() <= options.framing.max_body_bytes);
+    }
+
+    connection.device->inject_input(request_frame(std::uint64_t{3}, "value", std::nullopt, options.framing));
+    values = take_values(*connection.device);
+    REQUIRE(values.size() == 1U);
+    CHECK(require_response(values.front()).id == RequestId{std::uint64_t{3}});
+    CHECK(server.connection_count() == 1U);
+}
+
 TEST_CASE("Server applies inclusive configured and default batch limits", "[rpc][server][batch]")
 {
     SECTION("zero rejects non-empty batches without dispatch")

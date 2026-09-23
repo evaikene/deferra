@@ -7,6 +7,7 @@
 
 #include <map>
 #include <optional>
+#include <vector>
 
 namespace jb::rpc {
 
@@ -42,7 +43,7 @@ struct Server::Private : jb::core::priv::ObjectPrivate {
     void               process_readable(ConnectionId id);
     void               process_body(ConnectionId id, std::string const& body);
     [[nodiscard]] auto dispatch_document(ConnectionId id, detail::RequestDocument const& document)
-        -> std::optional<jb::core::JsonValue>;
+        -> std::vector<jb::core::JsonValue>;
     [[nodiscard]] auto dispatch_entry(ConnectionId id, detail::RequestEntry const& entry)
         -> std::optional<jb::core::JsonValue>;
     [[nodiscard]] auto write_response(ConnectionId id, jb::core::JsonValue const& response) -> bool;

@@ -97,6 +97,26 @@ auto internal_error_response(RequestId const& id) -> JsonValue
     return detail::encode_error_response(id, detail::make_standard_error(ErrorCode::InternalError));
 }
 
+auto batch_fits_body(std::vector<JsonValue> const& responses, std::size_t limit) -> bool
+{
+    if (limit < 2U) {
+        return false;
+    }
+
+    auto remaining = limit - 2U; // Array brackets.
+    auto first     = true;
+    for (auto const& response : responses) {
+        auto       serialized = serialize_json(response);
+        auto const separator  = first ? 0U : 1U;
+        if (!serialized || separator > remaining || serialized->size() > remaining - separator) {
+            return false;
+        }
+        remaining -= separator + serialized->size();
+        first      = false;
+    }
+    return true;
+}
+
 } // anonymous namespace
 
 Server::Private::ConnectionState::ConnectionState(ConnectionId         connection_id,
@@ -206,15 +226,17 @@ void Server::Private::process_body(ConnectionId id, std::string const& body)
         return;
     }
 
-    auto document = detail::decode_request_document(parsed.value(), options.max_batch_entries);
-    auto response = dispatch_document(id, document);
-    if (response && connections.contains(id)) {
-        static_cast<void>(write_response(id, *response));
+    auto document  = detail::decode_request_document(parsed.value(), options.max_batch_entries);
+    auto responses = dispatch_document(id, document);
+    for (auto const& response : responses) {
+        if (!connections.contains(id) || !write_response(id, response)) {
+            return;
+        }
     }
 }
 
 auto Server::Private::dispatch_document(ConnectionId id, detail::RequestDocument const& document)
-    -> std::optional<JsonValue>
+    -> std::vector<JsonValue>
 {
     auto responses = std::vector<JsonValue>{};
     responses.reserve(document.entries.size());
@@ -223,7 +245,7 @@ auto Server::Private::dispatch_document(ConnectionId id, detail::RequestDocument
         auto response = dispatch_entry(id, entry);
         auto iterator = connections.find(id);
         if (iterator == connections.end() || iterator->second.closing) {
-            return std::nullopt;
+            return {};
         }
         if (response) {
             responses.push_back(std::move(*response));
@@ -231,12 +253,19 @@ auto Server::Private::dispatch_document(ConnectionId id, detail::RequestDocument
     }
 
     if (document.kind == detail::RequestDocumentKind::Batch) {
-        return detail::encode_batch(std::move(responses));
+        if (responses.empty()) {
+            return {};
+        }
+
+        if (batch_fits_body(responses, options.framing.max_body_bytes)) {
+            auto batch = detail::encode_batch(std::move(responses));
+            return {std::move(*batch)};
+        }
+
+        // Individual envelopes retain their request IDs when the combined array cannot fit one frame.
+        return responses;
     }
-    if (responses.empty()) {
-        return std::nullopt;
-    }
-    return std::move(responses.front());
+    return responses;
 }
 
 auto Server::Private::dispatch_entry(ConnectionId id, detail::RequestEntry const& entry) -> std::optional<JsonValue>

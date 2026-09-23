@@ -210,6 +210,7 @@ public:
     explicit RpcEndpoint(ServiceFixture& fixture, ServerOptions options = {})
         : _service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time}
         , _server{options}
+        , _framing_limits{options.framing}
     {
         REQUIRE(register_management_methods(_server, _service, fixture.registry));
 
@@ -224,6 +225,32 @@ public:
     {
         _device->inject_input(request_frame(_next_id++, method, params));
         return take_response(*_device);
+    }
+
+    [[nodiscard]] auto call_split_batch(std::string_view method, JsonValue const& params)
+        -> std::vector<ResponseEnvelope>
+    {
+        auto batch = make_json(JsonValue::Array{
+            encode_request(_next_id++, method, params),
+            encode_request(_next_id++, method, params),
+        });
+        _device->inject_input(encode_frame(batch));
+
+        StreamFramer framer{_framing_limits};
+        auto         bodies = framer.append(_device->take_written_data());
+        REQUIRE(bodies);
+        REQUIRE(bodies->size() == 2U);
+
+        auto responses = std::vector<ResponseEnvelope>{};
+        for (auto const& body : *bodies) {
+            auto parsed = parse_json(body);
+            REQUIRE(parsed);
+            auto decoded = decode_response_document(*parsed);
+            REQUIRE(decoded);
+            REQUIRE(decoded->entries.size() == 1U);
+            responses.push_back(std::move(decoded->entries.front()));
+        }
+        return responses;
     }
 
     void call_losing_response(std::string_view method, JsonValue const& params)
@@ -261,6 +288,7 @@ public:
 private:
     ManagementService _service;
     Server            _server;
+    FramingLimits     _framing_limits;
     MemoryIODevice*   _device{nullptr};
     std::uint64_t     _next_id{1};
 };
@@ -433,6 +461,15 @@ TEST_CASE("Management RPC reports oversized results without closing the stream",
     require_application_error(endpoint.call("queue.get", encode_selector(queue_id)),
                               "resource_exhausted",
                               "jobu.response.too_large");
+
+    auto batch_responses = endpoint.call_split_batch("queue.get", encode_selector(queue_id));
+    REQUIRE(batch_responses.size() == 2U);
+    CHECK(batch_responses[0].id == RequestId{std::uint64_t{2}});
+    CHECK(batch_responses[1].id == RequestId{std::uint64_t{3}});
+    for (auto const& response : batch_responses) {
+        require_application_error(response, "resource_exhausted", "jobu.response.too_large");
+    }
+
     require_application_error(endpoint.call("queue.get", encode_selector(sequence_id(99))),
                               "not_found",
                               "jobu.queue.not_found");

@@ -29,6 +29,7 @@ struct ServerOptions {
     /// Per-message JSON nesting limits; the default permits 64 nested containers.
     jb::core::JsonLimits json;
     /// Maximum accepted entries in one request batch; defaults to 64, while zero rejects every non-empty batch.
+    /// Responses to a batch are sent individually when their combined array exceeds the response body limit.
     std::size_t          max_batch_entries{64};
     /// Maximum simultaneously live connections; defaults to 128, while zero rejects every connection.
     std::size_t          max_connections{128};
