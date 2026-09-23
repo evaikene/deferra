@@ -168,6 +168,10 @@ add_executable(history-json-test history-json-test.cpp)
 target_link_libraries(history-json-test PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME history-json-test COMMAND $<TARGET_FILE:history-json-test>)
 
+add_executable(control-json-test control-json-test.cpp)
+target_link_libraries(control-json-test PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME control-json-test COMMAND $<TARGET_FILE:control-json-test>)
+
 add_executable(history-cursor-test history-cursor-test.cpp)
 target_link_libraries(history-cursor-test PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME history-cursor-test COMMAND $<TARGET_FILE:history-cursor-test>)
@@ -557,6 +561,8 @@ foreach(JOBU_DOMAIN_HEADER IN ITEMS
         attempt-executor-group
         attribute-registry
         cron
+        control-json
+        control-rpc
         history
         history-json
         history-service

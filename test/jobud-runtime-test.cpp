@@ -1,7 +1,10 @@
 #include "runtime_priv.hpp"
 
 #include "attempt_repository_priv.hpp"
+#include "control_json.hpp"
+#include "control_rpc.hpp"
 #include "framing.hpp"
+#include "history_json.hpp"
 #include "http/http_attempt_executor.hpp"
 #include "json.hpp"
 #include "local_socket.hpp"
@@ -21,18 +24,22 @@
 #include "support/memory_io_device.hpp"
 #include "support/recovery_fixture.hpp"
 #include "support/storage_fault_helpers.hpp"
+#include "utc_timestamp.hpp"
 #include "uuid.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace jb::jobud::detail {
@@ -147,6 +154,9 @@ struct RuntimeFixture {
             if (sql.starts_with("INSERT INTO jobu_queues")) {
                 return "management.queue";
             }
+            if (sql.starts_with("UPDATE jobu_runs SET state = 'cancelled'")) {
+                return "cancellation.run";
+            }
             return "other";
         };
         time.set_utc(UtcTimePoint{120s});
@@ -168,12 +178,12 @@ struct RuntimeFixture {
         return run;
     }
 
-    void create_runtime(std::function<bool()> should_stop = {})
+    void create_runtime(std::function<bool()> should_stop = {}, CronEngine const* cron_override = nullptr)
     {
         runtime = std::make_unique<DaemonRuntime>(*loop.loop,
                                                   storage.database,
                                                   storage.registry,
-                                                  cron,
+                                                  cron_override ? *cron_override : cron,
                                                   generator,
                                                   time,
                                                   options,
@@ -241,6 +251,69 @@ auto request(std::string_view method, std::string_view name) -> std::string
     auto frame = jb::rpc::frame_message(*serialized);
     REQUIRE(frame);
     return std::move(*frame);
+}
+
+class RuntimeRpcEndpoint {
+public:
+    explicit RuntimeRpcEndpoint(jb::rpc::Server& server)
+    {
+        auto device = std::make_unique<MemoryIODevice>();
+        _device     = device.get();
+        device->open();
+        REQUIRE(server.add_connection(std::move(device)));
+    }
+
+    auto call(std::string_view method, JsonValue params) -> jb::rpc::detail::ResponseEnvelope
+    {
+        auto document = jb::rpc::detail::encode_request(_next_id++, method, params);
+        auto body     = serialize_json(document);
+        REQUIRE(body);
+        auto framed = jb::rpc::frame_message(*body);
+        REQUIRE(framed);
+        _device->inject_input(*framed);
+
+        jb::rpc::StreamFramer framer;
+        auto                  bodies = framer.append(_device->take_written_data());
+        REQUIRE(bodies);
+        REQUIRE(bodies->size() == 1);
+        auto parsed = parse_json(bodies->front());
+        REQUIRE(parsed);
+        auto decoded = jb::rpc::detail::decode_response_document(*parsed);
+        REQUIRE(decoded);
+        REQUIRE(decoded->entries.size() == 1);
+        return std::move(decoded->entries.front());
+    }
+
+private:
+    MemoryIODevice* _device{};
+    std::uint64_t   _next_id{1};
+};
+
+auto rpc_result(jb::rpc::detail::ResponseEnvelope const& response) -> JsonValue const&
+{
+    REQUIRE(std::holds_alternative<JsonValue>(response.payload));
+    return std::get<JsonValue>(response.payload);
+}
+
+auto rpc_error(jb::rpc::detail::ResponseEnvelope const& response) -> jb::rpc::RpcError const&
+{
+    REQUIRE(std::holds_alternative<jb::rpc::RpcError>(response.payload));
+    return std::get<jb::rpc::RpcError>(response.payload);
+}
+
+void check_application_error(jb::rpc::detail::ResponseEnvelope const& response,
+                             std::string_view                         category,
+                             std::string_view                         code)
+{
+    auto const& error = rpc_error(response);
+    CHECK(error.code == static_cast<std::int64_t>(jb::rpc::ErrorCode::ApplicationError));
+    REQUIRE(error.data);
+    REQUIRE(error.data->is_object());
+    auto const& data = error.data->as_object();
+    REQUIRE(data.size() == 2);
+    CHECK(data.at("category").as_string() == category);
+    CHECK(data.at("code").as_string() == code);
+    CHECK(error.message.find("private-backend-marker") == std::string::npos);
 }
 
 } // namespace
@@ -889,6 +962,211 @@ TEST_CASE("Daemon secret writes request later scheduling without adding secret R
         return EXIT_SUCCESS;
     });
     CHECK(result == EXIT_SUCCESS);
+}
+
+TEST_CASE("Daemon advertises and serves cron preview controls without changing API minor", "[jobud][control][rpc]")
+{
+    SystemCronEngine engine;
+    RuntimeFixture   fixture;
+    fixture.create_runtime({}, &engine);
+    auto result = fixture.run([&] {
+        RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
+        auto               info        = endpoint.call("system.info", JsonValue{.data = JsonValue::Object{}});
+        auto const&        info_fields = rpc_result(info).as_object();
+        CHECK(info_fields.at("api_version").as_object().at("minor").as_uint() == 2);
+        auto const& methods = info_fields.at("capabilities").as_array();
+        for (auto const* name : {"job.run_now", "run.cancel", "schedule.validate", "schedule.next"}) {
+            CHECK(std::ranges::count_if(methods,
+                                        [name](JsonValue const& value) { return value.as_string() == name; }) == 1);
+        }
+
+        auto schedule   = CronSchedule{.expression = "@daily", .timezone = "Europe/Tallinn"};
+        auto validation = schedule_validate_request_to_json(schedule);
+        REQUIRE(validation);
+        auto validated = endpoint.call("schedule.validate", *validation);
+        CHECK(rpc_result(validated).as_object().at("valid").as_bool());
+
+        auto next = schedule_next_request_to_json({
+            .schedule = {.expression = "30 3 31 MAR *", .timezone = "Europe/Tallinn"},
+            .after    = jb::jobu::parse_utc_timestamp("2024-03-30T00:00:00Z").value(),
+            .count    = 1
+        });
+        REQUIRE(next);
+        auto preview     = endpoint.call("schedule.next", *next);
+        auto occurrences = schedule_next_result_from_json(rpc_result(preview));
+        REQUIRE(occurrences);
+        REQUIRE(occurrences->size() == 1);
+        CHECK(jb::jobu::format_utc_timestamp(occurrences->front()).value() == "2024-03-31T01:30:00.000000Z");
+
+        auto cyclic = schedule_validate_request_to_json({.expression = "0 0 * * FRI-MON", .timezone = "UTC"});
+        REQUIRE(cyclic);
+        CHECK(rpc_result(endpoint.call("schedule.validate", *cyclic)).as_object().at("valid").as_bool());
+
+        auto const last_year = parse_utc_timestamp("9999-12-31T23:59:59Z");
+        REQUIRE(last_year);
+        auto at_limit = schedule_next_request_to_json({
+            .schedule = {.expression = "* * * * *", .timezone = "UTC"},
+            .after    = *last_year,
+            .count    = 1
+        });
+        REQUIRE(at_limit);
+        check_application_error(endpoint.call("schedule.next", *at_limit),
+                                "resource_exhausted",
+                                "jobu.schedule.out_of_range");
+
+        auto bad_count                                       = *next;
+        std::get<JsonValue::Object>(bad_count.data)["count"] = JsonValue{.data = std::uint64_t{0}};
+        check_application_error(endpoint.call("schedule.next", bad_count),
+                                "invalid_argument",
+                                "jobu.schedule.invalid_count");
+        auto bad_time = *next;
+        std::get<JsonValue::Object>(bad_time.data)["after"] =
+            JsonValue{.data = std::string{"2024-03-30T02:00:00+02:00"}};
+        CHECK(rpc_error(endpoint.call("schedule.next", bad_time)).code ==
+              static_cast<std::int64_t>(jb::rpc::ErrorCode::InvalidParams));
+
+        auto bad_cron = schedule_validate_request_to_json({.expression = "* * *", .timezone = "UTC"});
+        REQUIRE(bad_cron);
+        check_application_error(endpoint.call("schedule.validate", *bad_cron),
+                                "invalid_argument",
+                                "jobu.schedule.invalid_expression");
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == EXIT_SUCCESS);
+}
+
+TEST_CASE("Run Now RPC replays its original view and pending cancellation commits", "[jobud][control][rpc]")
+{
+    RuntimeFixture fixture;
+    fixture.time.set_utc(UtcTimePoint{1s});
+    auto scheduled = fixture.seed();
+    fixture.create_runtime();
+    auto result = fixture.run([&] {
+        RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
+        auto params = run_now_request_to_json({.job_id = scheduled.run.job_id, .idempotency_key = "same"});
+        REQUIRE(params);
+        auto first  = endpoint.call("job.run_now", *params);
+        auto manual = run_details_from_json(rpc_result(first), fixture.storage.registry);
+        REQUIRE(manual);
+        CHECK(manual->origin == RunOrigin::Manual);
+        CHECK_FALSE(manual->schedule_owned);
+        CHECK(manual->state == RunState::Scheduled);
+        CHECK(manual->payload == scheduled.run.payload);
+        CHECK(rpc_result(endpoint.call("job.run_now", *params)) == rpc_result(first));
+
+        auto without_key = run_now_request_to_json({.job_id = scheduled.run.job_id});
+        REQUIRE(without_key);
+        check_application_error(endpoint.call("job.run_now", *without_key), "conflict", "jobu.run.manual_conflict");
+
+        auto cancel = cancel_run_request_to_json(manual->id);
+        REQUIRE(cancel);
+        auto cancellation =
+            cancel_run_result_from_json(rpc_result(endpoint.call("run.cancel", *cancel)), fixture.storage.registry);
+        REQUIRE(cancellation);
+        CHECK(cancellation->disposition == CancelDisposition::Completed);
+        CHECK(cancellation->run.state == RunState::Cancelled);
+        check_application_error(endpoint.call("run.cancel", *cancel), "conflict", "jobu.run.state_conflict");
+        CHECK(rpc_result(endpoint.call("job.run_now", *params)) == rpc_result(first));
+
+        fixture.storage.require_run(scheduled);
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == EXIT_SUCCESS);
+}
+
+TEST_CASE("Oversized Run Now replies keep the committed idempotency result", "[jobud][control][rpc]")
+{
+    RuntimeFixture fixture;
+    fixture.time.set_utc(UtcTimePoint{1s});
+    auto scheduled = fixture.seed();
+    fixture.create_runtime();
+    auto result = fixture.run([&] {
+        auto options                      = jb::rpc::ServerOptions{};
+        options.framing.max_body_bytes    = 200;
+        options.response_limit_error_code = "jobu.response.too_large";
+        jb::rpc::Server limited{options};
+        REQUIRE(register_control_methods(limited,
+                                         *RuntimeTestAccess::management(*fixture.runtime),
+                                         *RuntimeTestAccess::scheduler(*fixture.runtime),
+                                         fixture.cron,
+                                         fixture.storage.registry));
+        RuntimeRpcEndpoint endpoint{limited};
+        auto               request = RunNowRequest{.job_id = scheduled.run.job_id, .idempotency_key = "oversized"};
+        auto               params  = run_now_request_to_json(request);
+        REQUIRE(params);
+        check_application_error(endpoint.call("job.run_now", *params), "resource_exhausted", "jobu.response.too_large");
+
+        auto replay = RuntimeTestAccess::management(*fixture.runtime)->run_now(request);
+        REQUIRE(replay);
+        CHECK(replay->origin == RunOrigin::Manual);
+        check_application_error(endpoint.call("job.run_now", *params), "resource_exhausted", "jobu.response.too_large");
+        fixture.storage.require_run(scheduled);
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == EXIT_SUCCESS);
+}
+
+TEST_CASE("Active run cancellation RPC remains requested until its completion commits", "[jobud][control][rpc]")
+{
+    RuntimeFixture fixture;
+    auto           seeded = fixture.seed();
+    fixture.create_runtime();
+    auto result = fixture.run([&] {
+        RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
+        auto               params = cancel_run_request_to_json(seeded.run.id);
+        REQUIRE(params);
+        auto reply =
+            cancel_run_result_from_json(rpc_result(endpoint.call("run.cancel", *params)), fixture.storage.registry);
+        REQUIRE(reply);
+        CHECK(reply->disposition == CancelDisposition::Requested);
+        CHECK(reply->run.state == RunState::Running);
+        fixture.require_running(seeded);
+
+        fixture.record.completions.front()(success(fixture.record.starts.front().key));
+        detail::RunRepository runs{fixture.storage.database, fixture.storage.registry};
+        auto                  completed = runs.find_by_id(seeded.run.id);
+        REQUIRE(completed);
+        REQUIRE(*completed);
+        CHECK((*completed)->state == RunState::Cancelled);
+        check_application_error(endpoint.call("run.cancel", *params), "conflict", "jobu.run.state_conflict");
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == EXIT_SUCCESS);
+}
+
+TEST_CASE("Cancellation RPC closes daemon admission after poisoned rollback", "[jobud][control][rpc]")
+{
+    using Operation = DatabaseOperation;
+    using Phase     = DatabaseFaultPhase;
+    RuntimeFixture fixture;
+    fixture.time.set_utc(UtcTimePoint{1s});
+    auto pending = fixture.seed();
+    fixture.create_runtime();
+    auto result = fixture.run([&] {
+        fixture.faults->faults.push_back({
+            .at    = {.boundary = "cancellation.run", .operation = Operation::Execute, .phase = Phase::AfterSuccess},
+            .error = fault_error()
+        });
+        fixture.faults->faults.push_back({
+            .at    = {.boundary = "connection", .operation = Operation::Rollback, .phase = Phase::Before},
+            .error = fault_error("db.rollback_failed")
+        });
+        RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
+        auto               params = cancel_run_request_to_json(pending.run.id);
+        REQUIRE(params);
+        check_application_error(endpoint.call("run.cancel", *params), "io", "db.io");
+        CHECK(fixture.storage.database.is_poisoned());
+        CHECK(fixture.runtime->state() == RuntimeState::Stopping);
+        CHECK(RuntimeTestAccess::scheduler(*fixture.runtime)->state() == SchedulerState::Failed);
+        check_application_error(endpoint.call("run.cancel", *params), "unavailable", "jobu.scheduler.stopping");
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == EXIT_FAILURE);
+    require_consumed_faults(*fixture.faults);
 }
 
 TEST_CASE("Daemon secret lookup failure closes admission before retained completions can persist")

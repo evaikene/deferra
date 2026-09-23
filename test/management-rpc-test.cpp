@@ -386,7 +386,7 @@ TEST_CASE("Management RPC registration is exact and reports duplicate failure", 
         CHECK(server.has_method(expected_methods[index]));
     }
     CHECK_FALSE(server.has_method("system.info"));
-    CHECK_FALSE(server.has_method("job.run_now"));
+    // Control methods are registered separately; daemon composition tests assert their presence.
     CHECK_FALSE(server.has_method("run.get"));
     CHECK_FALSE(server.has_method("attempt.list"));
     CHECK_FALSE(server.has_method("secret.list"));

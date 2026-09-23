@@ -122,6 +122,7 @@ auto expected_system_info(std::string_view version) -> std::string
                        "  job.list\n"
                        "  job.move\n"
                        "  job.resume\n"
+                       "  job.run_now\n"
                        "  job.suspend\n"
                        "  job.update\n"
                        "  queue.create\n"
@@ -131,6 +132,9 @@ auto expected_system_info(std::string_view version) -> std::string
                        "  queue.resume\n"
                        "  queue.suspend\n"
                        "  queue.update\n"
+                       "  run.cancel\n"
+                       "  schedule.next\n"
+                       "  schedule.validate\n"
                        "  system.info\n",
                        version);
 }

@@ -33,6 +33,19 @@ namespace jb::jobu {
 [[nodiscard]] auto run_summary_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<RunSummary, jb::core::Error>;
 
+/// Encodes a full retained run view, including materialized attributes and the original payload template.
+/// Output and attempts remain separate. The registry is borrowed only during conversion.
+[[nodiscard]] auto run_details_to_json(RunDetails const& details, AttributeRegistry const& registry)
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
+
+/// Encodes a service-owned run snapshot with the same full view used by history reads.
+[[nodiscard]] auto run_details_to_json(JobRun const& run, AttributeRegistry const& registry)
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
+
+/// Decodes a full run view. Known fields are required; unknown response members are ignored.
+[[nodiscard]] auto run_details_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
+    -> jb::core::Result<RunDetails, jb::core::Error>;
+
 /// Encodes only lightweight attempt fields, without result or output.
 [[nodiscard]] auto attempt_summary_to_json(AttemptSummary const& summary)
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;

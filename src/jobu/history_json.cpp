@@ -1,5 +1,6 @@
 #include "history_json.hpp"
 
+#include "attribute_registry.hpp"
 #include "history_scalar_codec_priv.hpp"
 #include "utc_timestamp.hpp"
 
@@ -448,6 +449,84 @@ auto run_summary_from_json(JsonValue const& value) -> ConversionResult<RunSummar
         return reject<RunSummary>(false);
     }
     return ConversionResult<RunSummary>::success(result);
+}
+
+auto run_details_to_json(RunDetails const& details, AttributeRegistry const& registry) -> ConversionResult<JsonValue>
+{
+    auto summary    = run_summary_to_json(details);
+    auto attributes = attribute_set_to_json(details.attributes, registry, AttributeScope::Job);
+    if (!summary || !attributes || !details.payload.is_object() || (details.result && !details.result->is_object())) {
+        return reject<JsonValue>(false);
+    }
+
+    auto  result = details.result ? *details.result : json(jb::core::JsonNull{});
+    auto  view   = std::move(summary).value();
+    auto& fields = std::get<JsonValue::Object>(view.data);
+    fields.emplace("attributes", std::move(attributes).value());
+    fields.emplace("payload", details.payload);
+    fields.emplace("result", std::move(result));
+    if (!jb::core::serialize_json(view)) {
+        return reject<JsonValue>(false);
+    }
+    return ConversionResult<JsonValue>::success(std::move(view));
+}
+
+auto run_details_to_json(JobRun const& run, AttributeRegistry const& registry) -> ConversionResult<JsonValue>
+{
+    auto details                      = RunDetails{};
+    static_cast<RunSummary&>(details) = {
+        .id             = run.id,
+        .job_id         = run.job_id,
+        .queue_id       = run.queue_id,
+        .job_revision   = run.job_revision,
+        .origin         = run.origin,
+        .type           = run.type,
+        .state          = run.state,
+        .schedule_owned = run.schedule_owned,
+        .priority       = run.priority,
+        .planned_at     = run.planned_at,
+        .runnable_at    = run.runnable_at,
+        .started_at     = run.started_at,
+        .completed_at   = run.completed_at,
+    };
+    details.attributes = run.attributes;
+    details.payload    = run.payload;
+    details.result     = run.result;
+    return run_details_to_json(details, registry);
+}
+
+auto run_details_from_json(JsonValue const& value, AttributeRegistry const& registry) -> ConversionResult<RunDetails>
+{
+    auto summary = run_summary_from_json(value);
+    if (!summary) {
+        return reject<RunDetails>(false);
+    }
+
+    auto const& object     = value.as_object();
+    auto const* attributes = member(object, "attributes");
+    auto const* payload    = member(object, "payload");
+    auto const* result     = member(object, "result");
+    if (!attributes || !payload || !payload->is_object() || !result || (!result->is_null() && !result->is_object())) {
+        return reject<RunDetails>(false);
+    }
+    auto decoded_attributes = attribute_set_from_json(*attributes, registry, AttributeScope::Job);
+    if (!decoded_attributes) {
+        return reject<RunDetails>(false);
+    }
+    for (auto const& definition : registry.definitions()) {
+        if (definition.scopes.test(AttributeScope::Job) && !decoded_attributes->contains(definition.name)) {
+            return reject<RunDetails>(false);
+        }
+    }
+
+    auto details                      = RunDetails{};
+    static_cast<RunSummary&>(details) = std::move(summary).value();
+    details.attributes                = std::move(decoded_attributes).value();
+    details.payload                   = *payload;
+    if (!result->is_null()) {
+        details.result = *result;
+    }
+    return ConversionResult<RunDetails>::success(std::move(details));
 }
 
 auto attempt_summary_to_json(AttemptSummary const& summary) -> ConversionResult<JsonValue>
