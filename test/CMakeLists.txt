@@ -163,6 +163,15 @@ add_executable(${TARGET} job-management-json-test.cpp)
 target_link_libraries(${TARGET} PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# History contracts and cursor ownership before repository query integration.
+add_executable(history-json-test history-json-test.cpp)
+target_link_libraries(history-json-test PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME history-json-test COMMAND $<TARGET_FILE:history-json-test>)
+
+add_executable(history-cursor-test history-cursor-test.cpp)
+target_link_libraries(history-cursor-test PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME history-cursor-test COMMAND $<TARGET_FILE:history-cursor-test>)
+
 # JobU HTTP payload decoding and validation test
 set(TARGET "http-job-payload-test")
 add_executable(${TARGET} http-job-payload-test.cpp)
@@ -530,6 +539,9 @@ foreach(JOBU_DOMAIN_HEADER IN ITEMS
         attempt-executor-group
         attribute-registry
         cron
+        history
+        history-json
+        history-service
         job
         management
         management-json

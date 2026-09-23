@@ -52,3 +52,12 @@ current owner state or run origin. Terminal history alone permits deletion.
 Malformed stored templates or failed scans abort deletion and trigger the fatal
 storage boundary. Bounded pages limit memory use, not total scan latency.
 There is no public secret-value read API.
+
+## History cursors
+
+| Code | Category | Meaning |
+| --- | --- | --- |
+| `jobu.history.invalid_cursor` | InvalidArgument | A cursor is malformed, unknown, expired, evicted, or belongs to another method. The current request fails; the connection remains usable. Start a new initial query. |
+| `jobu.history.cursor_unavailable` | ResourceExhausted | The server could not issue a unique continuation token. The current query fails; the connection remains usable. |
+
+Neither error includes stored filters, SQL, or token internals. Cursor lifetime is fixed at five minutes from the initial page. Earlier eviction or server restart can invalidate it sooner.
