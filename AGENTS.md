@@ -88,6 +88,7 @@ A reader should be able to scan a non-trivial function and identify its major lo
 * Avoid cleverness whose main benefit is fewer statements or fewer lines.
 * Preserve useful intermediate variables when they make intent, lifetime, or error handling clearer.
 * Prefer code whose structure communicates the algorithm before comments are needed to explain it.
+* Prefer fmt::format when it makes dynamic strings easier to read. In measured hot paths, use the faster form. When building SQL, format only trusted identifiers; bind all data values.
 
 As a rule of thumb, if more than roughly 10-15 consecutive lines form one uninterrupted logical block, consider whether a blank line, concise phase comment, or helper extraction would make the structure clearer. This is a readability prompt, not a hard line-count requirement.
 

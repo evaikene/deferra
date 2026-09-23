@@ -12,6 +12,7 @@
 #include "secret_service.hpp"
 #include "server.hpp"
 #include "sqlite/sqlite_schema.hpp"
+#include "statistics_service.hpp"
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_event_loop_backend.hpp"
 #include "support/fake_http_client.hpp"
@@ -40,6 +41,8 @@ struct RuntimeTestAccess {
     static auto management(DaemonRuntime& runtime) { return runtime.management(); }
 
     static auto secrets(DaemonRuntime& runtime) { return runtime.secrets(); }
+
+    static auto statistics(DaemonRuntime& runtime) { return runtime.statistics(); }
 
     static auto scheduler(DaemonRuntime& runtime) { return runtime.scheduler(); }
 
@@ -669,6 +672,36 @@ TEST_CASE("Daemon records event-loop failure and fatal errors after a normal sto
         FAIL("must not restart");
         return EXIT_SUCCESS;
     }) == EXIT_FAILURE);
+}
+
+TEST_CASE("Daemon closes statistics reads when their storage fails fatally")
+{
+    RuntimeFixture fixture;
+    fixture.seed(1, JobType::Cli, RunState::Succeeded);
+    fixture.create_runtime();
+    fixture.faults->classify = [](std::string_view sql) {
+        return sql.starts_with("SELECT r.state AS run_state") ? "statistics.runs" : "other";
+    };
+
+    auto result = fixture.run([&] {
+        auto* statistics = RuntimeTestAccess::statistics(*fixture.runtime);
+        REQUIRE(statistics != nullptr);
+        fixture.faults->faults.push_back({
+            .at    = {.boundary = "statistics.runs", .operation = DatabaseOperation::Execute},
+            .error = fault_error("db.corrupt")
+        });
+
+        auto read = statistics->read(StatisticsRequest{}, StatisticsScope::System);
+        REQUIRE_FALSE(read);
+        CHECK(read.error().code == "db.corrupt");
+        CHECK(fixture.runtime->state() == RuntimeState::Stopping);
+        auto stopped = statistics->read(StatisticsRequest{}, StatisticsScope::System);
+        REQUIRE_FALSE(stopped);
+        CHECK(stopped.error().code == "jobu.service.stopping");
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == EXIT_FAILURE);
+    require_consumed_faults(*fixture.faults);
 }
 
 TEST_CASE("Daemon runner factory failure never enters serving")
