@@ -3,6 +3,7 @@
 #include "domain_storage_priv.hpp"
 #include "query.hpp"
 #include "support/fake_time_source.hpp"
+#include "support/fault_database_driver.hpp"
 #include "support/recovery_fixture.hpp"
 #include "support/sequence_uuid_generator.hpp"
 
@@ -11,7 +12,12 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <functional>
+#include <iostream>
+#include <memory>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -32,7 +38,8 @@ struct Fixture {
     StatisticsService  statistics{storage.database, tokens, time};
     std::vector<Error> failures;
 
-    Fixture()
+    explicit Fixture(std::function<std::unique_ptr<Driver>(std::unique_ptr<Driver>)> wrap_driver = {})
+        : storage{std::move(wrap_driver)}
     {
         time.set_utc(UtcTimePoint{100s});
         statistics.failed.connect(&statistics, [this](Error const& error) { failures.push_back(error); });
@@ -59,6 +66,82 @@ struct Fixture {
 auto window() -> UtcRange
 {
     return {.from = UtcTimePoint{9s}, .to = UtcTimePoint{11s}};
+}
+
+struct QueryObservation {
+    std::vector<std::string> plan_steps;
+    std::size_t              rows{0};
+    double                   mean_ms{0};
+};
+
+auto observe_query(Database&                                         database,
+                   std::string const&                                sql,
+                   std::vector<std::pair<std::string, Value>> const& bindings) -> QueryObservation
+{
+    auto bind_all = [&](Query& query) {
+        for (auto const& [name, value] : bindings) {
+            REQUIRE(query.bind_value(name, value));
+        }
+    };
+
+    auto observation = QueryObservation{};
+    {
+        Query explain{database};
+        REQUIRE(explain.prepare("EXPLAIN QUERY PLAN " + sql));
+        bind_all(explain);
+        REQUIRE(explain.exec());
+        while (true) {
+            auto next = explain.next();
+            REQUIRE(next);
+            if (!*next) {
+                break;
+            }
+            auto detail = jb::jobu::detail::read_text(explain.record(), "detail");
+            REQUIRE(detail);
+            observation.plan_steps.push_back(std::move(*detail));
+        }
+    }
+
+    // The same prepared SQL and bindings are drained repeatedly for a cost observation, never a timing assertion.
+    Query measured{database};
+    REQUIRE(measured.prepare(sql));
+    bind_all(measured);
+    auto const start = std::chrono::steady_clock::now();
+    for (auto repetition = 0; repetition < 20; ++repetition) {
+        REQUIRE(measured.exec());
+        while (true) {
+            auto next = measured.next();
+            REQUIRE(next);
+            if (!*next) {
+                break;
+            }
+            if (repetition == 0) {
+                ++observation.rows;
+            }
+        }
+        REQUIRE(measured.finish());
+    }
+    auto const elapsed  = std::chrono::duration<double, std::milli>{std::chrono::steady_clock::now() - start};
+    observation.mean_ms = elapsed.count() / 20.0;
+    return observation;
+}
+
+auto includes_step(QueryObservation const& observation, std::string_view needle) -> bool
+{
+    for (auto const& step : observation.plan_steps) {
+        if (step.find(needle) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void print_observation(std::string_view name, QueryObservation const& observation)
+{
+    std::cout << "statistics " << name << ": rows=" << observation.rows << " mean_ms=" << observation.mean_ms << '\n';
+    for (auto const& step : observation.plan_steps) {
+        std::cout << "  " << step << '\n';
+    }
 }
 
 } // namespace
@@ -102,6 +185,90 @@ TEST_CASE("Statistics count a planned-run cohort and its retries once", "[jobu][
     CHECK(page->measurement.timing == "wall_clock_derived");
     CHECK(page->measurement.runnable_wait == "unavailable");
     CHECK(page->measurement.capture == "persisted_output_flags");
+}
+
+TEST_CASE("Statistics projections use populated v2 schema indexes", "[jobu][statistics][sqlite][plan]")
+{
+    struct CapturedSql {
+        std::string groups;
+        std::string runs;
+        std::string attempts;
+    } captured;
+
+    auto faults      = std::make_shared<DatabaseFaultState>();
+    faults->classify = [&captured](std::string_view sql) -> std::string {
+        if (sql.starts_with("SELECT DISTINCT r.queue_id AS group_key")) {
+            captured.groups = sql;
+        }
+        else if (sql.starts_with("SELECT r.state AS run_state")) {
+            captured.runs = sql;
+        }
+        else if (sql.starts_with("SELECT a.attempt_number AS attempt_number")) {
+            captured.attempts = sql;
+        }
+        return "statistics.plan";
+    };
+    Fixture fixture{[faults](std::unique_ptr<Driver> driver) {
+        return std::make_unique<FaultDatabaseDriver>(std::move(driver), faults);
+    }};
+
+    // Seed the production schema and indexes with several groups and attempts, including output join rows.
+    for (std::uint32_t queue = 0; queue < 10; ++queue) {
+        auto job = fixture.job(1'000 + queue, 2'000 + queue);
+        for (std::uint32_t number = 0; number < 20; ++number) {
+            auto run =
+                fixture.storage.make_run(recovery_id(3'000 + (queue * 20) + number), job, RunState::Succeeded, 1);
+            run.run.planned_at = UtcTimePoint{10s + std::chrono::seconds{number}};
+            for (auto& attempt : run.attempts) {
+                attempt.output = jb::jobu::detail::AttemptOutput{};
+            }
+            fixture.storage.insert_run(run);
+        }
+    }
+
+    auto page = fixture.statistics.read(
+        StatisticsRequest{
+            .planned  = {.from = UtcTimePoint{9s}, .to = UtcTimePoint{31s}},
+            .group_by = StatisticsGroupBy::Queue,
+            .limit    = 1
+    },
+        StatisticsScope::System);
+    REQUIRE(page);
+    REQUIRE(page->groups.size() == 1);
+    REQUIRE_FALSE(captured.groups.empty());
+    REQUIRE_FALSE(captured.runs.empty());
+    REQUIRE_FALSE(captured.attempts.empty());
+
+    auto const window_bindings = std::vector<std::pair<std::string, Value>>{
+        {":planned_from", std::int64_t{9'000'000} },
+        {":planned_to",   std::int64_t{31'000'000}}
+    };
+    auto group_bindings = window_bindings;
+    group_bindings.emplace_back(":limit", std::int64_t{2});
+    auto aggregate_bindings = window_bindings;
+    aggregate_bindings.emplace_back(":group_key", jb::jobu::detail::uuid_to_storage(recovery_id(1'000)));
+
+    auto  groups   = observe_query(fixture.storage.database, captured.groups, group_bindings);
+    auto  runs     = observe_query(fixture.storage.database, captured.runs, aggregate_bindings);
+    auto  attempts = observe_query(fixture.storage.database, captured.attempts, aggregate_bindings);
+    Query version{fixture.storage.database};
+    REQUIRE(version.exec("SELECT sqlite_version() AS version"));
+    REQUIRE(version.next());
+    auto sqlite_version = jb::jobu::detail::read_text(version.record(), "version");
+    REQUIRE(sqlite_version);
+    std::cout << "statistics SQLite version=" << *sqlite_version << '\n';
+    print_observation("groups", groups);
+    print_observation("runs", runs);
+    print_observation("attempts", attempts);
+
+    CHECK(groups.rows == 2);
+    CHECK(runs.rows == 20);
+    CHECK(attempts.rows == 40);
+    CHECK(includes_step(groups, "jobu_runs_"));
+    CHECK(includes_step(runs, "jobu_runs_queue_planned_id_idx"));
+    CHECK(includes_step(attempts, "jobu_runs_queue_planned_id_idx"));
+    CHECK(includes_step(attempts, "jobu_attempts"));
+    CHECK(includes_step(attempts, "jobu_attempt_output"));
 }
 
 TEST_CASE("Statistics group pages preserve snapshot owners and the resolved window", "[jobu][statistics][sqlite]")
