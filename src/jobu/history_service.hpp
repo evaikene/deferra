@@ -59,6 +59,11 @@ public:
     /// Lists lightweight attempts for one run, newest attempt number first.
     [[nodiscard]] auto list_attempts(AttemptListRequest const& request)
         -> jb::core::Result<AttemptPage, jb::core::Error>;
+    /// Reads at most 65,536 retained bytes from one CLI or HTTP channel without loading the entire output BLOB.
+    /// Missing attempts return jobu.attempt.not_found. Invalid channels, limits, and offsets return
+    /// jobu.history.invalid_request; storage failures follow the same owner-thread fatal-read policy as other reads.
+    [[nodiscard]] auto read_output(AttemptOutputRequest const& request)
+        -> jb::core::Result<AttemptOutputChunk, jb::core::Error>;
 
     /// Irreversibly closes read admission and discards every cursor. Idempotent and owner-thread only.
     void shutdown() noexcept;

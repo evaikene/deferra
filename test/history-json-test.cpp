@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -55,11 +56,11 @@ TEST_CASE("Run history requests preserve filters and require cursor-only continu
     auto const queue   = id("00112233-4455-6677-8899-aabbccddeeff");
     auto       request = RunListRequest{
         RunQuery{.filters = {.queue_id = queue,
-                             .state    = RunState::RetryWait,
-                             .origin   = RunOrigin::Manual,
-                             .type     = JobType::Http,
-                             .planned  = {.from = at("2026-01-01T00:00:00Z"), .to = at("2026-02-01T00:00:00Z")},
-                             .started  = {.from = at("2026-01-03T00:00:00Z")}},
+                                   .state    = RunState::RetryWait,
+                                   .origin   = RunOrigin::Manual,
+                                   .type     = JobType::Http,
+                                   .planned  = {.from = at("2026-01-01T00:00:00Z"), .to = at("2026-02-01T00:00:00Z")},
+                                   .started  = {.from = at("2026-01-03T00:00:00Z")}},
                  .limit   = 200}
     };
     auto encoded = run_list_request_to_json(request);
@@ -99,7 +100,7 @@ TEST_CASE("Run history request validation rejects invalid ranges, enums, and lim
     auto const lower = std::string{"2026-01-01T00:00:00Z"};
     auto const upper = std::string{"2026-02-01T00:00:00Z"};
     auto       bad   = json(JsonValue::Object{
-        {"planned", json(JsonValue::Object{{"from", json(upper)}, {"to", json(lower)}})}
+                {"planned", json(JsonValue::Object{{"from", json(upper)}, {"to", json(lower)}})}
     });
     invalid_request(run_list_request_from_json(bad));
     invalid_request(run_list_request_to_json(RunQuery{.filters = {.planned = {.from = at(lower), .to = at(lower)}}}));
@@ -158,10 +159,10 @@ TEST_CASE("History summaries encode only lightweight fields", "[jobu][history][j
     run.planned_at  = at("2026-01-01T00:00:00Z");
     run.runnable_at = run.planned_at;
     run.payload     = json(JsonValue::Object{
-        {"secret", json(std::string{"a.token"})}
+            {"secret", json(std::string{"a.token"})}
     });
     run.result      = json(JsonValue::Object{
-        {"private", json(std::string{"heavy"})}
+             {"private", json(std::string{"heavy"})}
     });
 
     auto encoded = run_summary_to_json(run);
@@ -191,7 +192,7 @@ TEST_CASE("History summaries encode only lightweight fields", "[jobu][history][j
     attempt.state          = AttemptState::Completed;
     attempt.outcome        = AttemptOutcome::Succeeded;
     attempt.result         = json(JsonValue::Object{
-        {"private", json(std::string{"heavy"})}
+                {"private", json(std::string{"heavy"})}
     });
     auto encoded_attempt   = attempt_summary_to_json(attempt);
     REQUIRE(encoded_attempt);
@@ -205,4 +206,110 @@ TEST_CASE("History summaries encode only lightweight fields", "[jobu][history][j
     auto invalid_attempt                                         = *encoded_attempt;
     std::get<JsonValue::Object>(invalid_attempt.data)["outcome"] = json(std::string{"unknown"});
     invalid_response(attempt_summary_from_json(invalid_attempt));
+}
+
+TEST_CASE("Output request codec enforces channel, limit, offset, and strict fields", "[jobu][history][json]")
+{
+    auto const run     = id("10112233-4455-6677-8899-aabbccddeeff");
+    auto       request = AttemptOutputRequest{
+              .attempt = {.run_id = run, .attempt_number = 2},
+              .channel = OutputChannel::Headers,
+              .offset  = 7,
+              .limit   = 65'536
+    };
+    auto encoded = attempt_output_request_to_json(request);
+    REQUIRE(encoded);
+    auto decoded = attempt_output_request_from_json(*encoded);
+    REQUIRE(decoded);
+    CHECK(decoded->attempt.run_id == run);
+    CHECK(decoded->attempt.attempt_number == 2);
+    CHECK(decoded->channel == OutputChannel::Headers);
+    CHECK(decoded->offset == 7);
+    CHECK(decoded->limit == 65'536);
+
+    auto defaults        = json(JsonValue::Object{
+               {"run_id",         json(run.to_string())      },
+               {"attempt_number", json(std::uint64_t{1})     },
+               {"channel",        json(std::string{"stdout"})},
+    });
+    auto parsed_defaults = attempt_output_request_from_json(defaults);
+    REQUIRE(parsed_defaults);
+    CHECK(parsed_defaults->offset == 0);
+    CHECK(parsed_defaults->limit == 16'384);
+
+    auto changed                                         = defaults;
+    std::get<JsonValue::Object>(changed.data)["channel"] = json(std::string{"bodyx"});
+    invalid_request(attempt_output_request_from_json(changed));
+
+    changed                                            = defaults;
+    std::get<JsonValue::Object>(changed.data)["limit"] = json(std::uint64_t{65'537});
+    invalid_request(attempt_output_request_from_json(changed));
+
+    changed                                             = defaults;
+    std::get<JsonValue::Object>(changed.data)["offset"] = json(std::numeric_limits<std::uint64_t>::max());
+    invalid_request(attempt_output_request_from_json(changed));
+
+    changed                                             = defaults;
+    std::get<JsonValue::Object>(changed.data)["future"] = json(true);
+    invalid_request(attempt_output_request_from_json(changed));
+    invalid_request(attempt_output_request_to_json(AttemptOutputRequest{
+        .attempt = {.run_id = run, .attempt_number = 0}
+    }));
+}
+
+TEST_CASE("Output chunk codec preserves raw bytes and availability metadata", "[jobu][history][json]")
+{
+    auto const run   = id("10112233-4455-6677-8899-aabbccddeeff");
+    auto       chunk = AttemptOutputChunk{
+              .attempt        = {.run_id = run,   .attempt_number = 2},
+              .channel        = OutputChannel::Body,
+              .status         = OutputStatus::Lost,
+              .offset         = 1,
+              .bytes_returned = 2,
+              .next_offset    = 3,
+              .retained_bytes = 4,
+              .total_bytes    = 9,
+              .omitted_bytes  = 5,
+              .truncated      = true,
+              .capture_lost   = true,
+              .encoding       = OutputEncoding::Base64,
+              .data           = {std::byte{0xff}, std::byte{0x00}    },
+    };
+    auto encoded = attempt_output_chunk_to_json(chunk);
+    REQUIRE(encoded);
+    CHECK(encoded->as_object().at("encoding").as_string() == "base64");
+    CHECK(encoded->as_object().at("data").as_string() == "/wA=");
+    auto decoded = attempt_output_chunk_from_json(*encoded);
+    REQUIRE(decoded);
+    CHECK(decoded->data == chunk.data);
+    CHECK(decoded->status == OutputStatus::Lost);
+    CHECK(decoded->total_bytes == 9);
+    CHECK(decoded->omitted_bytes == 5);
+    CHECK(decoded->next_offset == 3);
+
+    auto future = *encoded;
+    std::get<JsonValue::Object>(future.data).emplace("future", json(true));
+    CHECK(attempt_output_chunk_from_json(future));
+    std::get<JsonValue::Object>(future.data)["data"] = json(std::string{"/wB="});
+    invalid_response(attempt_output_chunk_from_json(future));
+    future                                                     = *encoded;
+    std::get<JsonValue::Object>(future.data)["bytes_returned"] = json(std::uint64_t{3});
+    invalid_response(attempt_output_chunk_from_json(future));
+    future                                                  = *encoded;
+    std::get<JsonValue::Object>(future.data)["next_offset"] = json(std::uint64_t{4});
+    invalid_response(attempt_output_chunk_from_json(future));
+
+    chunk.status         = OutputStatus::Available;
+    chunk.capture_lost   = false;
+    chunk.encoding       = OutputEncoding::Utf8;
+    chunk.data           = {std::byte{'A'}, std::byte{0xc3}, std::byte{0xa9}};
+    chunk.bytes_returned = 3;
+    chunk.offset         = 0;
+    chunk.next_offset    = 3;
+    auto utf8            = attempt_output_chunk_to_json(chunk);
+    REQUIRE(utf8);
+    CHECK(utf8->as_object().at("data").as_string() == "A\xc3\xa9");
+    auto decoded_utf8 = attempt_output_chunk_from_json(*utf8);
+    REQUIRE(decoded_utf8);
+    CHECK(decoded_utf8->data == chunk.data);
 }

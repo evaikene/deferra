@@ -38,6 +38,8 @@ target_sources(${TARGET}
         history_cursor_priv.cpp
         history_cursor_priv.hpp
         history_json.cpp
+        history_output_json.cpp
+        history_output_repository_priv.cpp
         history_repository_priv.cpp
         history_repository_priv.hpp
         history_scalar_codec_priv.cpp
