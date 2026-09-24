@@ -23,6 +23,14 @@ auto parse_system_command(std::filesystem::path                          socket_
                           std::string_view                               action,
                           std::span<jb::core::CommandLineArgument const> arguments,
                           jb::jobu::StandardAttributeRegistry const&     registry) -> CommandBuildResult;
+auto parse_run_command(std::filesystem::path                          socket_path,
+                       std::string_view                               action,
+                       std::span<jb::core::CommandLineArgument const> arguments,
+                       jb::jobu::StandardAttributeRegistry const&     registry) -> CommandBuildResult;
+auto parse_attempt_command(std::filesystem::path                          socket_path,
+                           std::string_view                               action,
+                           std::span<jb::core::CommandLineArgument const> arguments,
+                           jb::jobu::StandardAttributeRegistry const&     registry) -> CommandBuildResult;
 
 // These names need raw-token protection before the lexical parser consumes their values.
 auto is_cli_creation_option(std::string_view name) -> bool;
@@ -32,5 +40,9 @@ void print_system_info(jb::jobu::SystemInfo const& info);
 auto escape_human(std::string_view value) -> std::string;
 auto print_queue_result(Command const& command, jb::jobu::ControlReply const& value) -> bool;
 auto print_job_result(Command const& command, jb::jobu::ControlReply const& value) -> bool;
+auto print_run_result(Command const&                             command,
+                      jb::jobu::ControlReply const&              value,
+                      jb::jobu::StandardAttributeRegistry const& registry) -> bool;
+auto print_attempt_result(Command const& command, jb::jobu::ControlReply const& value) -> bool;
 
 } // namespace jb::jobuctl::detail

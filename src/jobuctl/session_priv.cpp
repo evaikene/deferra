@@ -49,12 +49,19 @@ auto is_mutation(CommandKind kind) noexcept -> bool
         case CommandKind::JobResume:
         case CommandKind::JobMove:
         case CommandKind::JobDelete:
+        case CommandKind::JobRunNow:
+        case CommandKind::RunCancel:
             return true;
         case CommandKind::SystemInfo:
         case CommandKind::QueueGet:
         case CommandKind::QueueList:
         case CommandKind::JobGet:
         case CommandKind::JobList:
+        case CommandKind::RunGet:
+        case CommandKind::RunList:
+        case CommandKind::AttemptGet:
+        case CommandKind::AttemptList:
+        case CommandKind::AttemptOutput:
             return false;
     }
     return false;
@@ -95,6 +102,20 @@ auto call_command(ControlClient& client, Command const& command, ControlCallOpti
             return client.move_job(std::get<MoveJobRequest>(command.request), options);
         case CommandKind::JobDelete:
             return client.delete_job(std::get<DeleteJobRequest>(command.request), options);
+        case CommandKind::JobRunNow:
+            return client.run_now(std::get<RunNowRequest>(command.request), options);
+        case CommandKind::RunGet:
+            return client.get_run(std::get<Uuid>(command.request), options);
+        case CommandKind::RunList:
+            return client.list_runs(std::get<RunListRequest>(command.request), options);
+        case CommandKind::RunCancel:
+            return client.cancel_run(std::get<Uuid>(command.request), options);
+        case CommandKind::AttemptGet:
+            return client.get_attempt(std::get<AttemptKey>(command.request), options);
+        case CommandKind::AttemptList:
+            return client.list_attempts(std::get<AttemptListRequest>(command.request), options);
+        case CommandKind::AttemptOutput:
+            return client.read_attempt_output(std::get<AttemptOutputRequest>(command.request), options);
         case CommandKind::SystemInfo:
             break;
     }
@@ -159,6 +180,26 @@ auto observe_suspension(CommandKind kind, ControlReply const& reply, std::option
     return SuspensionObservation::Conflict;
 }
 
+auto job_run_from_details(RunDetails const& run) -> JobRun
+{
+    return {.id             = run.id,
+            .job_id         = run.job_id,
+            .job_revision   = run.job_revision,
+            .queue_id       = run.queue_id,
+            .origin         = run.origin,
+            .schedule_owned = run.schedule_owned,
+            .planned_at     = run.planned_at,
+            .runnable_at    = run.runnable_at,
+            .started_at     = run.started_at,
+            .completed_at   = run.completed_at,
+            .type           = run.type,
+            .priority       = run.priority,
+            .attributes     = run.attributes,
+            .payload        = run.payload,
+            .state          = run.state,
+            .result         = run.result};
+}
+
 } // namespace
 
 struct Session::Private : jb::core::priv::ObjectPrivate {
@@ -204,7 +245,7 @@ Session::Session(Command command, StandardAttributeRegistry const& registry)
     });
     data->socket.connected.connect(this, [this] { connected(); });
     data->timer.timeout.connect(this, [this] { deadline_expired(); });
-    data->poll_timer.timeout.connect(this, [this] { poll_suspension(); });
+    data->poll_timer.timeout.connect(this, [this] { poll_wait(); });
 }
 
 Session::~Session()
@@ -255,14 +296,18 @@ void Session::deadline_expired()
 {
     auto*      data    = d_ptr<Private>();
     auto const unknown = data->phase == SessionPhase::Command && data->active_call && is_mutation(data->command.kind);
+    auto       message = std::string_view{"Overall command deadline expired"};
+    if (data->phase == SessionPhase::Polling) {
+        message = data->command.kind == CommandKind::RunCancel
+                    ? "Cancelled state was not confirmed before the deadline"
+                    : "Suspended state was not confirmed before the deadline";
+    }
     finish(3,
            local_error(
                {
                    .category = ErrorCategory::Timeout,
                    .code     = "jobu.client.timeout",
-                   .message  = data->phase == SessionPhase::Polling
-                                 ? "Suspended state was not confirmed before the deadline"
-                                 : "Overall command deadline expired",
+                   .message  = std::string{message},
                },
                unknown));
 }
@@ -345,7 +390,66 @@ void Session::receive_reply(ControlCallId id, ControlReply const& reply)
     }
     data->active_call.reset();
 
-    if (data->command.wait) {
+    if (data->command.wait && data->command.kind == CommandKind::RunCancel) {
+        if (data->phase == SessionPhase::Command) {
+            auto const* cancelled = std::get_if<CancelRunResult>(&reply);
+            if (!cancelled) {
+                finish(3,
+                       local_error({.category = ErrorCategory::Internal,
+                                    .code     = "jobuctl.output.invalid_reply",
+                                    .message  = "Unable to render the daemon reply"}));
+                return;
+            }
+            data->poll_id = cancelled->run.id;
+            if (cancelled->disposition == CancelDisposition::Requested) {
+                data->phase = SessionPhase::Polling;
+                schedule_poll();
+                return;
+            }
+            if (cancelled->run.state != RunState::Cancelled) {
+                finish(1,
+                       local_error({.category = ErrorCategory::Conflict,
+                                    .code     = "jobuctl.wait.state_changed",
+                                    .message  = "Run reached a different terminal state before cancellation"}));
+                return;
+            }
+        }
+        else {
+            auto const* run = std::get_if<RunDetails>(&reply);
+            if (!run || !data->poll_id || run->id != *data->poll_id) {
+                finish(1,
+                       local_error({.category = ErrorCategory::Conflict,
+                                    .code     = "jobuctl.wait.state_changed",
+                                    .message  = "Cancellation observation changed run identity"}));
+                return;
+            }
+            if (run->state == RunState::Cancelled) {
+                auto completed =
+                    CancelRunResult{.run = job_run_from_details(*run), .disposition = CancelDisposition::Completed};
+                if (!print_command_result(data->command, ControlReply{std::move(completed)}, data->registry)) {
+                    finish(3,
+                           local_error({.category = ErrorCategory::Internal,
+                                        .code     = "jobuctl.output.invalid_reply",
+                                        .message  = "Unable to render the daemon reply"}));
+                    return;
+                }
+                finish(0);
+                return;
+            }
+            if (run->state == RunState::Succeeded || run->state == RunState::Failed ||
+                run->state == RunState::Interrupted) {
+                finish(1,
+                       local_error({.category = ErrorCategory::Conflict,
+                                    .code     = "jobuctl.wait.state_changed",
+                                    .message  = "Run reached a different terminal state before cancellation"}));
+                return;
+            }
+            schedule_poll();
+            return;
+        }
+    }
+
+    if (data->command.wait && data->command.kind != CommandKind::RunCancel) {
         auto const observation = observe_suspension(data->command.kind, reply, data->poll_id);
         if (observation == SuspensionObservation::Conflict) {
             finish(1,
@@ -357,10 +461,27 @@ void Session::receive_reply(ControlCallId id, ControlReply const& reply)
         if (observation == SuspensionObservation::Pending) {
             // A suspend reply is observed once; every later request is a read by stable ID.
             data->phase = SessionPhase::Polling;
-            data->poll_timer.start(data->poll_interval);
-            data->poll_interval = std::min(data->poll_interval * 2, std::chrono::milliseconds{500});
+            schedule_poll();
             return;
         }
+    }
+
+    if (data->command.kind == CommandKind::AttemptOutput && (data->command.raw || data->command.output_file)) {
+        auto const* chunk = std::get_if<AttemptOutputChunk>(&reply);
+        if (!chunk) {
+            finish(3,
+                   local_error({.category = ErrorCategory::Internal,
+                                .code     = "jobuctl.output.invalid_reply",
+                                .message  = "Unable to render the daemon reply"}));
+            return;
+        }
+        auto delivered = write_output_chunk(data->command, *chunk);
+        if (!delivered) {
+            finish(2, local_error(delivered.error()));
+            return;
+        }
+        finish(0);
+        return;
     }
 
     if (!print_command_result(data->command, reply, data->registry)) {
@@ -391,7 +512,14 @@ void Session::receive_failure(ControlCallId id, ControlFailure const& failure)
     }
 }
 
-void Session::poll_suspension()
+void Session::schedule_poll()
+{
+    auto* data = d_ptr<Private>();
+    data->poll_timer.start(data->poll_interval);
+    data->poll_interval = std::min(data->poll_interval * 2, std::chrono::milliseconds{500});
+}
+
+void Session::poll_wait()
 {
     auto* data = d_ptr<Private>();
     if (data->phase != SessionPhase::Polling || data->active_call || !data->poll_id) {
@@ -403,9 +531,15 @@ void Session::poll_suspension()
         deadline_expired();
         return;
     }
-    auto call = data->command.kind == CommandKind::QueueSuspend
-                  ? data->control->get_queue(QueueSelector{*data->poll_id}, *options)
-                  : data->control->get_job(*data->poll_id, *options);
+    auto call = [&]() -> Result<ControlCallId, Error> {
+        if (data->command.kind == CommandKind::QueueSuspend) {
+            return data->control->get_queue(QueueSelector{*data->poll_id}, *options);
+        }
+        if (data->command.kind == CommandKind::JobSuspend) {
+            return data->control->get_job(*data->poll_id, *options);
+        }
+        return data->control->get_run(*data->poll_id, *options);
+    }();
     if (!call) {
         finish(operation_exit(call.error()), local_error(call.error()));
         return;

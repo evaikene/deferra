@@ -1,7 +1,9 @@
 #include "application.hpp"
 #include "attribute_registry.hpp"
 #include "byte_buffer.hpp"
+#include "control_json.hpp"
 #include "framing.hpp"
+#include "history_json.hpp"
 #include "json.hpp"
 #include "local_server.hpp"
 #include "local_socket.hpp"
@@ -17,6 +19,8 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -42,6 +46,10 @@ enum class PeerBehavior : std::uint8_t {
     QueueSuspendPolling,
     JobSuspendPolling,
     SuspendNeverSettles,
+    RunCancelPolling,
+    RunCancelOtherTerminal,
+    RunCancelNeverSettles,
+    OutputChunk,
     SilentHandshake,
     SilentCommand
 };
@@ -94,10 +102,11 @@ auto run_session(PeerBehavior             behavior,
                     .capabilities   = behavior == PeerBehavior::MissingCapability
                                         ? std::vector<std::string>{"system.info"}
                                         : std::vector<std::string>{"job.get",
-                                       "job.suspend", "queue.create",
-                                       "queue.delete", "queue.get",
-                                       "queue.suspend", "queue.list",
-                                       "system.info"}
+                                       "job.suspend", "run.cancel",
+                                       "run.get", "attempt.output",
+                                       "queue.create", "queue.delete",
+                                       "queue.get", "queue.suspend",
+                                       "queue.list", "system.info"}
                 });
                 response.emplace("result", behavior == PeerBehavior::InvalidInfo ? JsonValue{} : std::move(info));
             }
@@ -106,6 +115,64 @@ auto run_session(PeerBehavior             behavior,
                     R"({"code":-32000,"message":"fixture rejection","data":{"category":"conflict","code":"jobu.fixture.conflict"}})");
                 REQUIRE(error);
                 response.emplace("error", std::move(*error));
+            }
+            else if (method == "run.cancel" || method == "run.get") {
+                StandardAttributeRegistry registry;
+                auto                      id         = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff");
+                auto                      at         = parse_utc_timestamp("2030-01-01T00:00:00Z");
+                auto                      attributes = materialize_attributes(registry, {}, {}, {});
+                auto                      payload    = parse_json(R"({"command":"/bin/true"})");
+                REQUIRE(id);
+                REQUIRE(at);
+                REQUIRE(attributes);
+                REQUIRE(payload);
+                auto run = JobRun{.id          = *id,
+                                  .job_id      = *id,
+                                  .queue_id    = *id,
+                                  .planned_at  = *at,
+                                  .runnable_at = *at,
+                                  .attributes  = *attributes,
+                                  .payload     = *payload,
+                                  .state       = RunState::Running};
+                if (method == "run.cancel") {
+                    auto result =
+                        cancel_run_result_to_json({.run = run, .disposition = CancelDisposition::Requested}, registry);
+                    REQUIRE(result);
+                    response.emplace("result", std::move(*result));
+                }
+                else {
+                    ++poll_count;
+                    if (behavior == PeerBehavior::RunCancelOtherTerminal) {
+                        run.state        = RunState::Succeeded;
+                        run.completed_at = *at;
+                    }
+                    else if (behavior == PeerBehavior::RunCancelPolling && poll_count == 2) {
+                        run.state        = RunState::Cancelled;
+                        run.completed_at = *at;
+                    }
+                    auto result = run_details_to_json(run, registry);
+                    REQUIRE(result);
+                    response.emplace("result", std::move(*result));
+                }
+            }
+            else if (method == "attempt.output") {
+                auto id = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff");
+                REQUIRE(id);
+                auto chunk = AttemptOutputChunk{
+                    .attempt        = {.run_id = *id, .attempt_number = 1},
+                    .channel        = OutputChannel::Stdout,
+                    .status         = OutputStatus::Available,
+                    .bytes_returned = 4,
+                    .retained_bytes = 4,
+                    .total_bytes    = 10,
+                    .omitted_bytes  = 6,
+                    .truncated      = true,
+                    .encoding       = OutputEncoding::Base64,
+                    .data           = {std::byte{'A'}, std::byte{0}, std::byte{0xff}, std::byte{'Z'}},
+                };
+                auto result = attempt_output_chunk_to_json(chunk);
+                REQUIRE(result);
+                response.emplace("result", std::move(*result));
             }
             else if (method == "queue.delete") {
                 response.emplace("result", JsonValue{});
@@ -403,4 +470,80 @@ TEST_CASE("jobuctl wait deadline reports an unconfirmed state after observed mut
     auto const& error = value->as_object().at("error").as_object();
     CHECK(error.at("code").as_string() == "jobu.client.timeout");
     CHECK_FALSE(error.at("outcome_unknown").as_bool());
+}
+
+TEST_CASE("jobuctl cancellation wait submits once and reconciles the observed terminal state", "[jobuctl][session]")
+{
+    auto const command   = std::vector<std::string>{"run", "cancel", "00112233-4455-6677-8899-aabbccddeeff", "--wait"};
+    auto       completed = run_session(PeerBehavior::RunCancelPolling, command, {"--json"});
+    CHECK(completed.exit->exit_code == 0);
+    CHECK(completed.methods == std::vector<std::string>{"system.info", "run.cancel", "run.get", "run.get"});
+    auto value = parse_json(completed.output);
+    REQUIRE(value);
+    CHECK(value->as_object().at("disposition").as_string() == "completed");
+    CHECK(value->as_object().at("run").as_object().at("state").as_string() == "cancelled");
+
+    auto conflict = run_session(PeerBehavior::RunCancelOtherTerminal, command, {"--json"});
+    CHECK(conflict.exit->exit_code == 1);
+    CHECK(std::count(conflict.methods.begin(), conflict.methods.end(), "run.cancel") == 1);
+    CHECK(conflict.output.empty());
+    auto error = parse_json(conflict.error);
+    REQUIRE(error);
+    CHECK(error->as_object().at("error").as_object().at("code").as_string() == "jobuctl.wait.state_changed");
+
+    auto timeout = run_session(PeerBehavior::RunCancelNeverSettles, command, {"--json", "--timeout", "250"});
+    CHECK(timeout.exit->exit_code == 3);
+    CHECK(std::count(timeout.methods.begin(), timeout.methods.end(), "run.cancel") == 1);
+    CHECK(timeout.output.empty());
+    auto timeout_error = parse_json(timeout.error);
+    REQUIRE(timeout_error);
+    CHECK_FALSE(timeout_error->as_object().at("error").as_object().at("outcome_unknown").as_bool());
+}
+
+TEST_CASE("jobuctl output modes preserve bytes and never overwrite a file", "[jobuctl][session]")
+{
+    auto const command = std::vector<std::string>{"attempt",
+                                                  "output",
+                                                  "00112233-4455-6677-8899-aabbccddeeff",
+                                                  "1",
+                                                  "--channel",
+                                                  "stdout"};
+    auto       json    = run_session(PeerBehavior::OutputChunk, command, {"--json"});
+    CHECK(json.exit->exit_code == 0);
+    auto value = parse_json(json.output);
+    REQUIRE(value);
+    CHECK(value->as_object().at("truncated").as_bool());
+    CHECK(value->as_object().at("omitted_bytes").as_uint() == 6);
+    CHECK(value->as_object().at("encoding").as_string() == "base64");
+
+    auto human = run_session(PeerBehavior::OutputChunk, command);
+    CHECK(human.exit->exit_code == 0);
+    CHECK(human.output.find("truncated=true") != std::string::npos);
+    CHECK(human.output.find("omitted_bytes=6") != std::string::npos);
+    CHECK(human.output.find("encoding=base64") != std::string::npos);
+
+    auto raw_command = command;
+    raw_command.emplace_back("--raw");
+    auto raw = run_session(PeerBehavior::OutputChunk, raw_command);
+    CHECK(raw.exit->exit_code == 0);
+    CHECK(raw.output == std::string{"A\0\xffZ", 4});
+
+    jb::test::TemporaryDirectory directory;
+    auto const                   path         = directory.path() / "chunk.bin";
+    auto                         file_command = command;
+    file_command.insert(file_command.end(), {"--output-file", path.string()});
+    auto saved = run_session(PeerBehavior::OutputChunk, file_command);
+    CHECK(saved.exit->exit_code == 0);
+    CHECK(saved.output.empty());
+    auto input = std::ifstream{path, std::ios::binary};
+    REQUIRE(input);
+    auto bytes = std::string{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+    CHECK(bytes == std::string{"A\0\xffZ", 4});
+
+    auto refused = run_session(PeerBehavior::OutputChunk, file_command);
+    CHECK(refused.exit->exit_code == 2);
+    CHECK(refused.output.empty());
+    auto unchanged = std::ifstream{path, std::ios::binary};
+    REQUIRE(unchanged);
+    CHECK(std::string{std::istreambuf_iterator<char>{unchanged}, std::istreambuf_iterator<char>{}} == bytes);
 }

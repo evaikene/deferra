@@ -1,6 +1,8 @@
 #include "output_priv.hpp"
 
 #include "commands/commands_priv.hpp"
+#include "control_json.hpp"
+#include "history_json.hpp"
 #include "management_json.hpp"
 #include "system_info.hpp"
 
@@ -8,11 +10,14 @@
 
 #include <fmt/format.h>
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdio> // IWYU pragma: keep for stdout/stderr macros
+#include <fcntl.h>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unistd.h>
 #include <utility>
 #include <variant>
 
@@ -83,6 +88,13 @@ auto is_job_command(CommandKind kind) noexcept -> bool
         case CommandKind::QueueSuspend:
         case CommandKind::QueueResume:
         case CommandKind::QueueDelete:
+        case CommandKind::JobRunNow:
+        case CommandKind::RunGet:
+        case CommandKind::RunList:
+        case CommandKind::RunCancel:
+        case CommandKind::AttemptGet:
+        case CommandKind::AttemptList:
+        case CommandKind::AttemptOutput:
             return false;
     }
     return false;
@@ -104,6 +116,36 @@ auto encoded_reply(Command const& command, ControlReply const& reply, AttributeR
     else if (command.kind == CommandKind::JobList) {
         if (auto const* page = std::get_if<JobPage>(&reply)) {
             return job_page_to_json(*page, registry);
+        }
+    }
+    else if (command.kind == CommandKind::JobRunNow || command.kind == CommandKind::RunGet) {
+        if (auto const* run = std::get_if<RunDetails>(&reply)) {
+            return run_details_to_json(*run, registry);
+        }
+    }
+    else if (command.kind == CommandKind::RunList) {
+        if (auto const* page = std::get_if<RunPage>(&reply)) {
+            return run_page_to_json(*page);
+        }
+    }
+    else if (command.kind == CommandKind::RunCancel) {
+        if (auto const* result = std::get_if<CancelRunResult>(&reply)) {
+            return cancel_run_result_to_json(*result, registry);
+        }
+    }
+    else if (command.kind == CommandKind::AttemptGet) {
+        if (auto const* attempt = std::get_if<AttemptDetails>(&reply)) {
+            return attempt_details_to_json(*attempt);
+        }
+    }
+    else if (command.kind == CommandKind::AttemptList) {
+        if (auto const* page = std::get_if<AttemptPage>(&reply)) {
+            return attempt_page_to_json(*page);
+        }
+    }
+    else if (command.kind == CommandKind::AttemptOutput) {
+        if (auto const* chunk = std::get_if<AttemptOutputChunk>(&reply)) {
+            return attempt_output_chunk_to_json(*chunk);
         }
     }
     else if (command.kind == CommandKind::QueueDelete || command.kind == CommandKind::JobDelete) {
@@ -255,7 +297,55 @@ auto print_command_result(Command const& command, ControlReply const& reply, Sta
     if (is_job_command(command.kind)) {
         return print_job_result(command, reply);
     }
+    if (command.kind == CommandKind::JobRunNow || command.kind == CommandKind::RunGet ||
+        command.kind == CommandKind::RunList || command.kind == CommandKind::RunCancel) {
+        return print_run_result(command, reply, registry);
+    }
+    if (command.kind == CommandKind::AttemptGet || command.kind == CommandKind::AttemptList ||
+        command.kind == CommandKind::AttemptOutput) {
+        return print_attempt_result(command, reply);
+    }
     return print_queue_result(command, reply);
+}
+
+auto write_output_chunk(Command const& command, AttemptOutputChunk const& chunk) -> Result<void, Error>
+{
+    auto const failure = [](std::string code, std::string message) {
+        return Result<void, Error>::failure(
+            {.category = ErrorCategory::InvalidArgument, .code = std::move(code), .message = std::move(message)});
+    };
+    if (command.kind != CommandKind::AttemptOutput || (!command.raw && !command.output_file)) {
+        return failure("jobuctl.output.invalid_mode", "Output delivery mode is invalid");
+    }
+
+    auto const* path = command.output_file ? &*command.output_file : nullptr;
+    auto const  fd   = path ? ::open(path->c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : STDOUT_FILENO;
+    if (fd < 0) {
+        return failure("jobuctl.output.open_failed", "Unable to create output file exclusively");
+    }
+
+    // The typed chunk owns decoded raw bytes, even when the wire representation was base64.
+    auto const bytes   = jb::core::as_string_view(chunk.data);
+    auto       written = std::size_t{0};
+    while (written < bytes.size()) {
+        auto const count = ::write(fd, bytes.data() + written, bytes.size() - written);
+        if (count < 0 && errno == EINTR) {
+            continue;
+        }
+        if (count <= 0) {
+            if (path) {
+                static_cast<void>(::close(fd));
+                static_cast<void>(::unlink(path->c_str()));
+            }
+            return failure("jobuctl.output.write_failed", "Unable to write output chunk");
+        }
+        written += static_cast<std::size_t>(count);
+    }
+    if (path && ::close(fd) != 0) {
+        static_cast<void>(::unlink(path->c_str()));
+        return failure("jobuctl.output.write_failed", "Unable to finish output file");
+    }
+    return Result<void, Error>::success();
 }
 
 } // namespace jb::jobuctl::detail

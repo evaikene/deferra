@@ -30,4 +30,8 @@ auto print_command_result(Command const&                             command,
                           jb::jobu::ControlReply const&              reply,
                           jb::jobu::StandardAttributeRegistry const& registry) -> bool;
 
+/// Writes exactly one decoded chunk as bytes. A file is created exclusively and partial files are removed on failure.
+[[nodiscard]] auto write_output_chunk(Command const& command, jb::jobu::AttemptOutputChunk const& chunk)
+    -> jb::core::Result<void, jb::core::Error>;
+
 } // namespace jb::jobuctl::detail

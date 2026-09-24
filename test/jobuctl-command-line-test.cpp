@@ -659,3 +659,156 @@ TEST_CASE("jobuctl wait is local to suspend and compatible with request files", 
     CHECK(file.command->request_file == std::filesystem::path{"job.json"});
     CHECK_FALSE(parse({"--socket", "fixture.sock", "queue", "resume", "--name", "reports", "--wait"}).command);
 }
+
+TEST_CASE("jobuctl run commands preserve history filters and cursor-only continuations", "[jobuctl][parse]")
+{
+    auto now = parse({"--socket", "fixture.sock", "job", "run-now", job_id, "--idempotency-key", "manual-1"});
+    REQUIRE(now.command);
+    CHECK(now.command->method == "job.run_now");
+    CHECK(std::get<RunNowRequest>(now.command->request).idempotency_key == "manual-1");
+
+    auto listed = parse({"--socket",
+                         "fixture.sock",
+                         "run",
+                         "list",
+                         "--queue-id",
+                         job_id,
+                         "--state",
+                         "failed",
+                         "--origin",
+                         "manual",
+                         "--planned-from",
+                         "2030-01-01T00:00:00Z",
+                         "--planned-to",
+                         "2030-02-01T00:00:00Z",
+                         "--limit",
+                         "20"});
+    REQUIRE(listed.command);
+    auto const& query = std::get<RunQuery>(std::get<RunListRequest>(listed.command->request));
+    CHECK(query.limit == 20);
+    CHECK(query.filters.queue_id == *Uuid::parse(job_id));
+    CHECK(query.filters.state == RunState::Failed);
+    CHECK(query.filters.origin == RunOrigin::Manual);
+    CHECK(query.filters.planned.from.has_value());
+    CHECK(query.filters.planned.to.has_value());
+
+    auto cursor = parse({"--socket", "fixture.sock", "run", "list", "--cursor", "token"});
+    REQUIRE(cursor.command);
+    CHECK(std::get<CursorRequest>(std::get<RunListRequest>(cursor.command->request)).cursor == "token");
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "run", "list", "--cursor", "token", "--limit", "2"}).command);
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "run", "list", "--origin", "submitted"}).command);
+    CHECK_FALSE(parse({"--socket",
+                       "fixture.sock",
+                       "run",
+                       "list",
+                       "--planned-from",
+                       "2031-01-01T00:00:00Z",
+                       "--planned-to",
+                       "2030-01-01T00:00:00Z"})
+                    .command);
+
+    auto cancel = parse({"--socket", "fixture.sock", "run", "cancel", job_id, "--wait"});
+    REQUIRE(cancel.command);
+    CHECK(cancel.command->wait);
+    CHECK(cancel.command->method == "run.cancel");
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "run", "get", job_id, "--wait"}).command);
+}
+
+TEST_CASE("jobuctl attempt commands keep output delivery separate from request params", "[jobuctl][parse]")
+{
+    auto listed = parse({"--socket", "fixture.sock", "attempt", "list", job_id, "--limit", "3"});
+    REQUIRE(listed.command);
+    auto const& query = std::get<AttemptQuery>(std::get<AttemptListRequest>(listed.command->request));
+    CHECK(query.run_id == *Uuid::parse(job_id));
+    CHECK(query.limit == 3);
+
+    auto cursor = parse({"--socket", "fixture.sock", "attempt", "list", "--cursor", "next"});
+    REQUIRE(cursor.command);
+    CHECK(std::get<CursorRequest>(std::get<AttemptListRequest>(cursor.command->request)).cursor == "next");
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "attempt", "list", job_id, "--cursor", "next"}).command);
+
+    auto output = parse({"--socket",
+                         "fixture.sock",
+                         "attempt",
+                         "output",
+                         job_id,
+                         "2",
+                         "--channel",
+                         "stderr",
+                         "--offset",
+                         "4",
+                         "--limit",
+                         "16",
+                         "--raw"});
+    REQUIRE(output.command);
+    CHECK(output.command->raw);
+    auto const& request = std::get<AttemptOutputRequest>(output.command->request);
+    CHECK(request.attempt.attempt_number == 2);
+    CHECK(request.channel == OutputChannel::Stderr);
+    CHECK(request.offset == 4);
+    CHECK(request.limit == 16);
+
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "attempt", "output", job_id, "0", "--channel", "stdout"}).command);
+    CHECK_FALSE(
+        parse({"--socket", "fixture.sock", "attempt", "output", job_id, "1", "--channel", "stdout", "--raw", "--json"})
+            .command);
+    CHECK_FALSE(parse({"--socket",
+                       "fixture.sock",
+                       "attempt",
+                       "output",
+                       job_id,
+                       "1",
+                       "--channel",
+                       "stdout",
+                       "--raw",
+                       "--output-file",
+                       "out.bin"})
+                    .command);
+
+    auto file = parse(
+        {"--socket", "fixture.sock", "attempt", "output", "--request-file", "params.json", "--output-file", "out.bin"});
+    REQUIRE(file.command);
+    CHECK(file.command->output_file == std::filesystem::path{"out.bin"});
+}
+
+TEST_CASE("jobuctl request files decode run and output methods with strict public codecs", "[jobuctl][input]")
+{
+    jb::test::TemporaryDirectory directory;
+    StandardAttributeRegistry    registry;
+    auto const                   path = directory.path() / "history.json";
+    {
+        auto file = std::ofstream{path, std::ios::binary};
+        REQUIRE(file);
+        file << R"({"job_id":"00000000-0000-7000-8000-000000000001","limit":2})";
+    }
+    auto runs = parse({"--socket", "fixture.sock", "run", "list", "--request-file", path.string()});
+    REQUIRE(runs.command);
+    REQUIRE(load_request_file(*runs.command, registry));
+    auto const& query = std::get<RunQuery>(std::get<RunListRequest>(runs.command->request));
+    CHECK(query.limit == 2);
+    CHECK(query.filters.job_id == *Uuid::parse(job_id));
+
+    {
+        auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
+        REQUIRE(file);
+        file
+            << R"({"run_id":"00000000-0000-7000-8000-000000000001","attempt_number":1,"channel":"body","offset":4,"limit":8})";
+    }
+    auto output = parse({"--socket", "fixture.sock", "attempt", "output", "--request-file", path.string(), "--raw"});
+    REQUIRE(output.command);
+    REQUIRE(load_request_file(*output.command, registry));
+    CHECK(output.command->raw);
+    auto const& request = std::get<AttemptOutputRequest>(output.command->request);
+    CHECK(request.channel == OutputChannel::Body);
+    CHECK(request.offset == 4);
+    CHECK(request.limit == 8);
+
+    {
+        auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
+        REQUIRE(file);
+        file << R"({"cursor":"token","limit":2})";
+    }
+    auto invalid = load_request_file(*runs.command, registry);
+    REQUIRE_FALSE(invalid);
+    CHECK(invalid.error().code == "jobuctl.input.invalid_params");
+}
