@@ -29,9 +29,37 @@ struct ControlClient::Private final : jb::core::priv::ObjectPrivate {
         Failed
     };
     enum class Method : std::uint8_t {
-        Info,
+        Handshake,
+        SystemInfo,
+        SystemStats,
+        CreateQueue,
+        GetQueue,
+        ListQueues,
+        UpdateQueue,
+        SuspendQueue,
+        ResumeQueue,
+        DeleteQueue,
+        QueueStats,
         CreateJob,
-        ListRuns
+        GetJob,
+        ListJobs,
+        UpdateJob,
+        SuspendJob,
+        ResumeJob,
+        MoveJob,
+        DeleteJob,
+        RunNow,
+        GetRun,
+        ListRuns,
+        CancelRun,
+        GetAttempt,
+        ListAttempts,
+        ReadAttemptOutput,
+        SetSecret,
+        ListSecrets,
+        DeleteSecret,
+        ValidateSchedule,
+        NextSchedule
     };
 
     struct Pending {
@@ -57,13 +85,20 @@ struct ControlClient::Private final : jb::core::priv::ObjectPrivate {
     void schedule_delivery();
     void deliver_ready_outcomes();
     void deliver_one(ControlCallId id, Pending call);
-    void fail_handshake(jb::core::Error error);
-    void on_timeout();
-    void rearm_deadline();
-    void close(bool emit_failures);
+    [[nodiscard]] static auto is_mutation(Method method) noexcept -> bool;
+    void                      fail_handshake(jb::core::Error error);
+    void                      on_timeout();
+    void                      rearm_deadline();
+    void                      close(bool emit_failures);
 
-    [[nodiscard]] auto
-    start_call(Method method, std::string_view name, jb::core::JsonValue params, ControlCallOptions options)
+    [[nodiscard]] auto start_call(Method                             method,
+                                  std::string_view                   name,
+                                  std::optional<jb::core::JsonValue> params,
+                                  ControlCallOptions options) -> jb::core::Result<ControlCallId, jb::core::Error>;
+    [[nodiscard]] auto start_encoded_call(Method                                                 method,
+                                          std::string_view                                       name,
+                                          jb::core::Result<jb::core::JsonValue, jb::core::Error> params,
+                                          ControlCallOptions                                     options)
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
     jb::rpc::Client&                       rpc;

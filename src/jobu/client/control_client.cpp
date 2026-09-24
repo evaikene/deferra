@@ -3,8 +3,6 @@
 #include "control_client_priv.hpp"
 
 #include "event_loop.hpp"
-#include "history_json.hpp"
-#include "management_json.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -41,11 +39,6 @@ auto client_error(ErrorCategory category, std::string_view code, std::string_vie
 auto invalid_state_error() -> Error
 {
     return client_error(ErrorCategory::Unavailable, "jobu.client.not_ready", "JobU client is not ready");
-}
-
-auto invalid_response_error() -> Error
-{
-    return client_error(ErrorCategory::InvalidArgument, "jobu.client.invalid_response", "JobU response is invalid");
 }
 
 auto timeout_error() -> Error
@@ -90,15 +83,6 @@ auto local_failure(Error error, bool outcome_unknown = false) -> ControlFailure
         .kind            = ControlFailureKind::Local,
         .error           = std::move(error),
         .outcome_unknown = outcome_unknown,
-    };
-}
-
-auto remote_failure(jb::rpc::RpcError error) -> ControlFailure
-{
-    return {
-        .kind            = ControlFailureKind::Remote,
-        .error           = std::move(error),
-        .outcome_unknown = false,
     };
 }
 
@@ -249,61 +233,6 @@ void ControlClient::Private::fail_handshake(Error error)
     owner->emit(owner->failed, error);
 }
 
-void ControlClient::Private::deliver_one(ControlCallId id, Pending call)
-{
-    if (auto* remote = std::get_if<jb::rpc::RpcError>(&call.outcome)) {
-        if (call.method == Method::Info) {
-            fail_handshake(
-                client_error(ErrorCategory::Unavailable, "jobu.client.handshake_failed", "JobU handshake failed"));
-        }
-        else {
-            owner->emit(owner->call_failed, id, remote_failure(std::move(*remote)));
-        }
-        return;
-    }
-
-    auto const* value = std::get_if<JsonValue>(&call.outcome);
-    if (value == nullptr) {
-        return;
-    }
-
-    if (call.method == Method::Info) {
-        auto decoded = system_info_from_json(*value);
-        if (!decoded) {
-            fail_handshake(invalid_response_error());
-            return;
-        }
-        if (decoded->api_version.major != 1U) {
-            fail_handshake(client_error(ErrorCategory::Unsupported,
-                                        "jobu.client.unsupported_api",
-                                        "JobU API major version is unsupported"));
-            return;
-        }
-
-        capabilities = std::set<std::string>{decoded->capabilities.begin(), decoded->capabilities.end()};
-        phase        = Phase::Ready;
-        owner->emit(owner->ready, std::move(decoded).value());
-        return;
-    }
-
-    if (call.method == Method::CreateJob) {
-        auto decoded = job_from_json(*value, attributes);
-        if (decoded) {
-            owner->emit(owner->reply_received, id, ControlReply{std::move(decoded).value()});
-            return;
-        }
-    }
-    else if (call.method == Method::ListRuns) {
-        auto decoded = run_page_from_json(*value);
-        if (decoded) {
-            owner->emit(owner->reply_received, id, ControlReply{std::move(decoded).value()});
-            return;
-        }
-    }
-
-    owner->emit(owner->call_failed, id, local_failure(invalid_response_error(), call.method == Method::CreateJob));
-}
-
 void ControlClient::Private::on_terminated(Error const& raw_error)
 {
     if (phase == Phase::Closed || phase == Phase::Failed) {
@@ -316,9 +245,10 @@ void ControlClient::Private::on_terminated(Error const& raw_error)
     auto failures = std::vector<std::pair<ControlCallId, bool>>{};
     for (auto const& [id, call] : pending) {
         if (id != 0U) {
-            auto const uncertain =
-                call.method == Method::CreateJob && (call.possibly_sent || raw_error.code == "rpc.short_write" ||
-                                                     raw_error.code == "rpc.connection_closed");
+            auto const uncertain = is_mutation(call.method) &&
+                                   !std::holds_alternative<jb::rpc::RpcError>(call.outcome) &&
+                                   (call.possibly_sent || raw_error.code == "rpc.short_write" ||
+                                    raw_error.code == "rpc.connection_closed");
             failures.emplace_back(id, uncertain);
         }
     }
@@ -382,7 +312,7 @@ void ControlClient::Private::on_timeout()
                 wire_to_local.erase(*number);
             }
         }
-        expired.emplace_back(id, call.method == Method::CreateJob && call.possibly_sent);
+        expired.emplace_back(id, is_mutation(call.method) && call.possibly_sent);
         entry = pending.erase(entry);
     }
     rearm_deadline();
@@ -396,10 +326,10 @@ void ControlClient::Private::on_timeout()
     }
 }
 
-auto ControlClient::Private::start_call(Method             method,
-                                        std::string_view   name,
-                                        JsonValue          params,
-                                        ControlCallOptions options) -> Result<ControlCallId, Error>
+auto ControlClient::Private::start_call(Method                   method,
+                                        std::string_view         name,
+                                        std::optional<JsonValue> params,
+                                        ControlCallOptions       options) -> Result<ControlCallId, Error>
 {
     using CallResult = Result<ControlCallId, Error>;
     if (phase != Phase::Ready) {
@@ -445,6 +375,20 @@ auto ControlClient::Private::start_call(Method             method,
     return CallResult::success(local_id);
 }
 
+auto ControlClient::Private::start_encoded_call(Method                   method,
+                                                std::string_view         name,
+                                                Result<JsonValue, Error> params,
+                                                ControlCallOptions       options) -> Result<ControlCallId, Error>
+{
+    if (phase != Phase::Ready) {
+        return Result<ControlCallId, Error>::failure(invalid_state_error());
+    }
+    if (!params) {
+        return Result<ControlCallId, Error>::failure(std::move(params).error());
+    }
+    return start_call(method, name, std::move(params).value(), options);
+}
+
 void ControlClient::Private::close(bool emit_failures)
 {
     if (phase == Phase::Closed || phase == Phase::Failed) {
@@ -466,7 +410,9 @@ void ControlClient::Private::close(bool emit_failures)
             rpc.cancel(*call.wire_id);
         }
         if (id != 0U) {
-            auto const uncertain = call.method == Method::CreateJob && (call.possibly_sent || establishing == id);
+            auto const uncertain = is_mutation(call.method) &&
+                                   !std::holds_alternative<jb::rpc::RpcError>(call.outcome) &&
+                                   (call.possibly_sent || establishing == id);
             if (establishing == id) {
                 establishing_failure.emplace(id, uncertain);
             }
@@ -541,7 +487,7 @@ auto ControlClient::initialize(ControlCallOptions options) -> Result<void, Error
     }
 
     data->phase = Private::Phase::Initializing;
-    data->pending.emplace(0U, Private::Pending{.method = Private::Method::Info, .deadline = *deadline});
+    data->pending.emplace(0U, Private::Pending{.method = Private::Method::Handshake, .deadline = *deadline});
     data->establishing = 0U;
     auto wire          = data->rpc.call("system.info", std::nullopt, [data](jb::rpc::RequestId const& id) {
         data->bind_wire_id(0U, id);
@@ -561,33 +507,6 @@ auto ControlClient::initialize(ControlCallOptions options) -> Result<void, Error
     }
 
     return InitResult::success();
-}
-
-auto ControlClient::create_job(CreateJobRequest const& request, ControlCallOptions options)
-    -> Result<ControlCallId, Error>
-{
-    auto* data = d_ptr<Private>();
-    if (data->phase != Private::Phase::Ready) {
-        return Result<ControlCallId, Error>::failure(invalid_state_error());
-    }
-    auto params = create_job_request_to_json(request, data->attributes);
-    if (!params) {
-        return Result<ControlCallId, Error>::failure(std::move(params).error());
-    }
-    return data->start_call(Private::Method::CreateJob, "job.create", std::move(params).value(), options);
-}
-
-auto ControlClient::list_runs(RunListRequest const& request, ControlCallOptions options) -> Result<ControlCallId, Error>
-{
-    auto* data = d_ptr<Private>();
-    if (data->phase != Private::Phase::Ready) {
-        return Result<ControlCallId, Error>::failure(invalid_state_error());
-    }
-    auto params = run_list_request_to_json(request);
-    if (!params) {
-        return Result<ControlCallId, Error>::failure(std::move(params).error());
-    }
-    return data->start_call(Private::Method::ListRuns, "run.list", std::move(params).value(), options);
 }
 
 void ControlClient::cancel_call(ControlCallId id)
@@ -610,7 +529,9 @@ void ControlClient::cancel_call(ControlCallId id)
     data->rearm_deadline();
     emit(call_failed,
          id,
-         local_failure(cancelled_error(), call.method == Private::Method::CreateJob && call.possibly_sent));
+         local_failure(cancelled_error(),
+                       Private::is_mutation(call.method) && !std::holds_alternative<jb::rpc::RpcError>(call.outcome) &&
+                           call.possibly_sent));
 }
 
 void ControlClient::close()
