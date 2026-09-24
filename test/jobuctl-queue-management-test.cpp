@@ -441,7 +441,7 @@ auto main(int argc, char* argv[]) -> int
         return fail("renamed queue lookup did not surface the stable not-found code");
     }
 
-    auto       suspended         = run_success(argv[2], socket_path, {"queue", "suspend", "--id", *queue_id});
+    auto       suspended         = run_success(argv[2], socket_path, {"queue", "suspend", "--id", *queue_id, "--wait"});
     auto const suspended_summary = queue_summary(*queue_id, "renamed", "suspended", 4, 5, "retry_interrupted");
     if (!suspended || *suspended != suspended_summary) {
         return fail("queue suspend did not print the durable suspended state");

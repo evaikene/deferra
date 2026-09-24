@@ -7,6 +7,7 @@
 #include "event_loop_types.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <limits>
 #include <span>
@@ -28,10 +29,25 @@ auto is_cli_argument_value(std::string_view token, std::span<CommandLineOption c
     if (!token.starts_with("--")) {
         return true;
     }
-    auto const spelling = token.substr(2);
-    auto const name     = spelling.substr(0, spelling.find('='));
+    auto const     spelling      = token.substr(2);
+    auto const     name          = spelling.substr(0, spelling.find('='));
+    // Newly registered Stage 8.21 options were literal --arg values in earlier releases.
+    constexpr auto added_options = std::array<std::string_view, 11>{
+        "now",
+        "cron",
+        "timezone",
+        "attribute",
+        "header",
+        "body",
+        "defaults-file",
+        "history-retention-seconds",
+        "runnable-wait-warning-ms",
+        "inherit-history-retention",
+        "wait",
+    };
     return is_cli_creation_option(name) || name == "help" || name == "version" || name == "json" || name == "timeout" ||
-           name == "request-file" || std::ranges::find(options, name, &CommandLineOption::long_name) == options.end();
+           name == "request-file" || std::ranges::find(added_options, name) != added_options.end() ||
+           std::ranges::find(options, name, &CommandLineOption::long_name) == options.end();
 }
 
 auto preserve_value_tokens(int argc, char* argv[], std::span<CommandLineOption const> options)
@@ -112,6 +128,7 @@ struct ParsedOptions {
     std::vector<CommandLineArgument>     local;
     std::chrono::milliseconds            timeout{5000};
     bool                                 json{false};
+    bool                                 wait{false};
     bool                                 help{false};
     bool                                 version{false};
     std::string                          error;
@@ -153,7 +170,10 @@ auto parse_options(Selection const& selected) -> ParsedOptions
         }
         seen.push_back(argument.name());
 
-        if (!global) {
+        if (!global && argument.name() == "wait") {
+            parsed.wait = true;
+        }
+        else if (!global) {
             parsed.local.push_back(argument);
         }
         else if (argument.name() == "socket") {
@@ -260,6 +280,7 @@ auto parse_command_line(int argc, char* argv[], StandardAttributeRegistry const&
                               .request_file = std::move(options.request_file),
                               .timeout      = options.timeout,
                               .json         = options.json,
+                              .wait         = options.wait,
                               }
         };
     }
@@ -273,6 +294,7 @@ auto parse_command_line(int argc, char* argv[], StandardAttributeRegistry const&
     built.command->method  = selected.command->capability;
     built.command->timeout = options.timeout;
     built.command->json    = options.json;
+    built.command->wait    = options.wait;
     return {.action = std::move(*built.command)};
 }
 

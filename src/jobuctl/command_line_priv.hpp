@@ -55,6 +55,7 @@ struct Command {
     std::optional<std::filesystem::path> request_file;
     std::chrono::milliseconds            timeout{5000};
     bool                                 json{false};
+    bool                                 wait{false};
 };
 
 struct CommandBuildResult {

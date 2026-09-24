@@ -11,6 +11,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -157,6 +158,47 @@ TEST_CASE("jobuctl request files are bounded and strictly decoded", "[jobuctl][i
     REQUIRE(job.command);
     REQUIRE(load_request_file(*job.command, registry));
     CHECK(std::get<CreateJobRequest>(job.command->request).payload == *payload);
+
+    {
+        auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
+        REQUIRE(file);
+        file
+            << R"({"job_id":"00000000-0000-7000-8000-000000000001","expected_revision":7,"name":null,"type":"http","schedule":{"kind":"cron","expression":"0 9 * * *","timezone":"UTC"},"attributes":{"retry.max_attempts":2},"payload":{"url":"https://example.test","headers":[{"name":"Authorization","value":{"secret":"service.token"}}]}})";
+    }
+    auto update = parse({"--socket", "fixture.sock", "job", "update", "--request-file", path.string()});
+    REQUIRE(update.command);
+    REQUIRE(load_request_file(*update.command, registry));
+    auto const& update_request = std::get<UpdateJobRequest>(update.command->request);
+    REQUIRE(update_request.name);
+    CHECK_FALSE(*update_request.name);
+    CHECK(update_request.expected_revision == 7);
+    CHECK(update_request.type == JobType::Http);
+    CHECK(std::holds_alternative<CronSchedule>(*update_request.schedule));
+    CHECK(update_request.attribute_changes.contains("retry.max_attempts"));
+    REQUIRE(update_request.payload);
+    CHECK(update_request.payload->as_object()
+              .at("headers")
+              .as_array()
+              .front()
+              .as_object()
+              .at("value")
+              .as_object()
+              .at("secret")
+              .as_string() == "service.token");
+
+    {
+        auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
+        REQUIRE(file);
+        file << R"({"queue_name":"reports","defaults":{},"history_retention_seconds":null})";
+    }
+    auto queue_update = parse({"--socket", "fixture.sock", "queue", "update", "--request-file", path.string()});
+    REQUIRE(queue_update.command);
+    REQUIRE(load_request_file(*queue_update.command, registry));
+    auto const& queue_request = std::get<UpdateQueueRequest>(queue_update.command->request);
+    REQUIRE(queue_request.defaults);
+    CHECK(queue_request.defaults->empty());
+    REQUIRE(queue_request.history_retention);
+    CHECK_FALSE(*queue_request.history_retention);
 }
 
 TEST_CASE("jobuctl accepts one params object from standard input", "[jobuctl][input]")
@@ -477,4 +519,143 @@ TEST_CASE("jobuctl help-looking option values and terminator operands remain dat
     auto name = parse({"--socket", "fixture.sock", "queue", "get", "--name=--help"});
     REQUIRE(name.command);
     CHECK(std::get<std::string>(std::get<QueueSelector>(name.command->request)) == "--help");
+}
+
+TEST_CASE("jobuctl queue configuration keeps inheritance and clear semantics", "[jobuctl][parse]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   path = directory.path() / "defaults.json";
+    {
+        auto file = std::ofstream{path};
+        REQUIRE(file);
+        file << R"({"retry.max_attempts":2})";
+    }
+
+    auto created = parse({"--socket",
+                          "fixture.sock",
+                          "queue",
+                          "create",
+                          "reports",
+                          "--defaults-file",
+                          path.string(),
+                          "--history-retention-seconds",
+                          "0",
+                          "--runnable-wait-warning-ms",
+                          "250"});
+    REQUIRE(created.command);
+    auto const& create_request = std::get<CreateQueueRequest>(created.command->request);
+    CHECK(create_request.defaults.contains("retry.max_attempts"));
+    CHECK(create_request.history_retention == std::chrono::seconds{0});
+    CHECK(create_request.runnable_wait_warning == std::chrono::milliseconds{250});
+
+    {
+        auto file = std::ofstream{path, std::ios::trunc};
+        REQUIRE(file);
+        file << "{}";
+    }
+    auto updated = parse({"--socket",
+                          "fixture.sock",
+                          "queue",
+                          "update",
+                          "--name",
+                          "reports",
+                          "--defaults-file",
+                          path.string(),
+                          "--inherit-history-retention",
+                          "--recovery-policy",
+                          "retry_interrupted"});
+    REQUIRE(updated.command);
+    auto const& update_request = std::get<UpdateQueueRequest>(updated.command->request);
+    REQUIRE(update_request.defaults);
+    CHECK(update_request.defaults->empty());
+    REQUIRE(update_request.history_retention);
+    CHECK_FALSE(*update_request.history_retention);
+    CHECK(update_request.recovery_policy == RecoveryPolicy::RetryInterrupted);
+
+    CHECK_FALSE(parse({"--socket",
+                       "fixture.sock",
+                       "queue",
+                       "update",
+                       "--name",
+                       "reports",
+                       "--history-retention-seconds",
+                       "0",
+                       "--inherit-history-retention"})
+                    .command);
+    CHECK_FALSE(
+        parse({"--socket", "fixture.sock", "queue", "create", "reports", "--history-retention-seconds", "-1"}).command);
+}
+
+TEST_CASE("jobuctl job schedules and attribute patches use typed request semantics", "[jobuctl][parse]")
+{
+    auto const base = std::vector<std::string>{"--socket",
+                                               "fixture.sock",
+                                               "job",
+                                               "create",
+                                               "--queue-name",
+                                               "reports",
+                                               "--type",
+                                               "cli",
+                                               "--command",
+                                               "/bin/true"};
+    auto       with = [&](std::vector<std::string> suffix) {
+        auto args = base;
+        args.insert(args.end(), suffix.begin(), suffix.end());
+        return parse(std::move(args));
+    };
+
+    auto immediate = with({"--now", "--attribute", "retry.max_attempts=2"});
+    REQUIRE(immediate.command);
+    auto const& create_request = std::get<CreateJobRequest>(immediate.command->request);
+    CHECK(std::holds_alternative<ImmediateSchedule>(create_request.schedule));
+    CHECK(create_request.attributes.contains("retry.max_attempts"));
+
+    auto recurring = with({"--cron", "0 9 * * 1-5", "--timezone", "Europe/Tallinn"});
+    REQUIRE(recurring.command);
+    auto const& cron = std::get<CronSchedule>(std::get<CreateJobRequest>(recurring.command->request).schedule);
+    CHECK(cron.expression == "0 9 * * 1-5");
+    CHECK(cron.timezone == "Europe/Tallinn");
+
+    auto updated = parse({"--socket",
+                          "fixture.sock",
+                          "job",
+                          "update",
+                          job_id,
+                          "--revision",
+                          "1",
+                          "--cron",
+                          "0 9 * * *",
+                          "--attribute",
+                          "retry.max_attempts=3"});
+    REQUIRE(updated.command);
+    auto const& update_request = std::get<UpdateJobRequest>(updated.command->request);
+    CHECK(update_request.expected_revision == 1);
+    CHECK(update_request.attribute_changes.contains("retry.max_attempts"));
+    CHECK(std::holds_alternative<CronSchedule>(*update_request.schedule));
+
+    for (auto const& suffix : std::vector<std::vector<std::string>>{
+             {"--now", "--at", "2030-01-01T00:00:00Z"},
+             {"--now", "--cron", "0 9 * * *"},
+             {"--at", "2030-01-01T00:00:00Z", "--timezone", "UTC"},
+             {"--now", "--attribute", "retry.max_attempts=null"},
+             {"--now", "--attribute", "retry.max_attempts=2", "--attribute", "retry.max_attempts=3"}
+    }) {
+        CAPTURE(suffix);
+        CHECK_FALSE(with(suffix).command);
+    }
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "job", "update", job_id, "--revision", "1", "--now"}).command);
+}
+
+TEST_CASE("jobuctl wait is local to suspend and compatible with request files", "[jobuctl][parse]")
+{
+    auto queue = parse({"--socket", "fixture.sock", "queue", "suspend", "--name", "reports", "--wait"});
+    REQUIRE(queue.command);
+    CHECK(queue.command->wait);
+    CHECK(std::holds_alternative<QueueSelector>(queue.command->request));
+
+    auto file = parse({"--socket", "fixture.sock", "job", "suspend", "--request-file", "job.json", "--wait"});
+    REQUIRE(file.command);
+    CHECK(file.command->wait);
+    CHECK(file.command->request_file == std::filesystem::path{"job.json"});
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "queue", "resume", "--name", "reports", "--wait"}).command);
 }

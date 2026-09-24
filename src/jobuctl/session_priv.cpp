@@ -5,6 +5,7 @@
 #include "object_priv.hpp"
 #include "timer.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -24,7 +25,14 @@ enum class SessionPhase : std::uint8_t {
     Connecting,
     Initializing,
     Command,
+    Polling,
     Finished,
+};
+
+enum class SuspensionObservation : std::uint8_t {
+    Pending,
+    Complete,
+    Conflict,
 };
 
 auto is_mutation(CommandKind kind) noexcept -> bool
@@ -117,6 +125,40 @@ auto operation_exit(Error const& error) -> int
     return 3;
 }
 
+auto observe_suspension(CommandKind kind, ControlReply const& reply, std::optional<Uuid>& poll_id)
+    -> SuspensionObservation
+{
+    if (kind == CommandKind::QueueSuspend) {
+        if (auto const* queue = std::get_if<Queue>(&reply)) {
+            if (poll_id && *poll_id != queue->id) {
+                return SuspensionObservation::Conflict;
+            }
+            poll_id = queue->id;
+            if (queue->state == QueueState::Suspending) {
+                return SuspensionObservation::Pending;
+            }
+            if (queue->state == QueueState::Suspended) {
+                return SuspensionObservation::Complete;
+            }
+        }
+    }
+    else if (kind == CommandKind::JobSuspend) {
+        if (auto const* job = std::get_if<JobDefinition>(&reply)) {
+            if (poll_id && *poll_id != job->id) {
+                return SuspensionObservation::Conflict;
+            }
+            poll_id = job->id;
+            if (job->state == JobState::Suspending) {
+                return SuspensionObservation::Pending;
+            }
+            if (job->state == JobState::Suspended) {
+                return SuspensionObservation::Complete;
+            }
+        }
+    }
+    return SuspensionObservation::Conflict;
+}
+
 } // namespace
 
 struct Session::Private : jb::core::priv::ObjectPrivate {
@@ -133,9 +175,12 @@ struct Session::Private : jb::core::priv::ObjectPrivate {
     std::unique_ptr<jb::rpc::Client> rpc;
     std::unique_ptr<ControlClient>   control;
     Timer                            timer;
+    Timer                            poll_timer;
     SessionPhase                     phase{SessionPhase::Idle};
     TimePoint                        deadline;
     std::optional<ControlCallId>     active_call;
+    std::optional<Uuid>              poll_id;
+    std::chrono::milliseconds        poll_interval{100};
 };
 
 Session::Session(Command command, StandardAttributeRegistry const& registry)
@@ -155,10 +200,11 @@ Session::Session(Command command, StandardAttributeRegistry const& registry)
                        .code     = "jobuctl.connection_failed",
                        .message  = "Daemon socket connection failed",
                    },
-                   state->active_call && is_mutation(state->command.kind)));
+                   state->phase == SessionPhase::Command && state->active_call && is_mutation(state->command.kind)));
     });
     data->socket.connected.connect(this, [this] { connected(); });
     data->timer.timeout.connect(this, [this] { deadline_expired(); });
+    data->poll_timer.timeout.connect(this, [this] { poll_suspension(); });
 }
 
 Session::~Session()
@@ -167,6 +213,7 @@ Session::~Session()
     auto* data  = d_ptr<Private>();
     data->phase = SessionPhase::Finished;
     data->timer.stop();
+    data->poll_timer.stop();
     data->control.reset();
     data->rpc.reset();
 }
@@ -194,6 +241,7 @@ void Session::finish(int code, std::optional<CliError> error)
     // Latch completion before close() emits any pending-call failures through receiver-aware observers.
     data->phase = SessionPhase::Finished;
     data->timer.stop();
+    data->poll_timer.stop();
     if (data->control) {
         data->control->close();
     }
@@ -206,13 +254,15 @@ void Session::finish(int code, std::optional<CliError> error)
 void Session::deadline_expired()
 {
     auto*      data    = d_ptr<Private>();
-    auto const unknown = data->active_call && is_mutation(data->command.kind);
+    auto const unknown = data->phase == SessionPhase::Command && data->active_call && is_mutation(data->command.kind);
     finish(3,
            local_error(
                {
                    .category = ErrorCategory::Timeout,
                    .code     = "jobu.client.timeout",
-                   .message  = "Overall command deadline expired",
+                   .message  = data->phase == SessionPhase::Polling
+                                 ? "Suspended state was not confirmed before the deadline"
+                                 : "Overall command deadline expired",
                },
                unknown));
 }
@@ -234,7 +284,11 @@ void Session::connected()
         receive_failure(id, failure);
     });
     data->control->failed.connect(this, [this](Error const& error) {
-        finish(3, local_error(error, d_ptr<Private>()->active_call && is_mutation(d_ptr<Private>()->command.kind)));
+        auto* state = d_ptr<Private>();
+        finish(3,
+               local_error(error,
+                           state->phase == SessionPhase::Command && state->active_call &&
+                               is_mutation(state->command.kind)));
     });
 
     data->phase  = SessionPhase::Initializing;
@@ -286,10 +340,29 @@ void Session::ready(SystemInfo const& info)
 void Session::receive_reply(ControlCallId id, ControlReply const& reply)
 {
     auto* data = d_ptr<Private>();
-    if (data->phase != SessionPhase::Command || data->active_call != id) {
+    if ((data->phase != SessionPhase::Command && data->phase != SessionPhase::Polling) || data->active_call != id) {
         return;
     }
     data->active_call.reset();
+
+    if (data->command.wait) {
+        auto const observation = observe_suspension(data->command.kind, reply, data->poll_id);
+        if (observation == SuspensionObservation::Conflict) {
+            finish(1,
+                   local_error({.category = ErrorCategory::Conflict,
+                                .code     = "jobuctl.wait.state_changed",
+                                .message  = "Suspension did not reach a valid state"}));
+            return;
+        }
+        if (observation == SuspensionObservation::Pending) {
+            // A suspend reply is observed once; every later request is a read by stable ID.
+            data->phase = SessionPhase::Polling;
+            data->poll_timer.start(data->poll_interval);
+            data->poll_interval = std::min(data->poll_interval * 2, std::chrono::milliseconds{500});
+            return;
+        }
+    }
+
     if (!print_command_result(data->command, reply, data->registry)) {
         finish(3,
                local_error({
@@ -305,7 +378,7 @@ void Session::receive_reply(ControlCallId id, ControlReply const& reply)
 void Session::receive_failure(ControlCallId id, ControlFailure const& failure)
 {
     auto* data = d_ptr<Private>();
-    if (data->phase != SessionPhase::Command || data->active_call != id) {
+    if ((data->phase != SessionPhase::Command && data->phase != SessionPhase::Polling) || data->active_call != id) {
         return;
     }
     data->active_call.reset();
@@ -316,6 +389,28 @@ void Session::receive_failure(ControlCallId id, ControlFailure const& failure)
         auto const& error = std::get<Error>(failure.error);
         finish(operation_exit(error), local_error(error, failure.outcome_unknown));
     }
+}
+
+void Session::poll_suspension()
+{
+    auto* data = d_ptr<Private>();
+    if (data->phase != SessionPhase::Polling || data->active_call || !data->poll_id) {
+        return;
+    }
+
+    auto options = remaining_options(data->deadline);
+    if (!options) {
+        deadline_expired();
+        return;
+    }
+    auto call = data->command.kind == CommandKind::QueueSuspend
+                  ? data->control->get_queue(QueueSelector{*data->poll_id}, *options)
+                  : data->control->get_job(*data->poll_id, *options);
+    if (!call) {
+        finish(operation_exit(call.error()), local_error(call.error()));
+        return;
+    }
+    data->active_call = *call;
 }
 
 } // namespace jb::jobuctl::detail

@@ -202,6 +202,90 @@ TEST_CASE("jobuctl sends a complete request file through the typed session", "[j
     REQUIRE(exchange.params);
     CHECK(exchange.params->as_object().at("queue_name").as_string() == "fixture");
     CHECK(exchange.params->as_object().at("payload").as_object().at("command").as_string() == "/bin/true");
+
+    {
+        auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
+        REQUIRE(file);
+        file
+            << R"({"queue_name":"fixture","type":"http","schedule":{"kind":"once","at":"now"},"payload":{"url":"https://example.test/events","headers":[{"name":"Authorization","value":{"secret":"service.token"}}],"body":{"secret":"service.body"}},"attributes":{"retry.max_attempts":2}})";
+    }
+    auto http = run_client({"job", "create", "--request-file", path.string()});
+    REQUIRE(http.params);
+    auto const& http_request = http.params->as_object();
+    CHECK(http_request.at("schedule").as_object().at("at").as_string() == "now");
+    CHECK(http_request.at("payload").as_object().at("body").as_object().at("secret").as_string() == "service.body");
+    CHECK(http_request.at("payload")
+              .as_object()
+              .at("headers")
+              .as_array()
+              .front()
+              .as_object()
+              .at("value")
+              .as_object()
+              .at("secret")
+              .as_string() == "service.token");
+}
+
+TEST_CASE("jobuctl sends symbolic now, cron, attributes, and HTTP convenience fields", "[jobuctl][cli]")
+{
+    auto immediate = run_client({"job",
+                                 "create",
+                                 "--queue-name",
+                                 "fixture",
+                                 "--type",
+                                 "cli",
+                                 "--now",
+                                 "--command",
+                                 "/bin/true",
+                                 "--attribute",
+                                 "retry.max_attempts=2"});
+    REQUIRE(immediate.params);
+    auto const& now_request = immediate.params->as_object();
+    CHECK(now_request.at("schedule").as_object().at("at").as_string() == "now");
+    CHECK(now_request.at("attributes").as_object().at("retry.max_attempts").as_uint() == 2);
+
+    auto recurring = run_client({"job",
+                                 "create",
+                                 "--queue-name",
+                                 "fixture",
+                                 "--type",
+                                 "http",
+                                 "--cron",
+                                 "0 9 * * 1-5",
+                                 "--timezone",
+                                 "Europe/Tallinn",
+                                 "--url",
+                                 "https://example.test/events",
+                                 "--method",
+                                 "POST",
+                                 "--header",
+                                 "Content-Type=application/json",
+                                 "--body",
+                                 "{}"});
+    REQUIRE(recurring.params);
+    auto const& cron_request = recurring.params->as_object();
+    CHECK(cron_request.at("schedule").as_object().at("kind").as_string() == "cron");
+    CHECK(cron_request.at("schedule").as_object().at("timezone").as_string() == "Europe/Tallinn");
+    auto const& payload = cron_request.at("payload").as_object();
+    CHECK(payload.at("headers").as_array().front().as_object().at("name").as_string() == "Content-Type");
+    CHECK(payload.at("body").as_object().at("encoding").as_string() == "utf8");
+    CHECK(payload.at("body").as_object().at("data").as_string() == "{}");
+
+    auto empty_body = run_client({"job",
+                                  "create",
+                                  "--queue-name",
+                                  "fixture",
+                                  "--type",
+                                  "http",
+                                  "--now",
+                                  "--url",
+                                  "https://example.test/events",
+                                  "--method",
+                                  "POST",
+                                  "--body="});
+    REQUIRE(empty_body.params);
+    CHECK(
+        empty_body.params->as_object().at("payload").as_object().at("body").as_object().at("data").as_string().empty());
 }
 
 TEST_CASE("jobuctl omits unsupplied CLI fields and preserves explicit defaults", "[jobuctl][cli]")
@@ -234,6 +318,28 @@ TEST_CASE("jobuctl preserves literal CLI arguments after registering new option 
                                            "--working-directory",
                                            "--arg",
                                            "--expected-exit-code",
+                                           "--arg",
+                                           "--now",
+                                           "--arg",
+                                           "--cron",
+                                           "--arg",
+                                           "--timezone",
+                                           "--arg",
+                                           "--attribute",
+                                           "--arg",
+                                           "--header",
+                                           "--arg",
+                                           "--body",
+                                           "--arg",
+                                           "--wait",
+                                           "--arg",
+                                           "--defaults-file",
+                                           "--arg",
+                                           "--history-retention-seconds",
+                                           "--arg",
+                                           "--runnable-wait-warning-ms",
+                                           "--arg",
+                                           "--inherit-history-retention",
                                            "--arg=--command",
                                            "--arg=",
                                            "--arg=--help",
@@ -247,7 +353,7 @@ TEST_CASE("jobuctl preserves literal CLI arguments after registering new option 
                                            "ACTUAL=value"}));
     check_request(
         exchange,
-        R"({"command":"/bin/true","arguments":["","-abc","--unknown","--env","--env=NAME=value","--unset-env","--working-directory","--expected-exit-code","--command","","--help","--help","-h","-ahb"],"environment":{"ACTUAL":"value"}})");
+        R"({"command":"/bin/true","arguments":["","-abc","--unknown","--env","--env=NAME=value","--unset-env","--working-directory","--expected-exit-code","--now","--cron","--timezone","--attribute","--header","--body","--wait","--defaults-file","--history-retention-seconds","--runnable-wait-warning-ms","--inherit-history-retention","--command","","--help","--help","-h","-ahb"],"environment":{"ACTUAL":"value"}})");
 }
 
 TEST_CASE("jobuctl rejects invalid CLI creation options before connecting", "[jobuctl][cli]")

@@ -1,5 +1,6 @@
 #include "commands_priv.hpp"
 
+#include "attribute_registry.hpp"
 #include "command_helpers_priv.hpp"
 #include "job_validation_priv.hpp"
 #include "management_json.hpp"
@@ -35,6 +36,29 @@ auto parse_priority(std::string_view text) -> std::optional<std::int32_t>
         return std::nullopt;
     }
     return value;
+}
+
+auto add_attribute(JsonValue::Object& attributes, std::string_view assignment) -> bool
+{
+    auto const separator = assignment.find('=');
+    if (separator == std::string_view::npos || separator == 0U) {
+        return false;
+    }
+    auto value = parse_json(assignment.substr(separator + 1U));
+    if (!value) {
+        return false;
+    }
+    return attributes.emplace(std::string{assignment.substr(0, separator)}, std::move(*value)).second;
+}
+
+auto parse_job_attributes(JsonValue::Object values, StandardAttributeRegistry const& registry)
+    -> std::optional<AttributeSet>
+{
+    auto parsed = attribute_set_from_json(JsonValue{.data = std::move(values)}, registry, AttributeScope::Job);
+    if (!parsed) {
+        return std::nullopt;
+    }
+    return std::move(parsed).value();
 }
 
 auto option_value_allowing_unknown_following(std::span<CommandLineArgument const> arguments,
@@ -169,7 +193,8 @@ auto parse_job_create(std::filesystem::path                socket_path,
 {
     auto selector         = std::optional<QueueSelector>{};
     auto type             = std::optional<JobType>{};
-    auto planned_at       = std::optional<UtcTimePoint>{};
+    auto schedule         = std::optional<JobCreationSchedule>{};
+    auto timezone         = std::optional<std::string>{};
     auto name             = std::optional<std::string>{};
     auto priority         = std::int32_t{0};
     auto command          = std::optional<std::string>{};
@@ -177,9 +202,11 @@ auto parse_job_create(std::filesystem::path                socket_path,
     auto http_method      = std::optional<std::string>{};
     auto idempotency_key  = std::optional<std::string>{};
     auto arguments_json   = JsonValue::Array{};
+    auto headers_json     = JsonValue::Array{};
+    auto attributes_json  = JsonValue::Object{};
+    auto body             = std::optional<std::string>{};
     auto cli_options      = CliCreationOptions{};
     auto type_seen        = false;
-    auto at_seen          = false;
     auto name_seen        = false;
     auto priority_seen    = false;
     auto command_seen     = false;
@@ -203,6 +230,19 @@ auto parse_job_create(std::filesystem::path                socket_path,
                 return parse_failure("--arg requires a value");
             }
             arguments_json.push_back(JsonValue{.data = std::string{*value}});
+            continue;
+        }
+        if (argument.name() == "now" && argument.kind() == CommandLineArgumentKind::Option && argument.known() &&
+            !argument.has_value()) {
+            if (schedule) {
+                return parse_failure("choose exactly one of --now, --at, or --cron");
+            }
+            schedule = ImmediateSchedule{};
+            continue;
+        }
+        if (argument.name() == "body" && argument.kind() == CommandLineArgumentKind::Option && argument.known() &&
+            argument.has_value() && !body) {
+            body = std::string{*argument.value()};
             continue;
         }
 
@@ -232,13 +272,32 @@ auto parse_job_create(std::filesystem::path                socket_path,
             type_seen = true;
             continue;
         }
-        if (argument.name() == "at" && !at_seen) {
+        if (argument.name() == "at") {
+            if (schedule) {
+                return parse_failure("choose exactly one of --now, --at, or --cron");
+            }
             auto parsed = parse_utc_timestamp(*value);
             if (!parsed) {
                 return parse_failure("--at must be a valid canonical UTC timestamp");
             }
-            planned_at = std::move(parsed).value();
-            at_seen    = true;
+            schedule = OnceSchedule{.planned_at = std::move(parsed).value()};
+            continue;
+        }
+        if (argument.name() == "cron") {
+            if (schedule) {
+                return parse_failure("choose exactly one of --now, --at, or --cron");
+            }
+            schedule = CronSchedule{.expression = std::string{*value}};
+            continue;
+        }
+        if (argument.name() == "timezone" && !timezone) {
+            timezone = std::string{*value};
+            continue;
+        }
+        if (argument.name() == "attribute") {
+            if (!add_attribute(attributes_json, *value)) {
+                return parse_failure("--attribute requires a unique NAME=JSON_VALUE assignment");
+            }
             continue;
         }
         if (argument.name() == "name" && !name_seen) {
@@ -270,6 +329,19 @@ auto parse_job_create(std::filesystem::path                socket_path,
             method_seen = true;
             continue;
         }
+        if (argument.name() == "header") {
+            auto const separator = value->find('=');
+            if (separator == std::string_view::npos || separator == 0U) {
+                return parse_failure("--header requires NAME=VALUE");
+            }
+            headers_json.push_back(JsonValue{
+                .data = JsonValue::Object{
+                                          {"name", JsonValue{.data = std::string{value->substr(0, separator)}}},
+                                          {"value", JsonValue{.data = std::string{value->substr(separator + 1U)}}},
+                                          }
+            });
+            continue;
+        }
         if (argument.name() == "idempotency-key" && !idempotency_seen) {
             idempotency_key  = std::string{*value};
             idempotency_seen = true;
@@ -284,14 +356,25 @@ auto parse_job_create(std::filesystem::path                socket_path,
     if (!type) {
         return parse_failure("job create requires --type cli or --type http");
     }
-    if (!planned_at) {
-        return parse_failure("job create requires --at UTC");
+    if (!schedule) {
+        return parse_failure("job create requires exactly one --now, --at, or --cron schedule");
+    }
+    if (timezone) {
+        auto* cron = std::get_if<CronSchedule>(&*schedule);
+        if (!cron) {
+            return parse_failure("--timezone requires --cron");
+        }
+        cron->timezone = std::move(*timezone);
+    }
+    auto attributes = parse_job_attributes(std::move(attributes_json), registry);
+    if (!attributes) {
+        return parse_failure("--attribute contains an invalid JobU attribute value");
     }
 
     // Only the selected runner's fields may enter its payload; omission preserves server-side defaults.
     auto payload = JsonValue::Object{};
     if (*type == JobType::Cli) {
-        if (!command || url || http_method) {
+        if (!command || url || http_method || !headers_json.empty() || body) {
             return parse_failure("CLI job creation requires --command and rejects HTTP options");
         }
         payload.emplace("command", JsonValue{.data = std::move(*command)});
@@ -315,25 +398,35 @@ auto parse_job_create(std::filesystem::path                socket_path,
         }
         payload.emplace("method", JsonValue{.data = http_method.value_or("GET")});
         payload.emplace("url", JsonValue{.data = std::move(*url)});
+        if (!headers_json.empty()) {
+            payload.emplace("headers", JsonValue{.data = std::move(headers_json)});
+        }
+        if (body) {
+            payload.emplace("body",
+                            JsonValue{
+                                .data = JsonValue::Object{
+                                                          {"encoding", JsonValue{.data = std::string{"utf8"}}},
+                                                          {"data", JsonValue{.data = std::move(*body)}},
+                                                          }
+            });
+        }
     }
 
     auto request = CreateJobRequest{
         .queue           = std::move(*selector),
         .name            = std::move(name),
         .type            = *type,
-        .schedule        = OnceSchedule{.planned_at = *planned_at},
+        .schedule        = std::move(*schedule),
         .priority        = priority,
-        .attributes      = {},
+        .attributes      = std::move(*attributes),
         .payload         = JsonValue{.data = std::move(payload)},
         .idempotency_key = std::move(idempotency_key),
     };
     // The request encoder checks the wire shape, not CLI policy. Reuse management's complete validation before IPC.
-    if (request.type == JobType::Cli) {
-        auto validated = jb::jobu::detail::validate_and_serialize_job_payload(request.type, request.payload);
-        if (!validated) {
-            return parse_failure(
-                fmt::format("invalid CLI payload: {}", jb::jobu::detail::job_payload_issue_text(validated.error())));
-        }
+    auto validated = jb::jobu::detail::validate_and_serialize_job_payload(request.type, request.payload);
+    if (!validated) {
+        return parse_failure(
+            fmt::format("invalid job payload: {}", jb::jobu::detail::job_payload_issue_text(validated.error())));
     }
     auto params = create_job_request_to_json(request, registry);
     if (!params) {
@@ -429,15 +522,16 @@ auto parse_job_update(std::filesystem::path                socket_path,
     }
 
     // The nested optional distinguishes an omitted name from an explicit --clear-name patch.
-    auto revision      = std::optional<JobRevision>{};
-    auto name          = std::optional<std::optional<std::string>>{};
-    auto priority      = std::optional<std::int32_t>{};
-    auto schedule      = std::optional<JobSchedule>{};
-    auto revision_seen = false;
-    auto name_seen     = false;
-    auto priority_seen = false;
-    auto at_seen       = false;
-    auto remaining     = arguments.subspan(1);
+    auto revision        = std::optional<JobRevision>{};
+    auto name            = std::optional<std::optional<std::string>>{};
+    auto priority        = std::optional<std::int32_t>{};
+    auto schedule        = std::optional<JobSchedule>{};
+    auto timezone        = std::optional<std::string>{};
+    auto attributes_json = JsonValue::Object{};
+    auto revision_seen   = false;
+    auto name_seen       = false;
+    auto priority_seen   = false;
+    auto remaining       = arguments.subspan(1);
 
     for (auto index = std::size_t{0}; index < remaining.size(); ++index) {
         auto const& argument = remaining[index];
@@ -476,13 +570,32 @@ auto parse_job_update(std::filesystem::path                socket_path,
             priority_seen = true;
             continue;
         }
-        if (argument.name() == "at" && !at_seen) {
+        if (argument.name() == "at") {
+            if (schedule) {
+                return parse_failure("choose exactly one of --at or --cron");
+            }
             auto parsed = parse_utc_timestamp(*value);
             if (!parsed) {
                 return parse_failure("--at must be a valid canonical UTC timestamp");
             }
             schedule = JobSchedule{OnceSchedule{.planned_at = std::move(parsed).value()}};
-            at_seen  = true;
+            continue;
+        }
+        if (argument.name() == "cron") {
+            if (schedule) {
+                return parse_failure("choose exactly one of --at or --cron");
+            }
+            schedule = JobSchedule{CronSchedule{.expression = std::string{*value}}};
+            continue;
+        }
+        if (argument.name() == "timezone" && !timezone) {
+            timezone = std::string{*value};
+            continue;
+        }
+        if (argument.name() == "attribute") {
+            if (!add_attribute(attributes_json, *value)) {
+                return parse_failure("--attribute requires a unique NAME=JSON_VALUE assignment");
+            }
             continue;
         }
         return parse_failure("job update has an unknown or duplicate option");
@@ -491,7 +604,18 @@ auto parse_job_update(std::filesystem::path                socket_path,
     if (!revision) {
         return parse_failure("job update requires --revision");
     }
-    if (!name && !priority && !schedule) {
+    if (timezone) {
+        auto* cron = schedule ? std::get_if<CronSchedule>(&*schedule) : nullptr;
+        if (!cron) {
+            return parse_failure("--timezone requires --cron");
+        }
+        cron->timezone = std::move(*timezone);
+    }
+    auto attributes = parse_job_attributes(std::move(attributes_json), registry);
+    if (!attributes) {
+        return parse_failure("--attribute contains an invalid JobU attribute value");
+    }
+    if (!name && !priority && !schedule && attributes->empty()) {
         return parse_failure("job update requires at least one mutable field");
     }
 
@@ -501,6 +625,7 @@ auto parse_job_update(std::filesystem::path                socket_path,
         .name              = std::move(name),
         .schedule          = std::move(schedule),
         .priority          = priority,
+        .attribute_changes = std::move(*attributes),
     };
     auto params = update_job_request_to_json(request, registry);
     if (!params) {

@@ -1,6 +1,7 @@
 #include "support/temporary_directory.hpp"
 
 #include "database.hpp"
+#include "json.hpp"
 #include "query.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "uuid.hpp"
@@ -18,6 +19,7 @@
 #include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <initializer_list>
 #include <memory>
 #include <netinet/in.h>
@@ -842,7 +844,7 @@ auto main(int argc, char* argv[]) -> int
         return fail("job update did not print the committed replacement fields");
     }
 
-    auto suspended        = run_success(argv[2], socket_path, {"job", "suspend", *cli_id});
+    auto suspended        = run_success(argv[2], socket_path, {"job", "suspend", *cli_id, "--wait"});
     auto suspend_revision = suspended ? revision_from_summary(*suspended) : std::nullopt;
     if (!suspended || !suspend_revision || *suspend_revision <= 2 ||
         *suspended !=
@@ -936,6 +938,137 @@ auto main(int argc, char* argv[]) -> int
     auto persisted_list = run_success(argv[2], persisted_socket, {"job", "list", "--include-deleted"});
     if (!persisted_list || *persisted_list != deleted_summary + *http_created) {
         return fail("job lifecycle state did not persist through the final daemon restart");
+    }
+
+    auto immediate        = run_success(argv[2],
+                                        persisted_socket,
+                                        {"job",
+                                         "create",
+                                         "--queue-name",
+                                         "source",
+                                         "--type",
+                                         "cli",
+                                         "--now",
+                                         "--command",
+                                         "/bin/true",
+                                         "--idempotency-key",
+                                         "create-now-cli"});
+    auto immediate_replay = run_success(argv[2],
+                                        persisted_socket,
+                                        {"job",
+                                         "add",
+                                         "--queue-name",
+                                         "source",
+                                         "--type",
+                                         "cli",
+                                         "--now",
+                                         "--command",
+                                         "/bin/true",
+                                         "--idempotency-key",
+                                         "create-now-cli"});
+    if (!immediate || !immediate_replay || *immediate != *immediate_replay || !job_id_from_summary(*immediate)) {
+        return fail("symbolic-now creation did not replay the original job through the add alias");
+    }
+
+    auto recurring = run_success(argv[2],
+                                 persisted_socket,
+                                 {"job",
+                                  "create",
+                                  "--queue-name",
+                                  "source",
+                                  "--type",
+                                  "cli",
+                                  "--cron",
+                                  "0 9 * * 1-5",
+                                  "--timezone",
+                                  "Europe/Tallinn",
+                                  "--command",
+                                  "/bin/true",
+                                  "--attribute",
+                                  "retry.max_attempts=2"});
+    if (!recurring || recurring->find("cron=0 9 * * 1-5, timezone=Europe/Tallinn") == std::string::npos) {
+        return fail("recurring creation did not return its cron schedule and timezone");
+    }
+    auto const recurring_id = job_id_from_summary(*recurring);
+    auto       recurring_updated =
+        recurring_id
+            ? run_success(
+                  argv[2],
+                  persisted_socket,
+                  {"job", "update", *recurring_id, "--revision", "1", "--cron", "0 10 * * 1-5", "--timezone", "UTC"})
+            : std::nullopt;
+    if (!recurring_updated || recurring_updated->find("cron=0 10 * * 1-5, timezone=UTC") == std::string::npos) {
+        return fail("recurring update did not replace its cron schedule and timezone");
+    }
+
+    auto const defaults_path = directory.path() / "defaults.json";
+    {
+        auto file = std::ofstream{defaults_path};
+        if (!file) {
+            return fail("unable to create the queue defaults fixture");
+        }
+        file << R"({"retry.max_attempts":2})";
+    }
+    auto configured      = run_success(argv[2],
+                                       persisted_socket,
+                                       {"queue",
+                                        "create",
+                                        "configured",
+                                        "--defaults-file",
+                                        defaults_path.string(),
+                                        "--history-retention-seconds",
+                                        "0",
+                                        "--runnable-wait-warning-ms",
+                                        "0",
+                                        "--json"});
+    auto configured_json = jb::core::parse_json(configured.value_or(""));
+    if (!configured_json ||
+        configured_json->as_object().at("defaults").as_object().at("retry.max_attempts").as_uint() != 2 ||
+        configured_json->as_object().at("history_retention_seconds").as_uint() != 0 ||
+        configured_json->as_object().at("runnable_wait_warning_ms").as_uint() != 0) {
+        return fail("queue configuration options did not reach the durable queue");
+    }
+
+    auto inherited      = run_success(argv[2],
+                                      persisted_socket,
+                                      {"job",
+                                       "create",
+                                       "--queue-name",
+                                       "configured",
+                                       "--type",
+                                       "cli",
+                                       "--at",
+                                       cli_at,
+                                       "--command",
+                                       "/bin/true",
+                                       "--json"});
+    auto inherited_json = jb::core::parse_json(inherited.value_or(""));
+    if (!inherited_json ||
+        inherited_json->as_object().at("attributes").as_object().at("retry.max_attempts").as_uint() != 2) {
+        return fail("new job did not inherit the configured queue default");
+    }
+
+    {
+        auto file = std::ofstream{defaults_path, std::ios::trunc};
+        if (!file) {
+            return fail("unable to clear the queue defaults fixture");
+        }
+        file << "{}";
+    }
+    auto cleared      = run_success(argv[2],
+                                    persisted_socket,
+                                    {"queue",
+                                     "update",
+                                     "--name",
+                                     "configured",
+                                     "--defaults-file",
+                                     defaults_path.string(),
+                                     "--inherit-history-retention",
+                                     "--json"});
+    auto cleared_json = jb::core::parse_json(cleared.value_or(""));
+    if (!cleared_json || !cleared_json->as_object().at("defaults").as_object().empty() ||
+        !cleared_json->as_object().at("history_retention_seconds").is_null()) {
+        return fail("queue update did not clear defaults and restore retention inheritance");
     }
     persisted->terminate();
 
