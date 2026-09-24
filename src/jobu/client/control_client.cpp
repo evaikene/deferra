@@ -169,13 +169,7 @@ void ControlClient::Private::record_response(jb::rpc::RequestId const&          
 
     auto const correlated = wire_to_local.find(*number);
     if (correlated == wire_to_local.end()) {
-        // Earlier raw calls can complete before call() returns the establishing request's wire ID.
-        if (establishing && early_responses.size() < rpc.max_pending_requests()) {
-            early_responses.push_back({.id = id, .outcome = std::move(outcome)});
-        }
-        else if (establishing) {
-            on_terminated(invalid_response_error());
-        }
+        // The raw client also serves custom calls whose replies do not belong to this wrapper.
         return;
     }
 
@@ -195,26 +189,13 @@ void ControlClient::Private::record_response(jb::rpc::RequestId const&          
 
 void ControlClient::Private::bind_wire_id(ControlCallId local_id, jb::rpc::RequestId const& wire_id)
 {
+    // The raw acceptance hook runs before even a reply supplied during write can reach record_response().
     auto entry = pending.find(local_id);
     if (entry == pending.end()) {
         return;
     }
     entry->second.wire_id       = wire_id;
     entry->second.possibly_sent = true;
-
-    auto const matching = std::ranges::find_if(early_responses, [&wire_id](EarlyResponse const& response) {
-        return response.id == wire_id;
-    });
-    if (matching != early_responses.end()) {
-        std::visit([&entry](auto&& value) { entry->second.outcome = std::forward<decltype(value)>(value); },
-                   std::move(matching->outcome));
-        early_responses.clear();
-        ready_outcomes.push_back(local_id);
-        rearm_deadline();
-        schedule_delivery();
-        return;
-    }
-    early_responses.clear();
 
     if (auto const number = wire_number(wire_id)) {
         wire_to_local.emplace(*number, local_id);
@@ -343,7 +324,6 @@ void ControlClient::Private::on_terminated(Error const& raw_error)
     }
     pending.clear();
     wire_to_local.clear();
-    early_responses.clear();
     ready_outcomes.clear();
     ++generation;
 
@@ -445,7 +425,9 @@ auto ControlClient::Private::start_call(Method             method,
     next_id             = local_id == std::numeric_limits<ControlCallId>::max() ? 0U : local_id + 1U;
     pending.emplace(local_id, Pending{.method = method, .deadline = *deadline});
     establishing = local_id;
-    auto wire    = rpc.call(name, std::move(params));
+    auto wire    = rpc.call(name, std::move(params), [this, local_id](jb::rpc::RequestId const& id) {
+        bind_wire_id(local_id, id);
+    });
     establishing.reset();
 
     if (phase == Phase::Failed || phase == Phase::Closed) {
@@ -456,12 +438,10 @@ auto ControlClient::Private::start_call(Method             method,
     }
     if (!wire) {
         pending.erase(local_id);
-        early_responses.clear();
         rearm_deadline();
         return CallResult::failure(std::move(wire).error());
     }
 
-    bind_wire_id(local_id, wire.value());
     return CallResult::success(local_id);
 }
 
@@ -497,7 +477,6 @@ void ControlClient::Private::close(bool emit_failures)
     }
     pending.clear();
     wire_to_local.clear();
-    early_responses.clear();
     ready_outcomes.clear();
     ++generation;
 
@@ -564,7 +543,9 @@ auto ControlClient::initialize(ControlCallOptions options) -> Result<void, Error
     data->phase = Private::Phase::Initializing;
     data->pending.emplace(0U, Private::Pending{.method = Private::Method::Info, .deadline = *deadline});
     data->establishing = 0U;
-    auto wire          = data->rpc.call("system.info");
+    auto wire          = data->rpc.call("system.info", std::nullopt, [data](jb::rpc::RequestId const& id) {
+        data->bind_wire_id(0U, id);
+    });
     data->establishing.reset();
 
     if (data->phase == Private::Phase::Failed || data->phase == Private::Phase::Closed) {
@@ -575,12 +556,10 @@ auto ControlClient::initialize(ControlCallOptions options) -> Result<void, Error
     }
     if (!wire) {
         data->pending.clear();
-        data->early_responses.clear();
         data->phase = Private::Phase::Uninitialized;
         return InitResult::failure(std::move(wire).error());
     }
 
-    data->bind_wire_id(0U, wire.value());
     return InitResult::success();
 }
 

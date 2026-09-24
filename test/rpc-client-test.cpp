@@ -629,15 +629,22 @@ TEST_CASE("Synchronous input during write waits until the call is pending", "[rp
     Client client{device};
     auto   pending_during_signal = std::size_t{};
     auto   result                = std::string{};
+    auto   events                = std::vector<std::string>{};
     client.result_received.connect([&](RequestId const& id, JsonValue const& value) {
         CHECK(id == RequestId{std::uint64_t{1}});
         pending_during_signal = client.pending_request_count();
         result                = value.as_string();
+        events.emplace_back("result");
     });
 
-    auto call = client.call("sync");
+    auto call = client.call("sync", std::nullopt, [&](RequestId const& id) {
+        CHECK(id == RequestId{std::uint64_t{1}});
+        CHECK(client.pending_request_count() == 1U);
+        events.emplace_back("accepted");
+    });
     REQUIRE(call);
     CHECK(result == "done");
+    CHECK(events == std::vector<std::string>{"accepted", "result"});
     CHECK(pending_during_signal == 0U);
     CHECK(client.pending_request_count() == 0U);
 }
@@ -755,8 +762,10 @@ TEST_CASE("Short writes are terminal and fail only established pending calls", "
             events.push_back("failed:" + std::to_string(require_unsigned(id)) + ":" + error.code);
         });
 
-        auto attempted = client.call("short");
+        auto accepted  = false;
+        auto attempted = client.call("short", std::nullopt, [&](RequestId const&) { accepted = true; });
         REQUIRE_FALSE(attempted);
+        CHECK_FALSE(accepted);
         CHECK(attempted.error().category == ErrorCategory::Io);
         CHECK(attempted.error().code == "rpc.short_write");
         CHECK(events == std::vector<std::string>{"terminated:rpc.short_write",

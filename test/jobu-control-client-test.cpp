@@ -195,6 +195,59 @@ TEST_CASE("An earlier raw reply cannot hide a synchronous typed reply", "[jobu][
     CHECK(replies == std::vector<ControlCallId>{typed_call.value()});
 }
 
+TEST_CASE("Reentrant custom replies cannot exhaust typed correlation", "[jobu][client]")
+{
+    auto options                 = ClientOptions{};
+    options.max_pending_requests = 2U;
+    Fixture fixture{options};
+    fixture.initialize();
+
+    auto first_custom = fixture.rpc->call("custom");
+    REQUIRE(first_custom);
+    CHECK(first_custom.value() == RequestId{std::uint64_t{2}});
+
+    auto custom_results = 0U;
+    fixture.rpc->result_received.connect([&](RequestId const& id, JsonValue const&) {
+        if (id == RequestId{std::uint64_t{3}}) {
+            return;
+        }
+
+        ++custom_results;
+        if (custom_results < 3U) {
+            auto next = fixture.rpc->call("custom");
+            REQUIRE(next);
+            auto const next_id = std::uint64_t{3} + custom_results;
+            CHECK(next.value() == RequestId{next_id});
+            fixture.device.inject_input(success(next_id, JsonValue{}));
+        }
+        else {
+            fixture.device.inject_input(success(3U, empty_run_page()));
+        }
+    });
+
+    auto failures = std::vector<std::string>{};
+    fixture.typed->failed.connect([&](Error const& error) { failures.push_back(error.code); });
+    auto replies = std::vector<ControlCallId>{};
+    fixture.typed->reply_received.connect([&](ControlCallId id, ControlReply const&) { replies.push_back(id); });
+
+    auto inject_first = true;
+    auto inject_reply = fixture.device.bytes_written.connect([&](std::size_t) {
+        if (inject_first) {
+            inject_first = false;
+            fixture.device.inject_input(success(2U, JsonValue{}));
+        }
+    });
+    auto typed_call   = fixture.typed->list_runs(RunQuery{});
+    REQUIRE(typed_call);
+    inject_reply.disconnect();
+
+    CHECK(custom_results == 3U);
+    CHECK(replies.empty());
+    fixture.drain_tasks();
+    CHECK(failures.empty());
+    CHECK(replies == std::vector<ControlCallId>{typed_call.value()});
+}
+
 TEST_CASE("Closing an initializing client reports the unfinished handshake once", "[jobu][client]")
 {
     Fixture fixture;

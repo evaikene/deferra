@@ -201,8 +201,9 @@ void Client::Private::advance_request_id(std::uint64_t id) noexcept
     next_request_id = id == std::numeric_limits<std::uint64_t>::max() ? 0U : id + 1U;
 }
 
-auto Client::Private::write_frame(std::string const& frame, std::optional<std::uint64_t> pending_id)
-    -> jb::core::Result<void, Error>
+auto Client::Private::write_frame(std::string const&           frame,
+                                  std::optional<std::uint64_t> pending_id,
+                                  CallAcceptedHandler const&   on_accepted) -> jb::core::Result<void, Error>
 {
     using Result = jb::core::Result<void, Error>;
 
@@ -237,6 +238,10 @@ auto Client::Private::write_frame(std::string const& frame, std::optional<std::u
     if (pending_id) {
         pending_ids.insert(*pending_id);
         advance_request_id(*pending_id);
+        // Device callbacks may already have queued this reply; bind caller state before decoding it.
+        if (on_accepted) {
+            on_accepted(RequestId{*pending_id});
+        }
     }
     if (read_pending) {
         process_readable();
@@ -420,7 +425,7 @@ Client::~Client()
     close();
 }
 
-auto Client::call(std::string_view method, std::optional<JsonValue> params)
+auto Client::call(std::string_view method, std::optional<JsonValue> params, CallAcceptedHandler const& on_accepted)
     -> jb::core::Result<RequestId, jb::core::Error>
 {
     using Result = jb::core::Result<RequestId, jb::core::Error>;
@@ -454,7 +459,7 @@ auto Client::call(std::string_view method, std::optional<JsonValue> params)
         return Result::failure(pending_limit_error());
     }
 
-    auto written = data->write_frame(framed.value(), id);
+    auto written = data->write_frame(framed.value(), id, on_accepted);
     if (!written) {
         return Result::failure(std::move(written).error());
     }
@@ -484,7 +489,7 @@ auto Client::notify(std::string_view method, std::optional<JsonValue> params) ->
     if (!framed) {
         return Result::failure(std::move(framed).error());
     }
-    return data->write_frame(framed.value(), std::nullopt);
+    return data->write_frame(framed.value(), std::nullopt, {});
 }
 
 void Client::cancel(RequestId const& id)

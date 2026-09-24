@@ -42,11 +42,6 @@ struct ControlClient::Private final : jb::core::priv::ObjectPrivate {
         bool                                                                 possibly_sent{false};
     };
 
-    struct EarlyResponse {
-        jb::rpc::RequestId                                   id;
-        std::variant<jb::core::JsonValue, jb::rpc::RpcError> outcome;
-    };
-
     Private(jb::rpc::Client& raw_client, AttributeRegistry const& attribute_registry)
         : rpc{raw_client}
         , attributes{attribute_registry}
@@ -80,7 +75,6 @@ struct ControlClient::Private final : jb::core::priv::ObjectPrivate {
     std::map<ControlCallId, Pending>       pending;
     std::map<std::uint64_t, ControlCallId> wire_to_local;
     std::optional<ControlCallId>           establishing;
-    std::vector<EarlyResponse>             early_responses;
     std::vector<ControlCallId>             ready_outcomes;
     ControlCallId                          next_id{1};
     bool                                   delivery_scheduled{false};

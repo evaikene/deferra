@@ -13,6 +13,7 @@
 #include "signal.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <string_view>
 
@@ -34,6 +35,9 @@ struct ClientOptions {
     /// Maximum unacknowledged framed-output bytes; defaults to 2 MiB, while zero permits no request or notification.
     std::size_t          max_queued_output_bytes{std::size_t{2} * 1024U * 1024U};
 };
+
+/// Called once when a request has been fully written and assigned its wire ID.
+using CallAcceptedHandler = std::function<void(RequestId const&)>;
 
 /// Sends and correlates JSON-RPC calls over one borrowed byte-stream device.
 ///
@@ -72,10 +76,16 @@ public:
     ///
     /// @param method Case-sensitive method name copied into the request; exact lower-case `rpc.` names are permitted.
     /// @param params Optional owning parameters copied into the request.
+    /// @param on_accepted Optional per-call callback invoked after pending correlation is registered and before any
+    /// buffered response is delivered. It receives the ID returned on success, is borrowed only for this invocation,
+    /// and is never invoked for a call that fails before a complete write.
     /// @return Generated request identifier, or a stable local error. Failed never-written calls consume no identifier;
     /// identifiers are never reused within this client instance.
+    /// @pre `on_accepted` must not throw or start nested event processing.
     ///
-    [[nodiscard]] auto call(std::string_view method, std::optional<jb::core::JsonValue> params = std::nullopt)
+    [[nodiscard]] auto call(std::string_view                   method,
+                            std::optional<jb::core::JsonValue> params      = std::nullopt,
+                            CallAcceptedHandler const&         on_accepted = {})
         -> jb::core::Result<RequestId, jb::core::Error>;
 
     /// Sends one notification without creating pending correlation state.
