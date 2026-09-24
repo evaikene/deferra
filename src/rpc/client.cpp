@@ -396,6 +396,7 @@ void Client::Private::terminate(Error error, bool emit_protocol_error)
     pending_ids.clear();
 
     auto const& terminal = *terminal_error;
+    owner->emit(owner->terminated, terminal);
     if (emit_protocol_error) {
         owner->emit(owner->protocol_error, terminal);
     }

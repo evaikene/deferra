@@ -158,6 +158,7 @@ target_link_libraries(${TARGET}
 
 add_subdirectory(http)
 add_subdirectory(cli)
+add_subdirectory(client)
 
 if(TARGET db-sqlite)
     add_subdirectory(sqlite)

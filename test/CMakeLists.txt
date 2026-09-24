@@ -687,6 +687,21 @@ add_executable(${TARGET}
 target_link_libraries(${TARGET} PRIVATE rpc Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Typed JobU control client over the in-memory RPC transport.
+set(TARGET "jobu-control-client-test")
+add_executable(${TARGET}
+    jobu-control-client-test.cpp
+    support/memory_io_device.cpp
+)
+target_link_libraries(${TARGET} PRIVATE jobu-client Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# Public client header remains usable without private headers or concrete backend targets.
+set(TARGET "jobu-control-client-public-header-test")
+add_executable(${TARGET} jobu-control-client-public-header-test.cpp)
+target_link_libraries(${TARGET} PRIVATE jobu-client)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Byte buffer test
 set(TARGET "byte-buffer-test")
 add_executable(${TARGET} byte-buffer-test.cpp)

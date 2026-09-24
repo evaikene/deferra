@@ -736,6 +736,7 @@ TEST_CASE("Short writes are terminal and fail only established pending calls", "
         static_cast<void>(device.take_written_data());
         device.set_write_limit(limit);
         auto events = std::vector<std::string>{};
+        client.terminated.connect([&](Error const& error) { events.push_back("terminated:" + error.code); });
         client.protocol_error.connect([&](Error const& error) { events.push_back("protocol:" + error.code); });
         client.request_failed.connect([&](RequestId const& id, Error const& error) {
             events.push_back("failed:" + std::to_string(require_unsigned(id)) + ":" + error.code);
@@ -745,9 +746,26 @@ TEST_CASE("Short writes are terminal and fail only established pending calls", "
         REQUIRE_FALSE(attempted);
         CHECK(attempted.error().category == ErrorCategory::Io);
         CHECK(attempted.error().code == "rpc.short_write");
-        CHECK(events == std::vector<std::string>{"protocol:rpc.short_write", "failed:1:rpc.short_write"});
+        CHECK(events == std::vector<std::string>{"terminated:rpc.short_write",
+                                                 "protocol:rpc.short_write",
+                                                 "failed:1:rpc.short_write"});
         CHECK(device.written_data().size() == limit);
     }
+}
+
+TEST_CASE("Terminal notification also observes idle device and explicit close", "[rpc][client][lifecycle]")
+{
+    Application    app{0, nullptr};
+    MemoryIODevice device;
+    device.open();
+    Client client{device};
+    auto   events = std::vector<std::string>{};
+    client.terminated.connect([&](Error const& error) { events.push_back("terminated:" + error.code); });
+    client.protocol_error.connect([&](Error const& error) { events.push_back("protocol:" + error.code); });
+
+    device.close();
+    client.close();
+    CHECK(events == std::vector<std::string>{"terminated:rpc.connection_closed"});
 }
 
 TEST_CASE("Explicit close is idempotent and preserves the borrowed device", "[rpc][client][lifecycle]")

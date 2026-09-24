@@ -133,6 +133,13 @@ public:
     ///
     jb::core::Signal<jb::core::Error> protocol_error;
 
+    /// Emitted once after any terminal transition, including device failure or explicit close with no pending calls.
+    ///
+    /// The client has already cleared its pending state. This signal precedes protocol_error and request_failed;
+    /// their existing relative order is unchanged. The borrowed device remains owned by its caller.
+    ///
+    jb::core::Signal<jb::core::Error> terminated;
+
 private:
     /// Owns correlation and stream state without exposing private envelopes or a concrete transport.
     struct Private;
