@@ -221,13 +221,26 @@ auto fail(std::string_view message) -> int
 
 auto spawn_jobud(std::filesystem::path const& executable,
                  std::filesystem::path const& socket_path,
-                 std::filesystem::path const& database_path) -> std::optional<ChildProcess>
+                 std::filesystem::path const& database_path,
+                 bool                         allow_root_cli = false) -> std::optional<ChildProcess>
 {
     auto const pid = ::fork();
     if (pid < 0) {
         return std::nullopt;
     }
     if (pid == 0) {
+        if (allow_root_cli) {
+            ::execl(executable.c_str(),
+                    executable.c_str(),
+                    "--socket",
+                    socket_path.c_str(),
+                    "--database",
+                    database_path.c_str(),
+                    "--allow-root-cli",
+                    static_cast<char*>(nullptr));
+            ::_exit(127);
+        }
+
         ::execl(executable.c_str(),
                 executable.c_str(),
                 "--socket",
@@ -238,6 +251,12 @@ auto spawn_jobud(std::filesystem::path const& executable,
         ::_exit(127);
     }
     return ChildProcess{pid};
+}
+
+auto root_cli_opted_in() -> bool
+{
+    auto const* enabled = std::getenv("JOBU_TEST_ALLOW_ROOT_CLI");
+    return ::geteuid() == 0 && enabled != nullptr && std::string_view{enabled} == "1";
 }
 
 auto wait_for_listener(ChildProcess& daemon, std::filesystem::path const& socket_path) -> bool
@@ -575,7 +594,8 @@ auto inspect_database(std::filesystem::path const& database_path,
 /// Exercises the CLI against retained daemon state while the private integration daemon is serving.
 auto verify_run_attempt_cli(std::filesystem::path const& executable,
                             std::filesystem::path const& socket,
-                            std::filesystem::path const& directory) -> bool
+                            std::filesystem::path const& directory,
+                            bool                         can_execute_cli) -> bool
 {
     if (!run_success(executable, socket, {"queue", "create", "history"})) {
         return false;
@@ -621,6 +641,11 @@ auto verify_run_attempt_cli(std::filesystem::path const& executable,
         return false;
     }
 
+    // Root CI execution requires an explicit opt-in; the pending-run checks remain useful without it.
+    if (!can_execute_cli) {
+        return true;
+    }
+
     // Run Now leaves the scheduled occurrence intact and exposes its own retained attempt and output.
     auto output_job      = run_success(executable,
                                        socket,
@@ -661,8 +686,9 @@ auto verify_run_attempt_cli(std::filesystem::path const& executable,
     }
 
     // The subprocess is asynchronous; each read observes durable state without delaying the daemon event loop.
-    auto       succeeded = false;
-    auto const deadline  = std::chrono::steady_clock::now() + 8s;
+    auto       succeeded  = false;
+    auto       last_state = std::string{"not observed"};
+    auto const deadline   = std::chrono::steady_clock::now() + 8s;
     while (std::chrono::steady_clock::now() < deadline) {
         auto snapshot = run_success(executable, socket, {"run", "get", run_id, "--json"});
         auto value    = jb::core::parse_json(snapshot.value_or(""));
@@ -670,15 +696,18 @@ auto verify_run_attempt_cli(std::filesystem::path const& executable,
             return false;
         }
         auto const& state = value->as_object().at("state").as_string();
+        last_state        = state;
         if (state == "succeeded") {
             succeeded = true;
             break;
         }
         if (state == "failed" || state == "interrupted" || state == "cancelled") {
+            fmt::print(stderr, "run-now {} reached state {}\n", run_id, state);
             return false;
         }
     }
     if (!succeeded) {
+        fmt::print(stderr, "run-now {} remained in state {} until the deadline\n", run_id, last_state);
         return false;
     }
 
@@ -1153,7 +1182,9 @@ auto main(int argc, char* argv[]) -> int
     }
 
     auto const persisted_socket = directory.path() / "jobud-persisted.sock";
-    auto       persisted        = spawn_jobud(argv[1], persisted_socket, database_path);
+    // Only this daemon exercises real CLI attempts; earlier restarts retain the default root policy.
+    auto const allow_root_cli   = root_cli_opted_in();
+    auto       persisted        = spawn_jobud(argv[1], persisted_socket, database_path, allow_root_cli);
     if (!persisted) {
         return fail("unable to restart jobud after direct database inspection");
     }
@@ -1295,7 +1326,7 @@ auto main(int argc, char* argv[]) -> int
         !cleared_json->as_object().at("history_retention_seconds").is_null()) {
         return fail("queue update did not clear defaults and restore retention inheritance");
     }
-    if (!verify_run_attempt_cli(argv[2], persisted_socket, directory.path())) {
+    if (!verify_run_attempt_cli(argv[2], persisted_socket, directory.path(), ::geteuid() != 0 || allow_root_cli)) {
         return fail("run and attempt CLI did not preserve durable history and output");
     }
     persisted->terminate();
