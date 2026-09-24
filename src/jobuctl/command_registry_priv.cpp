@@ -56,17 +56,31 @@ constexpr auto queue_name =
     value_option("queue-name", "NAME", "Select a queue by name; mutually exclusive with --queue-id.");
 constexpr auto key =
     value_option("idempotency-key", "KEY", "Optional key for safely replaying the same creation request.");
-constexpr auto       deleted  = flag("include-deleted", "Include deleted definitions; default: excluded.");
-constexpr auto       limit    = value_option("limit", "N", "Page size, 1..200; default: 100.");
-constexpr auto       after    = value_option("after", "UUID", "Continue after the ID returned by the previous page.");
-constexpr auto       revision = value_option("revision", "N", "Required current revision, 1..18446744073709551615.");
-constexpr auto       at       = value_option("at", "UTC", "Once schedule timestamp, for example 2030-01-01T00:00:00Z.");
+constexpr auto deleted  = flag("include-deleted", "Include deleted definitions; default: excluded.");
+constexpr auto limit    = value_option("limit", "N", "Page size, 1..200; default: 100.");
+constexpr auto after    = value_option("after", "UUID", "Continue after the ID returned by the previous page.");
+constexpr auto revision = value_option("revision", "N", "Required current revision, 1..18446744073709551615.");
+constexpr auto at       = value_option("at", "UTC", "Once schedule timestamp, for example 2030-01-01T00:00:00Z.");
+constexpr auto cron     = value_option("cron", "EXPR", "Recurring cron expression; use --timezone for its zone.");
+constexpr auto timezone = value_option("timezone", "ZONE", "Cron timezone; default: UTC.");
+constexpr auto attribute =
+    value_option("attribute", "NAME=JSON", "Job attribute value; repeat for distinct names.", true);
+constexpr auto retention =
+    value_option("history-retention-seconds", "N", "Queue retention in seconds; 0 means unlimited.");
+constexpr auto warning = value_option("runnable-wait-warning-ms", "N", "Nonnegative runnable-wait warning delay.");
+constexpr auto defaults =
+    value_option("defaults-file",
+                 "FILE",
+                 "JSON object of queue default attributes; empty object clears defaults on update.");
 constexpr auto       priority = value_option("priority", "N", "Scheduling priority, -2147483648..2147483647.");
 constexpr std::array queue_selector{id, name_selector};
 constexpr std::array queue_create{
     value_option("weight", "N", "Scheduler weight, 1..4294967295; default: 1."),
     value_option("concurrency-limit", "N", "Concurrency limit, 1..4294967295; default: 1."),
     value_option("recovery-policy", "POLICY", "fail_interrupted (default) or retry_interrupted."),
+    defaults,
+    retention,
+    warning,
     key,
 };
 constexpr std::array queue_list{deleted, limit, after};
@@ -76,15 +90,25 @@ constexpr std::array queue_update{
     value_option("new-name", "NAME", "Replace the queue name."),
     value_option("weight", "N", "Replace scheduler weight, 1..4294967295."),
     value_option("concurrency-limit", "N", "Replace concurrency limit, 1..4294967295."),
+    value_option("recovery-policy", "POLICY", "Replace startup recovery policy."),
+    defaults,
+    retention,
+    flag("inherit-history-retention", "Restore inherited daemon retention; excludes --history-retention-seconds."),
+    warning,
 };
+constexpr std::array queue_suspend{id, name_selector, flag("wait", "Wait until the queue is fully suspended.")};
 constexpr std::array job_create{
     queue_id,
     queue_name,
     value_option("type", "cli|http", "Required runner type."),
     at,
+    flag("now", "Schedule once at the daemon's current time; excludes --at and --cron."),
+    cron,
+    timezone,
     value_option("name", "NAME", "Optional job name; omitted by default."),
     value_option("priority", "N", "Scheduling priority, -2147483648..2147483647; default: 0."),
     key,
+    attribute,
     value_option("command", "PATH", "CLI executable: absolute path or bare name with explicit --env PATH=... ."),
     value_option("arg", "VALUE", "CLI argument; repeat in order. Use --arg=VALUE for dash-leading values.", true),
     value_option("working-directory", "PATH", "Absolute CLI working directory; default: /."),
@@ -96,6 +120,8 @@ constexpr std::array job_create{
                  true),
     value_option("url", "URL", "Required HTTP URL for --type http."),
     value_option("method", "METHOD", "HTTP method; default: GET."),
+    value_option("header", "NAME=VALUE", "HTTP header; repeat in order.", true),
+    value_option("body", "TEXT", "UTF-8 HTTP request body; use --request-file for binary data or references."),
 };
 constexpr std::array job_list{queue_id, queue_name, deleted, limit, after};
 constexpr std::array job_update{
@@ -104,7 +130,11 @@ constexpr std::array job_update{
     flag("clear-name", "Remove the job name; mutually exclusive with --name."),
     priority,
     at,
+    cron,
+    timezone,
+    attribute,
 };
+constexpr std::array job_suspend{flag("wait", "Wait until the job is fully suspended.")};
 constexpr std::array job_move{revision, queue_id, queue_name};
 constexpr std::array job_delete{revision};
 
@@ -196,7 +226,7 @@ constexpr CommandSpec queue_suspend_command{
     .summary          = "Suspend a queue",
     .operands         = {},
     .maximum_operands = 0,
-    .options          = queue_selector,
+    .options          = queue_suspend,
     .rules            = select_queue,
     .example          = "jobuctl --socket /run/jobu.sock queue suspend --name reports",
     .capability       = "queue.suspend",
@@ -238,17 +268,18 @@ constexpr CommandSpec job_create_command{
     .name             = "create",
     .kind             = CommandKind::JobCreate,
     .alias            = "add",
-    .summary          = "Create a once-scheduled job",
+    .summary          = "Create a once or recurring job",
     .operands         = {},
     .maximum_operands = 0,
     .options          = job_create,
-    .rules      = "Require exactly one queue selector, --type, and --at. CLI requires --command; HTTP requires --url.\n"
-                  "CLI and HTTP options cannot be mixed. Environment names must be unique across --env and --unset-env.\n"
-                  "CLI environment defaults to empty apart from JobU-provided variables; arguments default to empty.",
-    .example    = "jobuctl --socket /run/jobu.sock job create --queue-name reports --type cli \\\n"
-                  "      --at 2030-01-01T00:00:00Z --command /bin/echo --arg=hello",
-    .capability = "job.create",
-    .build      = parse_job_command,
+    .rules            = "Require exactly one queue selector, --type, and one of --now, --at, or --cron.\n"
+                        "--timezone applies only to --cron. CLI requires --command; HTTP requires --url.\n"
+                        "CLI and HTTP options cannot be mixed. Environment names must be unique across --env and --unset-env.\n"
+                        "CLI environment defaults to empty apart from JobU-provided variables; arguments default to empty.",
+    .example          = "jobuctl --socket /run/jobu.sock job create --queue-name reports --type cli \\\n"
+                        "      --at 2030-01-01T00:00:00Z --command /bin/echo --arg=hello",
+    .capability       = "job.create",
+    .build            = parse_job_command,
 };
 
 constexpr CommandSpec job_get_command{
@@ -305,7 +336,7 @@ constexpr CommandSpec job_suspend_command{
     .summary          = "Suspend a job",
     .operands         = "UUID",
     .maximum_operands = 1,
-    .options          = {},
+    .options          = job_suspend,
     .rules            = job_uuid,
     .example          = "jobuctl --socket /run/jobu.sock job suspend 00000000-0000-7000-8000-000000000001",
     .capability       = "job.suspend",

@@ -49,10 +49,10 @@ Global options also work before or after the command path:
 | Option | Behavior |
 | --- | --- |
 | `--json` | Print one compact JSON result on standard output for a successful remote command. |
-| `--timeout MS` | Set the positive overall deadline in milliseconds; default 5000. It includes connection, handshake, and the command. |
+| `--timeout MS` | Set the positive overall deadline in milliseconds; default 5000. It includes connection, handshake, the command, and any requested wait. |
 | `--request-file FILE` | Read a complete JSON params object from `FILE`, or use `-` for standard input. |
 
-`--request-file` is available for the system, queue, and job commands listed above. It cannot be combined with command operands or command-specific options. Global options remain available. The file must contain one JSON object, with no trailing non-whitespace text, and is limited to the configured RPC body size (1 MiB by default). Request fields follow the public method's strict JSON contract. For example:
+`--request-file` is available for the system, queue, and job commands listed above. It cannot be combined with command operands or command-specific request options. Global options and `queue/job suspend --wait` remain available. The file must contain one JSON object, with no trailing non-whitespace text, and is limited to the configured RPC body size (1 MiB by default). Request fields follow the public method's strict JSON contract. For example:
 
 ```sh
 printf '{"limit":20}\n' > queue-list.json
@@ -72,7 +72,27 @@ jobuctl --socket /run/jobu.sock job create \
     --command /bin/echo --arg=hello
 ```
 
-Use a future UTC timestamp appropriate for your job. Run `jobuctl job create --help` for the supported CLI and HTTP creation options.
+Use a future UTC timestamp appropriate for your job. `job create` and `job add` also accept `--now` for a once job due at the daemon's current time, or `--cron EXPRESSION` for a recurring job. Choose exactly one of `--now`, `--at UTC`, and `--cron EXPRESSION`. `--timezone ZONE` applies only to cron and defaults to UTC. `job update` accepts `--at` or `--cron` with optional timezone; symbolic `--now` is creation-only.
+
+An idempotency key makes an identical `--now` creation replay the original job and scheduled run. Supply the same key and request when retrying after a lost response; changing the request with the same key is a conflict.
+
+## Queue and job configuration
+
+Queue create/update accept `--recovery-policy fail_interrupted|retry_interrupted`, `--history-retention-seconds N`, `--runnable-wait-warning-ms N`, and `--defaults-file FILE`. Retention `0` means unlimited. Omit retention at creation to inherit the daemon policy; use `--inherit-history-retention` on update to restore inheritance. These two update options are mutually exclusive. The warning delay is nonnegative milliseconds. A defaults file contains a JSON object of registered queue default attributes; `{}` clears all queue defaults on update. Omitted update fields stay unchanged.
+
+```sh
+printf '{"retry.max_attempts":2}\n' > queue-defaults.json
+jobuctl --socket /run/jobu.sock queue create reports \
+    --defaults-file queue-defaults.json --history-retention-seconds 86400
+jobuctl --socket /run/jobu.sock queue update --name reports --history-retention-seconds 0
+jobuctl --socket /run/jobu.sock queue update --name reports --inherit-history-retention
+```
+
+Job create/update accept repeated `--attribute NAME=JSON_VALUE` for distinct registered job attributes. JSON values keep their types, so a numeric value is written as `--attribute retry.max_attempts=2`. On update, supplied attributes replace those named values; omitted attributes remain unchanged. `job update` still requires the current `--revision`, and `--clear-name` explicitly clears the name. A stale revision is returned as a conflict; the CLI does not fetch a newer revision and retry.
+
+For CLI jobs, repeat `--arg`, `--env`, `--unset-env`, and `--expected-exit-code` as needed. For HTTP jobs, use `--url`, optional `--method`, repeated `--header NAME=VALUE`, and optional `--body TEXT` for a UTF-8 body. CLI and HTTP fields cannot be mixed. Use `--request-file` for complete nested configuration, binary HTTP bodies, secret references, or a full job type/payload replacement on update. For example, a job request file can contain a header value such as `{"secret":"service.token"}`; the secret name must already exist on the daemon.
+
+`queue suspend --wait` and `job suspend --wait` return when the resource reaches `suspended`. They submit the suspension once and use read requests while waiting. The same overall `--timeout` applies. A timeout after an observed suspension reply means the final state was not confirmed; inspect the resource before deciding what to do next.
 
 ## Literal arguments
 

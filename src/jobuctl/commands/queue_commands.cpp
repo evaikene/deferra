@@ -1,6 +1,8 @@
 #include "commands_priv.hpp"
 
+#include "attribute_registry.hpp"
 #include "command_helpers_priv.hpp"
+#include "input_priv.hpp"
 #include "management_json.hpp"
 
 #include <fmt/format.h>
@@ -16,6 +18,31 @@ using namespace jb::core;
 using namespace jb::jobu;
 
 namespace {
+
+auto parse_recovery_policy(std::string_view value) -> std::optional<RecoveryPolicy>
+{
+    if (value == "fail_interrupted") {
+        return RecoveryPolicy::FailInterrupted;
+    }
+    if (value == "retry_interrupted") {
+        return RecoveryPolicy::RetryInterrupted;
+    }
+    return std::nullopt;
+}
+
+auto parse_defaults_file(std::string_view path, StandardAttributeRegistry const& registry)
+    -> std::optional<AttributeSet>
+{
+    auto document = load_json_object(std::filesystem::path{path});
+    if (!document) {
+        return std::nullopt;
+    }
+    auto defaults = attribute_set_from_json(*document, registry, AttributeScope::QueueDefault);
+    if (!defaults) {
+        return std::nullopt;
+    }
+    return std::move(defaults).value();
+}
 
 struct SelectorResult {
     std::optional<QueueSelector> selector;
@@ -103,6 +130,9 @@ auto parse_queue_create(std::filesystem::path                socket_path,
     auto weight_seen      = false;
     auto concurrency_seen = false;
     auto recovery_seen    = false;
+    auto defaults_seen    = false;
+    auto retention_seen   = false;
+    auto warning_seen     = false;
     auto idempotency_seen = false;
 
     for (auto const& argument : arguments.subspan(1)) {
@@ -130,16 +160,39 @@ auto parse_queue_create(std::filesystem::path                socket_path,
             continue;
         }
         if (argument.name() == "recovery-policy" && !recovery_seen) {
-            if (*value == "fail_interrupted") {
-                request.recovery_policy = RecoveryPolicy::FailInterrupted;
-            }
-            else if (*value == "retry_interrupted") {
-                request.recovery_policy = RecoveryPolicy::RetryInterrupted;
-            }
-            else {
+            auto policy = parse_recovery_policy(*value);
+            if (!policy) {
                 return parse_failure("--recovery-policy must be fail_interrupted or retry_interrupted");
             }
-            recovery_seen = true;
+            request.recovery_policy = *policy;
+            recovery_seen           = true;
+            continue;
+        }
+        if (argument.name() == "defaults-file" && !defaults_seen) {
+            auto defaults = parse_defaults_file(*value, registry);
+            if (!defaults) {
+                return parse_failure("--defaults-file must contain valid queue default attributes");
+            }
+            request.defaults = std::move(*defaults);
+            defaults_seen    = true;
+            continue;
+        }
+        if (argument.name() == "history-retention-seconds" && !retention_seen) {
+            auto seconds = parse_unsigned(*value, 0, std::numeric_limits<std::int64_t>::max());
+            if (!seconds) {
+                return parse_failure("--history-retention-seconds must be a nonnegative integer");
+            }
+            request.history_retention = std::chrono::seconds{static_cast<std::int64_t>(*seconds)};
+            retention_seen            = true;
+            continue;
+        }
+        if (argument.name() == "runnable-wait-warning-ms" && !warning_seen) {
+            auto milliseconds = parse_unsigned(*value, 0, std::numeric_limits<std::int64_t>::max());
+            if (!milliseconds) {
+                return parse_failure("--runnable-wait-warning-ms must be a nonnegative integer");
+            }
+            request.runnable_wait_warning = std::chrono::milliseconds{static_cast<std::int64_t>(*milliseconds)};
+            warning_seen                  = true;
             continue;
         }
         if (argument.name() == "idempotency-key" && !idempotency_seen) {
@@ -236,12 +289,23 @@ auto parse_queue_update(std::filesystem::path                socket_path,
     auto new_name_seen    = false;
     auto weight_seen      = false;
     auto concurrency_seen = false;
+    auto recovery_seen    = false;
+    auto defaults_seen    = false;
+    auto retention_seen   = false;
+    auto warning_seen     = false;
+    auto request          = UpdateQueueRequest{};
 
     for (auto const& argument : arguments) {
         if (argument.name() == "id" || argument.name() == "name") {
             if (!add_selector(argument, selector)) {
                 return parse_failure("queue update requires exactly one valid --id or --name selector");
             }
+            continue;
+        }
+
+        if (argument.name() == "inherit-history-retention" && !retention_seen && !argument.has_value()) {
+            request.history_retention.emplace(std::nullopt);
+            retention_seen = true;
             continue;
         }
 
@@ -272,23 +336,58 @@ auto parse_queue_update(std::filesystem::path                socket_path,
             concurrency_seen = true;
             continue;
         }
+        if (argument.name() == "recovery-policy" && !recovery_seen) {
+            auto policy = parse_recovery_policy(*value);
+            if (!policy) {
+                return parse_failure("--recovery-policy must be fail_interrupted or retry_interrupted");
+            }
+            request.recovery_policy = policy;
+            recovery_seen           = true;
+            continue;
+        }
+        if (argument.name() == "defaults-file" && !defaults_seen) {
+            auto defaults = parse_defaults_file(*value, registry);
+            if (!defaults) {
+                return parse_failure("--defaults-file must contain valid queue default attributes");
+            }
+            request.defaults = std::move(*defaults);
+            defaults_seen    = true;
+            continue;
+        }
+        if (argument.name() == "history-retention-seconds" && !retention_seen) {
+            auto seconds = parse_unsigned(*value, 0, std::numeric_limits<std::int64_t>::max());
+            if (!seconds) {
+                return parse_failure("--history-retention-seconds must be a nonnegative integer");
+            }
+            request.history_retention.emplace(std::chrono::seconds{static_cast<std::int64_t>(*seconds)});
+            retention_seen = true;
+            continue;
+        }
+        if (argument.name() == "runnable-wait-warning-ms" && !warning_seen) {
+            auto milliseconds = parse_unsigned(*value, 0, std::numeric_limits<std::int64_t>::max());
+            if (!milliseconds) {
+                return parse_failure("--runnable-wait-warning-ms must be a nonnegative integer");
+            }
+            request.runnable_wait_warning = std::chrono::milliseconds{static_cast<std::int64_t>(*milliseconds)};
+            warning_seen                  = true;
+            continue;
+        }
         return parse_failure("queue update has an unknown or duplicate option");
     }
 
     if (!selector) {
         return parse_failure("queue update requires exactly one --id or --name selector");
     }
-    if (!new_name && !weight && !concurrency) {
+    if (!new_name && !weight && !concurrency && !request.recovery_policy && !request.defaults &&
+        !request.history_retention && !request.runnable_wait_warning) {
         return parse_failure("queue update requires at least one mutable field");
     }
 
-    auto request = UpdateQueueRequest{
-        .queue             = std::move(*selector),
-        .name              = std::move(new_name),
-        .weight            = weight,
-        .concurrency_limit = concurrency,
-    };
-    auto params = update_queue_request_to_json(request, registry);
+    request.queue             = std::move(*selector);
+    request.name              = std::move(new_name);
+    request.weight            = weight;
+    request.concurrency_limit = concurrency;
+    auto params               = update_queue_request_to_json(request, registry);
     if (!params) {
         return parse_failure(params.error().message);
     }

@@ -105,19 +105,15 @@ auto decode_request(CommandKind kind, JsonValue const& value, AttributeRegistry 
 
 } // namespace
 
-auto load_request_file(Command& command, StandardAttributeRegistry const& registry) -> Result<void, Error>
+auto load_json_object(std::filesystem::path const& path) -> Result<JsonValue, Error>
 {
-    if (!command.request_file) {
-        return Result<void, Error>::success();
-    }
-
     auto       file   = std::ifstream{};
     auto*      stream = &std::cin;
-    auto const stdin  = *command.request_file == std::filesystem::path{"-"};
+    auto const stdin  = path == std::filesystem::path{"-"};
     if (!stdin) {
-        file.open(*command.request_file, std::ios::binary);
+        file.open(path, std::ios::binary);
         if (!file) {
-            return Result<void, Error>::failure(
+            return Result<JsonValue, Error>::failure(
                 input_error("jobuctl.input.open_failed", "Unable to open request file"));
         }
         stream = &file;
@@ -125,12 +121,24 @@ auto load_request_file(Command& command, StandardAttributeRegistry const& regist
 
     auto text = read_bounded(*stream);
     if (!text) {
-        return Result<void, Error>::failure(std::move(text).error());
+        return Result<JsonValue, Error>::failure(std::move(text).error());
     }
     auto value = parse_json(*text);
     if (!value || !value->is_object()) {
-        return Result<void, Error>::failure(
+        return Result<JsonValue, Error>::failure(
             input_error("jobuctl.input.invalid_json", "Request input must contain one JSON params object"));
+    }
+    return Result<JsonValue, Error>::success(std::move(*value));
+}
+
+auto load_request_file(Command& command, StandardAttributeRegistry const& registry) -> Result<void, Error>
+{
+    if (!command.request_file) {
+        return Result<void, Error>::success();
+    }
+    auto value = load_json_object(*command.request_file);
+    if (!value) {
+        return Result<void, Error>::failure(std::move(value).error());
     }
     auto request = decode_request(command.kind, *value, registry);
     if (!request) {

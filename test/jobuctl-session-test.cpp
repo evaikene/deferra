@@ -13,6 +13,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -38,6 +39,9 @@ enum class PeerBehavior : std::uint8_t {
     MissingCapability,
     ControlInfo,
     LargeRevision,
+    QueueSuspendPolling,
+    JobSuspendPolling,
+    SuspendNeverSettles,
     SilentHandshake,
     SilentCommand
 };
@@ -62,6 +66,7 @@ auto run_session(PeerBehavior             behavior,
     std::unique_ptr<LocalSocket> peer;
     StreamFramer                 framer;
     Process                      child;
+    std::size_t                  poll_count{0};
 
     // The peer can deliberately withhold either response without blocking the owner event loop.
     auto read_requests = [&] {
@@ -89,8 +94,10 @@ auto run_session(PeerBehavior             behavior,
                     .capabilities   = behavior == PeerBehavior::MissingCapability
                                         ? std::vector<std::string>{"system.info"}
                                         : std::vector<std::string>{"job.get",
-                                       "queue.create", "queue.delete",
-                                       "queue.list", "system.info"}
+                                       "job.suspend", "queue.create",
+                                       "queue.delete", "queue.get",
+                                       "queue.suspend", "queue.list",
+                                       "system.info"}
                 });
                 response.emplace("result", behavior == PeerBehavior::InvalidInfo ? JsonValue{} : std::move(info));
             }
@@ -102,6 +109,48 @@ auto run_session(PeerBehavior             behavior,
             }
             else if (method == "queue.delete") {
                 response.emplace("result", JsonValue{});
+            }
+            else if (method == "queue.suspend" || method == "queue.get") {
+                auto id = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff");
+                auto at = parse_utc_timestamp("2030-01-01T00:00:00Z");
+                REQUIRE(id);
+                REQUIRE(at);
+                auto queue = Queue{.id         = *id,
+                                   .name       = "reports",
+                                   .state      = QueueState::Suspending,
+                                   .created_at = *at,
+                                   .updated_at = *at};
+                if (method == "queue.get" && behavior != PeerBehavior::SuspendNeverSettles && ++poll_count == 2) {
+                    queue.state = QueueState::Suspended;
+                }
+                auto encoded = queue_to_json(queue, StandardAttributeRegistry{});
+                REQUIRE(encoded);
+                response.emplace("result", std::move(*encoded));
+            }
+            else if (method == "job.suspend" || (method == "job.get" && behavior == PeerBehavior::JobSuspendPolling)) {
+                StandardAttributeRegistry registry;
+                auto                      id         = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff");
+                auto                      at         = parse_utc_timestamp("2030-01-01T00:00:00Z");
+                auto                      attributes = materialize_attributes(registry, {}, {}, {});
+                auto                      payload    = parse_json(R"({"command":"/bin/true"})");
+                REQUIRE(id);
+                REQUIRE(at);
+                REQUIRE(attributes);
+                REQUIRE(payload);
+                auto job = JobDefinition{.id         = *id,
+                                         .queue_id   = *id,
+                                         .state      = JobState::Suspending,
+                                         .schedule   = OnceSchedule{.planned_at = *at},
+                                         .attributes = *attributes,
+                                         .payload    = *payload,
+                                         .created_at = *at,
+                                         .updated_at = *at};
+                if (method == "job.get" && ++poll_count == 2) {
+                    job.state = JobState::Suspended;
+                }
+                auto encoded = job_to_json(job, registry);
+                REQUIRE(encoded);
+                response.emplace("result", std::move(*encoded));
             }
             else if (method == "job.get" && behavior == PeerBehavior::LargeRevision) {
                 StandardAttributeRegistry registry;
@@ -318,4 +367,40 @@ TEST_CASE("jobuctl session enforces one overall command deadline", "[jobuctl][se
         CHECK(error.at("code").as_string() == "jobu.client.timeout");
         CHECK(error.at("outcome_unknown").as_bool());
     }
+}
+
+TEST_CASE("jobuctl suspend wait submits once and reads until suspension completes", "[jobuctl][session]")
+{
+    auto queue =
+        run_session(PeerBehavior::QueueSuspendPolling, {"queue", "suspend", "--name", "reports", "--wait"}, {"--json"});
+    CHECK(queue.exit->exit_code == 0);
+    CHECK(queue.methods == std::vector<std::string>{"system.info", "queue.suspend", "queue.get", "queue.get"});
+    auto queue_result = parse_json(queue.output);
+    REQUIRE(queue_result);
+    CHECK(queue_result->as_object().at("state").as_string() == "suspended");
+
+    auto job = run_session(PeerBehavior::JobSuspendPolling,
+                           {"job", "suspend", "00112233-4455-6677-8899-aabbccddeeff", "--wait"},
+                           {"--json"});
+    CHECK(job.exit->exit_code == 0);
+    CHECK(job.methods == std::vector<std::string>{"system.info", "job.suspend", "job.get", "job.get"});
+    auto job_result = parse_json(job.output);
+    REQUIRE(job_result);
+    CHECK(job_result->as_object().at("state").as_string() == "suspended");
+}
+
+TEST_CASE("jobuctl wait deadline reports an unconfirmed state after observed mutation", "[jobuctl][session]")
+{
+    auto exchange = run_session(PeerBehavior::SuspendNeverSettles,
+                                {"queue", "suspend", "--name", "reports", "--wait"},
+                                {"--json", "--timeout", "250"});
+    CHECK(exchange.exit->exit_code == 3);
+    CHECK(exchange.methods.front() == "system.info");
+    CHECK(exchange.methods[1] == "queue.suspend");
+    CHECK(std::count(exchange.methods.begin(), exchange.methods.end(), "queue.suspend") == 1);
+    auto value = parse_json(exchange.error);
+    REQUIRE(value);
+    auto const& error = value->as_object().at("error").as_object();
+    CHECK(error.at("code").as_string() == "jobu.client.timeout");
+    CHECK_FALSE(error.at("outcome_unknown").as_bool());
 }
