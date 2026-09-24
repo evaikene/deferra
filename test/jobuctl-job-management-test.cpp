@@ -21,12 +21,14 @@
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <memory>
 #include <netinet/in.h>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -219,13 +221,26 @@ auto fail(std::string_view message) -> int
 
 auto spawn_jobud(std::filesystem::path const& executable,
                  std::filesystem::path const& socket_path,
-                 std::filesystem::path const& database_path) -> std::optional<ChildProcess>
+                 std::filesystem::path const& database_path,
+                 bool                         allow_root_cli = false) -> std::optional<ChildProcess>
 {
     auto const pid = ::fork();
     if (pid < 0) {
         return std::nullopt;
     }
     if (pid == 0) {
+        if (allow_root_cli) {
+            ::execl(executable.c_str(),
+                    executable.c_str(),
+                    "--socket",
+                    socket_path.c_str(),
+                    "--database",
+                    database_path.c_str(),
+                    "--allow-root-cli",
+                    static_cast<char*>(nullptr));
+            ::_exit(127);
+        }
+
         ::execl(executable.c_str(),
                 executable.c_str(),
                 "--socket",
@@ -236,6 +251,12 @@ auto spawn_jobud(std::filesystem::path const& executable,
         ::_exit(127);
     }
     return ChildProcess{pid};
+}
+
+auto root_cli_opted_in() -> bool
+{
+    auto const* enabled = std::getenv("JOBU_TEST_ALLOW_ROOT_CLI");
+    return ::geteuid() == 0 && enabled != nullptr && std::string_view{enabled} == "1";
 }
 
 auto wait_for_listener(ChildProcess& daemon, std::filesystem::path const& socket_path) -> bool
@@ -568,6 +589,239 @@ auto inspect_database(std::filesystem::path const& database_path,
     valid                    = valid && run_count && *run_count == 2 && attempt_count && *attempt_count == 0;
     auto const closed        = database.close();
     return valid && closed;
+}
+
+/// Exercises the CLI against retained daemon state while the private integration daemon is serving.
+auto verify_run_attempt_cli(std::filesystem::path const& executable,
+                            std::filesystem::path const& socket,
+                            std::filesystem::path const& directory,
+                            bool                         can_execute_cli) -> bool
+{
+    if (!run_success(executable, socket, {"queue", "create", "history"})) {
+        return false;
+    }
+    // A future schedule-owned occurrence can be cancelled before any attempt starts.
+    auto pending_job  = run_success(executable,
+                                    socket,
+                                    {"job",
+                                     "create",
+                                     "--queue-name",
+                                     "history",
+                                     "--type",
+                                     "cli",
+                                     "--at",
+                                     "2030-01-01T00:00:00Z",
+                                     "--command",
+                                     "/bin/true",
+                                     "--json"});
+    auto pending_json = jb::core::parse_json(pending_job.value_or(""));
+    if (!pending_json) {
+        return false;
+    }
+    auto const pending_job_id = pending_json->as_object().at("id").as_string();
+    auto       pending_page   = run_success(executable, socket, {"run", "list", "--job-id", pending_job_id, "--json"});
+    auto       pending_page_json = jb::core::parse_json(pending_page.value_or(""));
+    if (!pending_page_json || pending_page_json->as_object().at("items").as_array().size() != 1U) {
+        return false;
+    }
+    auto const& pending_summary = pending_page_json->as_object().at("items").as_array().front().as_object();
+    if (pending_summary.contains("payload") || pending_summary.contains("output")) {
+        return false;
+    }
+    auto const pending_id     = pending_summary.at("id").as_string();
+    auto       cancelled      = run_success(executable, socket, {"run", "cancel", pending_id, "--wait", "--json"});
+    auto       cancelled_json = jb::core::parse_json(cancelled.value_or(""));
+    if (!cancelled_json || cancelled_json->as_object().at("disposition").as_string() != "completed" ||
+        cancelled_json->as_object().at("run").as_object().at("state").as_string() != "cancelled") {
+        return false;
+    }
+    auto pending_attempts      = run_success(executable, socket, {"attempt", "list", pending_id, "--json"});
+    auto pending_attempts_json = jb::core::parse_json(pending_attempts.value_or(""));
+    if (!pending_attempts_json || !pending_attempts_json->as_object().at("items").as_array().empty()) {
+        return false;
+    }
+
+    // Root CI execution requires an explicit opt-in; the pending-run checks remain useful without it.
+    if (!can_execute_cli) {
+        return true;
+    }
+
+    // Run Now leaves the scheduled occurrence intact and exposes its own retained attempt and output.
+    auto output_job      = run_success(executable,
+                                       socket,
+                                       {"job",
+                                        "create",
+                                        "--queue-name",
+                                        "history",
+                                        "--type",
+                                        "cli",
+                                        "--at",
+                                        "2030-02-01T00:00:00Z",
+                                        "--command",
+                                        "/bin/sh",
+                                        "--arg=-c",
+                                        "--arg=printf 'A\\000\\377Z'",
+                                        "--attribute",
+                                        R"(output.capture="always")",
+                                        "--json"});
+    auto output_job_json = jb::core::parse_json(output_job.value_or(""));
+    if (!output_job_json) {
+        return false;
+    }
+    auto const output_job_id = output_job_json->as_object().at("id").as_string();
+    auto started      = run_success(executable,
+                                    socket,
+                                    {"job", "run-now", output_job_id, "--idempotency-key", "history-manual", "--json"});
+    auto started_json = jb::core::parse_json(started.value_or(""));
+    if (!started_json) {
+        return false;
+    }
+    auto const run_id = started_json->as_object().at("id").as_string();
+    auto       replay = run_success(executable,
+                                    socket,
+                                    {"job", "run-now", output_job_id, "--idempotency-key", "history-manual", "--json"});
+    auto       replay_json = jb::core::parse_json(replay.value_or(""));
+    if (!replay_json || replay_json->as_object().at("id").as_string() != run_id) {
+        return false;
+    }
+
+    // The subprocess is asynchronous; each read observes durable state without delaying the daemon event loop.
+    auto       succeeded  = false;
+    auto       last_state = std::string{"not observed"};
+    auto const deadline   = std::chrono::steady_clock::now() + 8s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        auto snapshot = run_success(executable, socket, {"run", "get", run_id, "--json"});
+        auto value    = jb::core::parse_json(snapshot.value_or(""));
+        if (!value) {
+            return false;
+        }
+        auto const& state = value->as_object().at("state").as_string();
+        last_state        = state;
+        if (state == "succeeded") {
+            succeeded = true;
+            break;
+        }
+        if (state == "failed" || state == "interrupted" || state == "cancelled") {
+            fmt::print(stderr, "run-now {} reached state {}\n", run_id, state);
+            return false;
+        }
+    }
+    if (!succeeded) {
+        fmt::print(stderr, "run-now {} remained in state {} until the deadline\n", run_id, last_state);
+        return false;
+    }
+
+    // Pages contain summaries only; details and raw output require separate requests.
+    auto page = run_success(executable, socket, {"run", "list", "--job-id", output_job_id, "--limit", "1", "--json"});
+    auto page_json = jb::core::parse_json(page.value_or(""));
+    if (!page_json || page_json->as_object().at("items").as_array().size() != 1U ||
+        !page_json->as_object().at("next_cursor").is_string()) {
+        return false;
+    }
+    auto const& first_summary = page_json->as_object().at("items").as_array().front().as_object();
+    if (first_summary.contains("payload") || first_summary.contains("output")) {
+        return false;
+    }
+    auto const cursor    = page_json->as_object().at("next_cursor").as_string();
+    auto       next      = run_success(executable, socket, {"run", "list", "--cursor", cursor, "--json"});
+    auto       next_json = jb::core::parse_json(next.value_or(""));
+    if (!next_json || next_json->as_object().at("items").as_array().size() != 1U ||
+        next_json->as_object().at("items").as_array().front().as_object().at("id").as_string() ==
+            first_summary.at("id").as_string()) {
+        return false;
+    }
+
+    auto attempts      = run_success(executable, socket, {"attempt", "list", run_id, "--json"});
+    auto attempts_json = jb::core::parse_json(attempts.value_or(""));
+    if (!attempts_json || attempts_json->as_object().at("items").as_array().size() != 1U) {
+        return false;
+    }
+    auto const& attempt_summary = attempts_json->as_object().at("items").as_array().front().as_object();
+    if (attempt_summary.contains("result") || attempt_summary.contains("output")) {
+        return false;
+    }
+    auto details      = run_success(executable, socket, {"attempt", "get", run_id, "1", "--json"});
+    auto details_json = jb::core::parse_json(details.value_or(""));
+    if (!details_json || details_json->as_object().at("state").as_string() != "completed") {
+        return false;
+    }
+
+    auto output = run_success(executable, socket, {"attempt", "output", run_id, "1", "--channel", "stdout", "--json"});
+    auto output_json = jb::core::parse_json(output.value_or(""));
+    if (!output_json || output_json->as_object().at("status").as_string() != "available" ||
+        output_json->as_object().at("bytes_returned").as_uint() != 4) {
+        return false;
+    }
+    auto const expected = std::string{"A\0\xffZ", 4};
+    auto raw = run_success(executable, socket, {"attempt", "output", run_id, "1", "--channel", "stdout", "--raw"});
+    if (!raw || *raw != expected) {
+        return false;
+    }
+    auto const path = directory / "retained-chunk.bin";
+    auto saved = run_success(executable,
+                             socket,
+                             {"attempt", "output", run_id, "1", "--channel", "stdout", "--output-file", path.string()});
+    if (!saved || !saved->empty()) {
+        return false;
+    }
+    auto file  = std::ifstream{path, std::ios::binary};
+    auto bytes = std::string{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+    if (bytes != expected) {
+        return false;
+    }
+    if (!run_failure(executable,
+                     socket,
+                     {"attempt", "output", run_id, "1", "--channel", "stdout", "--output-file", path.string()})) {
+        return false;
+    }
+
+    // A FIFO holds a real subprocess attempt after it signals readiness, so cancellation starts while active.
+    auto const fifo  = directory / "active-run.fifo";
+    auto const ready = directory / "active-run.ready";
+    if (::mkfifo(fifo.c_str(), 0600) != 0) {
+        return false;
+    }
+    auto script          = fmt::format("printf ready > '{}'; cat '{}'", ready.string(), fifo.string());
+    auto active_job      = run_success(executable,
+                                       socket,
+                                       {"job",
+                                        "create",
+                                        "--queue-name",
+                                        "history",
+                                        "--type",
+                                        "cli",
+                                        "--at",
+                                        "2030-03-01T00:00:00Z",
+                                        "--command",
+                                        "/bin/sh",
+                                        "--arg=-c",
+                                        "--arg",
+                                        script,
+                                        "--attribute",
+                                        "cli.termination_grace=0",
+                                        "--json"});
+    auto active_job_json = jb::core::parse_json(active_job.value_or(""));
+    if (!active_job_json) {
+        return false;
+    }
+    auto const active_job_id   = active_job_json->as_object().at("id").as_string();
+    auto       active_run      = run_success(executable, socket, {"job", "run-now", active_job_id, "--json"});
+    auto       active_run_json = jb::core::parse_json(active_run.value_or(""));
+    if (!active_run_json) {
+        return false;
+    }
+    auto const active_run_id  = active_run_json->as_object().at("id").as_string();
+    auto const ready_deadline = std::chrono::steady_clock::now() + 5s;
+    while (!std::filesystem::exists(ready) && std::chrono::steady_clock::now() < ready_deadline) {
+        std::this_thread::sleep_for(10ms);
+    }
+    if (!std::filesystem::exists(ready)) {
+        return false;
+    }
+    auto active_cancel      = run_success(executable, socket, {"run", "cancel", active_run_id, "--wait", "--json"});
+    auto active_cancel_json = jb::core::parse_json(active_cancel.value_or(""));
+    return active_cancel_json && active_cancel_json->as_object().at("disposition").as_string() == "completed" &&
+           active_cancel_json->as_object().at("run").as_object().at("state").as_string() == "cancelled";
 }
 
 } // anonymous namespace
@@ -928,7 +1182,9 @@ auto main(int argc, char* argv[]) -> int
     }
 
     auto const persisted_socket = directory.path() / "jobud-persisted.sock";
-    auto       persisted        = spawn_jobud(argv[1], persisted_socket, database_path);
+    // Only this daemon exercises real CLI attempts; earlier restarts retain the default root policy.
+    auto const allow_root_cli   = root_cli_opted_in();
+    auto       persisted        = spawn_jobud(argv[1], persisted_socket, database_path, allow_root_cli);
     if (!persisted) {
         return fail("unable to restart jobud after direct database inspection");
     }
@@ -1069,6 +1325,9 @@ auto main(int argc, char* argv[]) -> int
     if (!cleared_json || !cleared_json->as_object().at("defaults").as_object().empty() ||
         !cleared_json->as_object().at("history_retention_seconds").is_null()) {
         return fail("queue update did not clear defaults and restore retention inheritance");
+    }
+    if (!verify_run_attempt_cli(argv[2], persisted_socket, directory.path(), ::geteuid() != 0 || allow_root_cli)) {
+        return fail("run and attempt CLI did not preserve durable history and output");
     }
     persisted->terminate();
 

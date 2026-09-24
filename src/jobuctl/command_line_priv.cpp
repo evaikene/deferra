@@ -31,8 +31,8 @@ auto is_cli_argument_value(std::string_view token, std::span<CommandLineOption c
     }
     auto const     spelling      = token.substr(2);
     auto const     name          = spelling.substr(0, spelling.find('='));
-    // Newly registered Stage 8.21 options were literal --arg values in earlier releases.
-    constexpr auto added_options = std::array<std::string_view, 11>{
+    // Newly registered options were literal --arg values in earlier releases.
+    constexpr auto added_options = std::array{
         "now",
         "cron",
         "timezone",
@@ -44,6 +44,20 @@ auto is_cli_argument_value(std::string_view token, std::span<CommandLineOption c
         "runnable-wait-warning-ms",
         "inherit-history-retention",
         "wait",
+        "job-id",
+        "cursor",
+        "state",
+        "origin",
+        "planned-from",
+        "planned-to",
+        "started-from",
+        "started-to",
+        "completed-from",
+        "completed-to",
+        "channel",
+        "offset",
+        "raw",
+        "output-file",
     };
     return is_cli_creation_option(name) || name == "help" || name == "version" || name == "json" || name == "timeout" ||
            name == "request-file" || std::ranges::find(added_options, name) != added_options.end() ||
@@ -129,6 +143,8 @@ struct ParsedOptions {
     std::chrono::milliseconds            timeout{5000};
     bool                                 json{false};
     bool                                 wait{false};
+    bool                                 raw{false};
+    std::optional<std::filesystem::path> output_file;
     bool                                 help{false};
     bool                                 version{false};
     std::string                          error;
@@ -172,6 +188,16 @@ auto parse_options(Selection const& selected) -> ParsedOptions
 
         if (!global && argument.name() == "wait") {
             parsed.wait = true;
+        }
+        else if (!global && argument.name() == "raw") {
+            parsed.raw = true;
+        }
+        else if (!global && argument.name() == "output-file") {
+            if (argument.value()->empty()) {
+                parsed.error = "--output-file requires a nonempty path";
+                return parsed;
+            }
+            parsed.output_file = std::filesystem::path{std::string{*argument.value()}};
         }
         else if (!global) {
             parsed.local.push_back(argument);
@@ -221,6 +247,9 @@ auto parse_options(Selection const& selected) -> ParsedOptions
     }
     else if (parsed.version && (!selected.usage.group.empty() || selected.help_path || parsed.help)) {
         parsed.error = "--version must be used at root without help";
+    }
+    else if ((parsed.raw && parsed.output_file) || (parsed.json && (parsed.raw || parsed.output_file))) {
+        parsed.error = "--raw, --output-file, and --json output modes are mutually exclusive";
     }
     return parsed;
 }
@@ -281,6 +310,8 @@ auto parse_command_line(int argc, char* argv[], StandardAttributeRegistry const&
                               .timeout      = options.timeout,
                               .json         = options.json,
                               .wait         = options.wait,
+                              .raw          = options.raw,
+                              .output_file  = std::move(options.output_file),
                               }
         };
     }
@@ -290,11 +321,13 @@ auto parse_command_line(int argc, char* argv[], StandardAttributeRegistry const&
         return {.error = std::move(built.error), .usage = std::move(selected.usage), .json_requested = json_requested};
     }
     // The registry's canonical capability is also the wire method, including for aliases.
-    built.command->kind    = selected.command->kind;
-    built.command->method  = selected.command->capability;
-    built.command->timeout = options.timeout;
-    built.command->json    = options.json;
-    built.command->wait    = options.wait;
+    built.command->kind        = selected.command->kind;
+    built.command->method      = selected.command->capability;
+    built.command->timeout     = options.timeout;
+    built.command->json        = options.json;
+    built.command->wait        = options.wait;
+    built.command->raw         = options.raw;
+    built.command->output_file = std::move(options.output_file);
     return {.action = std::move(*built.command)};
 }
 

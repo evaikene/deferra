@@ -1,6 +1,6 @@
 # jobuctl
 
-`jobuctl` manages JobU queues and job definitions through a running `jobud` daemon's local socket.
+`jobuctl` manages JobU queues, jobs, runs, and retained attempts through a running `jobud` daemon's local socket.
 
 ## Help and version
 
@@ -28,7 +28,9 @@ An unknown group, command, or option is an error, even alongside `--help`. An op
 | --- | --- |
 | `system` | `info` |
 | `queue` | `create` (`add`), `get`, `list`, `update`, `suspend`, `resume`, `delete` |
-| `job` | `create` (`add`), `get`, `list`, `update`, `suspend`, `resume`, `move`, `delete` |
+| `job` | `create` (`add`), `get`, `list`, `update`, `suspend`, `resume`, `move`, `delete`, `run-now` |
+| `run` | `get`, `list`, `cancel` |
+| `attempt` | `get`, `list`, `output` |
 
 `queue add` and `job add` are aliases for `queue create` and `job create`. Each alias accepts the same options and performs the same operation as its canonical command.
 
@@ -52,7 +54,7 @@ Global options also work before or after the command path:
 | `--timeout MS` | Set the positive overall deadline in milliseconds; default 5000. It includes connection, handshake, the command, and any requested wait. |
 | `--request-file FILE` | Read a complete JSON params object from `FILE`, or use `-` for standard input. |
 
-`--request-file` is available for the system, queue, and job commands listed above. It cannot be combined with command operands or command-specific request options. Global options and `queue/job suspend --wait` remain available. The file must contain one JSON object, with no trailing non-whitespace text, and is limited to the configured RPC body size (1 MiB by default). Request fields follow the public method's strict JSON contract. For example:
+`--request-file` is available for every command listed above. It cannot be combined with command operands or command-specific request options. Global options, supported `--wait`, and `attempt output` delivery options remain available. The file must contain one JSON object, with no trailing non-whitespace text, and is limited to the configured RPC body size (1 MiB by default). Request fields follow the public method's strict JSON contract. For example:
 
 ```sh
 printf '{"limit":20}\n' > queue-list.json
@@ -93,6 +95,40 @@ Job create/update accept repeated `--attribute NAME=JSON_VALUE` for distinct reg
 For CLI jobs, repeat `--arg`, `--env`, `--unset-env`, and `--expected-exit-code` as needed. For HTTP jobs, use `--url`, optional `--method`, repeated `--header NAME=VALUE`, and optional `--body TEXT` for a UTF-8 body. CLI and HTTP fields cannot be mixed. Use `--request-file` for complete nested configuration, binary HTTP bodies, secret references, or a full job type/payload replacement on update. For example, a job request file can contain a header value such as `{"secret":"service.token"}`; the secret name must already exist on the daemon.
 
 `queue suspend --wait` and `job suspend --wait` return when the resource reaches `suspended`. They submit the suspension once and use read requests while waiting. The same overall `--timeout` applies. A timeout after an observed suspension reply means the final state was not confirmed; inspect the resource before deciding what to do next.
+
+## Runs and attempts
+
+`job run-now JOB_UUID` creates a manual run from the current job definition. Use `--idempotency-key KEY` when a retry after a lost response must return the original run. Run Now preserves the job's scheduled occurrence and follows the daemon's eligibility rules.
+
+```sh
+jobuctl --socket /run/jobu.sock job run-now JOB_UUID --idempotency-key manual-42 --json
+jobuctl --socket /run/jobu.sock run get RUN_UUID --json
+jobuctl --socket /run/jobu.sock run list --job-id JOB_UUID --state failed --limit 20
+```
+
+`run list` accepts `--queue-id`, `--job-id`, `--state`, `--origin scheduled|manual`, `--type cli|http`, and the UTC bounds `--planned-from/--planned-to`, `--started-from/--started-to`, and `--completed-from/--completed-to`. Lower bounds are inclusive and upper bounds are exclusive. Filters combine. `--limit` is 1–200, default 100. The result contains run summaries, without payload, result, attempts, or output. Full run details are available through `run get`.
+
+When a run page has `next_cursor`, pass it as `run list --cursor TOKEN` with no filters or limit. A cursor can expire or become invalid after daemon restart. This cursor differs from the ID-based `--after` option on queue/job lists.
+
+`run cancel RUN_UUID` succeeds when the daemon returns either `completed` or `requested`. A `requested` reply means active work is still settling. Add `--wait` to submit cancellation once and observe `run.get` until the run is durably `cancelled`, another terminal state causes a conflict, or the overall deadline expires. Set `--timeout` long enough for the job's process termination grace when waiting on active work. After a wait timeout, inspect the run before deciding what to do next. A successful `run get` can describe a failed run without changing the CLI's exit status.
+
+```sh
+jobuctl --socket /run/jobu.sock run cancel RUN_UUID --wait --json
+jobuctl --socket /run/jobu.sock attempt list RUN_UUID --limit 20 --json
+jobuctl --socket /run/jobu.sock attempt get RUN_UUID 1 --json
+```
+
+`attempt list` returns newest attempt numbers first. Its summaries contain no result or output. Continue with `attempt list --cursor TOKEN` and no run ID or limit. `attempt get RUN_UUID NUMBER` returns one attempt's details; `NUMBER` must be positive.
+
+`attempt output RUN_UUID NUMBER --channel CHANNEL` reads one retained chunk. Use `stdout` or `stderr` for a CLI job, and `body` or `headers` for an HTTP job. `--offset N` addresses retained bytes, default 0; `--limit N` requests 1–65,536 raw bytes, default 16,384. Follow `next_offset` to read another chunk. Truncated output may have an omitted middle section; retained offsets do not recover omitted bytes. The response distinguishes available, pending, not-captured, and lost output, and reports retained size, known total/omitted size, truncation, and capture loss.
+
+By default, output shows metadata and an escaped text or base64 preview. `--json` prints the complete protocol result. `--raw` writes only this chunk's decoded bytes to standard output, including binary bytes. `--output-file PATH` writes only this chunk to a newly created file and refuses an existing path. These three modes are mutually exclusive.
+
+```sh
+jobuctl --socket /run/jobu.sock attempt output RUN_UUID 1 --channel stdout --offset 0 --limit 4096 --json
+jobuctl --socket /run/jobu.sock attempt output RUN_UUID 1 --channel stdout --raw > chunk.bin
+jobuctl --socket /run/jobu.sock attempt output RUN_UUID 1 --channel stdout --output-file chunk.bin
+```
 
 ## Literal arguments
 

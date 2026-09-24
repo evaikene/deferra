@@ -33,9 +33,11 @@ constexpr auto flag(std::string_view name, std::string_view description, char sh
 }
 
 constexpr std::array groups{
-    GroupSpec{.name = "system", .summary = "Inspect the daemon"               },
-    GroupSpec{.name = "queue",  .summary = "Create and manage queues"         },
-    GroupSpec{.name = "job",    .summary = "Create and manage job definitions"},
+    GroupSpec{.name = "system",  .summary = "Inspect the daemon"               },
+    GroupSpec{.name = "queue",   .summary = "Create and manage queues"         },
+    GroupSpec{.name = "job",     .summary = "Create and manage job definitions"},
+    GroupSpec{.name = "run",     .summary = "Control and inspect runs"         },
+    GroupSpec{.name = "attempt", .summary = "Inspect attempts and output"      },
 };
 constexpr std::array globals{
     value_option("socket",
@@ -137,6 +139,34 @@ constexpr std::array job_update{
 constexpr std::array job_suspend{flag("wait", "Wait until the job is fully suspended.")};
 constexpr std::array job_move{revision, queue_id, queue_name};
 constexpr std::array job_delete{revision};
+constexpr std::array job_run_now{key};
+constexpr std::array run_cancel{flag("wait", "Wait until the run is durably cancelled.")};
+constexpr std::array run_list{
+    value_option("queue-id", "UUID", "Filter by the run's captured queue ID."),
+    value_option("job-id", "UUID", "Filter by the run's job ID."),
+    value_option("state",
+                 "STATE",
+                 "Filter by scheduled, running, retry_wait, succeeded, failed, interrupted, or cancelled."),
+    value_option("origin", "scheduled|manual", "Filter by run origin."),
+    value_option("type", "cli|http", "Filter by captured runner type."),
+    value_option("planned-from", "UTC", "Inclusive planned-time lower bound."),
+    value_option("planned-to", "UTC", "Exclusive planned-time upper bound."),
+    value_option("started-from", "UTC", "Inclusive first-start lower bound."),
+    value_option("started-to", "UTC", "Exclusive first-start upper bound."),
+    value_option("completed-from", "UTC", "Inclusive completion lower bound."),
+    value_option("completed-to", "UTC", "Exclusive completion upper bound."),
+    limit,
+    value_option("cursor", "TOKEN", "Continue a history page; excludes all filters and --limit."),
+};
+constexpr std::array attempt_list{limit,
+                                  value_option("cursor", "TOKEN", "Continue a page; excludes RUN_ID and --limit.")};
+constexpr std::array attempt_output{
+    value_option("channel", "CHANNEL", "CLI stdout/stderr or HTTP body/headers; required."),
+    value_option("offset", "N", "Retained-byte offset; default: 0."),
+    value_option("limit", "N", "Raw chunk size, 1..65536; default: 16384."),
+    flag("raw", "Write only the requested raw chunk bytes to standard output; excludes --json."),
+    value_option("output-file", "PATH", "Create a new file containing only this chunk; never overwrite."),
+};
 
 constexpr std::string_view select_queue = "Supply exactly one of --id or --name.";
 constexpr std::string_view job_uuid     = "UUID is the job ID.";
@@ -389,23 +419,114 @@ constexpr CommandSpec job_delete_command{
     .build            = parse_job_command,
 };
 
+constexpr CommandSpec job_run_now_command{
+    .group            = "job",
+    .name             = "run-now",
+    .kind             = CommandKind::JobRunNow,
+    .alias            = {},
+    .summary          = "Create one immediate manual run",
+    .operands         = "JOB_UUID",
+    .maximum_operands = 1,
+    .options          = job_run_now,
+    .rules            = "The optional idempotency key safely replays the same Run Now request.",
+    .example          = "jobuctl --socket /run/jobu.sock job run-now 00000000-0000-7000-8000-000000000001",
+    .capability       = "job.run_now",
+    .build            = parse_job_command,
+};
+
+constexpr CommandSpec run_get_command{
+    .group            = "run",
+    .name             = "get",
+    .kind             = CommandKind::RunGet,
+    .alias            = {},
+    .summary          = "Show a retained run",
+    .operands         = "RUN_UUID",
+    .maximum_operands = 1,
+    .options          = {},
+    .rules            = {},
+    .example          = "jobuctl --socket /run/jobu.sock run get 00000000-0000-7000-8000-000000000002",
+    .capability       = "run.get",
+    .build            = parse_run_command,
+};
+constexpr CommandSpec run_list_command{
+    .group            = "run",
+    .name             = "list",
+    .kind             = CommandKind::RunList,
+    .alias            = {},
+    .summary          = "List retained run summaries",
+    .operands         = {},
+    .maximum_operands = 0,
+    .options          = run_list,
+    .rules            = "--cursor is a cursor-only continuation; omit every filter and --limit with it.",
+    .example          = "jobuctl --socket /run/jobu.sock run list --state failed --limit 20",
+    .capability       = "run.list",
+    .build            = parse_run_command,
+};
+constexpr CommandSpec run_cancel_command{
+    .group            = "run",
+    .name             = "cancel",
+    .kind             = CommandKind::RunCancel,
+    .alias            = {},
+    .summary          = "Request cancellation of a run",
+    .operands         = "RUN_UUID",
+    .maximum_operands = 1,
+    .options          = run_cancel,
+    .rules            = "--wait observes the final state using run.get under the overall deadline.",
+    .example          = "jobuctl --socket /run/jobu.sock run cancel 00000000-0000-7000-8000-000000000002 --wait",
+    .capability       = "run.cancel",
+    .build            = parse_run_command,
+};
+constexpr CommandSpec attempt_get_command{
+    .group            = "attempt",
+    .name             = "get",
+    .kind             = CommandKind::AttemptGet,
+    .alias            = {},
+    .summary          = "Show a retained attempt",
+    .operands         = "RUN_UUID NUMBER",
+    .maximum_operands = 2,
+    .options          = {},
+    .rules            = "NUMBER is a positive attempt number.",
+    .example          = "jobuctl --socket /run/jobu.sock attempt get 00000000-0000-7000-8000-000000000002 1",
+    .capability       = "attempt.get",
+    .build            = parse_attempt_command,
+};
+constexpr CommandSpec attempt_list_command{
+    .group            = "attempt",
+    .name             = "list",
+    .kind             = CommandKind::AttemptList,
+    .alias            = {},
+    .summary          = "List attempt summaries for one run",
+    .operands         = "[RUN_UUID]",
+    .maximum_operands = 1,
+    .options          = attempt_list,
+    .rules            = "Require RUN_UUID initially; --cursor alone continues a page.",
+    .example          = "jobuctl --socket /run/jobu.sock attempt list 00000000-0000-7000-8000-000000000002 --limit 20",
+    .capability       = "attempt.list",
+    .build            = parse_attempt_command,
+};
+constexpr CommandSpec attempt_output_command{
+    .group            = "attempt",
+    .name             = "output",
+    .kind             = CommandKind::AttemptOutput,
+    .alias            = {},
+    .summary          = "Read one retained output chunk",
+    .operands         = "RUN_UUID NUMBER",
+    .maximum_operands = 2,
+    .options          = attempt_output,
+    .rules =
+        "Require --channel. --raw, --output-file, and --json are mutually exclusive; each delivers one chunk only.",
+    .example =
+        "jobuctl --socket /run/jobu.sock attempt output 00000000-0000-7000-8000-000000000002 1 --channel stdout --raw",
+    .capability = "attempt.output",
+    .build      = parse_attempt_command,
+};
+
 constexpr std::array commands{
-    system_info_command,
-    queue_create_command,
-    queue_get_command,
-    queue_list_command,
-    queue_update_command,
-    queue_suspend_command,
-    queue_resume_command,
-    queue_delete_command,
-    job_create_command,
-    job_get_command,
-    job_list_command,
-    job_update_command,
-    job_suspend_command,
-    job_resume_command,
-    job_move_command,
-    job_delete_command,
+    system_info_command,   queue_create_command, queue_get_command,      queue_list_command, queue_update_command,
+    queue_suspend_command, queue_resume_command, queue_delete_command,   job_create_command, job_get_command,
+    job_list_command,      job_update_command,   job_suspend_command,    job_resume_command, job_move_command,
+    job_delete_command,    job_run_now_command,  run_get_command,        run_list_command,   run_cancel_command,
+    attempt_get_command,   attempt_list_command, attempt_output_command,
 };
 
 } // namespace

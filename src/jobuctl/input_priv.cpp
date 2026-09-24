@@ -1,6 +1,8 @@
 #include "input_priv.hpp"
 
+#include "control_json.hpp"
 #include "framing.hpp"
+#include "history_json.hpp"
 #include "json.hpp"
 #include "management_json.hpp"
 
@@ -96,6 +98,20 @@ auto decode_request(CommandKind kind, JsonValue const& value, AttributeRegistry 
             return request_from(move_job_request_from_json(value));
         case CommandKind::JobDelete:
             return request_from(delete_job_request_from_json(value));
+        case CommandKind::JobRunNow:
+            return request_from(run_now_request_from_json(value));
+        case CommandKind::RunGet:
+            return request_from(run_get_request_from_json(value));
+        case CommandKind::RunList:
+            return request_from(run_list_request_from_json(value));
+        case CommandKind::RunCancel:
+            return request_from(cancel_run_request_from_json(value));
+        case CommandKind::AttemptGet:
+            return request_from(attempt_get_request_from_json(value));
+        case CommandKind::AttemptList:
+            return request_from(attempt_list_request_from_json(value));
+        case CommandKind::AttemptOutput:
+            return request_from(attempt_output_request_from_json(value));
         case CommandKind::SystemInfo:
             break;
     }

@@ -2,6 +2,7 @@
 
 #include "attribute_registry.hpp"
 #include "command_helpers_priv.hpp"
+#include "control_json.hpp"
 #include "job_validation_priv.hpp"
 #include "management_json.hpp"
 #include "utc_timestamp.hpp"
@@ -822,6 +823,43 @@ auto parse_job_command(std::filesystem::path                socket_path,
                        std::span<CommandLineArgument const> arguments,
                        StandardAttributeRegistry const&     registry) -> CommandBuildResult
 {
+    if (action == "run-now") {
+        auto job_id = std::optional<Uuid>{};
+        auto key    = std::optional<std::string>{};
+        for (auto const& argument : arguments) {
+            if (argument.kind() == CommandLineArgumentKind::Positional && !job_id) {
+                auto parsed = Uuid::parse(argument.token());
+                if (!parsed) {
+                    return parse_failure("job run-now requires one valid job UUID");
+                }
+                job_id = std::move(parsed).value();
+            }
+            else if (argument.kind() == CommandLineArgumentKind::Option && argument.name() == "idempotency-key") {
+                auto value = option_value(argument);
+                if (!value) {
+                    return parse_failure("--idempotency-key requires a nonempty value");
+                }
+                key = std::string{*value};
+            }
+            else {
+                return parse_failure("job run-now requires one job UUID and optional --idempotency-key");
+            }
+        }
+        if (!job_id) {
+            return parse_failure("job run-now requires one valid job UUID");
+        }
+        auto request = RunNowRequest{.job_id = *job_id, .idempotency_key = std::move(key)};
+        auto encoded = run_now_request_to_json(request);
+        if (!encoded) {
+            return parse_failure("job run-now request is invalid");
+        }
+        return {
+            .command = Command{.socket_path = std::move(socket_path),
+                               .kind        = CommandKind::JobRunNow,
+                               .method      = "job.run_now",
+                               .request     = std::move(request)}
+        };
+    }
     if (action == "create") {
         return parse_job_create(std::move(socket_path), arguments, registry);
     }

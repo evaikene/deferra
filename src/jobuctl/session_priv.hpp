@@ -31,7 +31,8 @@ private:
     void ready(jb::jobu::SystemInfo const& info);
     void receive_reply(jb::jobu::ControlCallId id, jb::jobu::ControlReply const& reply);
     void receive_failure(jb::jobu::ControlCallId id, jb::jobu::ControlFailure const& failure);
-    void poll_suspension();
+    void poll_wait();
+    void schedule_poll();
     void deadline_expired();
     void finish(int code, std::optional<CliError> error = std::nullopt);
 };

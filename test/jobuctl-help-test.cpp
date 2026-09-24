@@ -229,7 +229,7 @@ TEST_CASE("jobuctl executable rejects invalid help syntax with contextual stderr
              {"queue", "list", "--unknown", "--help"},
              {"queue", "list", "--", "--help"},
              {"queue", "list"},
-             {"job", "run-now", "--help"},
+             {"run", "unknown", "--help"},
              {"secret", "set", "--stdin", "--help"}
     }) {
         CAPTURE(arguments);

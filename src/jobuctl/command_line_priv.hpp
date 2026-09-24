@@ -1,6 +1,7 @@
 #pragma once
 
 #include "attribute_registry.hpp"
+#include "history.hpp"
 #include "management.hpp"
 #include "uuid.hpp"
 
@@ -31,6 +32,13 @@ enum class CommandKind : std::uint8_t {
     JobResume,
     JobMove,
     JobDelete,
+    JobRunNow,
+    RunGet,
+    RunList,
+    RunCancel,
+    AttemptGet,
+    AttemptList,
+    AttemptOutput,
 };
 
 /// Owning requests for the currently registered CLI methods. CommandKind identifies repeated result types.
@@ -44,7 +52,12 @@ using CommandRequest = std::variant<std::monostate,
                                     jb::jobu::JobListRequest,
                                     jb::jobu::UpdateJobRequest,
                                     jb::jobu::MoveJobRequest,
-                                    jb::jobu::DeleteJobRequest>;
+                                    jb::jobu::DeleteJobRequest,
+                                    jb::jobu::RunNowRequest,
+                                    jb::jobu::RunListRequest,
+                                    jb::jobu::AttemptKey,
+                                    jb::jobu::AttemptListRequest,
+                                    jb::jobu::AttemptOutputRequest>;
 
 /// Parsed remote work owns its data; method refers only to a static method-name literal.
 struct Command {
@@ -56,6 +69,8 @@ struct Command {
     std::chrono::milliseconds            timeout{5000};
     bool                                 json{false};
     bool                                 wait{false};
+    bool                                 raw{false};
+    std::optional<std::filesystem::path> output_file;
 };
 
 struct CommandBuildResult {
