@@ -594,7 +594,7 @@ State is `Uninitialized`, `Initializing`, `Ready`, or `Closed`/`Failed`. `initia
 - An unexpected result shape is `jobu.client.invalid_response`; fail that call. A raw RPC terminal protocol/device error closes the wrapper and fails all pending calls once. Define and test ordering: latch terminal state, clear pending ownership, emit safe terminal `failed`, then per-call failures in local-ID order.
 - The client never retries a mutation automatically. A timeout, disconnect, or local cancellation after a request may have been transmitted marks `outcome_unknown` for mutations. A remote represented application error is an observed failure; a known pre-write local validation/capability failure is not an unknown mutation.
 
-Most importantly, the underlying `rpc::Client::call()` can emit a reply synchronously before it returns its RequestId. Reserve local operation state first, buffer raw early events while that one call is establishing its wire ID, bind the returned ID, and then deliver deferred typed outcomes through the owner event loop. Typed reply/failure/ready signals must not precede the accepting public call's return. Bound temporary buffering by the existing pending/batch limits; do not add nested event processing or an unbounded queue.
+Most importantly, the underlying `rpc::Client::call()` can emit a reply synchronously before it returns its RequestId. Reserve local operation state first, then use its per-call acceptance hook to bind the wire ID after a complete write and before buffered raw replies are dispatched. Ignore unrelated raw completions, including chains of reentrant custom calls; the number of sequential completions is not bounded by the simultaneous pending limit. Deliver typed outcomes through the owner event loop so typed reply/failure/ready signals do not precede the accepting public call's return. Do not add nested event processing or an unbounded queue.
 
 Use receiver-aware raw-client and timer connections. Deferred work must carry a lifetime/generation guard so close/destruction makes it harmless. Test synchronous success, synchronous remote error, terminal failure during a write, close from a signal slot, timeout versus response, cancel versus response, and destruction with deferred delivery. A reply must never be misattributed to another method's decoder.
 
@@ -983,7 +983,7 @@ Every stage that changes public declarations includes Doxygen, standalone-header
 
 ### Stage 8.18 — Typed client lifecycle and correlation
 
-**Implement:** `jobu-client` target, ControlClient ObjectPrivate, handshake/capabilities, local/wire correlation, deferred early responses, bounded pending calls, monotonic deadlines, cancel/close/failure ordering. Initially exercise representative info/read/mutation methods.
+**Implement:** `jobu-client` target, ControlClient ObjectPrivate, handshake/capabilities, local/wire correlation through the raw acceptance hook, deferred synchronous responses, bounded pending calls, monotonic deadlines, cancel/close/failure ordering. Initially exercise representative info/read/mutation methods.
 
 **Verify:** In-memory synchronous responses, out-of-order replies, immediate/partial write failure, timeout/cancel races, destruction, reentrant cleanup, unsupported capabilities, and no concrete driver/runner dependency.
 

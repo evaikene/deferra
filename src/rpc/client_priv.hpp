@@ -23,8 +23,9 @@ struct Client::Private : jb::core::priv::ObjectPrivate {
         -> std::optional<jb::core::Error>;
     [[nodiscard]] auto allocate_request_id() const -> jb::core::Result<std::uint64_t, jb::core::Error>;
     void               advance_request_id(std::uint64_t id) noexcept;
-    [[nodiscard]] auto write_frame(std::string const& frame, std::optional<std::uint64_t> pending_id)
-        -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto write_frame(std::string const&           frame,
+                                   std::optional<std::uint64_t> pending_id,
+                                   CallAcceptedHandler const&   on_accepted) -> jb::core::Result<void, jb::core::Error>;
 
     void               process_readable();
     void               process_body(std::string const& body);
@@ -42,8 +43,8 @@ struct Client::Private : jb::core::priv::ObjectPrivate {
     ClientOptions const            options;
     StreamFramer                   framer;
     std::set<std::uint64_t>        pending_ids;
-    std::set<std::uint64_t>        reserved_response_ids;
     std::uint64_t                  next_request_id{1U};
+    std::uint64_t                  last_issued_id{0U};
     std::size_t                    queued_output_bytes{0U};
     std::optional<jb::core::Error> terminal_error;
 

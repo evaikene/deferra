@@ -13,6 +13,7 @@
 #include "signal.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <string_view>
 
@@ -35,11 +36,15 @@ struct ClientOptions {
     std::size_t          max_queued_output_bytes{std::size_t{2} * 1024U * 1024U};
 };
 
+/// Called once when a request has been fully written and assigned its wire ID.
+using CallAcceptedHandler = std::function<void(RequestId const&)>;
+
 /// Sends and correlates JSON-RPC calls over one borrowed byte-stream device.
 ///
 /// The client operates synchronously on its event-loop thread. Calls may remain outstanding concurrently and responses
 /// may arrive in any order. Public signals are emitted synchronously on that thread; listeners may call back into the
-/// client, but must not block, wait, or start nested event processing.
+/// client, but must not block, wait, or start nested event processing. Replies to completed or locally cancelled IDs
+/// are ignored; malformed IDs, future IDs, and duplicate IDs within one response document are protocol errors.
 ///
 class Client final : public jb::core::Object {
 public:
@@ -64,15 +69,23 @@ public:
     ///
     /// An empty method or primitive params fail with `rpc.invalid_argument`. Object and array params are accepted;
     /// absent params omit the member. The call becomes pending only after the device accepts the complete frame. Local
-    /// validation, pending-limit, JSON-encoding, and outbound-framing failures leave the client usable. Output-limit
-    /// overflow and short writes are terminal: they emit protocol_error, fail pending calls, and logically close the
-    /// client. A successful write can produce a synchronous completion signal before this function returns.
+    /// validation, pending-limit, identifier-exhaustion, JSON-encoding, and outbound-framing failures leave the client
+    /// usable. Output-limit overflow and short writes are terminal: they emit protocol_error, fail pending calls, and
+    /// logically close the client. A successful write can produce a synchronous completion signal before this function
+    /// returns.
     ///
     /// @param method Case-sensitive method name copied into the request; exact lower-case `rpc.` names are permitted.
     /// @param params Optional owning parameters copied into the request.
-    /// @return Generated request identifier, or a stable local error. Failed never-written calls consume no identifier.
+    /// @param on_accepted Optional per-call callback invoked after pending correlation is registered and before any
+    /// buffered response is delivered. It receives the ID returned on success, is borrowed only for this invocation,
+    /// and is never invoked for a call that fails before a complete write.
+    /// @return Generated request identifier, or a stable local error. Failed never-written calls consume no identifier;
+    /// identifiers are never reused within this client instance.
+    /// @pre `on_accepted` must not throw or start nested event processing.
     ///
-    [[nodiscard]] auto call(std::string_view method, std::optional<jb::core::JsonValue> params = std::nullopt)
+    [[nodiscard]] auto call(std::string_view                   method,
+                            std::optional<jb::core::JsonValue> params      = std::nullopt,
+                            CallAcceptedHandler const&         on_accepted = {})
         -> jb::core::Result<RequestId, jb::core::Error>;
 
     /// Sends one notification without creating pending correlation state.
@@ -87,7 +100,7 @@ public:
     [[nodiscard]] auto notify(std::string_view method, std::optional<jb::core::JsonValue> params = std::nullopt)
         -> jb::core::Result<void, jb::core::Error>;
 
-    /// Forgets one local request correlation without sending a wire message.
+    /// Forgets one local request correlation without sending a wire message. A later reply to this ID is ignored.
     /// @param id Exact request identifier to forget; unknown, non-unsigned, and already-completed identifiers are
     /// no-ops.
     ///
@@ -104,6 +117,11 @@ public:
     /// @return Number of live pending calls; zero after close.
     ///
     [[nodiscard]] auto pending_request_count() const noexcept -> std::size_t;
+
+    /// Reports the configured maximum number of simultaneously pending raw calls.
+    /// @return Immutable limit supplied at construction, including zero when calls are disabled.
+    ///
+    [[nodiscard]] auto max_pending_requests() const noexcept -> std::size_t;
 
     /// Emitted synchronously after a successful result is correlated.
     ///
@@ -127,11 +145,18 @@ public:
 
     /// Emitted synchronously once when a peer or output-contract violation terminally closes the logical client.
     ///
-    /// Malformed framing or JSON, invalid or uncorrelatable responses, output overflow, and short writes use this
+    /// Malformed framing or JSON, invalid response IDs or envelopes, output overflow, and short writes use this
     /// signal. Device failure and explicit close do not. The signal precedes request_failed emissions and may reenter
     /// close().
     ///
     jb::core::Signal<jb::core::Error> protocol_error;
+
+    /// Emitted once after any terminal transition, including device failure or explicit close with no pending calls.
+    ///
+    /// The client has already cleared its pending state. This signal precedes protocol_error and request_failed;
+    /// their existing relative order is unchanged. The borrowed device remains owned by its caller.
+    ///
+    jb::core::Signal<jb::core::Error> terminated;
 
 private:
     /// Owns correlation and stream state without exposing private envelopes or a concrete transport.

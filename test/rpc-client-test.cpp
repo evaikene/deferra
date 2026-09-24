@@ -278,6 +278,7 @@ TEST_CASE("Pending limits are inclusive and do not affect notifications", "[rpc]
     MemoryIODevice device;
     device.open();
     Client client{device, {.max_pending_requests = 2U}};
+    CHECK(client.max_pending_requests() == 2U);
 
     REQUIRE(client.call("one"));
     REQUIRE(client.call("two"));
@@ -296,7 +297,8 @@ TEST_CASE("Pending limits are inclusive and do not affect notifications", "[rpc]
     MemoryIODevice zero_device;
     zero_device.open();
     Client zero{zero_device, {.max_pending_requests = 0U}};
-    auto   rejected = zero.call("no-calls");
+    CHECK(zero.max_pending_requests() == 0U);
+    auto rejected = zero.call("no-calls");
     REQUIRE_FALSE(rejected);
     CHECK(rejected.error().code == "rpc.pending_limit");
     REQUIRE(zero.notify("notification"));
@@ -357,7 +359,8 @@ TEST_CASE("Response batches are preflighted and delivered in wire order", "[rpc]
     CHECK(client.pending_request_count() == 0U);
 }
 
-TEST_CASE("Additive response members are accepted and completed IDs cannot repeat", "[rpc][client][correlation]")
+TEST_CASE("Additive response members are accepted and later duplicate replies are ignored",
+          "[rpc][client][correlation]")
 {
     Application    app{0, nullptr};
     MemoryIODevice device;
@@ -389,7 +392,8 @@ TEST_CASE("Additive response members are accepted and completed IDs cannot repea
 
     device.inject_input(frame);
     CHECK(results == 1);
-    CHECK(protocols == 1);
+    CHECK(protocols == 0);
+    REQUIRE(client.call("still-open"));
 }
 
 TEST_CASE("Invalid response batches never partially complete", "[rpc][client][batch][failure]")
@@ -422,7 +426,7 @@ TEST_CASE("Invalid response batches never partially complete", "[rpc][client][ba
     CHECK(client.pending_request_count() == 0U);
 }
 
-TEST_CASE("Cancellation is local and a later response becomes terminal", "[rpc][client][cancel]")
+TEST_CASE("Cancellation is local and later replies leave other calls usable", "[rpc][client][cancel]")
 {
     Application    app{0, nullptr};
     MemoryIODevice device;
@@ -434,27 +438,36 @@ TEST_CASE("Cancellation is local and a later response becomes terminal", "[rpc][
         CHECK(error.code == "rpc.protocol_error");
     });
 
-    auto call = client.call("cancel-me");
+    auto call  = client.call("cancel-me");
+    auto other = client.call("keep-me");
     REQUIRE(call);
+    REQUIRE(other);
+    auto results = 0;
+    client.result_received.connect([&](RequestId const& id, JsonValue const&) {
+        CHECK(id == other.value());
+        ++results;
+    });
     auto written = device.written_data();
     client.cancel(RequestId{NullRequestId{}});
     client.cancel(RequestId{std::int64_t{1}});
     client.cancel(RequestId{std::string{"1"}});
     client.cancel(RequestId{std::uint64_t{999}});
-    CHECK(client.pending_request_count() == 1U);
+    CHECK(client.pending_request_count() == 2U);
     client.cancel(call.value());
-    CHECK(client.pending_request_count() == 0U);
+    CHECK(client.pending_request_count() == 1U);
     CHECK(device.written_data() == written);
 
     device.inject_input(success_frame(call.value()));
-    CHECK(protocol_errors == 1);
+    device.inject_input(error_frame(call.value(), {.code = 42, .message = "late"}));
+    device.inject_input(success_frame(other.value()));
+    CHECK(results == 1);
+    CHECK(protocol_errors == 0);
+    CHECK(client.pending_request_count() == 0U);
     CHECK(device.is_open());
-    auto closed = client.call("closed");
-    REQUIRE_FALSE(closed);
-    CHECK(closed.error().code == "rpc.connection_closed");
+    REQUIRE(client.call("still-open"));
 }
 
-TEST_CASE("Every invalid or uncorrelatable response ID is terminal", "[rpc][client][correlation][failure]")
+TEST_CASE("Invalid and never-issued response IDs are terminal", "[rpc][client][correlation][failure]")
 {
     auto const cases = std::vector<std::string>{
         success_frame(NullRequestId{}),
@@ -616,15 +629,22 @@ TEST_CASE("Synchronous input during write waits until the call is pending", "[rp
     Client client{device};
     auto   pending_during_signal = std::size_t{};
     auto   result                = std::string{};
+    auto   events                = std::vector<std::string>{};
     client.result_received.connect([&](RequestId const& id, JsonValue const& value) {
         CHECK(id == RequestId{std::uint64_t{1}});
         pending_during_signal = client.pending_request_count();
         result                = value.as_string();
+        events.emplace_back("result");
     });
 
-    auto call = client.call("sync");
+    auto call = client.call("sync", std::nullopt, [&](RequestId const& id) {
+        CHECK(id == RequestId{std::uint64_t{1}});
+        CHECK(client.pending_request_count() == 1U);
+        events.emplace_back("accepted");
+    });
     REQUIRE(call);
     CHECK(result == "done");
+    CHECK(events == std::vector<std::string>{"accepted", "result"});
     CHECK(pending_during_signal == 0U);
     CHECK(client.pending_request_count() == 0U);
 }
@@ -736,18 +756,38 @@ TEST_CASE("Short writes are terminal and fail only established pending calls", "
         static_cast<void>(device.take_written_data());
         device.set_write_limit(limit);
         auto events = std::vector<std::string>{};
+        client.terminated.connect([&](Error const& error) { events.push_back("terminated:" + error.code); });
         client.protocol_error.connect([&](Error const& error) { events.push_back("protocol:" + error.code); });
         client.request_failed.connect([&](RequestId const& id, Error const& error) {
             events.push_back("failed:" + std::to_string(require_unsigned(id)) + ":" + error.code);
         });
 
-        auto attempted = client.call("short");
+        auto accepted  = false;
+        auto attempted = client.call("short", std::nullopt, [&](RequestId const&) { accepted = true; });
         REQUIRE_FALSE(attempted);
+        CHECK_FALSE(accepted);
         CHECK(attempted.error().category == ErrorCategory::Io);
         CHECK(attempted.error().code == "rpc.short_write");
-        CHECK(events == std::vector<std::string>{"protocol:rpc.short_write", "failed:1:rpc.short_write"});
+        CHECK(events == std::vector<std::string>{"terminated:rpc.short_write",
+                                                 "protocol:rpc.short_write",
+                                                 "failed:1:rpc.short_write"});
         CHECK(device.written_data().size() == limit);
     }
+}
+
+TEST_CASE("Terminal notification also observes idle device and explicit close", "[rpc][client][lifecycle]")
+{
+    Application    app{0, nullptr};
+    MemoryIODevice device;
+    device.open();
+    Client client{device};
+    auto   events = std::vector<std::string>{};
+    client.terminated.connect([&](Error const& error) { events.push_back("terminated:" + error.code); });
+    client.protocol_error.connect([&](Error const& error) { events.push_back("protocol:" + error.code); });
+
+    device.close();
+    client.close();
+    CHECK(events == std::vector<std::string>{"terminated:rpc.connection_closed"});
 }
 
 TEST_CASE("Explicit close is idempotent and preserves the borrowed device", "[rpc][client][lifecycle]")

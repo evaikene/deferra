@@ -189,24 +189,21 @@ auto Client::Private::allocate_request_id() const -> jb::core::Result<std::uint6
 {
     using Result = jb::core::Result<std::uint64_t, Error>;
 
-    auto candidate = next_request_id;
-    auto attempts  = pending_ids.size() + reserved_response_ids.size() + 1U;
-    while (attempts-- > 0U) {
-        if (candidate != 0U && !pending_ids.contains(candidate) && !reserved_response_ids.contains(candidate)) {
-            return Result::success(candidate);
-        }
-        candidate = candidate == std::numeric_limits<std::uint64_t>::max() ? 1U : candidate + 1U;
+    if (next_request_id == 0U) {
+        return Result::failure(pending_limit_error());
     }
-    return Result::failure(pending_limit_error());
+    return Result::success(next_request_id);
 }
 
 void Client::Private::advance_request_id(std::uint64_t id) noexcept
 {
-    next_request_id = id == std::numeric_limits<std::uint64_t>::max() ? 1U : id + 1U;
+    last_issued_id  = id;
+    next_request_id = id == std::numeric_limits<std::uint64_t>::max() ? 0U : id + 1U;
 }
 
-auto Client::Private::write_frame(std::string const& frame, std::optional<std::uint64_t> pending_id)
-    -> jb::core::Result<void, Error>
+auto Client::Private::write_frame(std::string const&           frame,
+                                  std::optional<std::uint64_t> pending_id,
+                                  CallAcceptedHandler const&   on_accepted) -> jb::core::Result<void, Error>
 {
     using Result = jb::core::Result<void, Error>;
 
@@ -241,6 +238,10 @@ auto Client::Private::write_frame(std::string const& frame, std::optional<std::u
     if (pending_id) {
         pending_ids.insert(*pending_id);
         advance_request_id(*pending_id);
+        // Device callbacks may already have queued this reply; bind caller state before decoding it.
+        if (on_accepted) {
+            on_accepted(RequestId{*pending_id});
+        }
     }
     if (read_pending) {
         process_readable();
@@ -312,7 +313,6 @@ void Client::Private::process_body(std::string const& body)
         return;
     }
 
-    reserved_response_ids.insert(response_ids->begin(), response_ids->end());
     auto const& entries = document->entries;
     for (auto index = std::size_t{0U}; index < entries.size(); ++index) {
         if (closed) {
@@ -320,7 +320,7 @@ void Client::Private::process_body(std::string const& body)
         }
 
         auto const id = response_ids.value()[index];
-        reserved_response_ids.erase(id);
+        // A completed or locally cancelled call may still receive a later response.
         if (pending_ids.erase(id) == 0U) {
             continue;
         }
@@ -330,7 +330,6 @@ void Client::Private::process_body(std::string const& body)
             return;
         }
     }
-    reserved_response_ids.clear();
 }
 
 auto Client::Private::preflight_responses(detail::ResponseDocument const& document) const
@@ -344,7 +343,8 @@ auto Client::Private::preflight_responses(detail::ResponseDocument const& docume
 
     for (auto const& response : document.entries) {
         auto const* id = std::get_if<std::uint64_t>(&response.id);
-        if (id == nullptr || *id == 0U || !pending_ids.contains(*id) || !seen.insert(*id).second) {
+        // Issued IDs are never reused, so one high-water mark distinguishes stale replies from future IDs.
+        if (id == nullptr || *id == 0U || *id > last_issued_id || !seen.insert(*id).second) {
             return Result::failure(response_protocol_error());
         }
         ids.push_back(*id);
@@ -390,12 +390,12 @@ void Client::Private::terminate(Error error, bool emit_protocol_error)
     framer.reset();
     read_pending        = false;
     queued_output_bytes = 0U;
-    reserved_response_ids.clear();
 
     auto failed_ids = std::vector<std::uint64_t>{pending_ids.begin(), pending_ids.end()};
     pending_ids.clear();
 
     auto const& terminal = *terminal_error;
+    owner->emit(owner->terminated, terminal);
     if (emit_protocol_error) {
         owner->emit(owner->protocol_error, terminal);
     }
@@ -425,7 +425,7 @@ Client::~Client()
     close();
 }
 
-auto Client::call(std::string_view method, std::optional<JsonValue> params)
+auto Client::call(std::string_view method, std::optional<JsonValue> params, CallAcceptedHandler const& on_accepted)
     -> jb::core::Result<RequestId, jb::core::Error>
 {
     using Result = jb::core::Result<RequestId, jb::core::Error>;
@@ -459,7 +459,7 @@ auto Client::call(std::string_view method, std::optional<JsonValue> params)
         return Result::failure(pending_limit_error());
     }
 
-    auto written = data->write_frame(framed.value(), id);
+    auto written = data->write_frame(framed.value(), id, on_accepted);
     if (!written) {
         return Result::failure(std::move(written).error());
     }
@@ -489,7 +489,7 @@ auto Client::notify(std::string_view method, std::optional<JsonValue> params) ->
     if (!framed) {
         return Result::failure(std::move(framed).error());
     }
-    return data->write_frame(framed.value(), std::nullopt);
+    return data->write_frame(framed.value(), std::nullopt, {});
 }
 
 void Client::cancel(RequestId const& id)
@@ -511,6 +511,11 @@ void Client::close()
 auto Client::pending_request_count() const noexcept -> std::size_t
 {
     return d_ptr<Private const>()->pending_ids.size();
+}
+
+auto Client::max_pending_requests() const noexcept -> std::size_t
+{
+    return d_ptr<Private const>()->options.max_pending_requests;
 }
 
 } // namespace jb::rpc
