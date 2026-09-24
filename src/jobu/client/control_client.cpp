@@ -6,6 +6,7 @@
 #include "history_json.hpp"
 #include "management_json.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -168,9 +169,12 @@ void ControlClient::Private::record_response(jb::rpc::RequestId const&          
 
     auto const correlated = wire_to_local.find(*number);
     if (correlated == wire_to_local.end()) {
-        // The raw client can complete the establishing request before call() returns its wire ID.
-        if (establishing && early_responses.empty()) {
+        // Earlier raw calls can complete before call() returns the establishing request's wire ID.
+        if (establishing && early_responses.size() < rpc.max_pending_requests()) {
             early_responses.push_back({.id = id, .outcome = std::move(outcome)});
+        }
+        else if (establishing) {
+            on_terminated(invalid_response_error());
         }
         return;
     }
@@ -198,18 +202,19 @@ void ControlClient::Private::bind_wire_id(ControlCallId local_id, jb::rpc::Reque
     entry->second.wire_id       = wire_id;
     entry->second.possibly_sent = true;
 
-    if (!early_responses.empty()) {
-        auto response = std::move(early_responses.front());
+    auto const matching = std::ranges::find_if(early_responses, [&wire_id](EarlyResponse const& response) {
+        return response.id == wire_id;
+    });
+    if (matching != early_responses.end()) {
+        std::visit([&entry](auto&& value) { entry->second.outcome = std::forward<decltype(value)>(value); },
+                   std::move(matching->outcome));
         early_responses.clear();
-        if (response.id == wire_id) {
-            std::visit([&entry](auto&& value) { entry->second.outcome = std::forward<decltype(value)>(value); },
-                       std::move(response.outcome));
-            ready_outcomes.push_back(local_id);
-            rearm_deadline();
-            schedule_delivery();
-            return;
-        }
+        ready_outcomes.push_back(local_id);
+        rearm_deadline();
+        schedule_delivery();
+        return;
     }
+    early_responses.clear();
 
     if (auto const number = wire_number(wire_id)) {
         wire_to_local.emplace(*number, local_id);
@@ -429,7 +434,8 @@ auto ControlClient::Private::start_call(Method             method,
                                                 "jobu.client.invalid_timeout",
                                                 "JobU call timeout is invalid"));
     }
-    if (pending.size() >= max_typed_calls || next_id == 0U) {
+    auto const pending_limit = std::min(max_typed_calls, rpc.max_pending_requests());
+    if (pending.size() >= pending_limit || next_id == 0U) {
         return CallResult::failure(client_error(ErrorCategory::ResourceExhausted,
                                                 "jobu.client.pending_limit",
                                                 "JobU client pending call limit reached"));
@@ -443,7 +449,7 @@ auto ControlClient::Private::start_call(Method             method,
     establishing.reset();
 
     if (phase == Phase::Failed || phase == Phase::Closed) {
-        if (wire && phase == Phase::Closed) {
+        if (wire) {
             rpc.cancel(wire.value());
         }
         return CallResult::success(local_id);
@@ -562,7 +568,7 @@ auto ControlClient::initialize(ControlCallOptions options) -> Result<void, Error
     data->establishing.reset();
 
     if (data->phase == Private::Phase::Failed || data->phase == Private::Phase::Closed) {
-        if (wire && data->phase == Private::Phase::Closed) {
+        if (wire) {
             data->rpc.cancel(wire.value());
         }
         return InitResult::success();

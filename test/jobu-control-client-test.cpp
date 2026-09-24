@@ -162,6 +162,39 @@ TEST_CASE("Synchronous handshake and replies are delivered after accepting calls
     CHECK(events == std::vector<std::string>{"ready", "reply"});
 }
 
+TEST_CASE("An earlier raw reply cannot hide a synchronous typed reply", "[jobu][client]")
+{
+    Fixture fixture;
+    fixture.initialize();
+
+    auto custom = fixture.rpc->call("custom");
+    REQUIRE(custom);
+    auto custom_results = 0;
+    fixture.rpc->result_received.connect([&](RequestId const& id, JsonValue const&) {
+        if (id == custom.value()) {
+            ++custom_results;
+        }
+    });
+    auto replies = std::vector<ControlCallId>{};
+    fixture.typed->reply_received.connect([&](ControlCallId id, ControlReply const& reply) {
+        CHECK(std::holds_alternative<RunPage>(reply));
+        replies.push_back(id);
+    });
+
+    auto inject_both = fixture.device.bytes_written.connect([&](std::size_t) {
+        fixture.device.inject_input(success(2U, JsonValue{}));
+        fixture.device.inject_input(success(3U, empty_run_page()));
+    });
+    auto typed_call  = fixture.typed->list_runs(RunQuery{});
+    REQUIRE(typed_call);
+    inject_both.disconnect();
+
+    CHECK(custom_results == 1);
+    CHECK(replies.empty());
+    fixture.drain_tasks();
+    CHECK(replies == std::vector<ControlCallId>{typed_call.value()});
+}
+
 TEST_CASE("Closing an initializing client reports the unfinished handshake once", "[jobu][client]")
 {
     Fixture fixture;
@@ -307,8 +340,32 @@ TEST_CASE("Capability and smaller raw pending limits reject without writing", "[
     auto const before  = fixture.device.written_data();
     auto       limited = fixture.typed->list_runs(RunQuery{});
     REQUIRE_FALSE(limited);
-    CHECK(limited.error().code == "rpc.pending_limit");
+    CHECK(limited.error().code == "jobu.client.pending_limit");
     CHECK(fixture.device.written_data() == before);
+}
+
+TEST_CASE("A synchronous raw completion still occupies a typed pending slot", "[jobu][client]")
+{
+    auto options                 = ClientOptions{};
+    options.max_pending_requests = 1U;
+    Fixture fixture{options};
+    fixture.initialize();
+
+    auto inject_reply = fixture.device.bytes_written.connect(
+        [&](std::size_t) { fixture.device.inject_input(success(2U, empty_run_page())); });
+    auto first = fixture.typed->list_runs(RunQuery{});
+    REQUIRE(first);
+    inject_reply.disconnect();
+    CHECK(fixture.rpc->pending_request_count() == 0U);
+
+    auto const before = fixture.device.written_data();
+    auto       second = fixture.typed->list_runs(RunQuery{});
+    REQUIRE_FALSE(second);
+    CHECK(second.error().code == "jobu.client.pending_limit");
+    CHECK(fixture.device.written_data() == before);
+
+    fixture.drain_tasks();
+    REQUIRE(fixture.typed->list_runs(RunQuery{}));
 }
 
 TEST_CASE("A partial mutation write fails once with an unknown outcome and terminal ordering", "[jobu][client]")
@@ -356,6 +413,43 @@ TEST_CASE("Cancellation and close retire correlations exactly once", "[jobu][cli
     fixture.drain_tasks();
     CHECK(failures == std::vector<ControlCallId>{1U, 2U});
     CHECK(fixture.device.is_open());
+}
+
+TEST_CASE("Late cancelled and closed replies leave the borrowed raw client usable", "[jobu][client]")
+{
+    Fixture fixture;
+    fixture.initialize();
+    auto protocol_errors = 0;
+    fixture.rpc->protocol_error.connect([&](Error const&) { ++protocol_errors; });
+    auto replies = std::vector<ControlCallId>{};
+    fixture.typed->reply_received.connect([&](ControlCallId id, ControlReply const&) { replies.push_back(id); });
+
+    auto first  = fixture.typed->list_runs(RunQuery{});
+    auto second = fixture.typed->list_runs(RunQuery{});
+    REQUIRE(first);
+    REQUIRE(second);
+    fixture.typed->cancel_call(first.value());
+    fixture.device.inject_input(success(2U, empty_run_page()));
+    fixture.device.inject_input(success(3U, empty_run_page()));
+    fixture.drain_tasks();
+    CHECK(replies == std::vector<ControlCallId>{second.value()});
+    CHECK(protocol_errors == 0);
+
+    REQUIRE(fixture.typed->list_runs(RunQuery{}));
+    fixture.typed->close();
+    fixture.device.inject_input(success(4U, empty_run_page()));
+    CHECK(protocol_errors == 0);
+
+    auto raw_call = fixture.rpc->call("after-close");
+    REQUIRE(raw_call);
+    auto raw_replies = 0;
+    fixture.rpc->result_received.connect([&](RequestId const& id, JsonValue const&) {
+        if (id == raw_call.value()) {
+            ++raw_replies;
+        }
+    });
+    fixture.device.inject_input(success(5U, JsonValue{}));
+    CHECK(raw_replies == 1);
 }
 
 TEST_CASE("Close during a raw write defers the current mutation failure", "[jobu][client]")
@@ -435,4 +529,5 @@ TEST_CASE("Handshake rejects incompatible major and a timeout retires a late res
     fixture.device.inject_input(success(2U, empty_run_page()));
     fixture.drain_tasks();
     CHECK(timeouts == 1);
+    REQUIRE(fixture.rpc->call("after-timeout"));
 }

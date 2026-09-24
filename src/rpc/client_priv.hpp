@@ -42,8 +42,8 @@ struct Client::Private : jb::core::priv::ObjectPrivate {
     ClientOptions const            options;
     StreamFramer                   framer;
     std::set<std::uint64_t>        pending_ids;
-    std::set<std::uint64_t>        reserved_response_ids;
     std::uint64_t                  next_request_id{1U};
+    std::uint64_t                  last_issued_id{0U};
     std::size_t                    queued_output_bytes{0U};
     std::optional<jb::core::Error> terminal_error;
 
