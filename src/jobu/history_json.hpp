@@ -8,6 +8,22 @@
 
 namespace jb::jobu {
 
+/// Encodes a run.get request containing one canonical, non-nil run ID.
+[[nodiscard]] auto run_get_request_to_json(jb::core::Uuid const& id)
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
+
+/// Strictly decodes run.get parameters.
+[[nodiscard]] auto run_get_request_from_json(jb::core::JsonValue const& value)
+    -> jb::core::Result<jb::core::Uuid, jb::core::Error>;
+
+/// Encodes an attempt.get request containing a canonical run ID and positive attempt number.
+[[nodiscard]] auto attempt_get_request_to_json(AttemptKey const& key)
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
+
+/// Strictly decodes attempt.get parameters.
+[[nodiscard]] auto attempt_get_request_from_json(jb::core::JsonValue const& value)
+    -> jb::core::Result<AttemptKey, jb::core::Error>;
+
 /// Encodes an initial run query or cursor-only continuation as RPC parameters.
 /// Rejects invalid limits, ranges, enum values, and the reserved submitted origin.
 [[nodiscard]] auto run_list_request_to_json(RunListRequest const& request)
@@ -33,6 +49,12 @@ namespace jb::jobu {
 [[nodiscard]] auto run_summary_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<RunSummary, jb::core::Error>;
 
+/// Encodes a bounded run summary page and nullable continuation token.
+[[nodiscard]] auto run_page_to_json(RunPage const& page) -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
+
+/// Decodes a run page while ignoring unknown response members.
+[[nodiscard]] auto run_page_from_json(jb::core::JsonValue const& value) -> jb::core::Result<RunPage, jb::core::Error>;
+
 /// Encodes a full retained run view, including materialized attributes and the original payload template.
 /// Output and attempts remain separate. The registry is borrowed only during conversion.
 [[nodiscard]] auto run_details_to_json(RunDetails const& details, AttributeRegistry const& registry)
@@ -53,6 +75,22 @@ namespace jb::jobu {
 /// Decodes required lightweight attempt fields, allowing unknown response members for forward compatibility.
 [[nodiscard]] auto attempt_summary_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<AttemptSummary, jb::core::Error>;
+
+/// Encodes one attempt's summary and nullable safe result; output remains separate.
+[[nodiscard]] auto attempt_details_to_json(AttemptDetails const& details)
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
+
+/// Decodes an attempt detail while ignoring unknown response members.
+[[nodiscard]] auto attempt_details_from_json(jb::core::JsonValue const& value)
+    -> jb::core::Result<AttemptDetails, jb::core::Error>;
+
+/// Encodes a bounded attempt summary page and nullable continuation token.
+[[nodiscard]] auto attempt_page_to_json(AttemptPage const& page)
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
+
+/// Decodes an attempt page while ignoring unknown response members.
+[[nodiscard]] auto attempt_page_from_json(jb::core::JsonValue const& value)
+    -> jb::core::Result<AttemptPage, jb::core::Error>;
 
 /// Encodes a validated output request using the public channel names and retained-byte offsets.
 [[nodiscard]] auto attempt_output_request_to_json(AttemptOutputRequest const& request)

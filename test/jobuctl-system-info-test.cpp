@@ -114,8 +114,11 @@ auto fail(std::string_view message) -> int
 auto expected_system_info(std::string_view version) -> std::string
 {
     return fmt::format("Daemon version: {}\n"
-                       "API version: 1.2\n"
+                       "API version: 1.3\n"
                        "Capabilities:\n"
+                       "  attempt.get\n"
+                       "  attempt.list\n"
+                       "  attempt.output\n"
                        "  job.create\n"
                        "  job.delete\n"
                        "  job.get\n"
@@ -130,15 +133,19 @@ auto expected_system_info(std::string_view version) -> std::string
                        "  queue.get\n"
                        "  queue.list\n"
                        "  queue.resume\n"
+                       "  queue.stats\n"
                        "  queue.suspend\n"
                        "  queue.update\n"
                        "  run.cancel\n"
+                       "  run.get\n"
+                       "  run.list\n"
                        "  schedule.next\n"
                        "  schedule.validate\n"
                        "  secret.delete\n"
                        "  secret.list\n"
                        "  secret.set\n"
-                       "  system.info\n",
+                       "  system.info\n"
+                       "  system.stats\n",
                        version);
 }
 

@@ -40,7 +40,9 @@ target_sources(${TARGET}
         history_cursor_priv.cpp
         history_cursor_priv.hpp
         history_json.cpp
+        history_page_json.cpp
         history_output_json.cpp
+        history_rpc.cpp
         history_output_repository_priv.cpp
         history_repository_priv.cpp
         history_repository_priv.hpp
@@ -97,6 +99,9 @@ target_sources(${TARGET}
         statistics_cursor_priv.hpp
         statistics_repository_priv.cpp
         statistics_repository_priv.hpp
+        statistics_request_json.cpp
+        statistics_result_json.cpp
+        statistics_rpc.cpp
         statistics_service.cpp
         storage_failure_priv.cpp
         storage_failure_priv.hpp
@@ -116,6 +121,7 @@ target_sources(${TARGET}
         cron.hpp
         history.hpp
         history_json.hpp
+        history_rpc.hpp
         history_service.hpp
         job.hpp
         jobu.hpp
@@ -132,6 +138,8 @@ target_sources(${TARGET}
         secret_rpc.hpp
         secret_service.hpp
         statistics.hpp
+        statistics_json.hpp
+        statistics_rpc.hpp
         statistics_service.hpp
         system_info.hpp
         system_info_rpc.hpp

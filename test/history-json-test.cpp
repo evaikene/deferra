@@ -56,11 +56,11 @@ TEST_CASE("Run history requests preserve filters and require cursor-only continu
     auto const queue   = id("00112233-4455-6677-8899-aabbccddeeff");
     auto       request = RunListRequest{
         RunQuery{.filters = {.queue_id = queue,
-                                   .state    = RunState::RetryWait,
-                                   .origin   = RunOrigin::Manual,
-                                   .type     = JobType::Http,
-                                   .planned  = {.from = at("2026-01-01T00:00:00Z"), .to = at("2026-02-01T00:00:00Z")},
-                                   .started  = {.from = at("2026-01-03T00:00:00Z")}},
+                             .state    = RunState::RetryWait,
+                             .origin   = RunOrigin::Manual,
+                             .type     = JobType::Http,
+                             .planned  = {.from = at("2026-01-01T00:00:00Z"), .to = at("2026-02-01T00:00:00Z")},
+                             .started  = {.from = at("2026-01-03T00:00:00Z")}},
                  .limit   = 200}
     };
     auto encoded = run_list_request_to_json(request);
@@ -100,7 +100,7 @@ TEST_CASE("Run history request validation rejects invalid ranges, enums, and lim
     auto const lower = std::string{"2026-01-01T00:00:00Z"};
     auto const upper = std::string{"2026-02-01T00:00:00Z"};
     auto       bad   = json(JsonValue::Object{
-                {"planned", json(JsonValue::Object{{"from", json(upper)}, {"to", json(lower)}})}
+        {"planned", json(JsonValue::Object{{"from", json(upper)}, {"to", json(lower)}})}
     });
     invalid_request(run_list_request_from_json(bad));
     invalid_request(run_list_request_to_json(RunQuery{.filters = {.planned = {.from = at(lower), .to = at(lower)}}}));
@@ -159,10 +159,10 @@ TEST_CASE("History summaries encode only lightweight fields", "[jobu][history][j
     run.planned_at  = at("2026-01-01T00:00:00Z");
     run.runnable_at = run.planned_at;
     run.payload     = json(JsonValue::Object{
-            {"secret", json(std::string{"a.token"})}
+        {"secret", json(std::string{"a.token"})}
     });
     run.result      = json(JsonValue::Object{
-             {"private", json(std::string{"heavy"})}
+        {"private", json(std::string{"heavy"})}
     });
 
     auto encoded = run_summary_to_json(run);
@@ -192,7 +192,7 @@ TEST_CASE("History summaries encode only lightweight fields", "[jobu][history][j
     attempt.state          = AttemptState::Completed;
     attempt.outcome        = AttemptOutcome::Succeeded;
     attempt.result         = json(JsonValue::Object{
-                {"private", json(std::string{"heavy"})}
+        {"private", json(std::string{"heavy"})}
     });
     auto encoded_attempt   = attempt_summary_to_json(attempt);
     REQUIRE(encoded_attempt);
@@ -212,10 +212,10 @@ TEST_CASE("Output request codec enforces channel, limit, offset, and strict fiel
 {
     auto const run     = id("10112233-4455-6677-8899-aabbccddeeff");
     auto       request = AttemptOutputRequest{
-              .attempt = {.run_id = run, .attempt_number = 2},
-              .channel = OutputChannel::Headers,
-              .offset  = 7,
-              .limit   = 65'536
+        .attempt = {.run_id = run, .attempt_number = 2},
+        .channel = OutputChannel::Headers,
+        .offset  = 7,
+        .limit   = 65'536
     };
     auto encoded = attempt_output_request_to_json(request);
     REQUIRE(encoded);
@@ -228,9 +228,9 @@ TEST_CASE("Output request codec enforces channel, limit, offset, and strict fiel
     CHECK(decoded->limit == 65'536);
 
     auto defaults        = json(JsonValue::Object{
-               {"run_id",         json(run.to_string())      },
-               {"attempt_number", json(std::uint64_t{1})     },
-               {"channel",        json(std::string{"stdout"})},
+        {"run_id",         json(run.to_string())      },
+        {"attempt_number", json(std::uint64_t{1})     },
+        {"channel",        json(std::string{"stdout"})},
     });
     auto parsed_defaults = attempt_output_request_from_json(defaults);
     REQUIRE(parsed_defaults);
@@ -261,19 +261,19 @@ TEST_CASE("Output chunk codec preserves raw bytes and availability metadata", "[
 {
     auto const run   = id("10112233-4455-6677-8899-aabbccddeeff");
     auto       chunk = AttemptOutputChunk{
-              .attempt        = {.run_id = run,   .attempt_number = 2},
-              .channel        = OutputChannel::Body,
-              .status         = OutputStatus::Lost,
-              .offset         = 1,
-              .bytes_returned = 2,
-              .next_offset    = 3,
-              .retained_bytes = 4,
-              .total_bytes    = 9,
-              .omitted_bytes  = 5,
-              .truncated      = true,
-              .capture_lost   = true,
-              .encoding       = OutputEncoding::Base64,
-              .data           = {std::byte{0xff}, std::byte{0x00}    },
+        .attempt        = {.run_id = run,   .attempt_number = 2},
+        .channel        = OutputChannel::Body,
+        .status         = OutputStatus::Lost,
+        .offset         = 1,
+        .bytes_returned = 2,
+        .next_offset    = 3,
+        .retained_bytes = 4,
+        .total_bytes    = 9,
+        .omitted_bytes  = 5,
+        .truncated      = true,
+        .capture_lost   = true,
+        .encoding       = OutputEncoding::Base64,
+        .data           = {std::byte{0xff}, std::byte{0x00}    },
     };
     auto encoded = attempt_output_chunk_to_json(chunk);
     REQUIRE(encoded);
@@ -312,4 +312,64 @@ TEST_CASE("Output chunk codec preserves raw bytes and availability metadata", "[
     auto decoded_utf8 = attempt_output_chunk_from_json(*utf8);
     REQUIRE(decoded_utf8);
     CHECK(decoded_utf8->data == chunk.data);
+}
+
+TEST_CASE("History get and page codecs preserve detail boundaries", "[jobu][history][json]")
+{
+    auto const run_id   = id("00112233-4455-6677-8899-aabbccddeeff");
+    auto const job_id   = id("10112233-4455-6677-8899-aabbccddeeff");
+    auto const queue_id = id("20112233-4455-6677-8899-aabbccddeeff");
+    auto const key      = AttemptKey{.run_id = run_id, .attempt_number = 3};
+
+    auto run_request     = run_get_request_to_json(run_id);
+    auto attempt_request = attempt_get_request_to_json(key);
+    REQUIRE(run_request);
+    REQUIRE(attempt_request);
+    CHECK(run_get_request_from_json(*run_request).value() == run_id);
+    CHECK(attempt_get_request_from_json(*attempt_request)->attempt_number == 3);
+    std::get<JsonValue::Object>(run_request->data).emplace("extra", json(true));
+    invalid_request(run_get_request_from_json(*run_request));
+    std::get<JsonValue::Object>(attempt_request->data)["attempt_number"] = json(std::uint64_t{0});
+    invalid_request(attempt_get_request_from_json(*attempt_request));
+
+    auto run          = RunSummary{.id          = run_id,
+                                   .job_id      = job_id,
+                                   .queue_id    = queue_id,
+                                   .planned_at  = at("2026-01-01T00:00:00Z"),
+                                   .runnable_at = at("2026-01-01T00:00:00Z")};
+    auto page         = RunPage{.items = {run}, .next_cursor = "cursor"};
+    auto encoded_page = run_page_to_json(page);
+    REQUIRE(encoded_page);
+    auto decoded_page = run_page_from_json(*encoded_page);
+    REQUIRE(decoded_page);
+    CHECK(decoded_page->items.front().id == run_id);
+    CHECK(decoded_page->next_cursor == "cursor");
+    auto future_page = *encoded_page;
+    std::get<JsonValue::Object>(future_page.data).emplace("future", json(true));
+    REQUIRE(run_page_from_json(future_page));
+    std::get<JsonValue::Object>(future_page.data).erase("items");
+    invalid_response(run_page_from_json(future_page));
+
+    auto attempt           = AttemptDetails{};
+    attempt.run_id         = run_id;
+    attempt.attempt_number = 3;
+    attempt.due_at         = run.planned_at;
+    attempt.state          = AttemptState::Completed;
+    attempt.outcome        = AttemptOutcome::Succeeded;
+    attempt.result         = json(JsonValue::Object{
+        {"exit_code", json(std::uint64_t{0})}
+    });
+    auto encoded_detail    = attempt_details_to_json(attempt);
+    REQUIRE(encoded_detail);
+    CHECK(attempt_details_from_json(*encoded_detail)->result == attempt.result);
+    auto attempt_page = attempt_page_to_json(AttemptPage{.items = {attempt}});
+    REQUIRE(attempt_page);
+    CHECK_FALSE(attempt_page->as_object().at("items").as_array().front().as_object().contains("result"));
+    CHECK(attempt_page_from_json(*attempt_page)->items.front().attempt_number == 3);
+    std::get<JsonValue::Object>(encoded_detail->data).erase("result");
+    invalid_response(attempt_details_from_json(*encoded_detail));
+    invalid_response(run_page_from_json(json(JsonValue::Object{
+        {"items",       json(JsonValue::Array{})      },
+        {"next_cursor", json(std::string{"repeating"})}
+    })));
 }

@@ -3,6 +3,8 @@
 #include "connection.hpp"
 #include "control_rpc.hpp"
 #include "event_loop.hpp"
+#include "history_rpc.hpp"
+#include "history_service.hpp"
 #include "jobu_version_priv.hpp"
 #include "local_server.hpp"
 #include "logging.hpp"
@@ -15,6 +17,7 @@
 #include "secret_rpc.hpp"
 #include "secret_service.hpp"
 #include "server.hpp"
+#include "statistics_rpc.hpp"
 #include "statistics_service.hpp"
 #include "system_info.hpp"
 #include "system_info_rpc.hpp"
@@ -122,6 +125,9 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         if (statistics) {
             statistics->shutdown();
         }
+        if (history) {
+            history->shutdown();
+        }
         if (scheduler) {
             scheduler->shutdown();
         }
@@ -197,6 +203,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         management = std::make_unique<ManagementService>(database, attributes, cron, uuid_generator, time_source);
         secrets    = std::make_unique<SecretService>(database, time_source);
         statistics = std::make_unique<StatisticsService>(database, uuid_generator, time_source);
+        history    = std::make_unique<HistoryService>(database, attributes, uuid_generator, time_source);
         listener   = std::make_unique<jb::net::LocalServer>();
         rpc        = std::make_unique<jb::rpc::Server>(std::move(rpc_options));
 
@@ -204,6 +211,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         management->failed.connect(owner, [this](jb::core::Error const& error) { fail("management", error); });
         secrets->failed.connect(owner, [this](jb::core::Error const& error) { fail("secrets", error); });
         statistics->failed.connect(owner, [this](jb::core::Error const& error) { fail("statistics", error); });
+        history->failed.connect(owner, [this](jb::core::Error const& error) { fail("history", error); });
         runners.http->failed.connect(owner, [this](jb::core::Error const& error) { fail("http", error); });
         management->mutation_committed.connect(scheduler.get(), [this] { scheduler->request_rescan(); });
         secrets->mutation_committed.connect(scheduler.get(), [this] { scheduler->request_rescan(); });
@@ -218,15 +226,22 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         for (auto method : secret_rpc_method_names()) {
             capabilities.emplace_back(method);
         }
+        for (auto method : history_rpc_method_names()) {
+            capabilities.emplace_back(method);
+        }
+        for (auto method : statistics_rpc_method_names()) {
+            capabilities.emplace_back(method);
+        }
         auto info = SystemInfo{
             .daemon_version = std::string{jb::jobu::detail::project_version},
-            .api_version    = {.major = 1, .minor = 2},
+            .api_version    = {.major = 1, .minor = 3},
             .capabilities   = std::move(capabilities)
         };
         if (!register_system_info_method(*rpc, std::move(info)) ||
             !register_management_methods(*rpc, *management, attributes) ||
             !register_control_methods(*rpc, *management, *scheduler, cron, attributes) ||
-            !register_secret_methods(*rpc, *secrets)) {
+            !register_secret_methods(*rpc, *secrets) || !register_history_methods(*rpc, *history, attributes) ||
+            !register_statistics_methods(*rpc, *statistics, *management)) {
             fail("rpc_registration", runtime_error("jobud.rpc.registration_failed"));
             return false;
         }
@@ -300,6 +315,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         rpc.reset();
         listener.reset();
         statistics.reset();
+        history.reset();
         secrets.reset();
         management.reset();
         scheduler.reset();
@@ -326,6 +342,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
     std::unique_ptr<jb::jobu::ManagementService> management;
     std::unique_ptr<jb::jobu::SecretService>     secrets;
     std::unique_ptr<jb::jobu::StatisticsService> statistics;
+    std::unique_ptr<jb::jobu::HistoryService>    history;
     std::unique_ptr<jb::net::LocalServer>        listener;
     std::unique_ptr<jb::rpc::Server>             rpc;
     jb::core::Connection                         admission;
@@ -415,6 +432,11 @@ auto DaemonRuntime::secrets() -> jb::jobu::SecretService*
 auto DaemonRuntime::statistics() -> jb::jobu::StatisticsService*
 {
     return d_ptr<Private>()->statistics.get();
+}
+
+auto DaemonRuntime::history() -> jb::jobu::HistoryService*
+{
+    return d_ptr<Private>()->history.get();
 }
 
 auto DaemonRuntime::scheduler() -> jb::jobu::Scheduler*
