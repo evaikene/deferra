@@ -3,12 +3,14 @@
 ///
 #pragma once
 
+#include "control_json.hpp"
 #include "history.hpp"
 #include "management.hpp"
 #include "protocol.hpp"
 #include "scheduler.hpp"
 #include "secret.hpp"
 #include "statistics.hpp"
+#include "statistics_json.hpp"
 #include "system_info.hpp"
 
 #include "error.hpp"
@@ -18,6 +20,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -86,6 +89,9 @@ struct ControlFailure {
 ///
 /// The RPC client and immutable attribute registry are borrowed and must outlive this object. All three objects must
 /// share one non-null event loop and be used on its thread. The wrapper owns neither the device nor the event loop.
+/// Request arguments are borrowed only while the typed member encodes them. A successful method return supplies a
+/// local call ID, not an observed remote result; an immediate error means no request was written. Once accepted, a
+/// mutation is never retried automatically.
 /// Every accepted typed method call emits one reply or failure unless this wrapper is destroyed. Signals for
 /// synchronous raw responses are delivered later through the event loop, after the accepting method has returned.
 ///
@@ -123,12 +129,124 @@ public:
     /// Successful acceptance later emits ready or failed, once. Repeated initialization is rejected.
     [[nodiscard]] auto initialize(ControlCallOptions options = {}) -> jb::core::Result<void, jb::core::Error>;
 
+    /// Reads the current daemon information after initialization; replies with SystemInfo.
+    [[nodiscard]] auto get_system_info(ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Reads one system-wide statistics page; replies with StatisticsPage.
+    [[nodiscard]] auto system_statistics(StatisticsListRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Creates a queue; an unobserved transmitted call may have committed and should be reconciled by key.
+    [[nodiscard]] auto create_queue(CreateQueueRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Reads one queue by ID or exact name; replies with Queue.
+    [[nodiscard]] auto get_queue(QueueSelector const& selector, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Reads one bounded queue page using its ascending-ID continuation; replies with QueuePage.
+    [[nodiscard]] auto list_queues(QueueListRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Updates supplied queue fields; replies with Queue after commit.
+    [[nodiscard]] auto update_queue(UpdateQueueRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Requests queue suspension; replies with the updated Queue.
+    [[nodiscard]] auto suspend_queue(QueueSelector const& selector, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Resumes a queue; replies with the updated Queue.
+    [[nodiscard]] auto resume_queue(QueueSelector const& selector, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Deletes a queue; a successful JSON null replies as EmptyReply.
+    [[nodiscard]] auto delete_queue(QueueSelector const& selector, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Reads queue-scoped statistics by selector or cursor; replies with StatisticsPage.
+    [[nodiscard]] auto queue_statistics(QueueStatisticsListRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
     /// Creates a job using the shared public codec; a possibly sent failure may have created it.
     [[nodiscard]] auto create_job(CreateJobRequest const& request, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
+    /// Reads one job definition by ID; replies with JobDefinition.
+    [[nodiscard]] auto get_job(jb::core::Uuid const& id, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Reads one bounded job-definition page; replies with JobPage.
+    [[nodiscard]] auto list_jobs(JobListRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Updates a job at its expected revision; replies with the committed JobDefinition.
+    [[nodiscard]] auto update_job(UpdateJobRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Requests job suspension; replies with the updated JobDefinition.
+    [[nodiscard]] auto suspend_job(jb::core::Uuid const& id, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Resumes a job; replies with the updated JobDefinition.
+    [[nodiscard]] auto resume_job(jb::core::Uuid const& id, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Moves a suspended job at its expected revision; replies with JobDefinition.
+    [[nodiscard]] auto move_job(MoveJobRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Deletes a job at its expected revision; a successful JSON null replies as EmptyReply.
+    [[nodiscard]] auto delete_job(DeleteJobRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Creates a manual run without changing the scheduled occurrence; replies with RunDetails.
+    [[nodiscard]] auto run_now(RunNowRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Reads one retained run by ID; replies with RunDetails.
+    [[nodiscard]] auto get_run(jb::core::Uuid const& id, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
     /// Reads one run-summary page using an initial query or cursor-only continuation.
     [[nodiscard]] auto list_runs(RunListRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Requests cancellation of a run; replies with CancelRunResult, whose requested disposition may still be active.
+    [[nodiscard]] auto cancel_run(jb::core::Uuid const& id, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Reads one retained attempt by run ID and number; replies with AttemptDetails.
+    [[nodiscard]] auto get_attempt(AttemptKey const& key, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Reads one bounded attempt page using an initial query or cursor; replies with AttemptPage.
+    [[nodiscard]] auto list_attempts(AttemptListRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Reads one bounded retained-output slice; replies with AttemptOutputChunk.
+    [[nodiscard]] auto read_attempt_output(AttemptOutputRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Sets raw secret bytes without exposing them in the reply; replies with SecretMetadata.
+    [[nodiscard]] auto set_secret(SetSecretRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Reads a metadata-only secret page; replies with SecretPage.
+    [[nodiscard]] auto list_secrets(SecretListRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Deletes a secret by name; a successful JSON null replies as EmptyReply.
+    [[nodiscard]] auto delete_secret(std::string_view name, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Validates a cron schedule; replies with ScheduleValidationReply only when valid.
+    [[nodiscard]] auto validate_schedule(CronSchedule const& schedule, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Previews strictly later cron occurrences; replies with ScheduleNextReply.
+    [[nodiscard]] auto next_schedule_occurrences(ScheduleNextRequest const& request, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
     /// Forgets local observation of a call without sending run.cancel to the daemon.

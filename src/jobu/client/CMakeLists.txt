@@ -9,7 +9,9 @@ target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_sources(${TARGET}
     PRIVATE
         control_client.cpp
+        control_client_methods.cpp
         control_client_priv.hpp
+        control_client_results.cpp
     PUBLIC
         control_client.hpp
 )
