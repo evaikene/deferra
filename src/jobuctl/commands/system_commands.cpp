@@ -25,11 +25,11 @@ auto parse_system_command(std::filesystem::path                socket_path,
 
 void print_system_info(SystemInfo const& info)
 {
-    fmt::print(stdout, "Daemon version: {}\n", info.daemon_version);
+    fmt::print(stdout, "Daemon version: {}\n", escape_human(info.daemon_version));
     fmt::print(stdout, "API version: {}.{}\n", info.api_version.major, info.api_version.minor);
     fmt::print(stdout, "Capabilities:\n");
     for (auto const& capability : info.capabilities) {
-        fmt::print(stdout, "  {}\n", capability);
+        fmt::print(stdout, "  {}\n", escape_human(capability));
     }
 }
 

@@ -1,10 +1,10 @@
 #pragma once
 
 #include "attribute_registry.hpp"
-#include "json.hpp"
 #include "management.hpp"
 #include "uuid.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -33,14 +33,28 @@ enum class CommandKind : std::uint8_t {
     JobDelete,
 };
 
+/// Owning requests for the currently registered CLI methods. CommandKind identifies repeated result types.
+using CommandRequest = std::variant<std::monostate,
+                                    jb::jobu::QueueSelector,
+                                    jb::jobu::CreateQueueRequest,
+                                    jb::jobu::QueueListRequest,
+                                    jb::jobu::UpdateQueueRequest,
+                                    jb::core::Uuid,
+                                    jb::jobu::CreateJobRequest,
+                                    jb::jobu::JobListRequest,
+                                    jb::jobu::UpdateJobRequest,
+                                    jb::jobu::MoveJobRequest,
+                                    jb::jobu::DeleteJobRequest>;
+
 /// Parsed remote work owns its data; method refers only to a static method-name literal.
 struct Command {
-    std::filesystem::path                  socket_path;
-    CommandKind                            kind{CommandKind::SystemInfo};
-    std::string_view                       method{"system.info"};
-    std::optional<jb::core::JsonValue>     params;
-    std::optional<jb::jobu::QueueSelector> selector;
-    std::optional<jb::core::Uuid>          job_id;
+    std::filesystem::path                socket_path;
+    CommandKind                          kind{CommandKind::SystemInfo};
+    std::string_view                     method{"system.info"};
+    CommandRequest                       request;
+    std::optional<std::filesystem::path> request_file;
+    std::chrono::milliseconds            timeout{5000};
+    bool                                 json{false};
 };
 
 struct CommandBuildResult {
@@ -62,6 +76,7 @@ struct ParseResult {
     std::optional<ParsedCommand> action;
     std::string                  error;
     HelpCommand                  usage;
+    bool                         json_requested{false};
 };
 
 /// Selects local help/version or validates remote work without input, socket, or event-loop effects.

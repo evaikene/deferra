@@ -2,7 +2,6 @@
 
 #include "command_helpers_priv.hpp"
 #include "job_validation_priv.hpp"
-#include "logging.hpp"
 #include "management_json.hpp"
 #include "utc_timestamp.hpp"
 
@@ -111,8 +110,7 @@ auto make_job_id_command(std::filesystem::path                socket_path,
                     .socket_path = std::move(socket_path),
                     .kind        = kind,
                     .method      = method,
-                    .params      = std::move(params).value(),
-                    .job_id      = std::move(id).value(),
+                    .request     = std::move(id).value(),
                     },
         .error = {},
     };
@@ -347,7 +345,7 @@ auto parse_job_create(std::filesystem::path                socket_path,
                     .socket_path = std::move(socket_path),
                     .kind        = CommandKind::JobCreate,
                     .method      = "job.create",
-                    .params      = std::move(params).value(),
+                    .request     = std::move(request),
                     },
         .error = {},
     };
@@ -412,7 +410,7 @@ auto parse_job_list(std::filesystem::path socket_path, std::span<CommandLineArgu
                     .socket_path = std::move(socket_path),
                     .kind        = CommandKind::JobList,
                     .method      = "job.list",
-                    .params      = std::move(params).value(),
+                    .request     = std::move(request),
                     },
         .error = {},
     };
@@ -514,8 +512,7 @@ auto parse_job_update(std::filesystem::path                socket_path,
                     .socket_path = std::move(socket_path),
                     .kind        = CommandKind::JobUpdate,
                     .method      = "job.update",
-                    .params      = std::move(params).value(),
-                    .job_id      = std::move(id).value(),
+                    .request     = std::move(request),
                     },
         .error = {},
     };
@@ -576,8 +573,7 @@ auto parse_job_move(std::filesystem::path socket_path, std::span<CommandLineArgu
                     .socket_path = std::move(socket_path),
                     .kind        = CommandKind::JobMove,
                     .method      = "job.move",
-                    .params      = std::move(params).value(),
-                    .job_id      = std::move(id).value(),
+                    .request     = std::move(request),
                     },
         .error = {},
     };
@@ -605,10 +601,11 @@ auto parse_job_delete(std::filesystem::path socket_path, std::span<CommandLineAr
         return parse_failure("--revision must be a positive 64-bit integer");
     }
 
-    auto params = delete_job_request_to_json(DeleteJobRequest{
+    auto request = DeleteJobRequest{
         .job_id            = id.value(),
         .expected_revision = *revision,
-    });
+    };
+    auto params = delete_job_request_to_json(request);
     if (!params) {
         return parse_failure(params.error().message);
     }
@@ -618,8 +615,7 @@ auto parse_job_delete(std::filesystem::path socket_path, std::span<CommandLineAr
                     .socket_path = std::move(socket_path),
                     .kind        = CommandKind::JobDelete,
                     .method      = "job.delete",
-                    .params      = std::move(params).value(),
-                    .job_id      = std::move(id).value(),
+                    .request     = request,
                     },
         .error = {},
     };
@@ -653,26 +649,27 @@ auto job_type_text(JobType type) noexcept -> std::string_view
 
 auto print_job(JobDefinition const& job) -> bool
 {
-    auto const* schedule = std::get_if<OnceSchedule>(&job.schedule);
-    if (!schedule) {
-        log_error("Unable to print a non-one-time job returned by the Phase 3 daemon");
-        return false;
+    auto schedule = std::string{};
+    if (auto const* once = std::get_if<OnceSchedule>(&job.schedule)) {
+        auto at = format_utc_timestamp(once->planned_at);
+        if (!at) {
+            return false;
+        }
+        schedule = fmt::format("at={}", *at);
     }
-    auto at = format_utc_timestamp(schedule->planned_at);
-    if (!at) {
-        log_error("Unable to format a job timestamp: {} ({})", at.error().message, at.error().code);
-        return false;
+    else if (auto const* cron = std::get_if<CronSchedule>(&job.schedule)) {
+        schedule = fmt::format("cron={}, timezone={}", escape_human(cron->expression), escape_human(cron->timezone));
     }
 
     fmt::print(stdout,
-               "Job {}: queue_id={}, revision={}, name={}, state={}, type={}, at={}, priority={}\n",
+               "Job {}: queue_id={}, revision={}, name={}, state={}, type={}, {}, priority={}\n",
                job.id.to_string(),
                job.queue_id.to_string(),
                job.revision,
-               job.name.value_or("<unnamed>"),
+               escape_human(job.name.value_or("<unnamed>")),
                job_state_text(job.state),
                job_type_text(job.type),
-               at.value(),
+               schedule,
                job.priority);
     return true;
 }
@@ -727,30 +724,28 @@ auto parse_job_command(std::filesystem::path                socket_path,
     return parse_failure("unknown job action");
 }
 
-auto print_job_result(Command const& command, JsonValue const& value, StandardAttributeRegistry const& registry) -> bool
+auto print_job_result(Command const& command, ControlReply const& value) -> bool
 {
     if (command.kind == CommandKind::JobList) {
-        auto page = job_page_from_json(value, registry);
+        auto const* page = std::get_if<JobPage>(&value);
         if (!page) {
-            log_error("Invalid {} response: {} ({})", command.method, page.error().message, page.error().code);
             return false;
         }
-        return print_job_page(page.value());
+        return print_job_page(*page);
     }
     if (command.kind == CommandKind::JobDelete) {
-        if (!value.is_null() || !command.job_id) {
-            log_error("Invalid {} response", command.method);
+        auto const* request = std::get_if<DeleteJobRequest>(&command.request);
+        if (!std::holds_alternative<EmptyReply>(value) || !request) {
             return false;
         }
-        fmt::print(stdout, "Deleted job id={}\n", command.job_id->to_string());
+        fmt::print(stdout, "Deleted job id={}\n", request->job_id.to_string());
         return true;
     }
-    auto job = job_from_json(value, registry);
+    auto const* job = std::get_if<JobDefinition>(&value);
     if (!job) {
-        log_error("Invalid {} response: {} ({})", command.method, job.error().message, job.error().code);
         return false;
     }
-    return print_job(job.value());
+    return print_job(*job);
 }
 
 } // namespace jb::jobuctl::detail

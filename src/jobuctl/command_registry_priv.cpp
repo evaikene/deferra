@@ -41,6 +41,9 @@ constexpr std::array globals{
     value_option("socket",
                  "PATH",
                  "Daemon socket; required for remote commands. May precede or follow the command path."),
+    flag("json", "Print one compact JSON result; errors use one JSON object on standard error."),
+    value_option("timeout", "MS", "Overall command deadline in positive milliseconds; default: 5000."),
+    value_option("request-file", "FILE", "Read complete JSON params from FILE, or - for standard input."),
     flag("help", "Show local help without contacting a daemon.", 'h'),
     flag("version", "Show the local executable version (root only)."),
 };
@@ -112,6 +115,7 @@ constexpr std::string_view job_uuid     = "UUID is the job ID.";
 constexpr CommandSpec system_info_command{
     .group            = "system",
     .name             = "info",
+    .kind             = CommandKind::SystemInfo,
     .alias            = {},
     .summary          = "Show daemon version and capabilities",
     .operands         = {},
@@ -126,6 +130,7 @@ constexpr CommandSpec system_info_command{
 constexpr CommandSpec queue_create_command{
     .group            = "queue",
     .name             = "create",
+    .kind             = CommandKind::QueueCreate,
     .alias            = "add",
     .summary          = "Create a queue",
     .operands         = "NAME",
@@ -140,6 +145,7 @@ constexpr CommandSpec queue_create_command{
 constexpr CommandSpec queue_get_command{
     .group            = "queue",
     .name             = "get",
+    .kind             = CommandKind::QueueGet,
     .alias            = {},
     .summary          = "Show a queue",
     .operands         = {},
@@ -154,6 +160,7 @@ constexpr CommandSpec queue_get_command{
 constexpr CommandSpec queue_list_command{
     .group            = "queue",
     .name             = "list",
+    .kind             = CommandKind::QueueList,
     .alias            = {},
     .summary          = "List queues",
     .operands         = {},
@@ -168,6 +175,7 @@ constexpr CommandSpec queue_list_command{
 constexpr CommandSpec queue_update_command{
     .group            = "queue",
     .name             = "update",
+    .kind             = CommandKind::QueueUpdate,
     .alias            = {},
     .summary          = "Update a queue",
     .operands         = {},
@@ -183,6 +191,7 @@ constexpr CommandSpec queue_update_command{
 constexpr CommandSpec queue_suspend_command{
     .group            = "queue",
     .name             = "suspend",
+    .kind             = CommandKind::QueueSuspend,
     .alias            = {},
     .summary          = "Suspend a queue",
     .operands         = {},
@@ -197,6 +206,7 @@ constexpr CommandSpec queue_suspend_command{
 constexpr CommandSpec queue_resume_command{
     .group            = "queue",
     .name             = "resume",
+    .kind             = CommandKind::QueueResume,
     .alias            = {},
     .summary          = "Resume a queue",
     .operands         = {},
@@ -211,6 +221,7 @@ constexpr CommandSpec queue_resume_command{
 constexpr CommandSpec queue_delete_command{
     .group            = "queue",
     .name             = "delete",
+    .kind             = CommandKind::QueueDelete,
     .alias            = {},
     .summary          = "Delete a queue",
     .operands         = {},
@@ -225,6 +236,7 @@ constexpr CommandSpec queue_delete_command{
 constexpr CommandSpec job_create_command{
     .group            = "job",
     .name             = "create",
+    .kind             = CommandKind::JobCreate,
     .alias            = "add",
     .summary          = "Create a once-scheduled job",
     .operands         = {},
@@ -242,6 +254,7 @@ constexpr CommandSpec job_create_command{
 constexpr CommandSpec job_get_command{
     .group            = "job",
     .name             = "get",
+    .kind             = CommandKind::JobGet,
     .alias            = {},
     .summary          = "Show a job",
     .operands         = "UUID",
@@ -256,6 +269,7 @@ constexpr CommandSpec job_get_command{
 constexpr CommandSpec job_list_command{
     .group            = "job",
     .name             = "list",
+    .kind             = CommandKind::JobList,
     .alias            = {},
     .summary          = "List jobs",
     .operands         = {},
@@ -270,6 +284,7 @@ constexpr CommandSpec job_list_command{
 constexpr CommandSpec job_update_command{
     .group            = "job",
     .name             = "update",
+    .kind             = CommandKind::JobUpdate,
     .alias            = {},
     .summary          = "Update a job definition",
     .operands         = "UUID",
@@ -285,6 +300,7 @@ constexpr CommandSpec job_update_command{
 constexpr CommandSpec job_suspend_command{
     .group            = "job",
     .name             = "suspend",
+    .kind             = CommandKind::JobSuspend,
     .alias            = {},
     .summary          = "Suspend a job",
     .operands         = "UUID",
@@ -299,6 +315,7 @@ constexpr CommandSpec job_suspend_command{
 constexpr CommandSpec job_resume_command{
     .group            = "job",
     .name             = "resume",
+    .kind             = CommandKind::JobResume,
     .alias            = {},
     .summary          = "Resume a job",
     .operands         = "UUID",
@@ -313,6 +330,7 @@ constexpr CommandSpec job_resume_command{
 constexpr CommandSpec job_move_command{
     .group            = "job",
     .name             = "move",
+    .kind             = CommandKind::JobMove,
     .alias            = {},
     .summary          = "Move a job to another queue",
     .operands         = "UUID",
@@ -328,6 +346,7 @@ constexpr CommandSpec job_move_command{
 constexpr CommandSpec job_delete_command{
     .group            = "job",
     .name             = "delete",
+    .kind             = CommandKind::JobDelete,
     .alias            = {},
     .summary          = "Delete a job",
     .operands         = "UUID",

@@ -4,6 +4,7 @@
 #include "attribute_registry.hpp"
 #include "command_line_priv.hpp"
 #include "help_priv.hpp"
+#include "input_priv.hpp"
 #include "output_priv.hpp"
 #include "session_priv.hpp"
 
@@ -22,8 +23,13 @@ auto main(int argc, char* argv[]) -> int
     jb::jobu::StandardAttributeRegistry registry;
     auto                                parsed = parse_command_line(argc, argv, registry);
     if (!parsed.action) {
-        print_operator_error(parsed.error);
-        fmt::print(stderr, "{}", render_help(parsed.usage));
+        print_error(parsed.json_requested,
+                    local_error({.category = jb::core::ErrorCategory::InvalidArgument,
+                                 .code     = "jobuctl.syntax",
+                                 .message  = parsed.error}));
+        if (!parsed.json_requested) {
+            fmt::print(stderr, "{}", render_help(parsed.usage));
+        }
         return 2;
     }
     if (auto const* help = std::get_if<HelpCommand>(&*parsed.action)) {
@@ -35,8 +41,15 @@ auto main(int argc, char* argv[]) -> int
         return EXIT_SUCCESS;
     }
 
+    auto command = std::move(std::get<Command>(*parsed.action));
+    auto loaded  = load_request_file(command, registry);
+    if (!loaded) {
+        print_error(command.json, local_error(loaded.error()));
+        return 2;
+    }
+
     jb::core::Application app{0, nullptr};
-    Session               session{std::move(std::get<Command>(*parsed.action)), registry};
+    Session               session{std::move(command), registry};
     session.finished.connect(&app, [&app](int code) { static_cast<void>(app.quit(code)); });
     session.start();
     return app.exec();

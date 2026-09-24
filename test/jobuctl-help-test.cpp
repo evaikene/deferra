@@ -255,11 +255,11 @@ TEST_CASE("jobuctl local selection does not open supplied file paths", "[jobuctl
     CHECK(help.code == 0);
     CHECK(help.err.empty());
 
-    // Request-file support is not available yet; unknown options still fail without touching their values.
+    // Help must resolve before opening a request file, including a FIFO with no writer.
     for (auto const& path : {fifo, directory.path() / "missing-input"}) {
-        auto invalid = run({"queue", "create", "--request-file", path.string(), "--help"});
-        CHECK(invalid.code == 2);
-        CHECK(invalid.out.empty());
-        CHECK(invalid.err.find("unknown option") != std::string::npos);
+        auto result = run({"queue", "create", "--request-file", path.string(), "--json", "--help"});
+        CHECK(result.code == 0);
+        CHECK(result.out.find("Usage:\n") == 0);
+        CHECK(result.err.empty());
     }
 }

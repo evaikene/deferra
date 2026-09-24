@@ -14,6 +14,7 @@ add_library(jobuctl-private STATIC
     command_registry_priv.cpp
     help_priv.cpp
     command_helpers_priv.cpp
+    input_priv.cpp
     output_priv.cpp
     session_priv.cpp
     commands/system_commands.cpp
@@ -22,7 +23,7 @@ add_library(jobuctl-private STATIC
 )
 target_include_directories(jobuctl-private PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(jobuctl-private PUBLIC cxx_std_20)
-target_link_libraries(jobuctl-private PUBLIC jobu)
+target_link_libraries(jobuctl-private PUBLIC jobu-client)
 
 add_executable(${TARGET} main.cpp)
 

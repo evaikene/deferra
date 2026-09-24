@@ -2,14 +2,20 @@
 #include "command_line_priv.hpp"
 #include "command_registry_priv.hpp"
 #include "help_priv.hpp"
+#include "input_priv.hpp"
 #include "json.hpp"
 #include "management_json.hpp"
+#include "support/temporary_directory.hpp"
+#include "utc_timestamp.hpp"
 #include "uuid.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <fstream>
+#include <iostream>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <variant> // IWYU pragma: keep for std::get in Catch assertions
@@ -55,7 +61,7 @@ TEST_CASE("jobuctl parser retains socket selection and command family errors", "
     REQUIRE(parsed.command);
     CHECK(parsed.command->socket_path == "/tmp/custom.sock");
     CHECK(parsed.command->method == "system.info");
-    CHECK_FALSE(parsed.command->params);
+    CHECK(std::holds_alternative<std::monostate>(parsed.command->request));
 
     CHECK(parse({"system", "info", "--socket", "/tmp/custom.sock"}).command.has_value());
     CHECK(parse({"--socket", "/tmp/custom.sock", "system", "info", "extra"}).error == "unexpected extra operand");
@@ -65,23 +71,123 @@ TEST_CASE("jobuctl parser retains socket selection and command family errors", "
           "--socket may be supplied only once");
 }
 
+TEST_CASE("jobuctl parses machine options before or after the command", "[jobuctl][parse]")
+{
+    auto first = parse({"--json", "--timeout", "75", "--socket", "fixture.sock", "queue", "list"});
+    auto last  = parse({"--socket", "fixture.sock", "queue", "list", "--timeout=75", "--json"});
+    REQUIRE(first.command);
+    REQUIRE(last.command);
+    CHECK(first.command->json);
+    CHECK(last.command->json);
+    CHECK(first.command->timeout == std::chrono::milliseconds{75});
+    CHECK(last.command->timeout == first.command->timeout);
+
+    auto file = parse({"queue", "create", "--socket", "fixture.sock", "--request-file", "request.json"});
+    REQUIRE(file.command);
+    CHECK(file.command->request_file == std::filesystem::path{"request.json"});
+    CHECK(std::holds_alternative<std::monostate>(file.command->request));
+    CHECK_FALSE(
+        parse({"queue", "create", "reports", "--request-file", "request.json", "--socket", "fixture.sock"}).command);
+
+    for (auto const* invalid : {"0", "-1", "18446744073709551615", "abc"}) {
+        CHECK_FALSE(parse({"--socket", "fixture.sock", "queue", "list", "--timeout", invalid}).command);
+    }
+    auto syntax = parse_action({"queue", "list", "--unknown", "--json"});
+    CHECK_FALSE(syntax.action);
+    CHECK(syntax.json_requested);
+    CHECK_FALSE(parse_action({"queue", "list", "--arg=--json"}).json_requested);
+}
+
+TEST_CASE("jobuctl request files are bounded and strictly decoded", "[jobuctl][input]")
+{
+    jb::test::TemporaryDirectory directory;
+    StandardAttributeRegistry    registry;
+    auto const                   path = directory.path() / "request.json";
+    auto command = parse({"--socket", "fixture.sock", "queue", "list", "--request-file", path.string()});
+    REQUIRE(command.command);
+
+    {
+        auto file = std::ofstream{path, std::ios::binary};
+        REQUIRE(file);
+        file << "{\"limit\":2}";
+    }
+    REQUIRE(load_request_file(*command.command, registry));
+    CHECK(std::get<QueueListRequest>(command.command->request).page.limit == 2);
+
+    for (auto const& document : {"[]", R"({"limit":2} trailing)", R"({"limit":2,"unexpected":1})"}) {
+        auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
+        REQUIRE(file);
+        file << document;
+        file.close();
+
+        auto result = load_request_file(*command.command, registry);
+        REQUIRE_FALSE(result);
+        CHECK(result.error().message.find(document) == std::string::npos);
+    }
+
+    {
+        auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
+        REQUIRE(file);
+        file << std::string((1024U * 1024U) + 1U, 'x');
+    }
+    auto oversized = load_request_file(*command.command, registry);
+    REQUIRE_FALSE(oversized);
+    CHECK(oversized.error().code == "jobuctl.input.too_large");
+
+    auto const at = parse_utc_timestamp("2030-01-01T00:00:00Z");
+    REQUIRE(at);
+    auto payload = parse_json(R"({"command":"/bin/true","arguments":[{"secret":"reports.token"}]})");
+    REQUIRE(payload);
+    auto create = CreateJobRequest{
+        .queue    = std::string{"reports"},
+        .type     = JobType::Cli,
+        .schedule = OnceSchedule{.planned_at = *at},
+        .payload  = *payload,
+    };
+    auto encoded = create_job_request_to_json(create, registry);
+    REQUIRE(encoded);
+    auto serialized = serialize_json(*encoded);
+    REQUIRE(serialized);
+    {
+        auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
+        REQUIRE(file);
+        file << *serialized;
+    }
+    auto job = parse({"--socket", "fixture.sock", "job", "create", "--request-file", path.string()});
+    REQUIRE(job.command);
+    REQUIRE(load_request_file(*job.command, registry));
+    CHECK(std::get<CreateJobRequest>(job.command->request).payload == *payload);
+}
+
+TEST_CASE("jobuctl accepts one params object from standard input", "[jobuctl][input]")
+{
+    auto command = parse({"--socket", "fixture.sock", "queue", "list", "--request-file", "-"});
+    REQUIRE(command.command);
+
+    auto                      source   = std::istringstream{"{\"limit\":3}"};
+    auto*                     original = std::cin.rdbuf(source.rdbuf());
+    StandardAttributeRegistry registry;
+    auto                      loaded = load_request_file(*command.command, registry);
+    std::cin.rdbuf(original);
+    std::cin.clear();
+
+    REQUIRE(loaded);
+    CHECK(std::get<QueueListRequest>(command.command->request).page.limit == 3);
+}
+
 TEST_CASE("jobuctl parser preserves queue selectors and deletion rendering identity", "[jobuctl][parse]")
 {
     for (auto const* action : {"get", "suspend", "resume", "delete"}) {
         CAPTURE(action);
         auto named = parse({"--socket", "fixture.sock", "queue", action, "--name", "queue with spaces"});
         REQUIRE(named.command);
-        REQUIRE(named.command->params);
-        auto selector = queue_selector_from_json(*named.command->params);
-        REQUIRE(selector);
-        CHECK(std::get<std::string>(*selector) == "queue with spaces");
-        CHECK(named.command->selector == *selector);
+        auto const& selector = std::get<QueueSelector>(named.command->request);
+        CHECK(std::get<std::string>(selector) == "queue with spaces");
         CHECK(named.command->method == std::string{"queue."} + action);
 
         auto identified = parse({"--socket", "fixture.sock", "queue", action, "--id", job_id});
         REQUIRE(identified.command);
-        REQUIRE(identified.command->selector);
-        CHECK(std::get<Uuid>(*identified.command->selector).to_string() == job_id);
+        CHECK(std::get<Uuid>(std::get<QueueSelector>(identified.command->request)).to_string() == job_id);
     }
 
     auto duplicate = parse({"--socket", "fixture.sock", "queue", "get", "--id", job_id, "--name", "queue"});
@@ -91,26 +197,23 @@ TEST_CASE("jobuctl parser preserves queue selectors and deletion rendering ident
 
 TEST_CASE("jobuctl parser preserves job identity revisions and signed priority", "[jobuctl][parse]")
 {
-    StandardAttributeRegistry registry;
-    auto                      parsed = parse({"--socket",
-                                              "fixture.sock",
-                                              "job",
-                                              "update",
-                                              job_id,
-                                              "--revision",
-                                              "18446744073709551615",
-                                              "--priority",
-                                              "-2147483648",
-                                              "--clear-name"});
+    auto parsed = parse({"--socket",
+                         "fixture.sock",
+                         "job",
+                         "update",
+                         job_id,
+                         "--revision",
+                         "18446744073709551615",
+                         "--priority",
+                         "-2147483648",
+                         "--clear-name"});
     REQUIRE(parsed.command);
-    REQUIRE(parsed.command->params);
-    auto request = update_job_request_from_json(*parsed.command->params, registry);
-    REQUIRE(request);
-    CHECK(request->job_id.to_string() == job_id);
-    CHECK(request->expected_revision == std::numeric_limits<std::uint64_t>::max());
-    CHECK(request->priority == std::numeric_limits<std::int32_t>::min());
-    REQUIRE(request->name);
-    CHECK_FALSE(*request->name);
+    auto const& request = std::get<UpdateJobRequest>(parsed.command->request);
+    CHECK(request.job_id.to_string() == job_id);
+    CHECK(request.expected_revision == std::numeric_limits<std::uint64_t>::max());
+    CHECK(request.priority == std::numeric_limits<std::int32_t>::min());
+    REQUIRE(request.name);
+    CHECK_FALSE(*request.name);
 
     for (auto const* revision : {"0", "-1", "18446744073709551616"}) {
         CAPTURE(revision);
@@ -121,18 +224,14 @@ TEST_CASE("jobuctl parser preserves job identity revisions and signed priority",
         auto selected = parse({"--socket", "fixture.sock", "job", action, job_id});
         REQUIRE(selected.command);
         CHECK(selected.command->method == std::string{"job."} + action);
-        REQUIRE(selected.command->job_id);
-        CHECK(selected.command->job_id->to_string() == job_id);
+        CHECK(std::get<Uuid>(selected.command->request).to_string() == job_id);
     }
 
     auto deleted = parse({"--socket", "fixture.sock", "job", "delete", job_id, "--revision", "7"});
     REQUIRE(deleted.command);
-    REQUIRE(deleted.command->params);
-    auto deletion = delete_job_request_from_json(*deleted.command->params);
-    REQUIRE(deletion);
-    CHECK(deletion->expected_revision == 7);
-    REQUIRE(deleted.command->job_id);
-    CHECK(deleted.command->job_id->to_string() == job_id);
+    auto const& deletion = std::get<DeleteJobRequest>(deleted.command->request);
+    CHECK(deletion.expected_revision == 7);
+    CHECK(deletion.job_id.to_string() == job_id);
 }
 
 TEST_CASE("jobuctl parser retains exact repeated subprocess argument bytes", "[jobuctl][parse]")
@@ -167,15 +266,12 @@ TEST_CASE("jobuctl parser retains exact repeated subprocess argument bytes", "[j
                          "--env",
                          "ACTUAL=value"});
     REQUIRE(parsed.command);
-    REQUIRE(parsed.command->params);
-    StandardAttributeRegistry registry;
-    auto                      request = create_job_request_from_json(*parsed.command->params, registry);
-    REQUIRE(request);
-    CHECK(request->priority == -12);
+    auto const& request = std::get<CreateJobRequest>(parsed.command->request);
+    CHECK(request.priority == -12);
     auto expected = parse_json(
         R"({"command":"/bin/true","arguments":["","-abc","--unknown","--env","--env=NAME=value","--command","--help",""],"environment":{"ACTUAL":"value"}})");
     REQUIRE(expected);
-    CHECK(request->payload == *expected);
+    CHECK(request.payload == *expected);
 }
 
 TEST_CASE("jobuctl help is local at root group leaf and alias paths", "[jobuctl][help]")
@@ -289,7 +385,10 @@ TEST_CASE("jobuctl globals and aliases preserve canonical remote requests", "[jo
         CHECK(result.command->method == "queue.create");
         CHECK(result.command->kind == expected.command->kind);
         CHECK(result.command->socket_path == expected.command->socket_path);
-        CHECK(result.command->params == expected.command->params);
+        auto const& actual    = std::get<CreateQueueRequest>(result.command->request);
+        auto const& reference = std::get<CreateQueueRequest>(expected.command->request);
+        CHECK(actual.name == reference.name);
+        CHECK(actual.weight == reference.weight);
     }
     auto canonical = parse({"--socket",
                             "fixture.sock",
@@ -319,7 +418,11 @@ TEST_CASE("jobuctl globals and aliases preserve canonical remote requests", "[jo
     REQUIRE(alias.command);
     CHECK(alias.command->method == "job.create");
     CHECK(alias.command->kind == canonical.command->kind);
-    CHECK(alias.command->params == canonical.command->params);
+    auto const& alias_request     = std::get<CreateJobRequest>(alias.command->request);
+    auto const& canonical_request = std::get<CreateJobRequest>(canonical.command->request);
+    CHECK(alias_request.queue == canonical_request.queue);
+    CHECK(alias_request.type == canonical_request.type);
+    CHECK(alias_request.payload == canonical_request.payload);
 
     CHECK_FALSE(parse_action({"queue", "list"}).action);
     CHECK_FALSE(parse_action({"--socket", "one", "queue", "list", "--socket", "two"}).action);
@@ -336,6 +439,9 @@ TEST_CASE("jobuctl help-looking option values and terminator operands remain dat
              {"--arg", "-h"},
              {"--arg", "-ahb"},
              {"--arg", "--version"},
+             {"--arg", "--json"},
+             {"--arg", "--timeout"},
+             {"--arg", "--request-file"},
              {"--arg", "--unknown"},
              {"--arg", "--env"}
     }) {
@@ -355,7 +461,8 @@ TEST_CASE("jobuctl help-looking option values and terminator operands remain dat
         args.insert(args.end(), suffix.begin(), suffix.end());
         auto result = parse(args);
         REQUIRE(result.command);
-        auto const& values = result.command->params->as_object().at("payload").as_object().at("arguments").as_array();
+        auto const& values =
+            std::get<CreateJobRequest>(result.command->request).payload.as_object().at("arguments").as_array();
         REQUIRE(values.size() == 1);
         CHECK(values.front().as_string() == (suffix.size() == 1 ? "--help" : suffix.back()));
     }
@@ -365,9 +472,9 @@ TEST_CASE("jobuctl help-looking option values and terminator operands remain dat
     }) {
         auto result = parse(args);
         REQUIRE(result.command);
-        CHECK(result.command->params->as_object().at("name").as_string() == args.back());
+        CHECK(std::get<CreateQueueRequest>(result.command->request).name == args.back());
     }
     auto name = parse({"--socket", "fixture.sock", "queue", "get", "--name=--help"});
     REQUIRE(name.command);
-    CHECK(std::get<std::string>(*name.command->selector) == "--help");
+    CHECK(std::get<std::string>(std::get<QueueSelector>(name.command->request)) == "--help");
 }

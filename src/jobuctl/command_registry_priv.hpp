@@ -28,6 +28,7 @@ using CommandBuilder = auto (*)(std::filesystem::path,
 struct CommandSpec {
     std::string_view            group;
     std::string_view            name;
+    CommandKind                 kind;
     std::string_view            alias;
     std::string_view            summary;
     std::string_view            operands;

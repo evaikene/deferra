@@ -2,6 +2,7 @@
 
 #include "command_line_parser.hpp"
 #include "command_line_priv.hpp"
+#include "control_client.hpp"
 #include "system_info.hpp"
 
 #include <filesystem>
@@ -27,11 +28,9 @@ auto parse_system_command(std::filesystem::path                          socket_
 auto is_cli_creation_option(std::string_view name) -> bool;
 
 void print_system_info(jb::jobu::SystemInfo const& info);
-auto print_queue_result(Command const&                             command,
-                        jb::core::JsonValue const&                 value,
-                        jb::jobu::StandardAttributeRegistry const& registry) -> bool;
-auto print_job_result(Command const&                             command,
-                      jb::core::JsonValue const&                 value,
-                      jb::jobu::StandardAttributeRegistry const& registry) -> bool;
+/// Escapes terminal control bytes in data embedded in human-readable output.
+auto escape_human(std::string_view value) -> std::string;
+auto print_queue_result(Command const& command, jb::jobu::ControlReply const& value) -> bool;
+auto print_job_result(Command const& command, jb::jobu::ControlReply const& value) -> bool;
 
 } // namespace jb::jobuctl::detail

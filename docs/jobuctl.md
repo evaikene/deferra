@@ -44,6 +44,23 @@ jobuctl queue --socket /run/jobu.sock create reports
 
 Choose the path used by your daemon. There is no automatic socket discovery.
 
+Global options also work before or after the command path:
+
+| Option | Behavior |
+| --- | --- |
+| `--json` | Print one compact JSON result on standard output for a successful remote command. |
+| `--timeout MS` | Set the positive overall deadline in milliseconds; default 5000. It includes connection, handshake, and the command. |
+| `--request-file FILE` | Read a complete JSON params object from `FILE`, or use `-` for standard input. |
+
+`--request-file` is available for the system, queue, and job commands listed above. It cannot be combined with command operands or command-specific options. Global options remain available. The file must contain one JSON object, with no trailing non-whitespace text, and is limited to the configured RPC body size (1 MiB by default). Request fields follow the public method's strict JSON contract. For example:
+
+```sh
+printf '{"limit":20}\n' > queue-list.json
+jobuctl --socket /run/jobu.sock queue list --request-file queue-list.json
+```
+
+Help and version finish without reading a request file or standard input. `--json` does not change help into JSON.
+
 Queue operations select a queue with exactly one of `--id UUID` or `--name NAME`. Job creation and moving use exactly one of `--queue-id UUID` or `--queue-name NAME`. Job update, move, and delete require `--revision N`; use the current revision shown by `job get`.
 
 For example:
@@ -74,3 +91,18 @@ Here `--help` and `-h` are arguments to the scheduled program. They do not reque
 ```sh
 jobuctl --socket /run/jobu.sock queue create -- --help
 ```
+
+## Results and errors
+
+Human output escapes control characters in data supplied by the daemon, including names and error text. JSON mode prints exactly one result value and a newline on standard output; successful delete commands print `null`. It prints no headings or progress text. Integer values remain integers, including large revisions.
+
+On failure, standard output is empty. With `--json`, standard error contains one object with `error.kind` (`local` or `remote`), a stable string `code`, nullable `rpc_code` and `category`, safe `message`, and boolean `outcome_unknown`. A remote application error retains its domain code and category. A represented remote RPC error without application data uses `jobuctl.remote.rpc_error` as the string code.
+
+| Exit status | Meaning |
+| --- | --- |
+| 0 | Successful remote operation or local help/version. |
+| 1 | Represented operation failure, such as not found, revision conflict, or an unsupported capability. |
+| 2 | Syntax, local request decoding, or request-file input failure. |
+| 3 | Connection, protocol, or deadline failure. |
+
+For a mutation, `outcome_unknown: true` means the request may have reached the daemon without an observed result. Check the resource or replay with an explicit idempotency key before deciding whether to repeat it. The CLI does not retry mutations automatically.

@@ -800,7 +800,7 @@ endif()
 add_test(NAME jobuctl-version COMMAND $<TARGET_FILE:jobuctl> --version)
 add_test(NAME jobuctl-usage COMMAND $<TARGET_FILE:jobuctl>)
 
-add_executable(jobuctl-command-line-test jobuctl-command-line-test.cpp)
+add_executable(jobuctl-command-line-test jobuctl-command-line-test.cpp support/temporary_directory.cpp)
 target_link_libraries(jobuctl-command-line-test PRIVATE jobuctl-private Catch2::Catch2WithMain)
 add_test(NAME jobuctl-command-line-test COMMAND $<TARGET_FILE:jobuctl-command-line-test>)
 

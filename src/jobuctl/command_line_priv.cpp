@@ -1,11 +1,14 @@
 #include "command_line_priv.hpp"
 
+#include "command_helpers_priv.hpp"
 #include "command_line_parser.hpp"
 #include "command_registry_priv.hpp"
 #include "commands/commands_priv.hpp"
+#include "event_loop_types.hpp"
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <span>
 #include <utility>
 #include <vector>
@@ -27,8 +30,8 @@ auto is_cli_argument_value(std::string_view token, std::span<CommandLineOption c
     }
     auto const spelling = token.substr(2);
     auto const name     = spelling.substr(0, spelling.find('='));
-    return is_cli_creation_option(name) || name == "help" || name == "version" ||
-           std::ranges::find(options, name, &CommandLineOption::long_name) == options.end();
+    return is_cli_creation_option(name) || name == "help" || name == "version" || name == "json" || name == "timeout" ||
+           name == "request-file" || std::ranges::find(options, name, &CommandLineOption::long_name) == options.end();
 }
 
 auto preserve_value_tokens(int argc, char* argv[], std::span<CommandLineOption const> options)
@@ -105,7 +108,10 @@ auto select_path(std::span<CommandLineArgument const> arguments) -> Selection
 
 struct ParsedOptions {
     std::optional<std::filesystem::path> socket;
+    std::optional<std::filesystem::path> request_file;
     std::vector<CommandLineArgument>     local;
+    std::chrono::milliseconds            timeout{5000};
+    bool                                 json{false};
     bool                                 help{false};
     bool                                 version{false};
     std::string                          error;
@@ -160,12 +166,36 @@ auto parse_options(Selection const& selected) -> ParsedOptions
         else if (argument.name() == "help") {
             parsed.help = true;
         }
+        else if (argument.name() == "json") {
+            parsed.json = true;
+        }
+        else if (argument.name() == "timeout") {
+            auto const available =
+                std::chrono::duration_cast<std::chrono::milliseconds>(Clock::time_point::max() - Clock::now());
+            auto const maximum = std::min<std::uint64_t>(
+                static_cast<std::uint64_t>(available.count()),
+                static_cast<std::uint64_t>(std::numeric_limits<std::chrono::milliseconds::rep>::max()));
+            auto const timeout = parse_unsigned(*argument.value(), 1, maximum);
+            if (!timeout) {
+                parsed.error = "--timeout must be a positive millisecond count";
+                return parsed;
+            }
+            parsed.timeout = std::chrono::milliseconds{static_cast<std::chrono::milliseconds::rep>(*timeout)};
+        }
+        else if (argument.name() == "request-file") {
+            if (argument.value()->empty()) {
+                parsed.error = "--request-file requires a nonempty path or -";
+                return parsed;
+            }
+            parsed.request_file = std::filesystem::path{std::string{*argument.value()}};
+        }
         else if (argument.name() == "version") {
             parsed.version = true;
         }
     }
 
-    auto const maximum = selected.command && !selected.help_path ? selected.command->maximum_operands : 0;
+    auto const maximum =
+        selected.command && !selected.help_path && !parsed.request_file ? selected.command->maximum_operands : 0;
     if (operands > maximum) {
         parsed.error = "unexpected extra operand";
     }
@@ -188,13 +218,20 @@ auto parse_command_line(int argc, char* argv[], StandardAttributeRegistry const&
         normalized_argv.push_back(token.c_str());
     }
     CommandLineParser parser{static_cast<int>(normalized_argv.size()), normalized_argv.data(), descriptors};
-    auto              selected = select_path(parser.arguments());
+    auto const        json_requested = std::ranges::any_of(parser.arguments(), [](CommandLineArgument const& argument) {
+        return argument.kind() == CommandLineArgumentKind::Option && argument.name() == "json";
+    });
+    auto              selected       = select_path(parser.arguments());
     if (!selected.error.empty()) {
-        return {.error = std::move(selected.error), .usage = std::move(selected.usage)};
+        return {.error          = std::move(selected.error),
+                .usage          = std::move(selected.usage),
+                .json_requested = json_requested};
     }
     auto options = parse_options(selected);
     if (!options.error.empty()) {
-        return {.error = std::move(options.error), .usage = std::move(selected.usage)};
+        return {.error          = std::move(options.error),
+                .usage          = std::move(selected.usage),
+                .json_requested = json_requested};
     }
 
     // Help/version exit before request building, selector validation, or construction of runtime infrastructure.
@@ -205,15 +242,37 @@ auto parse_command_line(int argc, char* argv[], StandardAttributeRegistry const&
         return {.action = std::move(selected.usage)};
     }
     if (!options.socket) {
-        return {.error = "--socket PATH is required for remote commands", .usage = std::move(selected.usage)};
+        return {.error          = "--socket PATH is required for remote commands",
+                .usage          = std::move(selected.usage),
+                .json_requested = json_requested};
+    }
+    if (options.request_file) {
+        if (!options.local.empty()) {
+            return {.error          = "--request-file cannot be combined with command operands or options",
+                    .usage          = std::move(selected.usage),
+                    .json_requested = json_requested};
+        }
+        return {
+            .action = Command{
+                              .socket_path  = std::move(*options.socket),
+                              .kind         = selected.command->kind,
+                              .method       = selected.command->capability,
+                              .request_file = std::move(options.request_file),
+                              .timeout      = options.timeout,
+                              .json         = options.json,
+                              }
+        };
     }
 
     auto built = selected.command->build(std::move(*options.socket), selected.command->name, options.local, registry);
     if (!built.command) {
-        return {.error = std::move(built.error), .usage = std::move(selected.usage)};
+        return {.error = std::move(built.error), .usage = std::move(selected.usage), .json_requested = json_requested};
     }
     // The registry's canonical capability is also the wire method, including for aliases.
-    built.command->method = selected.command->capability;
+    built.command->kind    = selected.command->kind;
+    built.command->method  = selected.command->capability;
+    built.command->timeout = options.timeout;
+    built.command->json    = options.json;
     return {.action = std::move(*built.command)};
 }
 
