@@ -33,11 +33,12 @@ constexpr auto flag(std::string_view name, std::string_view description, char sh
 }
 
 constexpr std::array groups{
-    GroupSpec{.name = "system",  .summary = "Inspect the daemon"               },
-    GroupSpec{.name = "queue",   .summary = "Create and manage queues"         },
-    GroupSpec{.name = "job",     .summary = "Create and manage job definitions"},
-    GroupSpec{.name = "run",     .summary = "Control and inspect runs"         },
-    GroupSpec{.name = "attempt", .summary = "Inspect attempts and output"      },
+    GroupSpec{.name = "system",  .summary = "Inspect the daemon"                 },
+    GroupSpec{.name = "queue",   .summary = "Create and manage queues"           },
+    GroupSpec{.name = "job",     .summary = "Create and manage job definitions"  },
+    GroupSpec{.name = "run",     .summary = "Control and inspect runs"           },
+    GroupSpec{.name = "attempt", .summary = "Inspect attempts and output"        },
+    GroupSpec{.name = "secret",  .summary = "Set, list, and delete named secrets"},
 };
 constexpr std::array globals{
     value_option("socket",
@@ -166,6 +167,14 @@ constexpr std::array attempt_output{
     value_option("limit", "N", "Raw chunk size, 1..65536; default: 16384."),
     flag("raw", "Write only the requested raw chunk bytes to standard output; excludes --json."),
     value_option("output-file", "PATH", "Create a new file containing only this chunk; never overwrite."),
+};
+constexpr std::array secret_set{
+    value_option("file", "PATH", "Read raw secret bytes from PATH, including any trailing newline."),
+    flag("stdin", "Read raw secret bytes from standard input."),
+};
+constexpr std::array secret_list{
+    value_option("limit", "N", "Metadata page size, 1..200; default: 100."),
+    value_option("after-name", "NAME", "Continue after this canonical secret name."),
 };
 
 constexpr std::string_view select_queue = "Supply exactly one of --id or --name.";
@@ -520,13 +529,57 @@ constexpr CommandSpec attempt_output_command{
     .capability = "attempt.output",
     .build      = parse_attempt_command,
 };
+constexpr CommandSpec secret_set_command{
+    .group            = "secret",
+    .name             = "set",
+    .kind             = CommandKind::SecretSet,
+    .alias            = {},
+    .summary          = "Set or rotate a named secret",
+    .operands         = "NAME",
+    .maximum_operands = 1,
+    .options          = secret_set,
+    .rules            = "Require NAME and exactly one of --file or --stdin. Values are raw bytes, up to 65536 bytes.\n"
+                        "Alternatively, use --request-file for a complete JSON params object; do not combine input modes.",
+    .example          = "jobuctl --socket /run/jobu.sock secret set reports.token --stdin < token.bin",
+    .capability       = "secret.set",
+    .build            = parse_secret_command,
+};
+constexpr CommandSpec secret_list_command{
+    .group            = "secret",
+    .name             = "list",
+    .kind             = CommandKind::SecretList,
+    .alias            = {},
+    .summary          = "List secret metadata",
+    .operands         = {},
+    .maximum_operands = 0,
+    .options          = secret_list,
+    .rules            = "Values, sizes, and digests are never returned. --after-name is an exclusive boundary.",
+    .example          = "jobuctl --socket /run/jobu.sock secret list --limit 20",
+    .capability       = "secret.list",
+    .build            = parse_secret_command,
+};
+constexpr CommandSpec secret_delete_command{
+    .group            = "secret",
+    .name             = "delete",
+    .kind             = CommandKind::SecretDelete,
+    .alias            = {},
+    .summary          = "Delete an unreferenced secret",
+    .operands         = "NAME",
+    .maximum_operands = 1,
+    .options          = {},
+    .rules            = "Current job definitions and nonterminal run snapshots can prevent deletion.",
+    .example          = "jobuctl --socket /run/jobu.sock secret delete reports.token",
+    .capability       = "secret.delete",
+    .build            = parse_secret_command,
+};
 
 constexpr std::array commands{
     system_info_command,   queue_create_command, queue_get_command,      queue_list_command, queue_update_command,
     queue_suspend_command, queue_resume_command, queue_delete_command,   job_create_command, job_get_command,
     job_list_command,      job_update_command,   job_suspend_command,    job_resume_command, job_move_command,
     job_delete_command,    job_run_now_command,  run_get_command,        run_list_command,   run_cancel_command,
-    attempt_get_command,   attempt_list_command, attempt_output_command,
+    attempt_get_command,   attempt_list_command, attempt_output_command, secret_set_command, secret_list_command,
+    secret_delete_command,
 };
 
 } // namespace

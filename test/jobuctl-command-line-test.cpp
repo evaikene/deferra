@@ -1,4 +1,5 @@
 #include "attribute_registry.hpp"
+#include "byte_buffer.hpp"
 #include "command_line_priv.hpp"
 #include "command_registry_priv.hpp"
 #include "help_priv.hpp"
@@ -215,6 +216,121 @@ TEST_CASE("jobuctl accepts one params object from standard input", "[jobuctl][in
 
     REQUIRE(loaded);
     CHECK(std::get<QueueListRequest>(command.command->request).page.limit == 3);
+}
+
+TEST_CASE("jobuctl secret commands select metadata-only requests and deferred input", "[jobuctl][parse]")
+{
+    auto set = parse({"--socket", "fixture.sock", "secret", "set", "reports.token", "--stdin"});
+    REQUIRE(set.command);
+    CHECK(set.command->method == "secret.set");
+    REQUIRE(set.command->secret_input);
+    CHECK(set.command->secret_input->source == SecretInput::Source::Stdin);
+    CHECK(std::get<SetSecretRequest>(set.command->request).name == "reports.token");
+    CHECK(std::get<SetSecretRequest>(set.command->request).value.empty());
+
+    auto list = parse({"secret", "list", "--socket", "fixture.sock", "--limit", "1", "--after-name", "reports.a"});
+    REQUIRE(list.command);
+    CHECK(list.command->method == "secret.list");
+    CHECK(std::get<SecretListRequest>(list.command->request).limit == 1);
+    CHECK(std::get<SecretListRequest>(list.command->request).after_name == "reports.a");
+
+    auto erase = parse({"--socket", "fixture.sock", "secret", "delete", "reports.token"});
+    REQUIRE(erase.command);
+    CHECK(erase.command->method == "secret.delete");
+    CHECK(std::get<std::string>(erase.command->request) == "reports.token");
+
+    for (auto const& arguments : std::vector<std::vector<std::string>>{
+             {"secret", "set", "reports.token"},
+             {"secret", "set", "reports.token", "--file", "a", "--stdin"},
+             {"secret", "set", "reports.token", "--stdin", "--value", "literal"},
+             {"secret", "set", "reports.token", "--stdin", "--request-file", "request.json"},
+             {"secret", "list", "--limit", "0"},
+             {"secret", "list", "--after-name", ""},
+             {"secret", "delete"},
+    }) {
+        auto full = arguments;
+        full.insert(full.begin(), {"--socket", "fixture.sock"});
+        CHECK_FALSE(parse(std::move(full)).command);
+    }
+}
+
+TEST_CASE("jobuctl reads secret file and stdin as bounded raw bytes", "[jobuctl][input]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   path = directory.path() / "secret.bin";
+    auto command = parse({"--socket", "fixture.sock", "secret", "set", "reports.token", "--file", path.string()});
+    REQUIRE(command.command);
+
+    auto const sample = std::string{"\0\xff\n", 3};
+    {
+        auto file = std::ofstream{path, std::ios::binary};
+        REQUIRE(file);
+        file.write(sample.data(), static_cast<std::streamsize>(sample.size()));
+    }
+    REQUIRE(load_secret_input(*command.command));
+    CHECK(as_string_view(std::get<SetSecretRequest>(command.command->request).value) == sample);
+
+    for (auto const size : {std::size_t{0}, std::size_t{65536}, std::size_t{65537}}) {
+        auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
+        REQUIRE(file);
+        file << std::string(size, 'x');
+        file.close();
+
+        auto loaded = load_secret_input(*command.command);
+        if (size > 65536) {
+            REQUIRE_FALSE(loaded);
+            CHECK(loaded.error().code == "jobuctl.input.too_large");
+        }
+        else {
+            REQUIRE(loaded);
+            CHECK(std::get<SetSecretRequest>(command.command->request).value.size() == size);
+        }
+    }
+
+    auto stdin_command = parse({"--socket", "fixture.sock", "secret", "set", "reports.token", "--stdin"});
+    REQUIRE(stdin_command.command);
+    auto  source   = std::istringstream{sample};
+    auto* original = std::cin.rdbuf(source.rdbuf());
+    auto  loaded   = load_secret_input(*stdin_command.command);
+    std::cin.rdbuf(original);
+    std::cin.clear();
+    REQUIRE(loaded);
+    CHECK(as_string_view(std::get<SetSecretRequest>(stdin_command.command->request).value) == sample);
+}
+
+TEST_CASE("jobuctl decodes structured secret requests without exposing input", "[jobuctl][input]")
+{
+    jb::test::TemporaryDirectory directory;
+    StandardAttributeRegistry    registry;
+    auto const                   path  = directory.path() / "request.json";
+    auto                         write = [&](std::string_view document) {
+        auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
+        REQUIRE(file);
+        file << document;
+    };
+
+    auto set = parse({"--socket", "fixture.sock", "secret", "set", "--request-file", path.string()});
+    REQUIRE(set.command);
+    write(R"({"name":"reports.token","value":{"encoding":"base64","data":"AP8K"}})");
+    REQUIRE(load_request_file(*set.command, registry));
+    CHECK(as_string_view(std::get<SetSecretRequest>(set.command->request).value) == std::string{"\0\xff\n", 3});
+
+    write(R"({"name":"reports.token","value":{"encoding":"base64","data":"secret-sentinel"}})");
+    auto invalid = load_request_file(*set.command, registry);
+    REQUIRE_FALSE(invalid);
+    CHECK(invalid.error().message.find("secret-sentinel") == std::string::npos);
+
+    auto list = parse({"--socket", "fixture.sock", "secret", "list", "--request-file", path.string()});
+    REQUIRE(list.command);
+    write(R"({"limit":2,"after_name":"reports.a"})");
+    REQUIRE(load_request_file(*list.command, registry));
+    CHECK(std::get<SecretListRequest>(list.command->request).limit == 2);
+
+    auto erase = parse({"--socket", "fixture.sock", "secret", "delete", "--request-file", path.string()});
+    REQUIRE(erase.command);
+    write(R"({"name":"reports.token"})");
+    REQUIRE(load_request_file(*erase.command, registry));
+    CHECK(std::get<std::string>(erase.command->request) == "reports.token");
 }
 
 TEST_CASE("jobuctl parser preserves queue selectors and deletion rendering identity", "[jobuctl][parse]")

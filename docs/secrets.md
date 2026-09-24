@@ -7,9 +7,8 @@ Job definitions, run snapshots, and idempotency records keep the original refere
 The C++ `SecretService` and the public JSON-RPC methods `secret.set`,
 `secret.list`, and `secret.delete` support setting, listing metadata, and
 deleting secrets. See [Secret administration methods](protocol/methods/secret.md)
-for wire requests and results. `jobuctl secret` commands are planned for a
-later Phase 8 stage. The examples below describe payload templates, not CLI
-commands.
+for wire requests and results, and the [jobuctl guide](jobuctl.md#named-secrets)
+for file/stdin commands. The examples below describe payload templates.
 
 ## Values and references
 
@@ -116,6 +115,12 @@ process inspection. Prefer environment references when argument exposure matters
 environments are still accessible to the target program and potentially to
 privileged process inspection. Avoid putting secret literals in command lines,
 job definitions, or idempotency requests.
+
+For `jobuctl secret set`, use `--file PATH` or `--stdin` to pass raw bytes
+without putting the value in the process argument vector. Input is limited to
+65,536 bytes and keeps a trailing newline. `--request-file` can carry a
+structured `utf8` or base64 value; protect that file like the raw input file.
+CLI metadata and generated errors do not print the value, length, or preview.
 
 A program can echo an argument or environment value to stdout/stderr. An HTTP
 server can echo request secrets in response bodies or headers. JobU captures those

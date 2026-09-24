@@ -3,6 +3,7 @@
 #include "attribute_registry.hpp"
 #include "history.hpp"
 #include "management.hpp"
+#include "secret.hpp"
 #include "uuid.hpp"
 
 #include <chrono>
@@ -39,6 +40,9 @@ enum class CommandKind : std::uint8_t {
     AttemptGet,
     AttemptList,
     AttemptOutput,
+    SecretSet,
+    SecretList,
+    SecretDelete,
 };
 
 /// Owning requests for the currently registered CLI methods. CommandKind identifies repeated result types.
@@ -57,7 +61,21 @@ using CommandRequest = std::variant<std::monostate,
                                     jb::jobu::RunListRequest,
                                     jb::jobu::AttemptKey,
                                     jb::jobu::AttemptListRequest,
-                                    jb::jobu::AttemptOutputRequest>;
+                                    jb::jobu::AttemptOutputRequest,
+                                    jb::jobu::SetSecretRequest,
+                                    jb::jobu::SecretListRequest,
+                                    std::string>;
+
+/// Raw secret input is selected during parsing but read only after local help has been resolved.
+struct SecretInput {
+    enum class Source : std::uint8_t {
+        File,
+        Stdin
+    };
+
+    Source                source;
+    std::filesystem::path file;
+};
 
 /// Parsed remote work owns its data; method refers only to a static method-name literal.
 struct Command {
@@ -66,6 +84,7 @@ struct Command {
     std::string_view                     method{"system.info"};
     CommandRequest                       request;
     std::optional<std::filesystem::path> request_file;
+    std::optional<SecretInput>           secret_input;
     std::chrono::milliseconds            timeout{5000};
     bool                                 json{false};
     bool                                 wait{false};

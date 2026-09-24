@@ -4,6 +4,7 @@
 #include "control_json.hpp"
 #include "history_json.hpp"
 #include "management_json.hpp"
+#include "secret_json.hpp"
 #include "system_info.hpp"
 
 #include "json.hpp"
@@ -95,6 +96,9 @@ auto is_job_command(CommandKind kind) noexcept -> bool
         case CommandKind::AttemptGet:
         case CommandKind::AttemptList:
         case CommandKind::AttemptOutput:
+        case CommandKind::SecretSet:
+        case CommandKind::SecretList:
+        case CommandKind::SecretDelete:
             return false;
     }
     return false;
@@ -146,6 +150,21 @@ auto encoded_reply(Command const& command, ControlReply const& reply, AttributeR
     else if (command.kind == CommandKind::AttemptOutput) {
         if (auto const* chunk = std::get_if<AttemptOutputChunk>(&reply)) {
             return attempt_output_chunk_to_json(*chunk);
+        }
+    }
+    else if (command.kind == CommandKind::SecretSet) {
+        if (auto const* metadata = std::get_if<SecretMetadata>(&reply)) {
+            return secret_metadata_to_json(*metadata);
+        }
+    }
+    else if (command.kind == CommandKind::SecretList) {
+        if (auto const* page = std::get_if<SecretPage>(&reply)) {
+            return secret_page_to_json(*page);
+        }
+    }
+    else if (command.kind == CommandKind::SecretDelete) {
+        if (std::holds_alternative<EmptyReply>(reply)) {
+            return Result<JsonValue, Error>::success(JsonValue{});
         }
     }
     else if (command.kind == CommandKind::QueueDelete || command.kind == CommandKind::JobDelete) {
@@ -304,6 +323,10 @@ auto print_command_result(Command const& command, ControlReply const& reply, Sta
     if (command.kind == CommandKind::AttemptGet || command.kind == CommandKind::AttemptList ||
         command.kind == CommandKind::AttemptOutput) {
         return print_attempt_result(command, reply);
+    }
+    if (command.kind == CommandKind::SecretSet || command.kind == CommandKind::SecretList ||
+        command.kind == CommandKind::SecretDelete) {
+        return print_secret_result(command, reply);
     }
     return print_queue_result(command, reply);
 }

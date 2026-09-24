@@ -1060,6 +1060,23 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
         set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
     endif()
 
+    # Real-daemon secret administration and raw-byte CLI input.
+    set(TARGET "jobuctl-secret-management-test")
+    add_executable(${TARGET}
+        jobuctl-secret-management-test.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    target_compile_definitions(${TARGET} PRIVATE
+        JOBUD_EXECUTABLE="$<TARGET_FILE:jobud>"
+        JOBUCTL_EXECUTABLE="$<TARGET_FILE:jobuctl>")
+    add_dependencies(${TARGET} jobud jobuctl)
+    add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+    set_tests_properties(${TARGET} PROPERTIES TIMEOUT 60)
+    if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+        set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+    endif()
+
     if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
         # Platform daemon HTTP scheduling, management wakeup, and durable output integration test
         find_package(SQLite3 REQUIRED)

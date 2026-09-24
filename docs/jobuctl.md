@@ -1,6 +1,6 @@
 # jobuctl
 
-`jobuctl` manages JobU queues, jobs, runs, and retained attempts through a running `jobud` daemon's local socket.
+`jobuctl` manages JobU queues, jobs, runs, retained attempts, and named secrets through a running `jobud` daemon's local socket.
 
 ## Help and version
 
@@ -31,6 +31,7 @@ An unknown group, command, or option is an error, even alongside `--help`. An op
 | `job` | `create` (`add`), `get`, `list`, `update`, `suspend`, `resume`, `move`, `delete`, `run-now` |
 | `run` | `get`, `list`, `cancel` |
 | `attempt` | `get`, `list`, `output` |
+| `secret` | `set`, `list`, `delete` |
 
 `queue add` and `job add` are aliases for `queue create` and `job create`. Each alias accepts the same options and performs the same operation as its canonical command.
 
@@ -129,6 +130,36 @@ jobuctl --socket /run/jobu.sock attempt output RUN_UUID 1 --channel stdout --off
 jobuctl --socket /run/jobu.sock attempt output RUN_UUID 1 --channel stdout --raw > chunk.bin
 jobuctl --socket /run/jobu.sock attempt output RUN_UUID 1 --channel stdout --output-file chunk.bin
 ```
+
+## Named secrets
+
+`secret set NAME` creates or rotates a secret. Supply exactly one of `--file PATH`
+or `--stdin`; both read raw bytes, including NUL bytes and a final newline,
+without text conversion or trimming. Empty values are valid; the maximum is
+65,536 bytes. The command line has no literal secret-value option. Put the value
+in a file with access restricted to trusted users, or pass it through standard
+input. The CLI does not print the value, its size, or a preview.
+
+```sh
+jobuctl --socket /run/jobu.sock secret set reports.token --file /private/token.bin
+jobuctl --socket /run/jobu.sock secret set reports.token --stdin < /private/next-token.bin
+jobuctl --socket /run/jobu.sock secret list --limit 20 --json
+```
+
+`secret list` returns names and creation/update timestamps only, ordered by
+name. Its `--limit` is 1–200, default 100. When a JSON page contains a non-null
+`next_after_name`, continue with `secret list --after-name NAME`; the boundary
+is exclusive and is separate from queue/job `--after` IDs and history cursors.
+`secret delete NAME` returns JSON `null` on success. A current job definition
+or nonterminal run snapshot that refers to the name prevents deletion.
+
+Every secret command also accepts `--request-file` with its complete JSON params
+object. For `secret set`, this is an alternative to `NAME` and `--file`/`--stdin`;
+the public [secret method contract](protocol/methods/secret.md) defines the
+`utf8` and base64 value forms. Keep a request file containing a value private.
+Input and generated errors do not echo secret bytes. Secret values remain
+plaintext in the database, and application-generated output can contain them;
+see [Named secrets](secrets.md) for those exposure boundaries.
 
 ## Literal arguments
 
