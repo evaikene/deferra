@@ -1,7 +1,6 @@
 #include "commands_priv.hpp"
 
 #include "command_helpers_priv.hpp"
-#include "logging.hpp"
 #include "management_json.hpp"
 
 #include <fmt/format.h>
@@ -85,8 +84,7 @@ auto make_selector_command(std::filesystem::path                socket_path,
                     .socket_path = std::move(socket_path),
                     .kind        = kind,
                     .method      = method,
-                    .params      = std::move(params).value(),
-                    .selector    = std::move(selector.selector),
+                    .request     = std::move(*selector.selector),
                     },
         .error = {},
     };
@@ -162,7 +160,7 @@ auto parse_queue_create(std::filesystem::path                socket_path,
                     .socket_path = std::move(socket_path),
                     .kind        = CommandKind::QueueCreate,
                     .method      = "queue.create",
-                    .params      = std::move(params).value(),
+                    .request     = std::move(request),
                     },
         .error = {},
     };
@@ -221,7 +219,7 @@ auto parse_queue_list(std::filesystem::path socket_path, std::span<CommandLineAr
                     .socket_path = std::move(socket_path),
                     .kind        = CommandKind::QueueList,
                     .method      = "queue.list",
-                    .params      = std::move(params).value(),
+                    .request     = request,
                     },
         .error = {},
     };
@@ -300,7 +298,7 @@ auto parse_queue_update(std::filesystem::path                socket_path,
                     .socket_path = std::move(socket_path),
                     .kind        = CommandKind::QueueUpdate,
                     .method      = "queue.update",
-                    .params      = std::move(params).value(),
+                    .request     = std::move(request),
                     },
         .error = {},
     };
@@ -337,7 +335,7 @@ void print_queue(Queue const& queue)
     fmt::print(stdout,
                "Queue {}: name={}, state={}, weight={}, concurrency_limit={}, recovery_policy={}\n",
                queue.id.to_string(),
-               queue.name,
+               escape_human(queue.name),
                queue_state_text(queue.state),
                queue.weight,
                queue.concurrency_limit,
@@ -363,7 +361,7 @@ void print_deleted_selector(QueueSelector const& selector)
         fmt::print(stdout, "Deleted queue id={}\n", id->to_string());
         return;
     }
-    fmt::print(stdout, "Deleted queue name={}\n", std::get<std::string>(selector));
+    fmt::print(stdout, "Deleted queue name={}\n", escape_human(std::get<std::string>(selector)));
 }
 
 } // namespace
@@ -397,33 +395,30 @@ auto parse_queue_command(std::filesystem::path                socket_path,
     return parse_failure("unknown queue action");
 }
 
-auto print_queue_result(Command const& command, JsonValue const& value, StandardAttributeRegistry const& registry)
-    -> bool
+auto print_queue_result(Command const& command, ControlReply const& value) -> bool
 {
     if (command.kind == CommandKind::QueueList) {
-        auto page = queue_page_from_json(value, registry);
+        auto const* page = std::get_if<QueuePage>(&value);
         if (!page) {
-            log_error("Invalid {} response: {} ({})", command.method, page.error().message, page.error().code);
             return false;
         }
-        print_queue_page(page.value());
+        print_queue_page(*page);
         return true;
     }
     if (command.kind == CommandKind::QueueDelete) {
-        if (!value.is_null() || !command.selector) {
-            log_error("Invalid {} response", command.method);
+        auto const* selector = std::get_if<QueueSelector>(&command.request);
+        if (!std::holds_alternative<EmptyReply>(value) || !selector) {
             return false;
         }
-        print_deleted_selector(*command.selector);
+        print_deleted_selector(*selector);
         return true;
     }
 
-    auto queue = queue_from_json(value, registry);
+    auto const* queue = std::get_if<Queue>(&value);
     if (!queue) {
-        log_error("Invalid {} response: {} ({})", command.method, queue.error().message, queue.error().code);
         return false;
     }
-    print_queue(queue.value());
+    print_queue(*queue);
     return true;
 }
 

@@ -1,18 +1,22 @@
 #include "application.hpp"
+#include "attribute_registry.hpp"
 #include "byte_buffer.hpp"
 #include "framing.hpp"
 #include "json.hpp"
 #include "local_server.hpp"
 #include "local_socket.hpp"
+#include "management_json.hpp"
 #include "process.hpp"
 #include "support/temporary_directory.hpp"
 #include "system_info.hpp"
+#include "utc_timestamp.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -31,6 +35,9 @@ enum class PeerBehavior : std::uint8_t {
     RemoteError,
     InvalidInfo,
     InvalidResult,
+    MissingCapability,
+    ControlInfo,
+    LargeRevision,
     SilentHandshake,
     SilentCommand
 };
@@ -44,7 +51,9 @@ struct Exchange {
 
 /// Runs the executable against a scripted peer, driven entirely by socket/process readiness.
 /// @throws Catch::TestFailureException when setup, framing, or the child watchdog fails.
-auto run_session(PeerBehavior behavior) -> Exchange
+auto run_session(PeerBehavior             behavior,
+                 std::vector<std::string> command        = {"queue", "list"},
+                 std::vector<std::string> global_options = {}) -> Exchange
 {
     Exchange                     exchange;
     Application                  app{0, nullptr};
@@ -65,7 +74,7 @@ auto run_session(PeerBehavior behavior) -> Exchange
             auto const& method = fields.at("method").as_string();
             exchange.methods.push_back(method);
             if (behavior == PeerBehavior::SilentHandshake ||
-                (behavior == PeerBehavior::SilentCommand && method == "queue.list")) {
+                (behavior == PeerBehavior::SilentCommand && method != "system.info")) {
                 continue;
             }
 
@@ -75,9 +84,13 @@ auto run_session(PeerBehavior behavior) -> Exchange
             };
             if (method == "system.info") {
                 auto info = system_info_to_json({
-                    .daemon_version = "fixture",
-                    .api_version    = {.major = 1,   .minor = 2   },
-                    .capabilities   = {"queue.list", "system.info"}
+                    .daemon_version = behavior == PeerBehavior::ControlInfo ? "fixture\x1b[31m" : "fixture",
+                    .api_version    = {.major = 1, .minor = 2},
+                    .capabilities   = behavior == PeerBehavior::MissingCapability
+                                        ? std::vector<std::string>{"system.info"}
+                                        : std::vector<std::string>{"job.get",
+                                       "queue.create", "queue.delete",
+                                       "queue.list", "system.info"}
                 });
                 response.emplace("result", behavior == PeerBehavior::InvalidInfo ? JsonValue{} : std::move(info));
             }
@@ -86,6 +99,33 @@ auto run_session(PeerBehavior behavior) -> Exchange
                     R"({"code":-32000,"message":"fixture rejection","data":{"category":"conflict","code":"jobu.fixture.conflict"}})");
                 REQUIRE(error);
                 response.emplace("error", std::move(*error));
+            }
+            else if (method == "queue.delete") {
+                response.emplace("result", JsonValue{});
+            }
+            else if (method == "job.get" && behavior == PeerBehavior::LargeRevision) {
+                StandardAttributeRegistry registry;
+                auto                      id         = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff");
+                auto                      at         = parse_utc_timestamp("2030-01-01T00:00:00Z");
+                auto                      attributes = materialize_attributes(registry, {}, {}, {});
+                auto                      payload    = parse_json(R"({"command":"/bin/true"})");
+                REQUIRE(id);
+                REQUIRE(at);
+                REQUIRE(attributes);
+                REQUIRE(payload);
+                auto job = JobDefinition{
+                    .id         = *id,
+                    .queue_id   = *id,
+                    .revision   = std::numeric_limits<std::uint64_t>::max(),
+                    .schedule   = OnceSchedule{.planned_at = *at},
+                    .attributes = *attributes,
+                    .payload    = *payload,
+                    .created_at = *at,
+                    .updated_at = *at,
+                };
+                auto encoded_job = job_to_json(job, registry);
+                REQUIRE(encoded_job);
+                response.emplace("result", std::move(*encoded_job));
             }
             else {
                 auto page = parse_json(R"({"items":[],"next_after_id":null})");
@@ -117,12 +157,13 @@ auto run_session(PeerBehavior behavior) -> Exchange
 
     auto const socket_path = directory.path() / "custom.sock";
     REQUIRE(listener.listen(socket_path));
-    REQUIRE(child.start({
-        .executable        = JOBUCTL_EXECUTABLE,
-        .arguments         = {"--socket", socket_path.string(), "queue", "list"},
-        .timeout           = std::chrono::seconds{15},
-        .termination_grace = std::chrono::milliseconds{0}
-    }));
+    auto arguments = std::vector<std::string>{"--socket", socket_path.string()};
+    arguments.insert(arguments.end(), global_options.begin(), global_options.end());
+    arguments.insert(arguments.end(), command.begin(), command.end());
+    REQUIRE(child.start({.executable        = JOBUCTL_EXECUTABLE,
+                         .arguments         = std::move(arguments),
+                         .timeout           = std::chrono::seconds{15},
+                         .termination_grace = std::chrono::milliseconds{0}}));
     REQUIRE(app.exec() == EXIT_SUCCESS);
     REQUIRE(exchange.exit);
     INFO(exchange.error);
@@ -152,43 +193,129 @@ TEST_CASE("jobuctl session preserves represented remote errors", "[jobuctl][sess
     CHECK(exchange.error == "jobuctl: fixture rejection (jobu.fixture.conflict)\n");
 }
 
+TEST_CASE("jobuctl JSON mode emits one typed result or structured error", "[jobuctl][session]")
+{
+    SECTION("successful page")
+    {
+        auto exchange = run_session(PeerBehavior::EmptyPage, {"queue", "list"}, {"--json"});
+        CHECK(exchange.exit->exit_code == 0);
+        CHECK(exchange.output == "{\"items\":[],\"next_after_id\":null}\n");
+        CHECK(exchange.error.empty());
+    }
+    SECTION("remote application error")
+    {
+        auto exchange = run_session(PeerBehavior::RemoteError, {"queue", "list"}, {"--json"});
+        CHECK(exchange.exit->exit_code == 1);
+        CHECK(exchange.output.empty());
+        auto value = parse_json(exchange.error);
+        REQUIRE(value);
+        auto const& error = value->as_object().at("error").as_object();
+        CHECK(error.at("kind").as_string() == "remote");
+        CHECK(error.at("code").as_string() == "jobu.fixture.conflict");
+        CHECK(error.at("rpc_code").as_int() == -32000);
+        CHECK(error.at("category").as_string() == "conflict");
+        CHECK(error.at("message").as_string() == "fixture rejection");
+        CHECK_FALSE(error.at("outcome_unknown").as_bool());
+    }
+    SECTION("system info reuses the handshake")
+    {
+        auto exchange = run_session(PeerBehavior::EmptyPage, {"system", "info"}, {"--json"});
+        CHECK(exchange.methods == std::vector<std::string>{"system.info"});
+        CHECK(exchange.exit->exit_code == 0);
+        CHECK(exchange.error.empty());
+        auto value = parse_json(exchange.output);
+        REQUIRE(value);
+        CHECK(value->as_object().at("daemon_version").as_string() == "fixture");
+    }
+    SECTION("successful null reply")
+    {
+        auto exchange = run_session(PeerBehavior::EmptyPage, {"queue", "delete", "--name", "reports"}, {"--json"});
+        CHECK(exchange.exit->exit_code == 0);
+        CHECK(exchange.output == "null\n");
+        CHECK(exchange.error.empty());
+    }
+    SECTION("large unsigned revision remains an integer")
+    {
+        auto exchange = run_session(PeerBehavior::LargeRevision,
+                                    {"job", "get", "00112233-4455-6677-8899-aabbccddeeff"},
+                                    {"--json"});
+        CHECK(exchange.exit->exit_code == 0);
+        CHECK(exchange.error.empty());
+        auto value = parse_json(exchange.output);
+        REQUIRE(value);
+        CHECK(value->as_object().at("revision").as_uint() == std::numeric_limits<std::uint64_t>::max());
+    }
+}
+
+TEST_CASE("jobuctl handles missing capability before sending the command", "[jobuctl][session]")
+{
+    auto exchange = run_session(PeerBehavior::MissingCapability, {"queue", "list"}, {"--json"});
+    CHECK(exchange.methods == std::vector<std::string>{"system.info"});
+    CHECK(exchange.exit->exit_code == 1);
+    CHECK(exchange.output.empty());
+    auto value = parse_json(exchange.error);
+    REQUIRE(value);
+    CHECK(value->as_object().at("error").as_object().at("code").as_string() == "jobu.client.unsupported_method");
+}
+
+TEST_CASE("jobuctl human output escapes daemon control characters", "[jobuctl][session]")
+{
+    auto exchange = run_session(PeerBehavior::ControlInfo, {"system", "info"});
+    CHECK(exchange.exit->exit_code == 0);
+    CHECK(exchange.output.find("Daemon version: fixture\\x1B[31m\n") == 0);
+    CHECK(exchange.output.find('\x1b') == std::string::npos);
+}
+
 TEST_CASE("jobuctl session rejects malformed handshake and command results", "[jobuctl][session]")
 {
     SECTION("handshake rejection prevents command submission")
     {
         auto exchange = run_session(PeerBehavior::InvalidInfo);
         CHECK(exchange.methods == std::vector<std::string>{"system.info"});
-        CHECK(exchange.exit->exit_code == EXIT_FAILURE);
+        CHECK(exchange.exit->exit_code == 3);
         CHECK(exchange.output.empty());
-        CHECK(exchange.error.find("Invalid system.info response") != std::string::npos);
+        CHECK(exchange.error.find("JobU response is invalid") != std::string::npos);
     }
     SECTION("invalid command result is not printed")
     {
         auto exchange = run_session(PeerBehavior::InvalidResult);
         CHECK(exchange.methods == std::vector<std::string>{"system.info", "queue.list"});
-        CHECK(exchange.exit->exit_code == EXIT_FAILURE);
+        CHECK(exchange.exit->exit_code == 3);
         CHECK(exchange.output.empty());
-        CHECK(exchange.error.find("Invalid queue.list response") != std::string::npos);
+        CHECK(exchange.error.find("JobU response is invalid") != std::string::npos);
     }
 }
 
-TEST_CASE("jobuctl session deadline identifies the pending operation", "[jobuctl][session]")
+TEST_CASE("jobuctl session enforces one overall command deadline", "[jobuctl][session]")
 {
-    // Exercise the real five-second deadline, with a longer child watchdog and no timing-window assertions.
+    // A silent peer leaves the selected phase pending; the short configured deadline bounds the process.
     SECTION("handshake timeout")
     {
-        auto exchange = run_session(PeerBehavior::SilentHandshake);
+        auto exchange = run_session(PeerBehavior::SilentHandshake, {"queue", "list"}, {"--timeout", "50"});
         CHECK(exchange.methods == std::vector<std::string>{"system.info"});
-        CHECK(exchange.exit->exit_code == EXIT_FAILURE);
+        CHECK(exchange.exit->exit_code == 3);
         CHECK(exchange.output.empty());
-        CHECK(exchange.error == "jobuctl: system.info request timed out\n");
+        CHECK(exchange.error == "jobuctl: Overall command deadline expired\n");
     }
     SECTION("command timeout")
     {
-        auto exchange = run_session(PeerBehavior::SilentCommand);
+        auto exchange = run_session(PeerBehavior::SilentCommand, {"queue", "list"}, {"--timeout", "50"});
         CHECK(exchange.methods == std::vector<std::string>{"system.info", "queue.list"});
-        CHECK(exchange.exit->exit_code == EXIT_FAILURE);
+        CHECK(exchange.exit->exit_code == 3);
         CHECK(exchange.output.empty());
-        CHECK(exchange.error == "jobuctl: queue.list request timed out\n");
+        CHECK(exchange.error == "jobuctl: Overall command deadline expired\n");
+    }
+    SECTION("unobserved mutation reports uncertainty")
+    {
+        auto exchange =
+            run_session(PeerBehavior::SilentCommand, {"queue", "create", "reports"}, {"--json", "--timeout", "50"});
+        CHECK(exchange.methods == std::vector<std::string>{"system.info", "queue.create"});
+        CHECK(exchange.exit->exit_code == 3);
+        CHECK(exchange.output.empty());
+        auto value = parse_json(exchange.error);
+        REQUIRE(value);
+        auto const& error = value->as_object().at("error").as_object();
+        CHECK(error.at("code").as_string() == "jobu.client.timeout");
+        CHECK(error.at("outcome_unknown").as_bool());
     }
 }

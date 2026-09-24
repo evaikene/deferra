@@ -1,24 +1,14 @@
 #include "session_priv.hpp"
 
 #include "client.hpp"
-#include "commands/commands_priv.hpp"
 #include "local_socket.hpp"
-#include "logging.hpp"
 #include "object_priv.hpp"
-#include "output_priv.hpp"
-#include "protocol.hpp"
-#include "system_info.hpp"
 #include "timer.hpp"
 
-#include <fmt/format.h>
-
-#include <algorithm>
 #include <chrono>
-#include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <memory>
-#include <string>
+#include <optional>
 #include <utility>
 
 namespace jb::jobuctl::detail {
@@ -26,17 +16,106 @@ namespace jb::jobuctl::detail {
 using namespace jb::core;
 using namespace jb::jobu;
 using namespace jb::net;
-using namespace jb::rpc;
 
 namespace {
 
 enum class SessionPhase : std::uint8_t {
     Idle,
     Connecting,
-    SystemInfo,
+    Initializing,
     Command,
-    Finished
+    Finished,
 };
+
+auto is_mutation(CommandKind kind) noexcept -> bool
+{
+    switch (kind) {
+        case CommandKind::QueueCreate:
+        case CommandKind::QueueUpdate:
+        case CommandKind::QueueSuspend:
+        case CommandKind::QueueResume:
+        case CommandKind::QueueDelete:
+        case CommandKind::JobCreate:
+        case CommandKind::JobUpdate:
+        case CommandKind::JobSuspend:
+        case CommandKind::JobResume:
+        case CommandKind::JobMove:
+        case CommandKind::JobDelete:
+            return true;
+        case CommandKind::SystemInfo:
+        case CommandKind::QueueGet:
+        case CommandKind::QueueList:
+        case CommandKind::JobGet:
+        case CommandKind::JobList:
+            return false;
+    }
+    return false;
+}
+
+auto call_command(ControlClient& client, Command const& command, ControlCallOptions options)
+    -> Result<ControlCallId, Error>
+{
+    // The builders and request-file decoder establish the request alternative paired with each kind.
+    switch (command.kind) {
+        case CommandKind::QueueCreate:
+            return client.create_queue(std::get<CreateQueueRequest>(command.request), options);
+        case CommandKind::QueueGet:
+            return client.get_queue(std::get<QueueSelector>(command.request), options);
+        case CommandKind::QueueList:
+            return client.list_queues(std::get<QueueListRequest>(command.request), options);
+        case CommandKind::QueueUpdate:
+            return client.update_queue(std::get<UpdateQueueRequest>(command.request), options);
+        case CommandKind::QueueSuspend:
+            return client.suspend_queue(std::get<QueueSelector>(command.request), options);
+        case CommandKind::QueueResume:
+            return client.resume_queue(std::get<QueueSelector>(command.request), options);
+        case CommandKind::QueueDelete:
+            return client.delete_queue(std::get<QueueSelector>(command.request), options);
+        case CommandKind::JobCreate:
+            return client.create_job(std::get<CreateJobRequest>(command.request), options);
+        case CommandKind::JobGet:
+            return client.get_job(std::get<Uuid>(command.request), options);
+        case CommandKind::JobList:
+            return client.list_jobs(std::get<JobListRequest>(command.request), options);
+        case CommandKind::JobUpdate:
+            return client.update_job(std::get<UpdateJobRequest>(command.request), options);
+        case CommandKind::JobSuspend:
+            return client.suspend_job(std::get<Uuid>(command.request), options);
+        case CommandKind::JobResume:
+            return client.resume_job(std::get<Uuid>(command.request), options);
+        case CommandKind::JobMove:
+            return client.move_job(std::get<MoveJobRequest>(command.request), options);
+        case CommandKind::JobDelete:
+            return client.delete_job(std::get<DeleteJobRequest>(command.request), options);
+        case CommandKind::SystemInfo:
+            break;
+    }
+    return Result<ControlCallId, Error>::failure({
+        .category = ErrorCategory::Internal,
+        .code     = "jobuctl.session.invalid_command",
+        .message  = "Unable to issue the command",
+    });
+}
+
+auto remaining_options(TimePoint deadline) -> std::optional<ControlCallOptions>
+{
+    auto const remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now());
+    if (remaining.count() <= 0) {
+        return std::nullopt;
+    }
+    return ControlCallOptions{.timeout = remaining};
+}
+
+auto operation_exit(Error const& error) -> int
+{
+    if (error.code == "jobu.client.unsupported_method" || error.category == ErrorCategory::Unsupported) {
+        return 1;
+    }
+    if (error.category == ErrorCategory::InvalidArgument && error.code != "jobu.client.invalid_response") {
+        return 2;
+    }
+    return 3;
+}
 
 } // namespace
 
@@ -49,12 +128,14 @@ struct Session::Private : jb::core::priv::ObjectPrivate {
     Command                          command;
     StandardAttributeRegistry const& registry;
 
-    // Reverse destruction stops the timer and releases the client before its borrowed socket.
-    // These value/unique-owned Objects have no parent, avoiding a second ownership path.
-    LocalSocket             socket;
-    std::unique_ptr<Client> client;
-    Timer                   timeout;
-    SessionPhase            phase{SessionPhase::Idle};
+    // Reverse destruction stops the timer and typed client before their borrowed RPC client and socket.
+    LocalSocket                      socket;
+    std::unique_ptr<jb::rpc::Client> rpc;
+    std::unique_ptr<ControlClient>   control;
+    Timer                            timer;
+    SessionPhase                     phase{SessionPhase::Idle};
+    TimePoint                        deadline;
+    std::optional<ControlCallId>     active_call;
 };
 
 Session::Session(Command command, StandardAttributeRegistry const& registry)
@@ -62,28 +143,32 @@ Session::Session(Command command, StandardAttributeRegistry const& registry)
           *new Private{std::move(command), registry}
 }
 {
-    // Install receiver-aware connections only after Object owns the complete private block.
+    // Receiver-aware observers are installed after Object owns its only private allocation.
     auto* data = d_ptr<Private>();
     data->socket.set_read_buffer_limit(std::size_t{2} * 1024U * 1024U);
-    data->socket.error_occurred.connect(this, [this](IOError, std::string const& message) {
-        finish_operator_error(message);
+    data->socket.error_occurred.connect(this, [this](IOError, std::string const&) {
+        auto* state = d_ptr<Private>();
+        finish(3,
+               local_error(
+                   {
+                       .category = ErrorCategory::Io,
+                       .code     = "jobuctl.connection_failed",
+                       .message  = "Daemon socket connection failed",
+                   },
+                   state->active_call && is_mutation(state->command.kind)));
     });
     data->socket.connected.connect(this, [this] { connected(); });
-    data->timeout.timeout.connect(this, [this] {
-        auto*      state = d_ptr<Private>();
-        auto const method =
-            state->phase == SessionPhase::Command ? state->command.method : std::string_view{"system.info"};
-        finish_operator_error(fmt::format("{} request timed out", method));
-    });
+    data->timer.timeout.connect(this, [this] { deadline_expired(); });
 }
 
 Session::~Session()
 {
-    // Quiesce event sources while the derived object is intact. No completion is emitted during teardown.
+    // Stop borrowed-client callbacks while this derived object and its signals are intact.
     auto* data  = d_ptr<Private>();
     data->phase = SessionPhase::Finished;
-    data->timeout.stop();
-    data->client.reset();
+    data->timer.stop();
+    data->control.reset();
+    data->rpc.reset();
 }
 
 void Session::start()
@@ -93,40 +178,43 @@ void Session::start()
         return;
     }
 
-    data->phase = SessionPhase::Connecting;
-    data->timeout.start(std::chrono::seconds{5});
+    data->phase    = SessionPhase::Connecting;
+    data->deadline = Clock::now() + std::chrono::duration_cast<Clock::duration>(data->command.timeout);
+    data->timer.start(data->command.timeout);
     data->socket.connect_to_server(data->command.socket_path);
 }
 
-void Session::finish(int code)
+void Session::finish(int code, std::optional<CliError> error)
 {
     auto* data = d_ptr<Private>();
     if (data->phase == SessionPhase::Finished) {
         return;
     }
 
-    // Latch completion before notifying the application; retained callbacks become harmless.
+    // Latch completion before close() emits any pending-call failures through receiver-aware observers.
     data->phase = SessionPhase::Finished;
-    data->timeout.stop();
+    data->timer.stop();
+    if (data->control) {
+        data->control->close();
+    }
+    if (error) {
+        print_error(data->command.json, *error);
+    }
     emit(finished, code);
 }
 
-void Session::finish_operator_error(std::string_view message)
+void Session::deadline_expired()
 {
-    if (d_ptr<Private>()->phase == SessionPhase::Finished) {
-        return;
-    }
-    print_operator_error(message);
-    finish(EXIT_FAILURE);
-}
-
-void Session::finish_call_error(std::string_view method, Error const& error)
-{
-    if (d_ptr<Private>()->phase == SessionPhase::Finished) {
-        return;
-    }
-    log_error("Unable to send the {} request: {} ({})", method, error.message, error.code);
-    finish(EXIT_FAILURE);
+    auto*      data    = d_ptr<Private>();
+    auto const unknown = data->active_call && is_mutation(data->command.kind);
+    finish(3,
+           local_error(
+               {
+                   .category = ErrorCategory::Timeout,
+                   .code     = "jobu.client.timeout",
+                   .message  = "Overall command deadline expired",
+               },
+               unknown));
 }
 
 void Session::connected()
@@ -136,84 +224,98 @@ void Session::connected()
         return;
     }
 
-    // Establish every observer before call(): the raw client may deliver a response synchronously.
-    data->client = std::make_unique<Client>(data->socket);
-    data->client->result_received.connect(this,
-                                          [this](RequestId const&, JsonValue const& value) { receive_result(value); });
-    data->client->error_received.connect(this, [this](RequestId const&, RpcError const& error) {
-        if (d_ptr<Private>()->phase == SessionPhase::Finished) {
-            return;
-        }
-        print_remote_error(error);
-        finish(EXIT_FAILURE);
+    data->rpc     = std::make_unique<jb::rpc::Client>(data->socket);
+    data->control = std::make_unique<ControlClient>(*data->rpc, data->registry);
+    data->control->ready.connect(this, [this](SystemInfo const& info) { ready(info); });
+    data->control->reply_received.connect(this, [this](ControlCallId id, ControlReply const& reply) {
+        receive_reply(id, reply);
     });
-    data->client->request_failed.connect(this, [this](RequestId const&, Error const& error) {
-        finish_operator_error(error.message);
+    data->control->call_failed.connect(this, [this](ControlCallId id, ControlFailure const& failure) {
+        receive_failure(id, failure);
     });
-    data->client->protocol_error.connect(this, [this](Error const& error) {
-        if (d_ptr<Private>()->phase == SessionPhase::Finished) {
-            return;
-        }
-        log_error("RPC protocol error: {} ({})", error.message, error.code);
-        finish(EXIT_FAILURE);
+    data->control->failed.connect(this, [this](Error const& error) {
+        finish(3, local_error(error, d_ptr<Private>()->active_call && is_mutation(d_ptr<Private>()->command.kind)));
     });
 
-    data->phase = SessionPhase::SystemInfo;
-    auto call   = data->client->call("system.info");
-    if (!call) {
-        finish_call_error("system.info", call.error());
+    data->phase  = SessionPhase::Initializing;
+    auto options = remaining_options(data->deadline);
+    if (!options) {
+        deadline_expired();
+        return;
+    }
+    auto started = data->control->initialize(*options);
+    if (!started) {
+        finish(operation_exit(started.error()), local_error(started.error()));
     }
 }
 
-void Session::receive_result(JsonValue const& value)
+void Session::ready(SystemInfo const& info)
 {
     auto* data = d_ptr<Private>();
-    if (data->phase == SessionPhase::Finished) {
+    if (data->phase != SessionPhase::Initializing) {
+        return;
+    }
+    if (data->command.kind == CommandKind::SystemInfo) {
+        if (!print_command_result(data->command, ControlReply{info}, data->registry)) {
+            finish(3,
+                   local_error({
+                       .category = ErrorCategory::Internal,
+                       .code     = "jobuctl.output.invalid_reply",
+                       .message  = "Unable to render the daemon reply",
+                   }));
+            return;
+        }
+        finish(0);
         return;
     }
 
-    // The information command displays the handshake itself. Other commands require compatible capabilities.
-    if (data->phase == SessionPhase::SystemInfo) {
-        auto info = system_info_from_json(value);
-        if (!info) {
-            log_error("Invalid system.info response: {} ({})", info.error().message, info.error().code);
-            finish(EXIT_FAILURE);
-            return;
-        }
-        if (data->command.kind == CommandKind::SystemInfo) {
-            print_system_info(info.value());
-            finish(EXIT_SUCCESS);
-            return;
-        }
-        if (info->api_version.major != 1U) {
-            finish_operator_error("the daemon uses an incompatible API major version");
-            return;
-        }
-        if (std::find(info->capabilities.begin(), info->capabilities.end(), data->command.method) ==
-            info->capabilities.end()) {
-            finish_operator_error(fmt::format("the daemon does not advertise {}", data->command.method));
-            return;
-        }
+    auto options = remaining_options(data->deadline);
+    if (!options) {
+        deadline_expired();
+        return;
+    }
+    data->phase = SessionPhase::Command;
+    auto call   = call_command(*data->control, data->command, *options);
+    if (!call) {
+        finish(operation_exit(call.error()), local_error(call.error()));
+        return;
+    }
+    data->active_call = *call;
+}
 
-        // Keep the original two-call protocol and set the phase before possible synchronous delivery.
-        data->phase = SessionPhase::Command;
-        auto call   = data->client->call(data->command.method, data->command.params);
-        if (!call) {
-            finish_call_error(data->command.method, call.error());
-        }
+void Session::receive_reply(ControlCallId id, ControlReply const& reply)
+{
+    auto* data = d_ptr<Private>();
+    if (data->phase != SessionPhase::Command || data->active_call != id) {
         return;
     }
+    data->active_call.reset();
+    if (!print_command_result(data->command, reply, data->registry)) {
+        finish(3,
+               local_error({
+                   .category = ErrorCategory::Internal,
+                   .code     = "jobuctl.output.invalid_reply",
+                   .message  = "Unable to render the daemon reply",
+               }));
+        return;
+    }
+    finish(0);
+}
 
-    if (data->phase != SessionPhase::Command) {
-        log_error("Received an RPC result in an invalid command-session phase");
-        finish(EXIT_FAILURE);
+void Session::receive_failure(ControlCallId id, ControlFailure const& failure)
+{
+    auto* data = d_ptr<Private>();
+    if (data->phase != SessionPhase::Command || data->active_call != id) {
         return;
     }
-    if (!print_command_result(data->command, value, data->registry)) {
-        finish(EXIT_FAILURE);
-        return;
+    data->active_call.reset();
+    if (failure.kind == ControlFailureKind::Remote) {
+        finish(1, remote_error(std::get<jb::rpc::RpcError>(failure.error)));
     }
-    finish(EXIT_SUCCESS);
+    else {
+        auto const& error = std::get<Error>(failure.error);
+        finish(operation_exit(error), local_error(error, failure.outcome_unknown));
+    }
 }
 
 } // namespace jb::jobuctl::detail

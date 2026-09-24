@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -93,7 +94,14 @@ auto run_client(std::vector<std::string> arguments,
     REQUIRE(exchange.exit);
     INFO(exchange.output);
     REQUIRE(exchange.exit->kind == ProcessExitKind::Exited);
-    REQUIRE(exchange.exit->exit_code == (exchange.connections == 0 ? 2 : EXIT_FAILURE));
+    auto expected_exit = 1;
+    if (exchange.connections == 0) {
+        expected_exit = 2;
+    }
+    else if (info.api_version.major != 1) {
+        expected_exit = 3;
+    }
+    REQUIRE(exchange.exit->exit_code == expected_exit);
     REQUIRE_FALSE(exchange.exit->stdout_lost);
     REQUIRE_FALSE(exchange.exit->stderr_lost);
     return exchange;
@@ -176,6 +184,24 @@ TEST_CASE("jobuctl sends CLI creation fields through job.create on older API min
             exchange,
             R"({"command":"true","working_directory":"/tmp","environment":{"PATH":"/bin:/usr/bin","EMPTY":"","VALUE":"left=right","OLD":null,"OTHER":null},"expected_exit_codes":[255,0]})");
     }
+}
+
+TEST_CASE("jobuctl sends a complete request file through the typed session", "[jobuctl][cli]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   path = directory.path() / "create.json";
+    {
+        auto file = std::ofstream{path, std::ios::binary};
+        REQUIRE(file);
+        file
+            << R"({"queue_name":"fixture","type":"cli","schedule":{"kind":"once","at":"2030-01-01T00:00:00Z"},"payload":{"command":"/bin/true"}})";
+    }
+
+    auto exchange = run_client({"job", "create", "--request-file", path.string()});
+    REQUIRE(exchange.methods == std::vector<std::string>{"system.info", "job.create"});
+    REQUIRE(exchange.params);
+    CHECK(exchange.params->as_object().at("queue_name").as_string() == "fixture");
+    CHECK(exchange.params->as_object().at("payload").as_object().at("command").as_string() == "/bin/true");
 }
 
 TEST_CASE("jobuctl omits unsupplied CLI fields and preserves explicit defaults", "[jobuctl][cli]")

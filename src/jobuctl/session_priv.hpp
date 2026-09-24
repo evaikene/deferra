@@ -1,37 +1,38 @@
 #pragma once
 
 #include "command_line_priv.hpp"
-#include "error.hpp"
+#include "control_client.hpp"
 #include "object.hpp"
+#include "output_priv.hpp"
 #include "signal.hpp"
 
-#include <string_view>
+#include <optional>
 
 namespace jb::jobuctl::detail {
 
 /// One owner-thread command session. The borrowed registry must outlive the session.
-/// Owns socket, raw RPC client and deadline; construction performs no I/O.
-/// Destroy only after callback stacks unwind. No typed-client or retry policy is added here.
+/// Owns the socket, raw RPC client, typed client, and one overall deadline; construction performs no I/O.
+/// Destroy after signal callback stacks unwind.
 class Session final : public jb::core::Object {
 public:
     Session(Command command, jb::jobu::StandardAttributeRegistry const& registry);
     ~Session() override;
 
-    /// Starts connection and the existing five-second overall deadline once.
-    /// Completion can occur synchronously; connect finished before calling start().
+    /// Starts connection once. Connect finished before calling start(); connection may complete synchronously.
     void start();
 
-    /// Emitted once after terminal state is latched and the deadline is stopped.
+    /// Emitted once after terminal state is latched and observation has stopped.
     jb::core::Signal<int> finished;
 
 private:
     struct Private;
 
     void connected();
-    void receive_result(jb::core::JsonValue const& value);
-    void finish(int code);
-    void finish_operator_error(std::string_view message);
-    void finish_call_error(std::string_view method, jb::core::Error const& error);
+    void ready(jb::jobu::SystemInfo const& info);
+    void receive_reply(jb::jobu::ControlCallId id, jb::jobu::ControlReply const& reply);
+    void receive_failure(jb::jobu::ControlCallId id, jb::jobu::ControlFailure const& failure);
+    void deadline_expired();
+    void finish(int code, std::optional<CliError> error = std::nullopt);
 };
 
 } // namespace jb::jobuctl::detail
