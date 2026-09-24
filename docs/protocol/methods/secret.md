@@ -103,5 +103,5 @@ Backend diagnostics and submitted bytes are never included in generated
 errors, metadata, or capabilities. Storage is plaintext SQLite, and execution
 or captured output can expose values as described in [Named secrets](../../secrets.md).
 
-`jobuctl secret` commands and typed C++ client members are planned for later
-Phase 8 stages; these three RPC methods are available now.
+These methods are available through the typed C++ client and through
+[`jobuctl secret` commands](../../jobuctl.md#named-secrets).

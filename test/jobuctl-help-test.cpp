@@ -202,6 +202,10 @@ TEST_CASE("jobuctl executable prints local help with blocked or closed stdin", "
                  {"queue", "add", "--help"},
                  {"help", "queue", "add"},
                  {"job", "create", "--help"},
+                 {"secret"},
+                 {"secret", "set", "--stdin", "--help"},
+                 {"secret", "list", "--help"},
+                 {"secret", "delete", "--help"},
                  {"queue", "get", "--id", "not-a-uuid", "--socket", "/nonexistent/jobu.sock", "--help"}
         }) {
             CAPTURE(blocked, arguments);
@@ -230,7 +234,7 @@ TEST_CASE("jobuctl executable rejects invalid help syntax with contextual stderr
              {"queue", "list", "--", "--help"},
              {"queue", "list"},
              {"run", "unknown", "--help"},
-             {"secret", "set", "--stdin", "--help"}
+             {"secret", "unknown", "--help"}
     }) {
         CAPTURE(arguments);
         auto result = run(arguments);
@@ -261,5 +265,10 @@ TEST_CASE("jobuctl local selection does not open supplied file paths", "[jobuctl
         CHECK(result.code == 0);
         CHECK(result.out.find("Usage:\n") == 0);
         CHECK(result.err.empty());
+
+        auto secret = run({"secret", "set", "reports.token", "--file", path.string(), "--help"});
+        CHECK(secret.code == 0);
+        CHECK(secret.out.find("Usage:\n") == 0);
+        CHECK(secret.err.empty());
     }
 }

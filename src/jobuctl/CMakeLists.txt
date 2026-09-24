@@ -22,6 +22,7 @@ add_library(jobuctl-private STATIC
     commands/job_commands.cpp
     commands/run_commands.cpp
     commands/attempt_commands.cpp
+    commands/secret_commands.cpp
 )
 target_include_directories(jobuctl-private PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(jobuctl-private PUBLIC cxx_std_20)

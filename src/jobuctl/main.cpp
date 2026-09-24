@@ -47,6 +47,11 @@ auto main(int argc, char* argv[]) -> int
         print_error(command.json, local_error(loaded.error()));
         return 2;
     }
+    auto secret_loaded = load_secret_input(command);
+    if (!secret_loaded) {
+        print_error(command.json, local_error(secret_loaded.error()));
+        return 2;
+    }
 
     jb::core::Application app{0, nullptr};
     Session               session{std::move(command), registry};

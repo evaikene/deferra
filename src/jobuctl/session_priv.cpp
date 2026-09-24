@@ -51,6 +51,8 @@ auto is_mutation(CommandKind kind) noexcept -> bool
         case CommandKind::JobDelete:
         case CommandKind::JobRunNow:
         case CommandKind::RunCancel:
+        case CommandKind::SecretSet:
+        case CommandKind::SecretDelete:
             return true;
         case CommandKind::SystemInfo:
         case CommandKind::QueueGet:
@@ -62,6 +64,7 @@ auto is_mutation(CommandKind kind) noexcept -> bool
         case CommandKind::AttemptGet:
         case CommandKind::AttemptList:
         case CommandKind::AttemptOutput:
+        case CommandKind::SecretList:
             return false;
     }
     return false;
@@ -116,6 +119,12 @@ auto call_command(ControlClient& client, Command const& command, ControlCallOpti
             return client.list_attempts(std::get<AttemptListRequest>(command.request), options);
         case CommandKind::AttemptOutput:
             return client.read_attempt_output(std::get<AttemptOutputRequest>(command.request), options);
+        case CommandKind::SecretSet:
+            return client.set_secret(std::get<SetSecretRequest>(command.request), options);
+        case CommandKind::SecretList:
+            return client.list_secrets(std::get<SecretListRequest>(command.request), options);
+        case CommandKind::SecretDelete:
+            return client.delete_secret(std::get<std::string>(command.request), options);
         case CommandKind::SystemInfo:
             break;
     }

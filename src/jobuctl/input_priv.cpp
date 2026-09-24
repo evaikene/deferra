@@ -5,6 +5,7 @@
 #include "history_json.hpp"
 #include "json.hpp"
 #include "management_json.hpp"
+#include "secret_json.hpp"
 
 #include <algorithm>
 #include <array>
@@ -49,6 +50,35 @@ auto read_bounded(std::istream& stream) -> Result<std::string, Error>
     }
     return Result<std::string, Error>::failure(
         input_error("jobuctl.input.too_large", "Request input exceeds the RPC body limit"));
+}
+
+auto read_secret_bytes(std::istream& stream) -> Result<ByteBuffer, Error>
+{
+    constexpr auto limit = std::size_t{65536};
+    auto           bytes = ByteBuffer{};
+    auto           block = std::array<char, 8192>{};
+
+    // Read one byte beyond the raw-value limit; neither text decoding nor trimming is appropriate here.
+    while (bytes.size() <= limit) {
+        auto const count = std::min(block.size(), limit + 1U - bytes.size());
+        stream.read(block.data(), static_cast<std::streamsize>(count));
+        auto const chunk = as_bytes(std::string_view{block.data(), static_cast<std::size_t>(stream.gcount())});
+        bytes.insert(bytes.end(), chunk.begin(), chunk.end());
+
+        if (stream.bad() || (stream.fail() && !stream.eof())) {
+            return Result<ByteBuffer, Error>::failure(
+                input_error("jobuctl.input.read_failed", "Unable to read secret input"));
+        }
+        if (bytes.size() > limit) {
+            return Result<ByteBuffer, Error>::failure(
+                input_error("jobuctl.input.too_large", "Secret input exceeds 65536 bytes"));
+        }
+        if (stream.eof()) {
+            return Result<ByteBuffer, Error>::success(std::move(bytes));
+        }
+    }
+    return Result<ByteBuffer, Error>::failure(
+        input_error("jobuctl.input.too_large", "Secret input exceeds 65536 bytes"));
 }
 
 template <typename T>
@@ -112,6 +142,12 @@ auto decode_request(CommandKind kind, JsonValue const& value, AttributeRegistry 
             return request_from(attempt_list_request_from_json(value));
         case CommandKind::AttemptOutput:
             return request_from(attempt_output_request_from_json(value));
+        case CommandKind::SecretSet:
+            return request_from(set_secret_request_from_json(value));
+        case CommandKind::SecretList:
+            return request_from(secret_list_request_from_json(value));
+        case CommandKind::SecretDelete:
+            return request_from(secret_delete_request_from_json(value));
         case CommandKind::SystemInfo:
             break;
     }
@@ -161,6 +197,30 @@ auto load_request_file(Command& command, StandardAttributeRegistry const& regist
         return Result<void, Error>::failure(std::move(request).error());
     }
     command.request = std::move(request).value();
+    return Result<void, Error>::success();
+}
+
+auto load_secret_input(Command& command) -> Result<void, Error>
+{
+    if (!command.secret_input) {
+        return Result<void, Error>::success();
+    }
+
+    auto  file   = std::ifstream{};
+    auto* stream = &std::cin;
+    if (command.secret_input->source == SecretInput::Source::File) {
+        file.open(command.secret_input->file, std::ios::binary);
+        if (!file) {
+            return Result<void, Error>::failure(input_error("jobuctl.input.open_failed", "Unable to open secret file"));
+        }
+        stream = &file;
+    }
+
+    auto bytes = read_secret_bytes(*stream);
+    if (!bytes) {
+        return Result<void, Error>::failure(std::move(bytes).error());
+    }
+    std::get<SetSecretRequest>(command.request).value = std::move(bytes).value();
     return Result<void, Error>::success();
 }
 

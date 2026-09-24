@@ -16,4 +16,8 @@ namespace jb::jobuctl::detail {
 [[nodiscard]] auto load_request_file(Command& command, jb::jobu::StandardAttributeRegistry const& registry)
     -> jb::core::Result<void, jb::core::Error>;
 
+/// Reads selected raw secret input without text conversion or newline trimming, after help selection.
+/// The input is bounded to 65,536 bytes and failures never include supplied bytes or paths.
+[[nodiscard]] auto load_secret_input(Command& command) -> jb::core::Result<void, jb::core::Error>;
+
 } // namespace jb::jobuctl::detail
