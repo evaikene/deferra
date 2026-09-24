@@ -1,9 +1,9 @@
 # Operation errors
 
-This page records implemented error identities as services are added. Secret
-operations are available through the C++ `SecretService` and the registered
-`secret.set`, `secret.list`, and `secret.delete` RPC methods. See
-[secret method requests and results](methods/secret.md).
+This page records implemented error identities. Secret operations are available
+through the C++ `SecretService` and the registered `secret.set`, `secret.list`,
+and `secret.delete` RPC methods. See [secret method requests and
+results](methods/secret.md).
 
 ## Secret service
 
@@ -61,14 +61,30 @@ Malformed stored templates or failed scans abort deletion and trigger the fatal
 storage boundary. Bounded pages limit memory use, not total scan latency.
 There is no public secret-value read API.
 
-## History cursors
+## History and statistics reads
+
+Malformed RPC params return JSON-RPC invalid params (`-32602`). Validly shaped
+requests that fail a service rule return application `-32000` with safe
+`data:{category,code}`. No error includes a payload, output bytes, secret value,
+stored filters, SQL, or token internals.
 
 | Code | Category | Meaning |
 | --- | --- | --- |
+| `jobu.history.invalid_request` | InvalidArgument | A direct history read has an invalid limit, channel, or offset. The connection remains usable. |
 | `jobu.history.invalid_cursor` | InvalidArgument | A cursor is malformed, unknown, expired, evicted, or belongs to another method. The current request fails; the connection remains usable. Start a new initial query. |
 | `jobu.history.cursor_unavailable` | ResourceExhausted | The server could not issue a unique continuation token. The current query fails; the connection remains usable. |
+| `jobu.run.not_found` | NotFound | A requested retained run does not exist. |
+| `jobu.attempt.not_found` | NotFound | A requested retained attempt does not exist. |
+| `jobu.statistics.invalid_request` | InvalidArgument | The resolved window, limit, scope, or grouping is invalid. |
+| `jobu.statistics.invalid_cursor` | InvalidArgument | A statistics cursor is unknown, expired, evicted, or belongs to the other statistics scope. Start a new initial query. |
+| `jobu.statistics.cursor_unavailable` | ResourceExhausted | The server could not issue a unique statistics continuation token. |
+| `jobu.response.too_large` | ResourceExhausted | A result cannot fit the configured RPC response bound. No read data is truncated into a misleading success; a mutation may already have committed. |
+| `jobu.service.stopping` | Unavailable | History or statistics read admission has closed during shutdown or fatal failure. |
 
-Neither error includes stored filters, SQL, or token internals. Cursor lifetime is fixed at five minutes from the initial page. Earlier eviction or server restart can invalidate it sooner.
+Cursor lifetime is fixed at five minutes from the initial page. Earlier eviction
+or server restart can invalidate it sooner. Ordinary read errors leave the
+connection usable; malformed persisted data, storage corruption, and poisoned
+connections close read admission and cause the daemon's fatal transition.
 
 ## Run controls and cron preview
 
@@ -89,7 +105,6 @@ backend detail and submitted payloads are not echoed.
 | `jobu.schedule.invalid_count` | InvalidArgument | Preview count is outside 1–200. |
 | `jobu.schedule.no_future_occurrence` | InvalidArgument | No later occurrence exists in the bounded calendar search. |
 | `jobu.schedule.out_of_range` | ResourceExhausted | A requested occurrence cannot be represented. |
-| `jobu.response.too_large` | ResourceExhausted | An otherwise successful result does not fit the configured RPC body limit. A mutation may already have committed. |
 
 Malformed parameter shapes, wrong JSON types, and non-UTC `after` text return
 JSON-RPC invalid params (`-32602`) without application `data`. Cancellation

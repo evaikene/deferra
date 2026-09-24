@@ -23,6 +23,7 @@ class Database;
 namespace jb::jobu {
 class AttributeRegistry;
 class CronEngine;
+class HistoryService;
 class ManagementService;
 class SecretService;
 class StatisticsService;
@@ -90,6 +91,7 @@ private:
     friend struct RuntimeTestAccess;
     struct Private;
     auto management() -> jb::jobu::ManagementService*;
+    auto history() -> jb::jobu::HistoryService*;
     auto secrets() -> jb::jobu::SecretService*;
     auto statistics() -> jb::jobu::StatisticsService*;
     auto scheduler() -> jb::jobu::Scheduler*;

@@ -5,6 +5,8 @@
 #include "control_rpc.hpp"
 #include "framing.hpp"
 #include "history_json.hpp"
+#include "history_rpc.hpp"
+#include "history_service.hpp"
 #include "http/http_attempt_executor.hpp"
 #include "json.hpp"
 #include "local_socket.hpp"
@@ -16,6 +18,7 @@
 #include "secret_service.hpp"
 #include "server.hpp"
 #include "sqlite/sqlite_schema.hpp"
+#include "statistics_json.hpp"
 #include "statistics_service.hpp"
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_event_loop_backend.hpp"
@@ -52,6 +55,8 @@ struct RuntimeTestAccess {
     static auto secrets(DaemonRuntime& runtime) { return runtime.secrets(); }
 
     static auto statistics(DaemonRuntime& runtime) { return runtime.statistics(); }
+
+    static auto history(DaemonRuntime& runtime) { return runtime.history(); }
 
     static auto scheduler(DaemonRuntime& runtime) { return runtime.scheduler(); }
 
@@ -936,8 +941,7 @@ TEST_CASE("Daemon secret failures gate management and retained completion persis
     }
 }
 
-TEST_CASE("Daemon secret RPC capabilities follow registered handlers and preserve the API minor",
-          "[jobud][secret][rpc]")
+TEST_CASE("Daemon capabilities follow every registered Phase 8 server method", "[jobud][secret][rpc]")
 {
     RuntimeFixture fixture;
     auto           seeded = fixture.seed();
@@ -954,12 +958,18 @@ TEST_CASE("Daemon secret RPC capabilities follow registered handlers and preserv
         auto               info    = endpoint.call("system.info", JsonValue{.data = JsonValue::Object{}});
         auto const&        fields  = rpc_result(info).as_object();
         auto const&        methods = fields.at("capabilities").as_array();
-        CHECK(fields.at("api_version").as_object().at("minor").as_uint() == 2);
-        REQUIRE(methods.size() == 23U);
+        CHECK(fields.at("api_version").as_object().at("minor").as_uint() == 3);
+        REQUIRE(methods.size() == 30U);
         for (auto index = std::size_t{1}; index < methods.size(); ++index) {
             CHECK(methods[index - 1U].as_string() < methods[index].as_string());
         }
-        for (auto const* name : {"secret.set", "secret.list", "secret.delete"}) {
+        for (auto const* name :
+             {"system.info",  "system.stats",  "queue.create",  "queue.get",         "queue.list",
+              "queue.update", "queue.suspend", "queue.resume",  "queue.delete",      "queue.stats",
+              "job.create",   "job.get",       "job.list",      "job.update",        "job.suspend",
+              "job.resume",   "job.move",      "job.delete",    "job.run_now",       "run.get",
+              "run.list",     "run.cancel",    "attempt.get",   "attempt.list",      "attempt.output",
+              "secret.set",   "secret.list",   "secret.delete", "schedule.validate", "schedule.next"}) {
             CHECK(RuntimeTestAccess::rpc(*fixture.runtime)->has_method(name));
             CHECK(std::ranges::count_if(methods,
                                         [name](JsonValue const& value) { return value.as_string() == name; }) == 1);
@@ -993,7 +1003,168 @@ TEST_CASE("Daemon secret RPC capabilities follow registered handlers and preserv
     CHECK(result == EXIT_SUCCESS);
 }
 
-TEST_CASE("Daemon advertises and serves cron preview controls without changing API minor", "[jobud][control][rpc]")
+TEST_CASE("Daemon history and statistics RPC read retained data without exposing secret values",
+          "[jobud][history][rpc]")
+{
+    RuntimeFixture fixture;
+    auto           scheduled   = fixture.seed();
+    auto           terminal    = fixture.seed(2, JobType::Cli, RunState::Succeeded);
+    auto           other_queue = recovery_queue(recovery_id(2));
+    fixture.storage.insert_queue(other_queue);
+    auto other_job                   = fixture.storage.make_job(recovery_id(22), other_queue.id);
+    auto other_run                   = fixture.storage.make_run(recovery_id(202), other_job, RunState::Succeeded);
+    auto captured                    = ByteBuffer(65'536U, std::byte{0xff});
+    other_run.attempts.back().output = jb::jobu::detail::AttemptOutput{.stdout_bytes = captured};
+    fixture.storage.insert_job(other_job);
+    fixture.storage.insert_run(other_run);
+    fixture.create_runtime();
+
+    auto result = fixture.run([&] {
+        RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
+        auto               run_request = run_get_request_to_json(scheduled.run.id);
+        REQUIRE(run_request);
+        auto run = run_details_from_json(rpc_result(endpoint.call("run.get", *run_request)), fixture.storage.registry);
+        REQUIRE(run);
+        CHECK(run->id == scheduled.run.id);
+        CHECK(run->payload == scheduled.run.payload);
+
+        auto listed = run_list_request_to_json(RunQuery{.limit = 1});
+        REQUIRE(listed);
+        auto first = run_page_from_json(rpc_result(endpoint.call("run.list", *listed)));
+        REQUIRE(first);
+        REQUIRE(first->items.size() == 1);
+        REQUIRE(first->next_cursor);
+        auto next_request = run_list_request_to_json(CursorRequest{*first->next_cursor});
+        REQUIRE(next_request);
+        auto next = run_page_from_json(rpc_result(endpoint.call("run.list", *next_request)));
+        REQUIRE(next);
+        REQUIRE(next->items.size() == 1);
+        CHECK(next->items.front().id != first->items.front().id);
+        auto invalid_continuation = *next_request;
+        std::get<JsonValue::Object>(invalid_continuation.data).emplace("limit", JsonValue{.data = std::uint64_t{1}});
+        CHECK(rpc_error(endpoint.call("run.list", invalid_continuation)).code ==
+              static_cast<std::int64_t>(jb::rpc::ErrorCode::InvalidParams));
+
+        auto attempt_request = attempt_get_request_to_json({.run_id = scheduled.run.id, .attempt_number = 1});
+        REQUIRE(attempt_request);
+        auto attempt = attempt_details_from_json(rpc_result(endpoint.call("attempt.get", *attempt_request)));
+        REQUIRE(attempt);
+        CHECK(attempt->state == AttemptState::Running);
+        auto attempt_list_request = attempt_list_request_to_json(AttemptQuery{.run_id = scheduled.run.id});
+        REQUIRE(attempt_list_request);
+        auto attempts = attempt_page_from_json(rpc_result(endpoint.call("attempt.list", *attempt_list_request)));
+        REQUIRE(attempts);
+        REQUIRE(attempts->items.size() == 1);
+        CHECK(attempts->items.front().attempt_number == 1);
+        auto output_request = attempt_output_request_to_json({
+            .attempt = {.run_id = scheduled.run.id, .attempt_number = 1},
+            .channel = OutputChannel::Stdout
+        });
+        REQUIRE(output_request);
+        auto output = attempt_output_chunk_from_json(rpc_result(endpoint.call("attempt.output", *output_request)));
+        REQUIRE(output);
+        CHECK(output->status == OutputStatus::Pending);
+        CHECK(output->data.empty());
+        auto captured_request = attempt_output_request_to_json({
+            .attempt = {.run_id = other_run.run.id, .attempt_number = 1},
+            .channel = OutputChannel::Stdout,
+            .limit   = 65'536
+        });
+        REQUIRE(captured_request);
+        auto captured_chunk =
+            attempt_output_chunk_from_json(rpc_result(endpoint.call("attempt.output", *captured_request)));
+        REQUIRE(captured_chunk);
+        CHECK(captured_chunk->status == OutputStatus::Available);
+        CHECK(captured_chunk->encoding == OutputEncoding::Base64);
+        CHECK(captured_chunk->data == captured);
+
+        auto stats_request = system_statistics_request_to_json(StatisticsRequest{
+            .planned  = {.from = UtcTimePoint{0s}, .to = UtcTimePoint{200s}},
+            .group_by = StatisticsGroupBy::Queue,
+            .limit    = 1
+        });
+        REQUIRE(stats_request);
+        auto stats = statistics_page_from_json(rpc_result(endpoint.call("system.stats", *stats_request)));
+        REQUIRE(stats);
+        REQUIRE(stats->groups.size() == 1);
+        REQUIRE(stats->next_cursor);
+        auto stats_next = system_statistics_request_to_json(CursorRequest{*stats->next_cursor});
+        REQUIRE(stats_next);
+        auto continued = statistics_page_from_json(rpc_result(endpoint.call("system.stats", *stats_next)));
+        REQUIRE(continued);
+        REQUIRE(continued->groups.size() == 1);
+        CHECK(continued->groups.front().key != stats->groups.front().key);
+
+        auto queue_stats = queue_statistics_request_to_json(
+            QueueStatisticsQuery{.selector   = other_queue.name,
+                                 .statistics = {.planned = {.from = UtcTimePoint{0s}, .to = UtcTimePoint{200s}}}});
+        REQUIRE(queue_stats);
+        auto scoped = statistics_page_from_json(rpc_result(endpoint.call("queue.stats", *queue_stats)));
+        REQUIRE(scoped);
+        REQUIRE(scoped->groups.size() == 1);
+        CHECK(scoped->groups.front().runs.total == 1);
+        CHECK(scoped->measurement.runnable_wait == "unavailable");
+        check_application_error(endpoint.call("queue.stats", *stats_next),
+                                "invalid_argument",
+                                "jobu.statistics.invalid_cursor");
+
+        auto options                      = jb::rpc::ServerOptions{};
+        options.framing.max_body_bytes    = 200;
+        options.response_limit_error_code = "jobu.response.too_large";
+        jb::rpc::Server limited{options};
+        REQUIRE(
+            register_history_methods(limited, *RuntimeTestAccess::history(*fixture.runtime), fixture.storage.registry));
+        RuntimeRpcEndpoint bounded{limited};
+        check_application_error(bounded.call("run.get", *run_request), "resource_exhausted", "jobu.response.too_large");
+
+        CHECK_FALSE(RuntimeTestAccess::rpc(*fixture.runtime)->has_method("secret.get"));
+        CHECK(std::ranges::none_of(fixture.faults->calls,
+                                   [](DatabaseCall const& call) { return call.boundary == "dispatch.secret"; }));
+        CHECK(terminal.run.id != other_run.run.id);
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == EXIT_SUCCESS);
+}
+
+TEST_CASE("Fatal history RPC read closes all daemon admission before teardown", "[jobud][history][rpc]")
+{
+    RuntimeFixture fixture;
+    fixture.create_runtime();
+    auto result = fixture.run([&] {
+        auto* history            = RuntimeTestAccess::history(*fixture.runtime);
+        auto  observed           = false;
+        auto  connection         = history->failed.connect(history, [&](Error const& error) {
+            observed = true;
+            check_safe_error(error, "db.corrupt");
+            CHECK(fixture.runtime->state() == RuntimeState::Stopping);
+            CHECK(RuntimeTestAccess::scheduler(*fixture.runtime)->state() == SchedulerState::Shutdown);
+            CHECK(history->list_runs(RunQuery{}).error().code == "jobu.service.stopping");
+            CHECK(RuntimeTestAccess::statistics(*fixture.runtime)
+                      ->read(StatisticsRequest{}, StatisticsScope::System)
+                      .error()
+                      .code == "jobu.service.stopping");
+        });
+        fixture.faults->classify = [](std::string_view sql) -> std::string {
+            return sql.starts_with("SELECT id AS run_id, job_id AS run_job_id") ? "history.list" : "other";
+        };
+        fixture.faults->faults.push_back({
+            .at    = {.boundary = "history.list", .operation = DatabaseOperation::Execute},
+            .error = {.category = ErrorCategory::Internal, .code = "db.corrupt", .message = "private-backend-marker"}
+        });
+        RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
+        check_application_error(endpoint.call("run.list", JsonValue{.data = JsonValue::Object{}}),
+                                "internal",
+                                "db.corrupt");
+        CHECK(observed);
+        connection.disconnect();
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == EXIT_FAILURE);
+    require_consumed_faults(*fixture.faults);
+}
+
+TEST_CASE("Daemon advertises and serves cron preview controls at API 1.3", "[jobud][control][rpc]")
 {
     SystemCronEngine engine;
     RuntimeFixture   fixture;
@@ -1002,7 +1173,7 @@ TEST_CASE("Daemon advertises and serves cron preview controls without changing A
         RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
         auto               info        = endpoint.call("system.info", JsonValue{.data = JsonValue::Object{}});
         auto const&        info_fields = rpc_result(info).as_object();
-        CHECK(info_fields.at("api_version").as_object().at("minor").as_uint() == 2);
+        CHECK(info_fields.at("api_version").as_object().at("minor").as_uint() == 3);
         auto const& methods = info_fields.at("capabilities").as_array();
         for (auto const* name : {"job.run_now", "run.cancel", "schedule.validate", "schedule.next"}) {
             CHECK(std::ranges::count_if(methods,

@@ -451,7 +451,7 @@ public:
 
     void responsive()
     {
-        CHECK(control({"system", "info"}).find("1.2") != std::string::npos);
+        CHECK(control({"system", "info"}).find("API version: 1.3") != std::string::npos);
         CHECK(log.find("daemon-ambient-marker") == std::string::npos);
         CHECK(log.find("literal $x = value") == std::string::npos);
         if (::geteuid() == 0) {
@@ -742,5 +742,5 @@ TEST_CASE("root daemon denies CLI targets without the unsafe override", "[jobud]
     CHECK(fixture.state("denied").attempt_state.empty());
     CHECK_FALSE(std::filesystem::exists(sentinel));
     CHECK(fixture.log.find("UNSAFE:") == std::string::npos);
-    CHECK(fixture.control({"system", "info"}).find("1.2") != std::string::npos);
+    CHECK(fixture.control({"system", "info"}).find("API version: 1.3") != std::string::npos);
 }

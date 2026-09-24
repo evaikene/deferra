@@ -168,6 +168,10 @@ add_executable(history-json-test history-json-test.cpp)
 target_link_libraries(history-json-test PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME history-json-test COMMAND $<TARGET_FILE:history-json-test>)
 
+add_executable(statistics-json-test statistics-json-test.cpp)
+target_link_libraries(statistics-json-test PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME statistics-json-test COMMAND $<TARGET_FILE:statistics-json-test>)
+
 add_executable(control-json-test control-json-test.cpp)
 target_link_libraries(control-json-test PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME control-json-test COMMAND $<TARGET_FILE:control-json-test>)
@@ -571,6 +575,7 @@ foreach(JOBU_DOMAIN_HEADER IN ITEMS
         control-rpc
         history
         history-json
+        history-rpc
         history-service
         job
         management
@@ -586,6 +591,8 @@ foreach(JOBU_DOMAIN_HEADER IN ITEMS
         secret-service
         secret-provider
         statistics
+        statistics-json
+        statistics-rpc
         statistics-service
         system-info-rpc
         utc-timestamp
