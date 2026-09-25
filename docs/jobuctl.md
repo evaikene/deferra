@@ -1,6 +1,6 @@
 # jobuctl
 
-`jobuctl` manages JobU queues, jobs, runs, retained attempts, and named secrets through a running `jobud` daemon's local socket.
+`jobuctl` manages JobU queues, jobs, runs, retained attempts, named secrets, statistics, and cron previews through a running `jobud` daemon's local socket.
 
 ## Help and version
 
@@ -26,12 +26,13 @@ An unknown group, command, or option is an error, even alongside `--help`. An op
 
 | Group | Commands |
 | --- | --- |
-| `system` | `info` |
-| `queue` | `create` (`add`), `get`, `list`, `update`, `suspend`, `resume`, `delete` |
+| `system` | `info`, `stats` |
+| `queue` | `create` (`add`), `get`, `list`, `update`, `suspend`, `resume`, `delete`, `stats` |
 | `job` | `create` (`add`), `get`, `list`, `update`, `suspend`, `resume`, `move`, `delete`, `run-now` |
 | `run` | `get`, `list`, `cancel` |
 | `attempt` | `get`, `list`, `output` |
 | `secret` | `set`, `list`, `delete` |
+| `schedule` | `validate`, `next` |
 
 `queue add` and `job add` are aliases for `queue create` and `job create`. Each alias accepts the same options and performs the same operation as its canonical command.
 
@@ -130,6 +131,59 @@ jobuctl --socket /run/jobu.sock attempt output RUN_UUID 1 --channel stdout --off
 jobuctl --socket /run/jobu.sock attempt output RUN_UUID 1 --channel stdout --raw > chunk.bin
 jobuctl --socket /run/jobu.sock attempt output RUN_UUID 1 --channel stdout --output-file chunk.bin
 ```
+
+## Retained statistics
+
+`system stats` summarizes runs across queues; `queue stats` requires exactly one
+initial selector, `--id UUID` or `--name NAME`. Both accept `--job-id UUID`,
+`--type cli|http`, `--origin scheduled|manual`, `--planned-from UTC`,
+`--planned-to UTC`, `--group-by none|queue|job|type|origin|state`, and `--limit N`
+(1–200, default 100). `system stats` also accepts `--queue-id UUID` as a filter.
+The planned window is half-open and at most 31 days. Omit its upper bound to use
+the daemon's current UTC time; omit its lower bound to use 24 hours before the
+resolved upper bound.
+
+```sh
+jobuctl --socket /run/jobu.sock system stats --group-by state --json
+jobuctl --socket /run/jobu.sock queue stats --name reports \
+    --planned-from 2030-01-01T00:00:00Z --planned-to 2030-01-02T00:00:00Z \
+    --group-by job --limit 20
+```
+
+The result includes the resolved window, groups, a nullable `next_cursor`, and
+measurement provenance. Run and attempt counts cover the planned-run cohort and
+all its retained attempts. Lateness and execution duration are derived from
+wall-clock timestamps; averages and maxima are null when there are no samples.
+`runnable_wait_ms` is null and marked unavailable. Human output prints these
+null and unavailable values explicitly. With `--json`, the CLI prints the
+protocol result unchanged.
+
+Continue a page with `system stats --cursor TOKEN` or
+`queue stats --cursor TOKEN`. A continuation must contain only the cursor: omit
+the queue selector, filters, window, grouping, and limit. The token belongs to
+its original method and can expire or be evicted; the returned groups reflect a
+live retained-history view. `--request-file` accepts the complete strict params
+object for either method; see the [system](protocol/methods/system.md) and
+[queue](protocol/methods/queue.md) contracts.
+
+## Cron validation and preview
+
+`schedule validate EXPRESSION` checks a five-field cron expression or supported
+alias using the daemon's cron engine. `schedule next EXPRESSION --after UTC`
+returns future occurrence timestamps strictly after the supplied RFC 3339 UTC
+instant. Both accept `--timezone ZONE` (default UTC); `schedule next` also
+accepts `--count N` (1–200, default 5). The timezone controls calendar matching;
+results are UTC. Invalid expressions and timezones are reported as errors.
+
+```sh
+jobuctl --socket /run/jobu.sock schedule validate '0 9 * * FRI-MON'
+jobuctl --socket /run/jobu.sock schedule next '@daily' \
+    --timezone Europe/Tallinn --after 2030-01-01T00:00:00Z --count 2 --json
+```
+
+The cyclic weekday range `FRI-MON` includes Friday through Monday. These
+commands do not create or change a job. Both accept `--request-file` containing
+their complete [schedule method](protocol/methods/schedule.md) params object.
 
 ## Named secrets
 

@@ -35,5 +35,6 @@ Each result is strictly later than `after` and the preceding occurrence. UTC
 results use six fractional digits. The timezone engine handles DST gaps and
 overlaps before producing UTC times. An exhausted or unrepresentable search
 returns `jobu.schedule.no_future_occurrence` or
-`jobu.schedule.out_of_range`. The CLI and typed client will expose these
-methods in later Phase 8 stages.
+`jobu.schedule.out_of_range`. The CLI routes are `schedule validate` and
+`schedule next`; the typed client members are `ControlClient::validate_schedule()`
+and `ControlClient::next_schedule_occurrences()`.

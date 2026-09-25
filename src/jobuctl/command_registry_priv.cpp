@@ -33,12 +33,13 @@ constexpr auto flag(std::string_view name, std::string_view description, char sh
 }
 
 constexpr std::array groups{
-    GroupSpec{.name = "system",  .summary = "Inspect the daemon"                 },
-    GroupSpec{.name = "queue",   .summary = "Create and manage queues"           },
-    GroupSpec{.name = "job",     .summary = "Create and manage job definitions"  },
-    GroupSpec{.name = "run",     .summary = "Control and inspect runs"           },
-    GroupSpec{.name = "attempt", .summary = "Inspect attempts and output"        },
-    GroupSpec{.name = "secret",  .summary = "Set, list, and delete named secrets"},
+    GroupSpec{.name = "system",   .summary = "Inspect the daemon"                 },
+    GroupSpec{.name = "queue",    .summary = "Create and manage queues"           },
+    GroupSpec{.name = "job",      .summary = "Create and manage job definitions"  },
+    GroupSpec{.name = "run",      .summary = "Control and inspect runs"           },
+    GroupSpec{.name = "attempt",  .summary = "Inspect attempts and output"        },
+    GroupSpec{.name = "secret",   .summary = "Set, list, and delete named secrets"},
+    GroupSpec{.name = "schedule", .summary = "Validate and preview cron schedules"},
 };
 constexpr std::array globals{
     value_option("socket",
@@ -176,6 +177,37 @@ constexpr std::array secret_list{
     value_option("limit", "N", "Metadata page size, 1..200; default: 100."),
     value_option("after-name", "NAME", "Continue after this canonical secret name."),
 };
+constexpr auto stats_cursor =
+    value_option("cursor", "TOKEN", "Continue a statistics page; excludes all other query options.");
+constexpr std::array system_stats{
+    value_option("queue-id", "UUID", "Filter by captured queue ID."),
+    value_option("job-id", "UUID", "Filter by job ID."),
+    value_option("type", "cli|http", "Filter by captured runner type."),
+    value_option("origin", "scheduled|manual", "Filter by run origin."),
+    value_option("planned-from", "UTC", "Inclusive planned-time lower bound; default: 24 hours before upper bound."),
+    value_option("planned-to", "UTC", "Exclusive planned-time upper bound; default: daemon UTC now."),
+    value_option("group-by", "GROUP", "none (default), queue, job, type, origin, or state."),
+    limit,
+    stats_cursor,
+};
+constexpr std::array queue_stats{
+    id,
+    name_selector,
+    value_option("job-id", "UUID", "Filter by job ID."),
+    value_option("type", "cli|http", "Filter by captured runner type."),
+    value_option("origin", "scheduled|manual", "Filter by run origin."),
+    value_option("planned-from", "UTC", "Inclusive planned-time lower bound; default: 24 hours before upper bound."),
+    value_option("planned-to", "UTC", "Exclusive planned-time upper bound; default: daemon UTC now."),
+    value_option("group-by", "GROUP", "none (default), queue, job, type, origin, or state."),
+    limit,
+    stats_cursor,
+};
+constexpr std::array schedule_next{
+    timezone,
+    value_option("after", "UTC", "Required UTC instant; occurrences are strictly later."),
+    value_option("count", "N", "Number of occurrences, 1..200; default: 5."),
+};
+constexpr std::array schedule_validate{timezone};
 
 constexpr std::string_view select_queue = "Supply exactly one of --id or --name.";
 constexpr std::string_view job_uuid     = "UUID is the job ID.";
@@ -194,6 +226,17 @@ constexpr CommandSpec system_info_command{
     .example          = "jobuctl --socket /run/jobu.sock system info",
     .capability       = "system.info",
     .build            = parse_system_command,
+};
+constexpr CommandSpec system_stats_command{
+    .group      = "system",
+    .name       = "stats",
+    .kind       = CommandKind::SystemStats,
+    .summary    = "Summarize retained runs and attempts",
+    .options    = system_stats,
+    .rules      = "The planned window is at most 31 days. --cursor excludes filters, grouping, and --limit.",
+    .example    = "jobuctl --socket /run/jobu.sock system stats --group-by state --limit 20",
+    .capability = "system.stats",
+    .build      = parse_system_statistics_command,
 };
 
 constexpr CommandSpec queue_create_command{
@@ -300,6 +343,17 @@ constexpr CommandSpec queue_delete_command{
     .example          = "jobuctl --socket /run/jobu.sock queue delete --name reports",
     .capability       = "queue.delete",
     .build            = parse_queue_command,
+};
+constexpr CommandSpec queue_stats_command{
+    .group      = "queue",
+    .name       = "stats",
+    .kind       = CommandKind::QueueStats,
+    .summary    = "Summarize one queue's retained history",
+    .options    = queue_stats,
+    .rules      = "Initially require exactly one of --id or --name. --cursor alone continues a page.",
+    .example    = "jobuctl --socket /run/jobu.sock queue stats --name reports --group-by job",
+    .capability = "queue.stats",
+    .build      = parse_queue_statistics_command,
 };
 
 constexpr CommandSpec job_create_command{
@@ -572,14 +626,42 @@ constexpr CommandSpec secret_delete_command{
     .capability       = "secret.delete",
     .build            = parse_secret_command,
 };
+constexpr CommandSpec schedule_validate_command{
+    .group            = "schedule",
+    .name             = "validate",
+    .kind             = CommandKind::ScheduleValidate,
+    .summary          = "Validate a cron expression and timezone",
+    .operands         = "EXPRESSION",
+    .maximum_operands = 1,
+    .options          = schedule_validate,
+    .rules      = "EXPRESSION is required. --timezone defaults to UTC. Invalid schedules return a structured error.",
+    .example    = "jobuctl --socket /run/jobu.sock schedule validate '0 9 * * FRI-MON'",
+    .capability = "schedule.validate",
+    .build      = parse_schedule_command,
+};
+constexpr CommandSpec schedule_next_command{
+    .group            = "schedule",
+    .name             = "next",
+    .kind             = CommandKind::ScheduleNext,
+    .summary          = "Preview future cron occurrences",
+    .operands         = "EXPRESSION",
+    .maximum_operands = 1,
+    .options          = schedule_next,
+    .rules            = "Require EXPRESSION and --after UTC. --timezone defaults to UTC; --count defaults to 5.",
+    .example          = "jobuctl --socket /run/jobu.sock schedule next '@daily' --after 2030-01-01T00:00:00Z",
+    .capability       = "schedule.next",
+    .build            = parse_schedule_command,
+};
 
 constexpr std::array commands{
-    system_info_command,   queue_create_command, queue_get_command,      queue_list_command, queue_update_command,
-    queue_suspend_command, queue_resume_command, queue_delete_command,   job_create_command, job_get_command,
-    job_list_command,      job_update_command,   job_suspend_command,    job_resume_command, job_move_command,
-    job_delete_command,    job_run_now_command,  run_get_command,        run_list_command,   run_cancel_command,
-    attempt_get_command,   attempt_list_command, attempt_output_command, secret_set_command, secret_list_command,
-    secret_delete_command,
+    system_info_command,       system_stats_command,  queue_create_command,  queue_get_command,
+    queue_list_command,        queue_update_command,  queue_suspend_command, queue_resume_command,
+    queue_delete_command,      queue_stats_command,   job_create_command,    job_get_command,
+    job_list_command,          job_update_command,    job_suspend_command,   job_resume_command,
+    job_move_command,          job_delete_command,    job_run_now_command,   run_get_command,
+    run_list_command,          run_cancel_command,    attempt_get_command,   attempt_list_command,
+    attempt_output_command,    secret_set_command,    secret_list_command,   secret_delete_command,
+    schedule_validate_command, schedule_next_command,
 };
 
 } // namespace

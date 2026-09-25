@@ -2,10 +2,12 @@
 #include "byte_buffer.hpp"
 #include "command_line_priv.hpp"
 #include "command_registry_priv.hpp"
+#include "control_json.hpp"
 #include "help_priv.hpp"
 #include "input_priv.hpp"
 #include "json.hpp"
 #include "management_json.hpp"
+#include "statistics_json.hpp"
 #include "support/temporary_directory.hpp"
 #include "utc_timestamp.hpp"
 #include "uuid.hpp"
@@ -98,6 +100,138 @@ TEST_CASE("jobuctl parses machine options before or after the command", "[jobuct
     CHECK_FALSE(syntax.action);
     CHECK(syntax.json_requested);
     CHECK_FALSE(parse_action({"queue", "list", "--arg=--json"}).json_requested);
+}
+
+TEST_CASE("jobuctl statistics options preserve typed filters and cursor-only continuation", "[jobuctl][parse]")
+{
+    auto system = parse({"--socket",       "fixture.sock",
+                         "system",         "stats",
+                         "--queue-id",     job_id,
+                         "--job-id",       job_id,
+                         "--type",         "cli",
+                         "--origin",       "manual",
+                         "--planned-from", "2030-01-01T00:00:00Z",
+                         "--planned-to",   "2030-01-02T00:00:00Z",
+                         "--group-by",     "state",
+                         "--limit",        "2"});
+    REQUIRE(system.command);
+    CHECK(system.command->method == "system.stats");
+    auto const& query = std::get<StatisticsRequest>(std::get<StatisticsListRequest>(system.command->request));
+    CHECK(query.queue_id.has_value());
+    CHECK(query.job_id.has_value());
+    CHECK(query.type == JobType::Cli);
+    CHECK(query.origin == RunOrigin::Manual);
+    CHECK(query.planned.from.has_value());
+    CHECK(query.planned.to.has_value());
+    CHECK(query.group_by == StatisticsGroupBy::State);
+    CHECK(query.limit == 2);
+
+    auto queue = parse({"--socket", "fixture.sock", "queue", "stats", "--name", "reports", "--group-by", "job"});
+    REQUIRE(queue.command);
+    CHECK(queue.command->method == "queue.stats");
+    auto const& scoped = std::get<QueueStatisticsQuery>(std::get<QueueStatisticsListRequest>(queue.command->request));
+    CHECK(std::get<std::string>(scoped.selector) == "reports");
+    CHECK(scoped.statistics.group_by == StatisticsGroupBy::Job);
+
+    auto continuation = parse({"--socket", "fixture.sock", "queue", "stats", "--cursor", "opaque-token"});
+    REQUIRE(continuation.command);
+    CHECK(std::get<CursorRequest>(std::get<QueueStatisticsListRequest>(continuation.command->request)).cursor ==
+          "opaque-token");
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "queue", "stats"}).command);
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "queue", "stats", "--id", job_id, "--name", "reports"}).command);
+    CHECK_FALSE(
+        parse({"--socket", "fixture.sock", "queue", "stats", "--name", "reports", "--cursor", "token"}).command);
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "system", "stats", "--cursor", "token", "--limit", "2"}).command);
+    CHECK_FALSE(parse({"--socket",
+                       "fixture.sock",
+                       "system",
+                       "stats",
+                       "--planned-from",
+                       "2030-01-02T00:00:00Z",
+                       "--planned-to",
+                       "2030-01-01T00:00:00Z"})
+                    .command);
+}
+
+TEST_CASE("jobuctl schedule preview uses cron-only typed requests", "[jobuctl][parse]")
+{
+    auto valid = parse({"--socket", "fixture.sock", "schedule", "validate", "0 9 * * FRI-MON"});
+    REQUIRE(valid.command);
+    CHECK(valid.command->method == "schedule.validate");
+    CHECK(std::get<CronSchedule>(valid.command->request).timezone == "UTC");
+
+    auto next = parse({"--socket",
+                       "fixture.sock",
+                       "schedule",
+                       "next",
+                       "@daily",
+                       "--timezone",
+                       "Europe/Tallinn",
+                       "--after",
+                       "2030-01-01T00:00:00Z",
+                       "--count",
+                       "2"});
+    REQUIRE(next.command);
+    CHECK(next.command->method == "schedule.next");
+    auto const& request = std::get<ScheduleNextRequest>(next.command->request);
+    CHECK(request.schedule.expression == "@daily");
+    CHECK(request.schedule.timezone == "Europe/Tallinn");
+    CHECK(request.count == 2);
+
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "schedule", "validate"}).command);
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "schedule", "next", "@daily"}).command);
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "schedule", "next", "@daily", "--after", "2030-01-01"}).command);
+    CHECK_FALSE(parse({"--socket",
+                       "fixture.sock",
+                       "schedule",
+                       "next",
+                       "@daily",
+                       "--after",
+                       "2030-01-01T00:00:00Z",
+                       "--count",
+                       "201"})
+                    .command);
+}
+
+TEST_CASE("jobuctl statistics and schedule request files use strict public codecs", "[jobuctl][input]")
+{
+    jb::test::TemporaryDirectory directory;
+    StandardAttributeRegistry    registry;
+    auto const                   file_path = directory.path() / "params.json";
+
+    struct Case {
+        std::vector<std::string> command;
+        std::string              document;
+    };
+
+    auto const cases = std::vector<Case>{
+        {.command = {"system", "stats"},       .document = R"({"group_by":"state","limit":2})"                                },
+        {.command = {"queue", "stats"},        .document = R"({"queue_name":"reports","group_by":"job"})"                     },
+        {.command  = {"schedule", "validate"},
+         .document = R"({"schedule":{"kind":"cron","expression":"@daily","timezone":"UTC"}})"                                 },
+        {.command = {"schedule", "next"},
+         .document =
+             R"({"schedule":{"kind":"cron","expression":"@daily","timezone":"UTC"},"after":"2030-01-01T00:00:00Z","count":2})"},
+    };
+    for (auto const& item : cases) {
+        auto file = std::ofstream{file_path, std::ios::binary | std::ios::trunc};
+        REQUIRE(file);
+        file << item.document;
+        file.close();
+
+        auto arguments = std::vector<std::string>{"--socket", "fixture.sock"};
+        arguments.insert(arguments.end(), item.command.begin(), item.command.end());
+        arguments.insert(arguments.end(), {"--request-file", file_path.string()});
+        auto parsed = parse(std::move(arguments));
+        REQUIRE(parsed.command);
+        REQUIRE(load_request_file(*parsed.command, registry));
+
+        file.open(file_path, std::ios::binary | std::ios::trunc);
+        REQUIRE(file);
+        file << R"({"unexpected":true})";
+        file.close();
+        CHECK_FALSE(load_request_file(*parsed.command, registry));
+    }
 }
 
 TEST_CASE("jobuctl request files are bounded and strictly decoded", "[jobuctl][input]")

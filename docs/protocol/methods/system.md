@@ -44,5 +44,5 @@ An invalid cursor returns `jobu.statistics.invalid_cursor`.
 
 Malformed request fields return JSON-RPC `-32602`; represented service errors
 use application `-32000` with safe `data:{category,code}`. Fatal persisted-data
-or storage errors close daemon read admission. `system stats` CLI and typed
-client access are added in later Phase 8 stages.
+or storage errors close daemon read admission. The CLI route is `system stats`;
+the typed client member is `ControlClient::system_statistics()`.

@@ -21,4 +21,5 @@ application `-32000` with `category: Conflict` and
 selector, both selectors, an extra field, or a selector beside `cursor` returns
 JSON-RPC invalid params (`-32602`). Other service errors use application
 `-32000`; fatal reads close admission as described on the system page.
-`queue stats` CLI and typed client access follow in later Phase 8 stages.
+The CLI route is `queue stats`; the typed client member is
+`ControlClient::queue_statistics()`.
