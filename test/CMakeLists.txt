@@ -408,6 +408,9 @@ if(TARGET jobu-sqlite)
     target_link_libraries(recovery-repair-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME recovery-repair-test COMMAND $<TARGET_FILE:recovery-repair-test>)
 
+    add_executable(recovery-service-test-helper recovery-service-test-helper.cpp)
+    target_link_libraries(recovery-service-test-helper PRIVATE jobu-sqlite)
+
     add_executable(recovery-service-test
         recovery-service-test.cpp
         support/recovery_fixture.cpp
@@ -415,6 +418,9 @@ if(TARGET jobu-sqlite)
         support/temporary_directory.cpp
     )
     target_link_libraries(recovery-service-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    target_compile_definitions(recovery-service-test PRIVATE
+        RECOVERY_SERVICE_TEST_HELPER="$<TARGET_FILE:recovery-service-test-helper>")
+    add_dependencies(recovery-service-test recovery-service-test-helper)
     add_test(NAME recovery-service-test COMMAND $<TARGET_FILE:recovery-service-test>)
 
     add_executable(recovery-transaction-fault-test
