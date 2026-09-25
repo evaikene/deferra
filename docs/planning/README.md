@@ -23,7 +23,7 @@ current source tree remain authoritative for exact implemented behavior.
 | [JobU Phase 6 closure code-level design](jobu-phase6-closure-code-design.md) | Completed | Corrects disabled CLI capture retention and records the final verification and closure disposition. |
 | [JobU Phase 7 code-level design](jobu-phase7-code-design.md) | Completed | Defines startup recovery, terminal storage-failure gates, immediate shutdown, and platform verification boundaries. |
 | [JobU Phase 7 closure code-level design](jobu-phase7-closure-code-design.md) | Completed | Corrects cancellation rollback failure handling and records final Linux verification with explicit native coverage limits. |
-| [JobU Phase 8 code-level design](jobu-phase8-code-design.md) | Active | Secrets, complete RPC, and `jobuctl` |
+| [JobU Phase 8 code-level design](jobu-phase8-code-design.md) | Completed | Secrets, complete RPC, and `jobuctl` |
 
 ## Authority
 
