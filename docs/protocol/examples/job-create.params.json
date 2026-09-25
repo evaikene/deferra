@@ -1,0 +1,1 @@
+{"queue_name":"reports","type":"cli","schedule":{"kind":"once","at":"now"},"payload":{"command":"/usr/bin/true"},"idempotency_key":"submit-42"}

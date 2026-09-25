@@ -1,0 +1,29 @@
+{
+  "window": {"from":"2026-01-01T00:00:00.000000Z","to":"2026-01-02T00:00:00.000000Z"},
+  "group_by": "none",
+  "groups": [{
+    "key": null,
+    "runs": {
+      "total": 0,
+      "states": {"scheduled":0,"running":0,"retry_wait":0,"succeeded":0,"failed":0,"interrupted":0,"cancelled":0},
+      "types": {"cli":0,"http":0},
+      "origins": {"scheduled":0,"manual":0}
+    },
+    "attempts": {
+      "total": 0,
+      "states": {"pending":0,"running":0,"completed":0},
+      "outcomes": {"succeeded":0,"failed":0,"interrupted":0,"cancelled":0},
+      "retries": 0
+    },
+    "capture": {"truncated_attempts":0,"lost_attempts":0},
+    "schedule_lateness_ms": {"samples":0,"average":null,"maximum":null},
+    "execution_wall_duration_ms": {"samples":0,"average":null,"maximum":null},
+    "runnable_wait_ms": null
+  }],
+  "next_cursor": null,
+  "measurement": {
+    "timing": "wall_clock_derived",
+    "runnable_wait": "unavailable",
+    "capture": "persisted_output_flags"
+  }
+}

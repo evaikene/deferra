@@ -84,6 +84,9 @@ An idempotency key makes an identical `--now` creation replay the original job a
 
 Queue create/update accept `--recovery-policy fail_interrupted|retry_interrupted`, `--history-retention-seconds N`, `--runnable-wait-warning-ms N`, and `--defaults-file FILE`. Retention `0` means unlimited. Omit retention at creation to inherit the daemon policy; use `--inherit-history-retention` on update to restore inheritance. These two update options are mutually exclusive. The warning delay is nonnegative milliseconds. A defaults file contains a JSON object of registered queue default attributes; `{}` clears all queue defaults on update. Omitted update fields stay unchanged.
 
+The daemon stores retention and warning settings. It does not currently
+automatically purge retained history or emit runnable-wait warnings.
+
 ```sh
 printf '{"retry.max_attempts":2}\n' > queue-defaults.json
 jobuctl --socket /run/jobu.sock queue create reports \
@@ -184,6 +187,8 @@ jobuctl --socket /run/jobu.sock schedule next '@daily' \
 The cyclic weekday range `FRI-MON` includes Friday through Monday. These
 commands do not create or change a job. Both accept `--request-file` containing
 their complete [schedule method](protocol/methods/schedule.md) params object.
+See [Cron schedules](cron.md) for the five-field grammar, exact alias meanings,
+timezone behavior, and examples.
 
 ## Named secrets
 

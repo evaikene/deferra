@@ -2,9 +2,10 @@
 
 `jb::jobu::ControlClient` provides typed asynchronous calls for the JobU 1.x
 control protocol. Include `control_client.hpp` and link `jobu-client`. The
-library needs no SQLite driver or job runner in the client process. The
-[buildable example](../examples/jobu-client/main.cpp) uses a local socket; the
-same typed client can wrap another already-connected `jb::rpc::Client`.
+library needs no SQLite driver or job runner in the client process. In a source
+checkout, `examples/jobu-client/main.cpp` provides a buildable local-socket
+example. The same typed client can wrap another already-connected
+`jb::rpc::Client`.
 
 The caller owns `Application`, the socket or other IODevice, the raw RPC client,
 and an attribute registry. Construct `ControlClient` after the raw client and
@@ -14,7 +15,7 @@ open a socket or run an event loop.
 
 ## Read-only example
 
-Build the `jobu-client-example` CMake target, then run:
+In a source checkout, build the `jobu-client-example` CMake target, then run:
 
 ```sh
 .bld/examples/jobu-client/jobu-client-example /path/to/jobud.sock
@@ -85,12 +86,11 @@ failures. After an unknown outcome, inspect the resource or replay a creation
 with the **same caller-selected idempotency key and request**. Do not retry an
 unkeyed write blindly.
 
-The separately compiled
-[idempotent creation snippet](../examples/jobu-client/idempotent_creation.cpp)
-shows a once-now `create_job` request with a caller-selected key. The read-only
-example never invokes it. The key and complete request must be retained by the
+In a source checkout, `examples/jobu-client/idempotent_creation.cpp` shows a
+once-now `create_job` request with a caller-selected key. The read-only example
+never invokes it. The key and complete request must be retained by the
 application until it has reconciled a possible lost response; the client does
 not generate keys or repeat calls automatically.
 
-This target is a source-tree library and example. Installation and package
-exports are outside the current phase.
+`jobu-client` and its example are source-tree CMake targets. This repository
+does not provide an installed C++ package export.
