@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -59,6 +60,24 @@ auto json(std::string_view value) -> JsonValue
     auto parsed = parse_json(value);
     REQUIRE(parsed);
     return std::move(*parsed);
+}
+
+void write_file(std::filesystem::path const& path, std::string_view bytes)
+{
+    auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
+    REQUIRE(file);
+    file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    REQUIRE(file.good());
+}
+
+auto header_value(jb::test::HttpTestRequest const& request, std::string_view name) -> std::optional<std::string>
+{
+    for (auto const& header : request.headers) {
+        if (header.name == name) {
+            return header.value;
+        }
+    }
+    return std::nullopt;
 }
 
 void require_execution_environment()
@@ -219,18 +238,10 @@ auto column_uuid(sqlite3_stmt* statement, int column) -> std::string
 class DaemonFixture {
 public:
     explicit DaemonFixture(std::uint32_t cli_concurrency = 2, bool allow_root = true)
+        : _cli_concurrency{cli_concurrency}
+        , _allow_root_cli{allow_root}
     {
-        auto arguments = std::vector<std::string>{"--socket",
-                                                  socket_path.string(),
-                                                  "--database",
-                                                  database_path.string(),
-                                                  "--cli-concurrency",
-                                                  std::to_string(cli_concurrency),
-                                                  "--http-concurrency",
-                                                  "1"};
-        if (::geteuid() == 0 && allow_root) {
-            arguments.emplace_back("--allow-root-cli");
-        }
+        auto arguments = daemon_arguments();
         daemon.standard_output.connect(&app, [&](ByteBuffer const& chunk) { log.append(as_string_view(chunk)); });
         daemon.standard_error.connect(&app, [&](ByteBuffer const& chunk) { log.append(as_string_view(chunk)); });
         daemon.finished.connect(&app, [&](ProcessExit const&) { exited = true; });
@@ -287,7 +298,7 @@ public:
         REQUIRE(predicate());
     }
 
-    auto control(std::vector<std::string> arguments) -> std::string
+    auto control(std::vector<std::string> arguments, int expected_exit_code = 0) -> std::string
     {
         std::string                output;
         std::optional<ProcessExit> exit;
@@ -303,8 +314,42 @@ public:
         until([&] { return exit.has_value(); });
         INFO(output);
         REQUIRE(exit->kind == ProcessExitKind::Exited);
-        REQUIRE(exit->exit_code == 0);
+        REQUIRE(exit->exit_code == expected_exit_code);
         return output;
+    }
+
+    void restart()
+    {
+        REQUIRE(daemon.stop());
+        auto const deadline = Clock::now() + 8s;
+        while (!exited && Clock::now() < deadline) {
+            REQUIRE(app.process_events(EventFlag::All, 10) != ProcessEventsResult::Failed);
+        }
+        REQUIRE(exited);
+
+        // The daemon has released exclusive SQLite ownership before the next incarnation opens it.
+        database.reset();
+        socket_path = directory.path() / "daemon-restarted.sock";
+        exited      = false;
+        log.clear();
+        auto arguments = daemon_arguments();
+        REQUIRE(daemon.start({
+            .executable        = JOBUD_EXECUTABLE,
+            .arguments         = std::move(arguments),
+            .environment       = {{"HOME", "/ambient-home"},
+                                  {"PATH", "/ambient-path"},
+                                  {"AMBIENT_SECRET", "daemon-ambient-marker"}},
+            .termination_grace = 0ms
+        }));
+        until([&] {
+            std::error_code error;
+            return std::filesystem::is_socket(socket_path, error);
+        });
+        sqlite3*   raw{};
+        auto const opened = sqlite3_open_v2(database_path.c_str(), &raw, SQLITE_OPEN_READONLY, nullptr);
+        database.reset(raw);
+        REQUIRE(opened == SQLITE_OK);
+        REQUIRE(sqlite3_busy_timeout(database.get(), 100) == SQLITE_OK);
     }
 
     auto rpc(std::string_view method, JsonValue params) -> JsonValue
@@ -328,6 +373,38 @@ public:
         INFO((error ? error->message : ""));
         REQUIRE_FALSE(error);
         return std::move(*response);
+    }
+
+    void lose_response(std::string_view method, JsonValue params)
+    {
+        bool                 connected{false};
+        jb::net::LocalSocket socket;
+        socket.connected.connect(&app, [&] { connected = true; });
+        socket.connect_to_server(socket_path);
+        until([&] { return connected; });
+
+        jb::rpc::Client client{socket};
+        bool            observed{false};
+        client.result_received.connect(&app, [&](jb::rpc::RequestId const&, JsonValue const&) { observed = true; });
+        REQUIRE(client.call(method, std::move(params)));
+        // Keep the request bytes, but discard local correlation before reading the reply.
+        client.close();
+        socket.disconnect_from_server();
+        until([&] { return socket.state() == jb::net::LocalSocketState::Unconnected; });
+        CHECK_FALSE(observed);
+    }
+
+    auto job_count(std::string_view name) const -> std::int64_t
+    {
+        sqlite3_stmt* raw{};
+        REQUIRE(sqlite3_prepare_v2(database.get(), "SELECT count(*) FROM jobu_jobs WHERE name=?", -1, &raw, nullptr) ==
+                SQLITE_OK);
+        auto statement = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>{raw, sqlite3_finalize};
+        REQUIRE(sqlite3_bind_text(raw, 1, name.data(), static_cast<int>(name.size()), SQLITE_TRANSIENT) == SQLITE_OK);
+        REQUIRE(sqlite3_step(raw) == SQLITE_ROW);
+        auto const result = sqlite3_column_int64(raw, 0);
+        REQUIRE(sqlite3_step(raw) == SQLITE_DONE);
+        return result;
     }
 
     void queue(std::string name, std::uint32_t concurrency = 4)
@@ -428,6 +505,22 @@ public:
         return value;
     }
 
+    auto run_state(std::string_view run_id) const -> std::string
+    {
+        auto parsed = Uuid::parse(run_id);
+        REQUIRE(parsed);
+        sqlite3_stmt* raw{};
+        REQUIRE(sqlite3_prepare_v2(database.get(), "SELECT state FROM jobu_runs WHERE id=?", -1, &raw, nullptr) ==
+                SQLITE_OK);
+        auto        statement = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>{raw, sqlite3_finalize};
+        auto const& bytes     = parsed->bytes();
+        REQUIRE(sqlite3_bind_blob(raw, 1, bytes.data(), static_cast<int>(bytes.size()), SQLITE_TRANSIENT) == SQLITE_OK);
+        REQUIRE(sqlite3_step(raw) == SQLITE_ROW);
+        auto result = column_bytes(raw, 0);
+        REQUIRE(sqlite3_step(raw) == SQLITE_DONE);
+        return result;
+    }
+
     auto thread_count() const -> std::size_t
     {
         auto const pid = daemon.process_id();
@@ -454,7 +547,7 @@ public:
         CHECK(control({"system", "info"}).find("API version: 1.3") != std::string::npos);
         CHECK(log.find("daemon-ambient-marker") == std::string::npos);
         CHECK(log.find("literal $x = value") == std::string::npos);
-        if (::geteuid() == 0) {
+        if (::geteuid() == 0 && _allow_root_cli) {
             CHECK(log.find("UNSAFE: --allow-root-cli enables command execution as root") != std::string::npos);
         }
     }
@@ -469,6 +562,25 @@ public:
     std::unique_ptr<sqlite3, decltype(&sqlite3_close)> database{nullptr, sqlite3_close};
 
 private:
+    auto daemon_arguments() const -> std::vector<std::string>
+    {
+        auto arguments = std::vector<std::string>{"--socket",
+                                                  socket_path.string(),
+                                                  "--database",
+                                                  database_path.string(),
+                                                  "--cli-concurrency",
+                                                  std::to_string(_cli_concurrency),
+                                                  "--http-concurrency",
+                                                  "1"};
+        if (::geteuid() == 0 && _allow_root_cli) {
+            arguments.emplace_back("--allow-root-cli");
+        }
+        return arguments;
+    }
+
+    std::uint32_t _cli_concurrency;
+    bool          _allow_root_cli;
+
     auto has_running_attempt() const -> bool
     {
         if (!database) {
@@ -743,4 +855,194 @@ TEST_CASE("root daemon denies CLI targets without the unsafe override", "[jobud]
     CHECK_FALSE(std::filesystem::exists(sentinel));
     CHECK(fixture.log.find("UNSAFE:") == std::string::npos);
     CHECK(fixture.control({"system", "info"}).find("API version: 1.3") != std::string::npos);
+}
+
+TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls, and restart",
+          "[jobud][phase8][integration]")
+{
+    DaemonFixture            fixture{2, false};
+    jb::test::HttpTestServer retry_server;
+    auto const               failed_body = as_bytes("retry response");
+    auto const               final_body  = as_bytes("final response");
+    retry_server.enqueue_response({
+        .status_code = 503,
+        .reason      = "Unavailable",
+        .body        = ByteBuffer{failed_body.begin(), failed_body.end()}
+    });
+    retry_server.enqueue_response({
+        .body = ByteBuffer{final_body.begin(), final_body.end()}
+    });
+
+    // Submit the first job with a durable template; the held HTTP response leaves room to rotate before retry.
+    auto       queue       = json(fixture.control({"queue", "create", "workflow", "--json"}));
+    auto const queue_id    = queue.as_object().at("id").as_string();
+    auto const secret_file = fixture.directory.path() / "workflow-secret";
+    write_file(secret_file, "workflow-first");
+    auto set = json(fixture.control({"secret", "set", "workflow.token", "--file", secret_file.string(), "--json"}));
+    CHECK(set.as_object().at("name").as_string() == "workflow.token");
+    CHECK_FALSE(set.as_object().contains("value"));
+
+    auto  request        = json(R"({"name":"rotating-http","queue_name":"workflow","type":"http",
+        "schedule":{"kind":"once","at":"now"},"payload":{"url":"","method":"POST",
+        "headers":[{"name":"X-Workflow-Token","value":{"secret":"workflow.token"}}],
+        "body":{"secret":"workflow.token"}},"attributes":{"retry.max_attempts":2,
+        "retry.initial_delay":0,"retry.max_delay":0,"output.capture":"always"},
+        "idempotency_key":"workflow-retry"})");
+    auto& request_fields = std::get<JsonValue::Object>(request.data);
+    std::get<JsonValue::Object>(request_fields.at("payload").data).at("url") = text(retry_server.url("/retry"));
+    auto       created                                                       = fixture.rpc("job.create", request);
+    auto const retry_job_id                                                  = created.as_object().at("id").as_string();
+    CHECK(fixture.rpc("job.create", request) == created);
+
+    auto retry_page = fixture.rpc("run.list", JsonValue{.data = JsonValue::Object{{"job_id", text(retry_job_id)}}});
+    REQUIRE(retry_page.as_object().at("items").as_array().size() == 1);
+    auto const retry_run_id = retry_page.as_object().at("items").as_array().front().as_object().at("id").as_string();
+    CHECK_FALSE(retry_page.as_object().at("items").as_array().front().as_object().contains("payload"));
+    REQUIRE(retry_server.wait_for_requests(1, 5s));
+
+    auto in_use = fixture.control({"secret", "delete", "workflow.token", "--json"}, 1);
+    CHECK(in_use.find("jobu.secret.in_use") != std::string::npos);
+    write_file(secret_file, "workflow-second");
+    static_cast<void>(fixture.control({"secret", "set", "workflow.token", "--file", secret_file.string(), "--json"}));
+    retry_server.release_responses();
+    fixture.until([&] { return fixture.run_state(retry_run_id) == "succeeded"; });
+
+    auto const requests = retry_server.requests();
+    REQUIRE(requests.size() == 2);
+    CHECK(header_value(requests[0], "X-Workflow-Token") == "workflow-first");
+    CHECK(header_value(requests[1], "X-Workflow-Token") == "workflow-second");
+    CHECK(as_string_view(requests[0].body) == "workflow-first");
+    CHECK(as_string_view(requests[1].body) == "workflow-second");
+
+    // Public reads expose original references and separate retained output, never prepared request bytes.
+    auto run = json(fixture.control({"run", "get", retry_run_id, "--json"}));
+    CHECK(run.as_object().at("state").as_string() == "succeeded");
+    auto const& header = run.as_object().at("payload").as_object().at("headers").as_array().front().as_object();
+    CHECK(header.at("value").as_object().at("secret").as_string() == "workflow.token");
+    auto attempts = json(fixture.control({"attempt", "list", retry_run_id, "--json"}));
+    REQUIRE(attempts.as_object().at("items").as_array().size() == 2);
+    CHECK(attempts.as_object().at("items").as_array().front().as_object().at("attempt_number").as_uint() == 2);
+    auto output = json(fixture.control({"attempt", "output", retry_run_id, "2", "--channel", "body", "--json"}));
+    CHECK(output.as_object().at("status").as_string() == "available");
+    CHECK(output.as_object().at("encoding").as_string() == "utf8");
+    CHECK(output.as_object().at("data").as_string() == "final response");
+    auto        stats  = json(fixture.control({"system", "stats", "--json"}));
+    auto const& counts = stats.as_object().at("groups").as_array().front().as_object();
+    CHECK(counts.at("runs").as_object().at("total").as_uint() >= 1);
+    CHECK(counts.at("attempts").as_object().at("total").as_uint() >= 2);
+    CHECK(counts.at("runnable_wait_ms").is_null());
+
+    // Deletion requires a fully suspended definition; terminal history retains its reference template.
+    auto       suspended         = json(fixture.control({"job", "suspend", retry_job_id, "--wait", "--json"}));
+    auto const deletion_revision = std::to_string(suspended.as_object().at("revision").as_uint());
+    CHECK(fixture.control({"job", "delete", retry_job_id, "--revision", deletion_revision, "--json"}) == "null\n");
+    CHECK(fixture.control({"secret", "delete", "workflow.token", "--json"}) == "null\n");
+
+    // A future cron occurrence remains scheduled while Run Now creates a separate manual run.
+    jb::test::HttpTestServer manual_server;
+    manual_server.enqueue_response({});
+    manual_server.release_responses();
+    auto cron_request = json(R"({"name":"cron-http","queue_name":"workflow","type":"http",
+        "schedule":{"kind":"cron","expression":"0 0 1 1 *","timezone":"UTC"},"payload":{"url":""}})");
+    std::get<JsonValue::Object>(std::get<JsonValue::Object>(cron_request.data).at("payload").data).at("url") =
+        text(manual_server.url("/manual"));
+    auto       cron_job    = fixture.rpc("job.create", std::move(cron_request));
+    auto const cron_job_id = cron_job.as_object().at("id").as_string();
+    auto       manual =
+        json(fixture.control({"job", "run-now", cron_job_id, "--idempotency-key", "workflow-manual", "--json"}));
+    auto const manual_id = manual.as_object().at("id").as_string();
+    auto       replay =
+        json(fixture.control({"job", "run-now", cron_job_id, "--idempotency-key", "workflow-manual", "--json"}));
+    CHECK(replay.as_object().at("id").as_string() == manual_id);
+    fixture.until([&] { return fixture.run_state(manual_id) == "succeeded"; });
+    auto advanced =
+        json(fixture.control({"job", "update", cron_job_id, "--revision", "1", "--priority", "1", "--json"}));
+    CHECK(advanced.as_object().at("revision").as_uint() == 2);
+    auto stale = fixture.control({"job", "update", cron_job_id, "--revision", "1", "--priority", "2", "--json"}, 1);
+    CHECK(stale.find("jobu.job.revision_conflict") != std::string::npos);
+    auto cron_runs = json(fixture.control({"run", "list", "--job-id", cron_job_id, "--json"}));
+    REQUIRE(cron_runs.as_object().at("items").as_array().size() == 2);
+    static_cast<void>(fixture.control({"job", "suspend", cron_job_id, "--wait"}));
+    static_cast<void>(fixture.control({"job", "resume", cron_job_id}));
+
+    // Queue suspension makes a due-now run cancellable before it can start.
+    static_cast<void>(fixture.control({"queue", "suspend", "--id", queue_id, "--wait"}));
+    auto       pending_request = json(R"({"name":"pending-cli","queue_name":"workflow","type":"cli",
+        "schedule":{"kind":"once","at":"now"},"payload":{"command":"/bin/true"}})");
+    auto       pending_job     = fixture.rpc("job.create", std::move(pending_request));
+    auto const pending_job_id  = pending_job.as_object().at("id").as_string();
+    auto       pending_runs    = json(fixture.control({"run", "list", "--job-id", pending_job_id, "--json"}));
+    REQUIRE(pending_runs.as_object().at("items").as_array().size() == 1);
+    auto const pending_id = pending_runs.as_object().at("items").as_array().front().as_object().at("id").as_string();
+    auto       cancelled  = json(fixture.control({"run", "cancel", pending_id, "--wait", "--json"}));
+    CHECK(cancelled.as_object().at("disposition").as_string() == "completed");
+    CHECK(cancelled.as_object().at("run").as_object().at("state").as_string() == "cancelled");
+    static_cast<void>(fixture.control({"queue", "resume", "--id", queue_id}));
+
+    // Hold a second HTTP request until cancellation is accepted, then observe its durable terminal state.
+    jb::test::HttpTestServer active_server;
+    active_server.enqueue_response({});
+    auto active_request = json(R"({"name":"active-http","queue_name":"workflow","type":"http",
+        "schedule":{"kind":"once","at":"now"},"payload":{"url":""}})");
+    std::get<JsonValue::Object>(std::get<JsonValue::Object>(active_request.data).at("payload").data).at("url") =
+        text(active_server.url("/active"));
+    auto active_job = fixture.rpc("job.create", std::move(active_request));
+    auto active_runs =
+        json(fixture.control({"run", "list", "--job-id", active_job.as_object().at("id").as_string(), "--json"}));
+    REQUIRE(active_runs.as_object().at("items").as_array().size() == 1);
+    auto const active_id = active_runs.as_object().at("items").as_array().front().as_object().at("id").as_string();
+    REQUIRE(active_server.wait_for_requests(1, 5s));
+    auto requested = json(fixture.control({"run", "cancel", active_id, "--json"}));
+    CHECK(requested.as_object().at("disposition").as_string() == "requested");
+    active_server.release_responses();
+    fixture.until([&] { return fixture.run_state(active_id) == "cancelled"; });
+
+    // A new daemon incarnation serves the same immutable history and output through public commands.
+    fixture.restart();
+    auto retained = json(fixture.control({"run", "get", retry_run_id, "--json"}));
+    CHECK(retained == run);
+    auto retained_attempts = json(fixture.control({"attempt", "list", retry_run_id, "--json"}));
+    CHECK(retained_attempts == attempts);
+    auto retained_output =
+        json(fixture.control({"attempt", "output", retry_run_id, "2", "--channel", "body", "--json"}));
+    CHECK(retained_output == output);
+    CHECK(fixture.run_state(pending_id) == "cancelled");
+    CHECK(fixture.run_state(active_id) == "cancelled");
+    fixture.responsive();
+}
+
+TEST_CASE("lost real-transport creation response replays one durable job and run after restart",
+          "[jobud][phase8][integration]")
+{
+    DaemonFixture fixture{2, false};
+    static_cast<void>(fixture.control({"queue", "create", "lost-response"}));
+    static_cast<void>(fixture.control({"queue", "suspend", "--name", "lost-response", "--wait"}));
+
+    // The queue holds the due-now run while the first client closes without observing its mutation reply.
+    auto request    = json(R"({"name":"lost-create","queue_name":"lost-response","type":"cli",
+        "schedule":{"kind":"once","at":"now"},"payload":{"command":"/bin/true"},
+        "idempotency_key":"workflow-lost-response"})");
+    auto serialized = serialize_json(request);
+    REQUIRE(serialized);
+    auto const request_file = fixture.directory.path() / "lost-create.json";
+    write_file(request_file, *serialized);
+    fixture.lose_response("job.create", request);
+    fixture.until([&] { return fixture.job_count("lost-create") == 1; });
+
+    auto       created = json(fixture.control({"job", "create", "--request-file", request_file.string(), "--json"}));
+    auto const job_id  = created.as_object().at("id").as_string();
+    CHECK(fixture.job_count("lost-create") == 1);
+    auto page = json(fixture.control({"run", "list", "--job-id", job_id, "--json"}));
+    REQUIRE(page.as_object().at("items").as_array().size() == 1);
+    auto const run_id = page.as_object().at("items").as_array().front().as_object().at("id").as_string();
+    CHECK(fixture.run_state(run_id) == "scheduled");
+
+    fixture.restart();
+    auto replayed = json(fixture.control({"job", "create", "--request-file", request_file.string(), "--json"}));
+    CHECK(replayed == created);
+    CHECK(fixture.job_count("lost-create") == 1);
+    auto retained = json(fixture.control({"run", "list", "--job-id", job_id, "--json"}));
+    REQUIRE(retained.as_object().at("items").as_array().size() == 1);
+    CHECK(retained.as_object().at("items").as_array().front().as_object().at("id").as_string() == run_id);
+    CHECK(fixture.run_state(run_id) == "scheduled");
 }
