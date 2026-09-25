@@ -6,6 +6,7 @@
 #include "json.hpp"
 #include "management_json.hpp"
 #include "secret_json.hpp"
+#include "statistics_json.hpp"
 
 #include <algorithm>
 #include <array>
@@ -148,6 +149,14 @@ auto decode_request(CommandKind kind, JsonValue const& value, AttributeRegistry 
             return request_from(secret_list_request_from_json(value));
         case CommandKind::SecretDelete:
             return request_from(secret_delete_request_from_json(value));
+        case CommandKind::SystemStats:
+            return request_from(system_statistics_request_from_json(value));
+        case CommandKind::QueueStats:
+            return request_from(queue_statistics_request_from_json(value));
+        case CommandKind::ScheduleValidate:
+            return request_from(schedule_validate_request_from_json(value));
+        case CommandKind::ScheduleNext:
+            return request_from(schedule_next_request_from_json(value));
         case CommandKind::SystemInfo:
             break;
     }

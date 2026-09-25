@@ -1,9 +1,11 @@
 #pragma once
 
 #include "attribute_registry.hpp"
+#include "control_json.hpp"
 #include "history.hpp"
 #include "management.hpp"
 #include "secret.hpp"
+#include "statistics_json.hpp"
 #include "uuid.hpp"
 
 #include <chrono>
@@ -18,6 +20,7 @@ namespace jb::jobuctl::detail {
 
 enum class CommandKind : std::uint8_t {
     SystemInfo,
+    SystemStats,
     QueueCreate,
     QueueGet,
     QueueList,
@@ -25,6 +28,7 @@ enum class CommandKind : std::uint8_t {
     QueueSuspend,
     QueueResume,
     QueueDelete,
+    QueueStats,
     JobCreate,
     JobGet,
     JobList,
@@ -43,6 +47,8 @@ enum class CommandKind : std::uint8_t {
     SecretSet,
     SecretList,
     SecretDelete,
+    ScheduleValidate,
+    ScheduleNext,
 };
 
 /// Owning requests for the currently registered CLI methods. CommandKind identifies repeated result types.
@@ -64,6 +70,10 @@ using CommandRequest = std::variant<std::monostate,
                                     jb::jobu::AttemptOutputRequest,
                                     jb::jobu::SetSecretRequest,
                                     jb::jobu::SecretListRequest,
+                                    jb::jobu::StatisticsListRequest,
+                                    jb::jobu::QueueStatisticsListRequest,
+                                    jb::jobu::CronSchedule,
+                                    jb::jobu::ScheduleNextRequest,
                                     std::string>;
 
 /// Raw secret input is selected during parsing but read only after local help has been resolved.

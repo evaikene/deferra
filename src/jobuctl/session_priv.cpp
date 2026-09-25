@@ -65,6 +65,10 @@ auto is_mutation(CommandKind kind) noexcept -> bool
         case CommandKind::AttemptList:
         case CommandKind::AttemptOutput:
         case CommandKind::SecretList:
+        case CommandKind::SystemStats:
+        case CommandKind::QueueStats:
+        case CommandKind::ScheduleValidate:
+        case CommandKind::ScheduleNext:
             return false;
     }
     return false;
@@ -125,6 +129,14 @@ auto call_command(ControlClient& client, Command const& command, ControlCallOpti
             return client.list_secrets(std::get<SecretListRequest>(command.request), options);
         case CommandKind::SecretDelete:
             return client.delete_secret(std::get<std::string>(command.request), options);
+        case CommandKind::SystemStats:
+            return client.system_statistics(std::get<StatisticsListRequest>(command.request), options);
+        case CommandKind::QueueStats:
+            return client.queue_statistics(std::get<QueueStatisticsListRequest>(command.request), options);
+        case CommandKind::ScheduleValidate:
+            return client.validate_schedule(std::get<CronSchedule>(command.request), options);
+        case CommandKind::ScheduleNext:
+            return client.next_schedule_occurrences(std::get<ScheduleNextRequest>(command.request), options);
         case CommandKind::SystemInfo:
             break;
     }

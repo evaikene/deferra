@@ -61,6 +61,8 @@ auto is_cli_argument_value(std::string_view token, std::span<CommandLineOption c
         "file",
         "stdin",
         "after-name",
+        "group-by",
+        "count",
     };
     return is_cli_creation_option(name) || name == "help" || name == "version" || name == "json" || name == "timeout" ||
            name == "request-file" || std::ranges::find(added_options, name) != added_options.end() ||

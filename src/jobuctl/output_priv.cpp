@@ -5,6 +5,7 @@
 #include "history_json.hpp"
 #include "management_json.hpp"
 #include "secret_json.hpp"
+#include "statistics_json.hpp"
 #include "system_info.hpp"
 
 #include "json.hpp"
@@ -99,6 +100,10 @@ auto is_job_command(CommandKind kind) noexcept -> bool
         case CommandKind::SecretSet:
         case CommandKind::SecretList:
         case CommandKind::SecretDelete:
+        case CommandKind::SystemStats:
+        case CommandKind::QueueStats:
+        case CommandKind::ScheduleValidate:
+        case CommandKind::ScheduleNext:
             return false;
     }
     return false;
@@ -165,6 +170,21 @@ auto encoded_reply(Command const& command, ControlReply const& reply, AttributeR
     else if (command.kind == CommandKind::SecretDelete) {
         if (std::holds_alternative<EmptyReply>(reply)) {
             return Result<JsonValue, Error>::success(JsonValue{});
+        }
+    }
+    else if (command.kind == CommandKind::SystemStats || command.kind == CommandKind::QueueStats) {
+        if (auto const* page = std::get_if<StatisticsPage>(&reply)) {
+            return statistics_page_to_json(*page);
+        }
+    }
+    else if (command.kind == CommandKind::ScheduleValidate) {
+        if (std::holds_alternative<ScheduleValidationReply>(reply)) {
+            return Result<JsonValue, Error>::success(schedule_validate_result_to_json());
+        }
+    }
+    else if (command.kind == CommandKind::ScheduleNext) {
+        if (auto const* result = std::get_if<ScheduleNextReply>(&reply)) {
+            return schedule_next_result_to_json(result->occurrences);
         }
     }
     else if (command.kind == CommandKind::QueueDelete || command.kind == CommandKind::JobDelete) {
@@ -312,6 +332,12 @@ auto print_command_result(Command const& command, ControlReply const& reply, Sta
         }
         print_system_info(*info);
         return true;
+    }
+    if (command.kind == CommandKind::SystemStats || command.kind == CommandKind::QueueStats) {
+        return print_statistics_result(reply);
+    }
+    if (command.kind == CommandKind::ScheduleValidate || command.kind == CommandKind::ScheduleNext) {
+        return print_schedule_result(command.kind, reply);
     }
     if (is_job_command(command.kind)) {
         return print_job_result(command, reply);

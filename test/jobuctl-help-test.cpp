@@ -206,6 +206,11 @@ TEST_CASE("jobuctl executable prints local help with blocked or closed stdin", "
                  {"secret", "set", "--stdin", "--help"},
                  {"secret", "list", "--help"},
                  {"secret", "delete", "--help"},
+                 {"system", "stats", "--help"},
+                 {"queue", "stats", "--help"},
+                 {"schedule"},
+                 {"schedule", "validate", "--help"},
+                 {"schedule", "next", "--help"},
                  {"queue", "get", "--id", "not-a-uuid", "--socket", "/nonexistent/jobu.sock", "--help"}
         }) {
             CAPTURE(blocked, arguments);
@@ -222,6 +227,27 @@ TEST_CASE("jobuctl executable prints local help with blocked or closed stdin", "
     auto alias = run({"queue", "add", "--help"});
     CHECK(alias.out.find("queue create NAME") != std::string::npos);
     CHECK(alias.out.find("Alias: queue add") != std::string::npos);
+}
+
+TEST_CASE("jobuctl help reaches every registered command and alias without a daemon", "[jobuctl][help]")
+{
+    auto const actions = std::vector<std::string>{
+        "system info",       "system stats",  "queue create",   "queue add",    "queue get",   "queue list",
+        "queue update",      "queue suspend", "queue resume",   "queue delete", "queue stats", "job create",
+        "job add",           "job get",       "job list",       "job update",   "job suspend", "job resume",
+        "job move",          "job delete",    "job run-now",    "run get",      "run list",    "run cancel",
+        "attempt get",       "attempt list",  "attempt output", "secret set",   "secret list", "secret delete",
+        "schedule validate", "schedule next",
+    };
+    for (auto const& path : actions) {
+        auto const separator = path.find(' ');
+        auto       result    = run({path.substr(0, separator), path.substr(separator + 1), "--help"});
+        CAPTURE(path);
+        CHECK(result.code == 0);
+        CHECK(result.out.starts_with("Usage:\n"));
+        CHECK(result.out.find("--request-file") != std::string::npos);
+        CHECK(result.err.empty());
+    }
 }
 
 TEST_CASE("jobuctl executable rejects invalid help syntax with contextual stderr", "[jobuctl][help]")
