@@ -24,6 +24,7 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -33,8 +34,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(__APPLE__)
+#  include <crt_externs.h>
+#endif
 #include <csignal> // IWYU pragma: keep - SIGKILL for the child-process recovery fixture
 #include <poll.h>
+#include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -46,6 +51,15 @@ using namespace jb::test;
 using namespace std::chrono_literals;
 
 namespace {
+
+auto process_environment() noexcept -> char**
+{
+#if defined(__APPLE__)
+    return *_NSGetEnviron();
+#else
+    return environ;
+#endif
+}
 
 struct ServiceFixture {
     RecoveryFixture       storage;
@@ -531,36 +545,33 @@ TEST_CASE("Recovery converges after abrupt process exit between committed units"
     fixture.storage.insert_run(second);
     REQUIRE(fixture.storage.database.close());
 
-    // Fork with the database closed. The pipe's hangup is an exit handshake; its timeout
-    // only protects the parent test from a stuck child, not evidence of recovery progress.
+    // The helper starts as a new process so its SQLite connection and runtime state are
+    // created after exec. The inherited pipe writer closes on exit; hangup is an exit
+    // handshake, not recovery progress evidence.
     int descriptors[2];
     REQUIRE(::pipe(descriptors) == 0);
-    auto pid = ::fork();
-    if (pid == 0) {
-        ::close(descriptors[0]);
-        if (!fixture.storage.database.open()) {
-            ::_exit(10);
-        }
-        RunRepository runs{fixture.storage.database, fixture.storage.registry};
-        bool          observed_precommit = false;
-        auto          result             = fixture.recover(1, [&] {
-            auto row = runs.find_by_id(first.run.id);
-            if (!row || !*row) {
-                ::_exit(11);
-            }
-            if ((*row)->state == RunState::Interrupted && std::exchange(observed_precommit, true)) {
-                // The second observation is the next page boundary, after commit. Exit
-                // without destructors: neither recovery nor the database gets normal cleanup.
-                ::_exit(77);
-            }
-            return false;
-        });
-        ::_exit(result ? 12 : 13);
-    }
+
+    auto executable      = std::string{RECOVERY_SERVICE_TEST_HELPER};
+    auto database_file   = fixture.storage.database_file.string();
+    auto first_run       = first.run.id.to_string();
+    auto successor_one   = recovery_id(1000).to_string();
+    auto successor_two   = recovery_id(1001).to_string();
+    auto successor_three = recovery_id(1002).to_string();
+    auto arguments       = std::array<char*, 7>{executable.data(),
+                                                database_file.data(),
+                                                first_run.data(),
+                                                successor_one.data(),
+                                                successor_two.data(),
+                                                successor_three.data(),
+                                                nullptr};
+
+    pid_t pid{};
+    auto  spawn_error =
+        ::posix_spawn(&pid, executable.c_str(), nullptr, nullptr, arguments.data(), process_environment());
     ::close(descriptors[1]);
-    if (pid < 0) {
+    if (spawn_error != 0) {
         ::close(descriptors[0]);
-        FAIL("Could not fork recovery child");
+        FAIL("Could not start recovery child");
     }
 
     pollfd descriptor{.fd = descriptors[0], .events = POLLIN, .revents = 0};
