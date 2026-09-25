@@ -76,9 +76,9 @@ at the 512 KiB result budget. Use `run.list` to inspect occurrence history;
 
 ## Update (`job.update`)
 
-`job_id`, `expected_revision`, and at least one effective change are required.
-The supplied revision must equal the current one; the service never fetches a
-new revision and retries for you.
+`job_id`, `expected_revision`, and at least one replacement field or one
+`attributes` entry are required. The supplied revision must equal the current
+one; the service never fetches a new revision and retries for you.
 
 | Params member | Type | Required | Since | Meaning |
 | --- | --- | --- | --- | --- |
@@ -91,9 +91,12 @@ new revision and retries for you.
 | `attributes` | attribute object | No | 1.1 | Partial patch; supplied names replace values, omitted names stay unchanged |
 | `payload` | object | No | 1.1 | Complete replacement payload |
 
-The result is the new full definition with an advanced revision. A changed
-schedule can replace an unstarted scheduled occurrence; a running or
-retry-waiting occurrence keeps its immutable snapshot. A stale revision
+The result is the new full definition with an advanced revision. A supplied
+field may equal its current value; an accepted same-value update still advances
+the revision.
+
+A changed schedule can replace an unstarted scheduled occurrence; a running
+or retry-waiting occurrence keeps its immutable snapshot. A stale revision
 returns `jobu.job.revision_conflict` without modifying either definition or
 secret-reference ownership. Updates commit before replying.
 

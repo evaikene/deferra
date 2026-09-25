@@ -75,7 +75,8 @@ to fit the 512 KiB result budget.
 
 ## Update (`queue.update`)
 
-The request needs exactly one selector and at least one changed field:
+The request needs exactly one selector and at least one setting field, even if
+the supplied value equals the current value:
 
 | Params member | Type | Required | Since | Meaning |
 | --- | --- | --- | --- | --- |

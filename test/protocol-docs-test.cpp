@@ -13,6 +13,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <variant>
 
 using namespace jb::core;
 using namespace jb::jobu;
@@ -58,4 +59,28 @@ TEST_CASE("Published protocol results use production decoders", "[jobu][protocol
     REQUIRE(secret_metadata_from_json(example("secret-set.result.json")));
     REQUIRE(schedule_next_result_from_json(example("schedule-next.result.json")));
     REQUIRE(statistics_page_from_json(example("system-stats.result.json")));
+}
+
+TEST_CASE("Published statistics request and result describe one empty cohort", "[jobu][protocol][docs]")
+{
+    auto const request = system_statistics_request_from_json(example("system-stats.params.json"));
+    REQUIRE(request);
+
+    auto const* query = std::get_if<StatisticsRequest>(&*request);
+    REQUIRE(query != nullptr);
+
+    auto const result = statistics_page_from_json(example("system-stats.result.json"));
+    REQUIRE(result);
+
+    CHECK(result->group_by == query->group_by);
+    CHECK(result->window.from == query->planned.from);
+    CHECK(result->window.to == query->planned.to);
+    CHECK(result->groups.size() <= query->limit);
+
+    REQUIRE(result->group_by == StatisticsGroupBy::None);
+    REQUIRE(result->groups.size() == 1);
+    CHECK(std::holds_alternative<std::monostate>(result->groups.front().key));
+    CHECK(result->groups.front().runs.total == 0);
+    CHECK(result->groups.front().attempts.total == 0);
+    CHECK_FALSE(result->next_cursor);
 }

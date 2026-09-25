@@ -51,7 +51,7 @@ time; all retained attempts of those runs count, including retries outside
 the window.
 
 ```json
-{"planned":{"from":"2026-01-01T00:00:00Z","to":"2026-01-02T00:00:00Z"},"group_by":"queue","limit":2}
+{"planned":{"from":"2026-01-01T00:00:00Z","to":"2026-01-02T00:00:00Z"},"group_by":"none","limit":2}
 ```
 
 The result is a [statistics page](../types.md#statistics-page). An empty
