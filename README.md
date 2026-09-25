@@ -121,6 +121,13 @@ explicit `PATH` with `--env PATH=/usr/bin:/bin` for a bare command name.
 
 Run `jobud --help` or `jobuctl --help` to see the available options.
 
+## Documentation
+
+- [User Manual](docs/README.md)
+- [`jobuctl` command guide](docs/jobuctl.md)
+- [C++ control client guide](docs/cpp-client.md)
+- [JSON-RPC protocol](docs/protocol/README.md)
+
 ## AI-supported development experiment
 
 JobU is also an experiment in incremental, AI-supported software development:

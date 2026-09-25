@@ -168,6 +168,12 @@ add_executable(history-json-test history-json-test.cpp)
 target_link_libraries(history-json-test PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME history-json-test COMMAND $<TARGET_FILE:history-json-test>)
 
+add_executable(protocol-docs-test protocol-docs-test.cpp)
+target_link_libraries(protocol-docs-test PRIVATE jobu Catch2::Catch2WithMain)
+target_compile_definitions(protocol-docs-test PRIVATE
+    JOBU_DOC_EXAMPLE_DIR="${PROJECT_SOURCE_DIR}/docs/protocol/examples")
+add_test(NAME protocol-docs-test COMMAND $<TARGET_FILE:protocol-docs-test>)
+
 add_executable(statistics-json-test statistics-json-test.cpp)
 target_link_libraries(statistics-json-test PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME statistics-json-test COMMAND $<TARGET_FILE:statistics-json-test>)
