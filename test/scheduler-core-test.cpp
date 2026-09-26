@@ -5,6 +5,7 @@
 #include "attribute_registry.hpp"
 #include "database.hpp"
 #include "domain_storage_priv.hpp"
+#include "job_repository_priv.hpp"
 #include "management.hpp"
 #include "query.hpp"
 #include "run_repository_priv.hpp"
@@ -1026,10 +1027,11 @@ TEST_CASE("Scheduler core completes service-requested suspension drains",
 
         fixture.time.set_utc(at(140));
         REQUIRE(fixture.executor.complete(first_key, success(first_key)));
-        auto first_suspended = service.get_job(first_job);
-        REQUIRE(first_suspended);
-        CHECK(first_suspended->state == JobState::Suspended);
-        CHECK(first_suspended->revision == 3);
+        auto first_finished = service.get_job(first_job);
+        REQUIRE(first_finished);
+        CHECK(first_finished->state == JobState::Succeeded);
+        CHECK(first_finished->revision == 3);
+        CHECK(first_finished->updated_at == at(140));
         auto queue_draining = service.get_queue(queue_id);
         REQUIRE(queue_draining);
         CHECK(queue_draining->state == QueueState::Suspending);
@@ -1037,10 +1039,11 @@ TEST_CASE("Scheduler core completes service-requested suspension drains",
         REQUIRE(service.suspend_job(second_job));
         fixture.time.set_utc(at(150));
         REQUIRE(fixture.executor.complete(second_key, success(second_key)));
-        auto second_suspended = service.get_job(second_job);
-        REQUIRE(second_suspended);
-        CHECK(second_suspended->state == JobState::Suspended);
-        CHECK(second_suspended->revision == 3);
+        auto second_finished = service.get_job(second_job);
+        REQUIRE(second_finished);
+        CHECK(second_finished->state == JobState::Succeeded);
+        CHECK(second_finished->revision == 3);
+        CHECK(second_finished->updated_at == at(150));
         auto queue_suspended = service.get_queue(queue_id);
         REQUIRE(queue_suspended);
         CHECK(queue_suspended->state == QueueState::Suspended);
@@ -1259,6 +1262,141 @@ TEST_CASE("Scheduler core commits terminal success before releasing capacity",
     CHECK(second_key.run_id == id(102));
     fixture.time.set_utc(at(201));
     REQUIRE(fixture.executor.complete(second_key, success(second_key)));
+}
+
+TEST_CASE("Scheduler core persists the final one-time result for CLI and HTTP work",
+          "[jobu][scheduler][core][completion][lifecycle][sqlite]")
+{
+    for (auto const type : {JobType::Cli, JobType::Http}) {
+        for (auto const failed : {false, true}) {
+            DYNAMIC_SECTION("type " << static_cast<int>(type) << " failed " << failed)
+            {
+                CoreFixture fixture;
+                auto const  queue_id = id(1);
+                auto const  run_id   = id(10);
+                auto const  job_id   = id(110);
+                insert_queue(fixture.database, queue_id, 1);
+                insert_scheduled(fixture, queue_id, 10, type);
+                fixture.executor.set_available(type, true);
+                SchedulerCore core{fixture.database,
+                                   fixture.registry,
+                                   fixture.cron,
+                                   fixture.generator,
+                                   fixture.time,
+                                   fixture.executor,
+                                   fixture.secrets};
+                JobRepository jobs{fixture.database, fixture.registry};
+
+                REQUIRE(core.process_cycle());
+                REQUIRE(fixture.executor.pending_keys().size() == 1U);
+                auto const key = fixture.executor.pending_keys().front();
+                REQUIRE(key.run_id == run_id);
+                fixture.time.set_utc(at(200));
+                auto result = failed ? failure(key, FailureDisposition::Terminal) : success(key);
+                REQUIRE(fixture.executor.complete(key, std::move(result)));
+
+                auto run = fixture.runs.find_by_id(run_id);
+                REQUIRE(run);
+                REQUIRE(run->has_value());
+                CHECK(run->value().state == (failed ? RunState::Failed : RunState::Succeeded));
+                CHECK(run->value().job_revision == 1);
+                auto job = jobs.find_by_id(job_id, false);
+                REQUIRE(job);
+                REQUIRE(job->has_value());
+                CHECK(job->value().state == (failed ? JobState::Failed : JobState::Succeeded));
+                CHECK(job->value().revision == 2);
+                CHECK(job->value().updated_at == at(200));
+            }
+        }
+    }
+}
+
+TEST_CASE("Scheduler core preserves a deleted definition when its running work completes",
+          "[jobu][scheduler][core][completion][lifecycle][deleted][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  queue_id = id(1);
+    auto const  job_id   = id(110);
+    insert_queue(fixture.database, queue_id, 1);
+    insert_scheduled(fixture, queue_id, 10, JobType::Cli);
+    fixture.executor.set_available(JobType::Cli, true);
+    SchedulerCore core{fixture.database,
+                       fixture.registry,
+                       fixture.cron,
+                       fixture.generator,
+                       fixture.time,
+                       fixture.executor,
+                       fixture.secrets};
+    JobRepository jobs{fixture.database, fixture.registry};
+
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const key = fixture.executor.pending_keys().front();
+    mark_job_deleted(fixture.database, job_id);
+    fixture.time.set_utc(at(200));
+    REQUIRE(fixture.executor.complete(key, success(key)));
+
+    auto run = fixture.runs.find_by_id(key.run_id);
+    REQUIRE(run);
+    REQUIRE(run->has_value());
+    CHECK(run->value().state == RunState::Succeeded);
+    auto job = jobs.find_by_id(job_id, true);
+    REQUIRE(job);
+    REQUIRE(job->has_value());
+    CHECK(job->value().state == JobState::Deleted);
+    CHECK(job->value().revision == 2);
+    CHECK(job->value().updated_at == at(1));
+}
+
+TEST_CASE("A completed manual test leaves its one-time scheduled occurrence unfinished",
+          "[jobu][scheduler][core][completion][run-now][lifecycle][sqlite]")
+{
+    auto const  queue_id     = id(1);
+    auto const  job_id       = id(2);
+    auto const  scheduled_id = id(3);
+    auto const  manual_id    = id(4);
+    CoreFixture fixture{
+        {queue_id, job_id, scheduled_id, manual_id}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    fixture.executor.set_available(JobType::Cli, true);
+    REQUIRE(service.create_queue({.name = "manual-test"}));
+    REQUIRE(service.create_job({
+        .queue    = queue_id,
+        .schedule = OnceSchedule{.planned_at = at(300)},
+        .payload  = cli_payload("/manual"),
+    }));
+    auto manual = service.run_now({.job_id = job_id});
+    REQUIRE(manual);
+    REQUIRE(manual->id == manual_id);
+
+    SchedulerCore core{fixture.database,
+                       fixture.registry,
+                       fixture.cron,
+                       fixture.generator,
+                       fixture.time,
+                       fixture.executor,
+                       fixture.secrets};
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const key = fixture.executor.pending_keys().front();
+    REQUIRE(key.run_id == manual_id);
+    fixture.time.set_utc(at(200));
+    REQUIRE(fixture.executor.complete(key, success(key)));
+
+    auto completed = fixture.runs.find_by_id(manual_id);
+    REQUIRE(completed);
+    REQUIRE(completed->has_value());
+    CHECK(completed->value().state == RunState::Succeeded);
+    auto scheduled = fixture.runs.find_schedule_owned(job_id);
+    REQUIRE(scheduled);
+    REQUIRE(scheduled->has_value());
+    CHECK(scheduled->value().id == scheduled_id);
+    CHECK(scheduled->value().state == RunState::Scheduled);
+    auto unfinished = service.get_job(job_id);
+    REQUIRE(unfinished);
+    CHECK(unfinished->state == JobState::Active);
+    CHECK(unfinished->revision == 1);
 }
 
 TEST_CASE("Scheduler core persists runner output with success retry and terminal completion",
@@ -1697,6 +1835,13 @@ TEST_CASE("Scheduler core retries the same run and terminally exhausts its polic
     fixture.time.set_utc(at(200));
     REQUIRE(fixture.executor.complete(first_key, failure(first_key, FailureDisposition::Retryable)));
 
+    JobRepository jobs{fixture.database, fixture.registry};
+    auto          unfinished = jobs.find_by_id(id(206), false);
+    REQUIRE(unfinished);
+    REQUIRE(unfinished->has_value());
+    CHECK(unfinished->value().state == JobState::Active);
+    CHECK(unfinished->value().revision == 1);
+
     auto waiting = fixture.runs.find_by_id(first_key.run_id);
     REQUIRE(waiting);
     REQUIRE(waiting->has_value());
@@ -1727,6 +1872,59 @@ TEST_CASE("Scheduler core retries the same run and terminally exhausts its polic
     REQUIRE(attempts->size() == 2U);
     CHECK((*attempts)[0].outcome == AttemptOutcome::Failed);
     CHECK((*attempts)[1].outcome == AttemptOutcome::Failed);
+    auto finished = jobs.find_by_id(id(206), false);
+    REQUIRE(finished);
+    REQUIRE(finished->has_value());
+    CHECK(finished->value().state == JobState::Failed);
+    CHECK(finished->value().revision == 2);
+    CHECK(finished->value().updated_at == at(220));
+}
+
+TEST_CASE("Scheduler core finishes a one-time job after a successful retry",
+          "[jobu][scheduler][core][completion][retry][lifecycle][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  queue_id = id(1);
+    auto const  job_id   = id(110);
+    insert_queue(fixture.database, queue_id, 1);
+    auto const attributes = attribute_document(fixture.registry, "reschedule", 2, Duration{10us});
+    insert_scheduled(fixture, queue_id, 10, JobType::Cli, 0, 100, 100, attributes);
+    fixture.executor.set_available(JobType::Cli, true);
+    SchedulerCore core{fixture.database,
+                       fixture.registry,
+                       fixture.cron,
+                       fixture.generator,
+                       fixture.time,
+                       fixture.executor,
+                       fixture.secrets};
+    JobRepository jobs{fixture.database, fixture.registry};
+
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const first_key = fixture.executor.pending_keys().front();
+    fixture.time.set_utc(at(200));
+    REQUIRE(fixture.executor.complete(first_key, failure(first_key, FailureDisposition::Retryable)));
+    auto waiting = jobs.find_by_id(job_id, false);
+    REQUIRE(waiting);
+    REQUIRE(waiting->has_value());
+    CHECK(waiting->value().state == JobState::Active);
+    CHECK(waiting->value().revision == 1);
+    CHECK(waiting->value().updated_at == at(0));
+
+    fixture.time.set_utc(at(210));
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const second_key = fixture.executor.pending_keys().front();
+    CHECK(second_key.run_id == first_key.run_id);
+    CHECK(second_key.attempt_number == 2U);
+    fixture.time.set_utc(at(220));
+    REQUIRE(fixture.executor.complete(second_key, success(second_key)));
+    auto finished = jobs.find_by_id(job_id, false);
+    REQUIRE(finished);
+    REQUIRE(finished->has_value());
+    CHECK(finished->value().state == JobState::Succeeded);
+    CHECK(finished->value().revision == 2);
+    CHECK(finished->value().updated_at == at(220));
 }
 
 TEST_CASE("Scheduler core combines policy delays with executor retry deadlines",
@@ -1942,6 +2140,96 @@ TEST_CASE("Scheduler core completes executor start errors through the normal ter
         CHECK(attempts->front().state == AttemptState::Completed);
         CHECK(attempts->front().outcome == AttemptOutcome::Failed);
     }
+}
+
+TEST_CASE("A one-time secret preparation failure finishes its definition without launching work",
+          "[jobu][scheduler][core][completion][secret][lifecycle][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  queue_id = id(1);
+    auto const  job_id   = id(2);
+    auto const  run_id   = id(3);
+    auto const  payload  = std::string_view{R"({"command":"/test","arguments":[{"secret":"missing"}]})"};
+    insert_queue(fixture.database, queue_id, 1);
+    insert_job(fixture.database,
+               job_id,
+               queue_id,
+               JobType::Cli,
+               JobState::Active,
+               std::nullopt,
+               1,
+               0,
+               attribute_document(fixture.registry),
+               payload);
+    auto run         = default_run(fixture, run_id, job_id, queue_id, JobType::Cli);
+    run.payload_json = payload;
+    insert_run(fixture.database, run);
+    fixture.executor.set_available(JobType::Cli, true);
+    DatabaseSecretProvider provider{fixture.database};
+    SchedulerCore          core{fixture.database,
+                                fixture.registry,
+                                fixture.cron,
+                                fixture.generator,
+                                fixture.time,
+                                fixture.executor,
+                                provider};
+    JobRepository          jobs{fixture.database, fixture.registry};
+
+    fixture.time.set_utc(at(200));
+    REQUIRE(core.process_cycle());
+    CHECK(fixture.executor.start_requests().empty());
+    auto finished_run = fixture.runs.find_by_id(run_id);
+    REQUIRE(finished_run);
+    REQUIRE(finished_run->has_value());
+    CHECK(finished_run->value().state == RunState::Failed);
+    auto attempts = fixture.attempts.list_for_run(run_id, 10);
+    REQUIRE(attempts);
+    REQUIRE(attempts->size() == 1U);
+    CHECK(attempts->front().outcome == AttemptOutcome::Failed);
+    auto finished_job = jobs.find_by_id(job_id, false);
+    REQUIRE(finished_job);
+    REQUIRE(finished_job->has_value());
+    CHECK(finished_job->value().state == JobState::Failed);
+    CHECK(finished_job->value().revision == 2);
+    CHECK(finished_job->value().updated_at == at(200));
+}
+
+TEST_CASE("A stale completion cannot change a finished one-time definition",
+          "[jobu][scheduler][core][completion][lifecycle][stale][sqlite]")
+{
+    CoreFixture        fixture;
+    RawAttemptExecutor executor;
+    auto const         queue_id = id(1);
+    auto const         job_id   = id(110);
+    insert_queue(fixture.database, queue_id, 1);
+    insert_scheduled(fixture, queue_id, 10, JobType::Cli);
+    SchedulerCore core{fixture.database,
+                       fixture.registry,
+                       fixture.cron,
+                       fixture.generator,
+                       fixture.time,
+                       executor,
+                       fixture.secrets};
+    JobRepository jobs{fixture.database, fixture.registry};
+
+    REQUIRE(core.process_cycle());
+    REQUIRE(executor.requests.size() == 1U);
+    auto const key   = executor.requests.front().key;
+    auto       stale = executor.handler;
+    fixture.time.set_utc(at(200));
+    executor.emit(success(key));
+    fixture.time.set_utc(at(300));
+    stale(success(key));
+
+    auto failed = core.process_cycle();
+    REQUIRE_FALSE(failed);
+    CHECK(failed.error().code == "jobu.executor.invalid_completion");
+    auto job = jobs.find_by_id(job_id, false);
+    REQUIRE(job);
+    REQUIRE(job->has_value());
+    CHECK(job->value().state == JobState::Succeeded);
+    CHECK(job->value().revision == 2);
+    CHECK(job->value().updated_at == at(200));
 }
 
 TEST_CASE("Scheduler core rejects invalid executor completion protocol and fails closed",
@@ -2361,7 +2649,7 @@ TEST_CASE("Scheduler core rolls output writes back and retains capacity on failu
     CHECK(waiting->value().state == RunState::Scheduled);
 }
 
-TEST_CASE("Scheduler core rolls suspension-drain failures back and fails closed",
+TEST_CASE("Scheduler core rolls terminal job-state failures back and fails closed",
           "[jobu][scheduler][core][completion][suspension][rollback][management][sqlite]")
 {
     enum class FailureKind : std::uint8_t {
@@ -2400,9 +2688,9 @@ TEST_CASE("Scheduler core rolls suspension-drain failures back and fails closed"
 
         if (kind == FailureKind::Persistence) {
             Query trigger{fixture.database};
-            REQUIRE(trigger.exec("CREATE TRIGGER fail_scheduler_job_drain BEFORE UPDATE OF state ON jobu_jobs "
-                                 "WHEN OLD.state = 'suspending' AND NEW.state = 'suspended' "
-                                 "BEGIN SELECT RAISE(ABORT, 'injected scheduler drain failure'); END"));
+            REQUIRE(trigger.exec("CREATE TRIGGER fail_scheduler_job_finish BEFORE UPDATE OF state ON jobu_jobs "
+                                 "WHEN OLD.state = 'suspending' AND NEW.state = 'succeeded' "
+                                 "BEGIN SELECT RAISE(ABORT, 'injected scheduler completion failure'); END"));
         }
         else {
             Query revision{fixture.database};
@@ -3226,9 +3514,11 @@ TEST_CASE("Scheduler cancellation releases manual barriers and completes suspens
 
         fixture.time.set_utc(at(200));
         REQUIRE(fixture.executor.complete(key, success(key)));
-        auto suspended = service.get_job(job_id);
-        REQUIRE(suspended);
-        CHECK(suspended->state == JobState::Suspended);
+        auto finished = service.get_job(job_id);
+        REQUIRE(finished);
+        CHECK(finished->state == JobState::Cancelled);
+        CHECK(finished->revision == 3);
+        CHECK(finished->updated_at == at(200));
         auto cancelled = fixture.runs.find_by_id(run_id);
         REQUIRE(cancelled);
         REQUIRE(cancelled->has_value());
