@@ -109,9 +109,15 @@ requests that fail a service rule return application `-32000` with safe
 `data:{category,code}`. No error includes a payload, output bytes, secret value,
 stored filters, SQL, or token internals.
 
+For `attempt.get` and `attempt.output`, `attempt_number` must be an integer from
+1 through 9,223,372,036,854,775,807 (`INT64_MAX`). An out-of-range RPC value
+returns `-32602` without application `data` and leaves the daemon serving.
+The equivalent invalid direct-service request returns
+`jobu.history.invalid_request`.
+
 | Code | Category | Meaning |
 | --- | --- | --- |
-| `jobu.history.invalid_request` | InvalidArgument | A direct history read has an invalid limit, channel, or offset. The connection remains usable. |
+| `jobu.history.invalid_request` | InvalidArgument | A direct history read has an invalid attempt number, limit, channel, or offset. The connection remains usable. |
 | `jobu.history.invalid_cursor` | InvalidArgument | A cursor is malformed, unknown, expired, evicted, or belongs to another method. The current request fails; the connection remains usable. Start a new initial query. |
 | `jobu.history.cursor_unavailable` | ResourceExhausted | The server could not issue a unique continuation token. The current query fails; the connection remains usable. |
 | `jobu.run.not_found` | NotFound | A requested retained run does not exist. |

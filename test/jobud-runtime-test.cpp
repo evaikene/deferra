@@ -1,5 +1,6 @@
 #include "runtime_priv.hpp"
 
+#include "attempt.hpp"
 #include "attempt_repository_priv.hpp"
 #include "control_json.hpp"
 #include "control_rpc.hpp"
@@ -40,6 +41,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -1121,6 +1123,67 @@ TEST_CASE("Daemon history and statistics RPC read retained data without exposing
         CHECK(std::ranges::none_of(fixture.faults->calls,
                                    [](DatabaseCall const& call) { return call.boundary == "dispatch.secret"; }));
         CHECK(terminal.run.id != other_run.run.id);
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == EXIT_SUCCESS);
+}
+
+TEST_CASE("Oversized raw history requests leave daemon reads available", "[jobud][history][rpc]")
+{
+    RuntimeFixture fixture;
+    auto           scheduled = fixture.seed();
+    fixture.create_runtime();
+
+    auto result = fixture.run([&] {
+        auto*              history    = RuntimeTestAccess::history(*fixture.runtime);
+        auto               failures   = std::size_t{0};
+        auto               connection = history->failed.connect(history, [&](Error const&) { ++failures; });
+        RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
+
+        auto const run_id    = scheduled.run.id.to_string();
+        auto const valid_get = JsonValue{
+            .data = JsonValue::Object{{"run_id", JsonValue{.data = run_id}},
+                                      {"attempt_number", JsonValue{.data = std::uint64_t{1}}}}
+        };
+        auto const valid_output = JsonValue{
+            .data = JsonValue::Object{{"run_id", JsonValue{.data = run_id}},
+                                      {"attempt_number", JsonValue{.data = std::uint64_t{1}}},
+                                      {"channel", JsonValue{.data = std::string{"stdout"}}}}
+        };
+
+        auto check_still_serving = [&](std::string_view method, JsonValue const& valid_params) {
+            CHECK(failures == 0);
+            CHECK(fixture.runtime->state() == RuntimeState::Serving);
+            CHECK(rpc_result(endpoint.call("system.info", JsonValue{.data = JsonValue::Object{}})).is_object());
+            CHECK(rpc_result(endpoint.call(method, valid_params)).is_object());
+            CHECK(failures == 0);
+            CHECK(fixture.runtime->state() == RuntimeState::Serving);
+        };
+
+        // These numbers bypass the typed request encoder and exercise the daemon's raw RPC boundary.
+        for (auto number : {maximum_attempt_number + 1, std::numeric_limits<AttemptNumber>::max()}) {
+            auto get_params = JsonValue{
+                .data = JsonValue::Object{{"run_id", JsonValue{.data = run_id}},
+                                          {"attempt_number", JsonValue{.data = number}}}
+            };
+            auto rejected_get = endpoint.call("attempt.get", get_params);
+            CHECK(rpc_error(rejected_get).code == static_cast<std::int64_t>(jb::rpc::ErrorCode::InvalidParams));
+            CHECK_FALSE(rpc_error(rejected_get).data);
+            check_still_serving("attempt.get", valid_get);
+
+            auto output_params = JsonValue{
+                .data = JsonValue::Object{{"run_id", JsonValue{.data = run_id}},
+                                          {"attempt_number", JsonValue{.data = number}},
+                                          {"channel", JsonValue{.data = std::string{"stdout"}}}}
+            };
+            auto rejected_output = endpoint.call("attempt.output", output_params);
+            CHECK(rpc_error(rejected_output).code == static_cast<std::int64_t>(jb::rpc::ErrorCode::InvalidParams));
+            CHECK_FALSE(rpc_error(rejected_output).data);
+            check_still_serving("attempt.output", valid_output);
+        }
+
+        connection.disconnect();
         fixture.runtime->request_stop();
         return EXIT_SUCCESS;
     });
