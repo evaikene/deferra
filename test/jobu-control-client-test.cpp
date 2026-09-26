@@ -18,6 +18,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -122,6 +123,13 @@ struct Fixture {
     }
 
     void drain_tasks() { REQUIRE(app.process_events(EventFlag::Tasks) != ProcessEventsResult::Failed); }
+
+    void fire_one_millisecond_timeouts()
+    {
+        // Keep timer delivery queued until every one-millisecond call submitted so far has passed its deadline.
+        std::this_thread::sleep_until(Clock::now() + std::chrono::milliseconds{2});
+        REQUIRE(app.process_events(EventFlag::Timers) != ProcessEventsResult::Failed);
+    }
 
     void initialize(std::vector<std::string> methods = {"job.create", "run.list"})
     {
@@ -608,6 +616,144 @@ TEST_CASE("A partial mutation write fails once with an unknown outcome and termi
     CHECK(events == std::vector<std::string>{"failed", "1:known", "2:unknown"});
 }
 
+TEST_CASE("Terminal failure delivery stops when a handler destroys the wrapper", "[jobu][client]")
+{
+    for (auto destroy_on_failed : {true, false}) {
+        Fixture fixture;
+        fixture.initialize();
+        auto failed_count  = 0;
+        auto call_failures = std::vector<ControlCallId>{};
+
+        fixture.typed->failed.connect([&](Error const& error) {
+            ++failed_count;
+            if (destroy_on_failed) {
+                fixture.typed.reset();
+            }
+            CHECK(error.code == "rpc.connection_closed");
+        });
+        fixture.typed->call_failed.connect([&](ControlCallId id, ControlFailure const& failure) {
+            call_failures.push_back(id);
+            fixture.typed.reset();
+            CHECK(std::get<Error>(failure.error).code == "rpc.connection_closed");
+        });
+
+        REQUIRE(fixture.typed->list_runs(RunQuery{}));
+        REQUIRE(fixture.typed->list_runs(RunQuery{}));
+        fixture.rpc->close();
+        fixture.drain_tasks();
+
+        CHECK(failed_count == 1);
+        CHECK(call_failures == (destroy_on_failed ? std::vector<ControlCallId>{} : std::vector<ControlCallId>{1U}));
+        CHECK(fixture.typed == nullptr);
+    }
+}
+
+TEST_CASE("A timeout batch keeps its latched failures after reentrant close", "[jobu][client]")
+{
+    Fixture fixture;
+    fixture.initialize();
+    auto first  = fixture.typed->list_runs(RunQuery{}, {.timeout = std::chrono::milliseconds{1}});
+    auto second = fixture.typed->list_runs(RunQuery{}, {.timeout = std::chrono::milliseconds{1}});
+    auto third  = fixture.typed->list_runs(RunQuery{}, {.timeout = std::chrono::seconds{1}});
+    REQUIRE(first);
+    REQUIRE(second);
+    REQUIRE(third);
+
+    auto outcomes = std::vector<std::pair<ControlCallId, std::string>>{};
+    fixture.typed->call_failed.connect([&](ControlCallId id, ControlFailure const& failure) {
+        outcomes.emplace_back(id, std::get<Error>(failure.error).code);
+        if (id == first.value()) {
+            fixture.typed->close();
+        }
+    });
+
+    fixture.fire_one_millisecond_timeouts();
+    CHECK(outcomes == std::vector<std::pair<ControlCallId, std::string>>{
+                          {first.value(),  "jobu.client.timeout"},
+                          {third.value(),  "jobu.client.closed" },
+                          {second.value(), "jobu.client.timeout"},
+    });
+}
+
+TEST_CASE("Destroying the wrapper from a timeout suppresses the rest of the batch", "[jobu][client]")
+{
+    Fixture fixture;
+    fixture.initialize();
+    auto first  = fixture.typed->list_runs(RunQuery{}, {.timeout = std::chrono::milliseconds{1}});
+    auto second = fixture.typed->list_runs(RunQuery{}, {.timeout = std::chrono::milliseconds{1}});
+    REQUIRE(first);
+    REQUIRE(second);
+
+    auto failures = std::vector<ControlCallId>{};
+    fixture.typed->call_failed.connect([&](ControlCallId id, ControlFailure const& failure) {
+        failures.push_back(id);
+        fixture.typed.reset();
+        CHECK(std::get<Error>(failure.error).code == "jobu.client.timeout");
+    });
+
+    fixture.fire_one_millisecond_timeouts();
+    CHECK(failures == std::vector<ControlCallId>{first.value()});
+
+    auto raw_call = fixture.rpc->call("after-timeout-destruction");
+    REQUIRE(raw_call);
+    auto raw_replies = 0;
+    fixture.rpc->result_received.connect([&](RequestId const& id, JsonValue const&) {
+        if (id == raw_call.value()) {
+            ++raw_replies;
+        }
+    });
+    fixture.device.inject_input(success(4U, JsonValue{}));
+    CHECK(raw_replies == 1);
+}
+
+TEST_CASE("Explicit close failure delivery respects destruction and reentrancy", "[jobu][client]")
+{
+    {
+        Fixture fixture;
+        REQUIRE(fixture.typed->initialize());
+        auto failures = 0;
+        fixture.typed->failed.connect([&](Error const& error) {
+            fixture.typed.reset();
+            CHECK(error.code == "jobu.client.closed");
+            ++failures;
+        });
+
+        fixture.typed->close();
+        CHECK(failures == 1);
+    }
+
+    {
+        Fixture fixture;
+        fixture.initialize();
+        auto failures = std::vector<ControlCallId>{};
+        fixture.typed->call_failed.connect([&](ControlCallId id, ControlFailure const& failure) {
+            failures.push_back(id);
+            fixture.typed.reset();
+            CHECK(std::get<Error>(failure.error).code == "jobu.client.closed");
+        });
+
+        REQUIRE(fixture.typed->list_runs(RunQuery{}));
+        REQUIRE(fixture.typed->list_runs(RunQuery{}));
+        fixture.typed->close();
+        CHECK(failures == std::vector<ControlCallId>{1U});
+    }
+
+    Fixture fixture;
+    fixture.initialize();
+    auto failures = std::vector<ControlCallId>{};
+    fixture.typed->call_failed.connect([&](ControlCallId id, ControlFailure const& failure) {
+        CHECK(std::get<Error>(failure.error).code == "jobu.client.closed");
+        failures.push_back(id);
+        fixture.typed->close();
+    });
+
+    REQUIRE(fixture.typed->list_runs(RunQuery{}));
+    REQUIRE(fixture.typed->list_runs(RunQuery{}));
+    fixture.typed->close();
+    fixture.typed->close();
+    CHECK(failures == std::vector<ControlCallId>{1U, 2U});
+}
+
 TEST_CASE("Cancellation and close retire correlations exactly once", "[jobu][client]")
 {
     Fixture fixture;
@@ -684,6 +830,61 @@ TEST_CASE("Close during a raw write defers the current mutation failure", "[jobu
     fixture.drain_tasks();
     REQUIRE(failures.size() == 1U);
     CHECK(failures.front().outcome_unknown);
+}
+
+TEST_CASE("A failure handler may destroy the wrapper during another call's raw write", "[jobu][client]")
+{
+    Fixture fixture;
+    fixture.initialize();
+    auto earlier = fixture.typed->list_runs(RunQuery{});
+    REQUIRE(earlier);
+
+    auto failures = std::vector<ControlCallId>{};
+    fixture.typed->call_failed.connect([&](ControlCallId id, ControlFailure const& failure) {
+        failures.push_back(id);
+        fixture.typed.reset();
+        CHECK(std::get<Error>(failure.error).code == "jobu.client.closed");
+    });
+    auto close_on_write = fixture.device.bytes_written.connect([&](std::size_t) { fixture.typed->close(); });
+
+    auto current = fixture.typed->create_job(creation_request());
+    REQUIRE(current);
+    close_on_write.disconnect();
+    fixture.drain_tasks();
+
+    CHECK(failures == std::vector<ControlCallId>{earlier.value()});
+    CHECK(fixture.typed == nullptr);
+    CHECK(fixture.rpc->pending_request_count() == 0U);
+
+    auto raw_call = fixture.rpc->call("after-write-destruction");
+    REQUIRE(raw_call);
+    auto raw_replies = 0;
+    fixture.rpc->result_received.connect([&](RequestId const& id, JsonValue const&) {
+        if (id == raw_call.value()) {
+            ++raw_replies;
+        }
+    });
+    fixture.device.inject_input(success(4U, JsonValue{}));
+    CHECK(raw_replies == 1);
+}
+
+TEST_CASE("A cancellation failure may destroy the wrapper without affecting the raw client", "[jobu][client]")
+{
+    Fixture fixture;
+    fixture.initialize();
+    auto call = fixture.typed->list_runs(RunQuery{});
+    REQUIRE(call);
+
+    auto failures = 0;
+    fixture.typed->call_failed.connect([&](ControlCallId id, ControlFailure const& failure) {
+        fixture.typed.reset();
+        CHECK(id == call.value());
+        CHECK(std::get<Error>(failure.error).code == "jobu.client.cancelled");
+        ++failures;
+    });
+    fixture.typed->cancel_call(call.value());
+    CHECK(failures == 1);
+    REQUIRE(fixture.rpc->call("after-cancel-destruction"));
 }
 
 TEST_CASE("Idle raw closure and wrapper destruction suppress deferred callbacks", "[jobu][client]")

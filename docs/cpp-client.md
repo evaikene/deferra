@@ -44,6 +44,18 @@ identifies the operation when several methods share a result type. The client
 checks the daemon's advertised capabilities before writing each call. It
 accepts a compatible 1.x daemon that advertises only some methods.
 
+A handler for `ready`, `reply_received`, `failed`, or `call_failed` may destroy
+the wrapper or its parent. Destruction emits no further wrapper outcomes; an
+emission already in progress retains core Signal's connection snapshot and any
+queued receiver deliveries from that emission. The raw client, device,
+attribute registry, and event loop must still outlive the wrapper and remain
+on their required event-loop thread. While the wrapper stays alive, each
+accepted call receives exactly one reply or failure. Handlers may call
+`close()` or `cancel_call()` reentrantly. In particular, `close()` during a
+terminal `failed` handler does not discard the already-latched per-call
+failures. A synchronous raw response still produces its typed signal only
+after the accepting call returns.
+
 ## Method coverage
 
 | Protocol family | Typed members |
