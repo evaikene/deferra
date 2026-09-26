@@ -3,6 +3,7 @@
 #include "attempt_executor.hpp"
 #include "attempt_repository_priv.hpp"
 #include "database.hpp"
+#include "job_lifecycle_priv.hpp"
 #include "json.hpp"
 #include "recurrence_priv.hpp"
 #include "retry_policy_priv.hpp"
@@ -595,6 +596,14 @@ auto process_completion(jb::db::Database&                        database,
                                                     std::max(completed_at, context->run.planned_at));
         if (!successor) {
             return CoreResult<CompletionEffect>::failure(std::move(successor).error());
+        }
+
+        // The final run and its one-time definition must commit together. Reconcile before suspension drain so a
+        // Suspending definition moves directly to its terminal result when this was its last outstanding run.
+        JobLifecycleRepository lifecycle{database, attributes};
+        auto                   finished = lifecycle.finish_after_terminal_run(completion.key.run_id, completed_at);
+        if (!finished) {
+            return CoreResult<CompletionEffect>::failure(std::move(finished).error());
         }
     }
 

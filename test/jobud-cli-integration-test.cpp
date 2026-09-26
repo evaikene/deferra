@@ -933,11 +933,13 @@ TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls
     CHECK(counts.at("attempts").as_object().at("total").as_uint() >= 2);
     CHECK(counts.at("runnable_wait_ms").is_null());
 
-    // Deletion requires a fully suspended definition; terminal history retains its reference template.
-    auto       suspended         = json(fixture.control({"job", "suspend", retry_job_id, "--wait", "--json"}));
-    auto const deletion_revision = std::to_string(suspended.as_object().at("revision").as_uint());
-    CHECK(fixture.control({"job", "delete", retry_job_id, "--revision", deletion_revision, "--json"}) == "null\n");
-    CHECK(fixture.control({"secret", "delete", "workflow.token", "--json"}) == "null\n");
+    // Completion changes the one-time definition, while its symbolic secret reference remains owned by that
+    // definition until an explicit deletion.
+    auto finished_job = json(fixture.control({"job", "get", retry_job_id, "--json"}));
+    CHECK(finished_job.as_object().at("state").as_string() == "succeeded");
+    CHECK(finished_job.as_object().at("revision").as_uint() == created.as_object().at("revision").as_uint() + 1);
+    auto retained_reference = fixture.control({"secret", "delete", "workflow.token", "--json"}, 1);
+    CHECK(retained_reference.find("jobu.secret.in_use") != std::string::npos);
 
     // A future cron occurrence remains scheduled while Run Now creates a separate manual run.
     jb::test::HttpTestServer manual_server;

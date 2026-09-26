@@ -103,14 +103,20 @@ auto boundary(std::string_view sql) -> std::string
     if (sql.starts_with("UPDATE jobu_runs SET state = :state, completed_at_us")) {
         return "completion.run";
     }
+    if (sql.starts_with("SELECT id AS job_id") && sql.find("WHERE id = :id") != std::string_view::npos) {
+        return "completion.job_read";
+    }
+    if (sql.starts_with("SELECT origin AS live_origin")) {
+        return "completion.live_runs";
+    }
+    if (sql.starts_with("UPDATE jobu_jobs SET state = :next_state")) {
+        return "completion.job_state";
+    }
     if (sql.starts_with("INSERT INTO jobu_runs")) {
         return "completion.successor";
     }
     if (sql.starts_with("UPDATE jobu_queues SET state = :next_state")) {
         return "completion.queue_suspension";
-    }
-    if (sql.starts_with("UPDATE jobu_jobs SET state = :next_state")) {
-        return "completion.job_suspension";
     }
     return "other";
 }
@@ -377,15 +383,27 @@ auto completion_faults(Scenario scenario) -> std::vector<DatabaseCall>
     if (scenario == Scenario::Recurring) {
         writes.emplace_back("completion.successor");
     }
+    if (!retries(scenario) && scenario != Scenario::Recurring) {
+        writes.emplace_back("completion.job_state");
+    }
     if (suspends(scenario)) {
         writes.emplace_back("completion.queue_suspension");
-        writes.emplace_back("completion.job_suspension");
+        if (retries(scenario)) {
+            writes.emplace_back("completion.job_state");
+        }
     }
     for (auto const& write : writes) {
         result.push_back({.boundary = write, .operation = Operation::Prepare});
         result.push_back({.boundary = write, .operation = Operation::Bind});
         result.push_back({.boundary = write, .operation = Operation::Execute});
         result.push_back({.boundary = write, .operation = Operation::Execute, .phase = Phase::AfterSuccess});
+    }
+    if (scenario == Scenario::Terminal) {
+        for (auto const* read : {"completion.job_read", "completion.live_runs"}) {
+            result.push_back({.boundary = read, .operation = Operation::Prepare});
+            result.push_back({.boundary = read, .operation = Operation::Execute});
+            result.push_back({.boundary = read, .operation = Operation::Fetch});
+        }
     }
     return result;
 }
@@ -435,20 +453,31 @@ void require_committed_completion(Fixture& fixture, AttemptKey key, Scenario sce
         CHECK_FALSE(successor->has_value());
     }
 
+    JobRepository jobs{database, fixture.store.registry};
+    auto          job = jobs.find_by_id(fixture.job.id, false);
+    REQUIRE(job);
+    REQUIRE(job->has_value());
+    if (retries(scenario)) {
+        CHECK(job->value().state == (suspends(scenario) ? JobState::Suspended : JobState::Active));
+        CHECK(job->value().revision == fixture.job.revision + (suspends(scenario) ? 2 : 0));
+    }
+    else if (scenario == Scenario::Recurring) {
+        CHECK(job->value().state == JobState::Active);
+        CHECK(job->value().revision == fixture.job.revision);
+    }
+    else {
+        CHECK(job->value().state == JobState::Succeeded);
+        CHECK(job->value().revision == fixture.job.revision + (suspends(scenario) ? 2 : 1));
+        CHECK(job->value().updated_at == at(110));
+    }
+
     if (suspends(scenario)) {
         QueueRepository queues{database, fixture.store.registry};
-        JobRepository   jobs{database, fixture.store.registry};
         auto            queue = queues.find_by_id(fixture.queue.id, false);
-        auto            job   = jobs.find_by_id(fixture.job.id, false);
         REQUIRE(queue);
-        REQUIRE(job);
         REQUIRE(queue->has_value());
-        REQUIRE(job->has_value());
         CHECK(queue->value().state == QueueState::Suspended);
         CHECK(queue->value().updated_at == at(110));
-        CHECK(job->value().state == JobState::Suspended);
-        CHECK(job->value().revision == fixture.job.revision + 2);
-        CHECK(job->value().updated_at == at(110));
     }
 }
 
