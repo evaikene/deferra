@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <string>
 #include <utility>
+#include <variant>
 
 namespace jb::jobu::detail {
 
@@ -206,6 +207,9 @@ auto decode_job(jb::db::Record const& record, AttributeRegistry const& attribute
     if ((*state == JobState::Deleted) != deleted->has_value()) {
         return RepositoryResult<JobDefinition>::failure(invalid_job("deleted_state_mismatch"));
     }
+    if (is_terminal_job_state(*state) && !std::holds_alternative<OnceSchedule>(*schedule)) {
+        return RepositoryResult<JobDefinition>::failure(invalid_job("terminal_state_mismatch"));
+    }
 
     return RepositoryResult<JobDefinition>::success(JobDefinition{
         .id         = *id,
@@ -240,6 +244,9 @@ auto JobRepository::insert(JobDefinition const&               job,
     }
     if ((job.state == JobState::Deleted) != job.deleted_at.has_value()) {
         return RepositoryResult<void>::failure(invalid_job("deleted_state_mismatch"));
+    }
+    if (is_terminal_job_state(job.state) && !std::holds_alternative<OnceSchedule>(job.schedule)) {
+        return RepositoryResult<void>::failure(invalid_job("terminal_state_mismatch"));
     }
     auto revision = revision_to_storage(job.revision);
     if (!revision) {

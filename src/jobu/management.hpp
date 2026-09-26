@@ -180,7 +180,7 @@ struct JobListRequest {
     std::optional<QueueSelector> queue;
     /// Includes soft-deleted job definitions when true.
     bool                         include_deleted{false};
-    /// Restricts results to one lifecycle state when supplied.
+    /// Restricts results to one lifecycle state when supplied; omission leaves state unrestricted.
     std::optional<JobState>      state;
     /// Restricts results to one runner family when supplied.
     std::optional<JobType>       type;

@@ -639,6 +639,12 @@ auto storage_text(JobState value) noexcept -> std::string_view
             return "suspended";
         case JobState::Deleted:
             return "deleted";
+        case JobState::Succeeded:
+            return "succeeded";
+        case JobState::Failed:
+            return "failed";
+        case JobState::Cancelled:
+            return "cancelled";
     }
     return {};
 }
@@ -745,6 +751,9 @@ auto read_job_state(jb::db::Record const& record, std::string_view field) -> jb:
         std::pair{"suspending", JobState::Suspending},
         std::pair{"suspended",  JobState::Suspended },
         std::pair{"deleted",    JobState::Deleted   },
+        std::pair{"succeeded",  JobState::Succeeded },
+        std::pair{"failed",     JobState::Failed    },
+        std::pair{"cancelled",  JobState::Cancelled },
     };
     return read_enum(record, field, values);
 }

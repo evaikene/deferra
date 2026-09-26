@@ -19,12 +19,26 @@ namespace jb::jobu {
 using JobRevision = std::uint64_t;
 
 /// Durable lifecycle state of a job definition.
+///
+/// Succeeded, Failed, and Cancelled describe a finished one-time definition. Deleted is a separate soft-deletion
+/// state and takes precedence over an execution outcome.
 enum class JobState : std::uint8_t {
     Active,     ///< The definition may produce eligible work.
     Suspending, ///< Suspension is waiting for running work to finish.
     Suspended,  ///< The definition cannot produce eligible work.
     Deleted,    ///< The definition is soft-deleted and retained only for history.
+    Succeeded,  ///< The final outstanding one-time run succeeded.
+    Failed,     ///< The final outstanding one-time run failed or was permanently interrupted.
+    Cancelled,  ///< The final outstanding one-time run was cancelled.
 };
+
+/// Whether a state records the execution outcome of a finished one-time job definition.
+///
+/// Deleted is not an execution outcome. RunState has its own terminal-state rules.
+[[nodiscard]] constexpr auto is_terminal_job_state(JobState state) noexcept -> bool
+{
+    return state == JobState::Succeeded || state == JobState::Failed || state == JobState::Cancelled;
+}
 
 /// Runner family selected by a job definition and copied into each run snapshot.
 enum class JobType : std::uint8_t {
@@ -66,7 +80,7 @@ struct JobDefinition {
     JobRevision                           revision{1};
     /// Optional non-unique display name.
     std::optional<std::string>            name;
-    /// Current lifecycle state.
+    /// Current durable lifecycle state; terminal execution states require a OnceSchedule.
     JobState                              state{JobState::Active};
     /// Runner family copied into run snapshots.
     JobType                               type{JobType::Cli};

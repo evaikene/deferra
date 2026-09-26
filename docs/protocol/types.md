@@ -15,7 +15,8 @@ an explicit `null` is accepted only where stated.
 | Revision | integer | Positive job definition revision; send it as `expected_revision` on guarded mutations |
 | Page limit | integer | Usually 1–200, default 100; the method table states exceptions |
 | Cursor | string | Opaque server token; use alone in a continuation params object |
-| `QueueState`, `JobState` | string | `active`, `suspending`, `suspended`, `deleted` |
+| `QueueState` | string | `active`, `suspending`, `suspended`, `deleted` |
+| `JobState` | string | `active`, `suspending`, `suspended`, `deleted`, `succeeded`, `failed`, `cancelled` |
 | `JobType` | string | `cli`, `http` |
 | `RunOrigin` | string | `scheduled`, `manual`; `submitted` is reserved and cannot be sent |
 | `RunState` | string | `scheduled`, `running`, `retry_wait`, `succeeded`, `failed`, `interrupted`, `cancelled` |
@@ -98,6 +99,10 @@ Every job definition result contains:
 | `created_at` | time | 1.1 | Creation time |
 | `updated_at` | time | 1.1 | Last durable mutation time |
 | `deleted_at` | time or null | 1.1 | Soft-deletion time |
+
+`succeeded`, `failed`, and `cancelled` are durable outcomes of a one-time job definition after its final outstanding
+run finishes. A recurring definition cannot have one of these states. A terminal definition has no deletion timestamp;
+`deleted` remains the separate soft-deletion state. Run and attempt states describe individual execution history.
 
 Retention and runnable-wait warning settings are stored configuration. The
 current daemon does not automatically purge retained history or emit

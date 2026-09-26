@@ -616,6 +616,11 @@ TEST_CASE("Job management lists filtered keyset pages and controls deleted visib
     auto active_jobs = service.list_jobs({.state = JobState::Active, .page = {.limit = 10}});
     REQUIRE(active_jobs);
     CHECK(active_jobs->items.size() == 3);
+    for (auto state : {JobState::Succeeded, JobState::Failed, JobState::Cancelled}) {
+        auto terminal_jobs = service.list_jobs({.state = state, .page = {.limit = 10}});
+        REQUIRE(terminal_jobs);
+        CHECK(terminal_jobs->items.empty());
+    }
 
     execute(fixture.database,
             "UPDATE jobu_jobs SET revision = revision + 1, state = 'deleted', updated_at_us = 20, "

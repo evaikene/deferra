@@ -361,7 +361,7 @@ auto valid_queue_state(QueueState value) noexcept -> bool
 auto valid_job_state(JobState value) noexcept -> bool
 {
     return value == JobState::Active || value == JobState::Suspending || value == JobState::Suspended ||
-           value == JobState::Deleted;
+           value == JobState::Deleted || is_terminal_job_state(value);
 }
 
 auto valid_job_type(JobType value) noexcept -> bool

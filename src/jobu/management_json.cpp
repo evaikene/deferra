@@ -80,8 +80,8 @@ auto has_only_members(jb::core::JsonValue::Object const& object, std::initialize
 }
 
 template <typename T>
-requires(std::is_integral_v<T>&& std::is_unsigned_v<T>) auto decode_unsigned(jb::core::JsonValue const& value,
-                                                                             T&                         result) -> bool
+    requires(std::is_integral_v<T> && std::is_unsigned_v<T>)
+auto decode_unsigned(jb::core::JsonValue const& value, T& result) -> bool
 {
     auto decoded = std::uint64_t{};
     if (value.is_uint()) {
@@ -101,8 +101,8 @@ requires(std::is_integral_v<T>&& std::is_unsigned_v<T>) auto decode_unsigned(jb:
 }
 
 template <typename T>
-requires(std::is_integral_v<T>&& std::is_signed_v<T>) auto decode_signed(jb::core::JsonValue const& value, T& result)
-    -> bool
+    requires(std::is_integral_v<T> && std::is_signed_v<T>)
+auto decode_signed(jb::core::JsonValue const& value, T& result) -> bool
 {
     auto decoded = std::int64_t{};
     if (value.is_int()) {
@@ -200,6 +200,12 @@ auto job_state_text(JobState state) -> std::optional<std::string_view>
             return "suspended";
         case JobState::Deleted:
             return "deleted";
+        case JobState::Succeeded:
+            return "succeeded";
+        case JobState::Failed:
+            return "failed";
+        case JobState::Cancelled:
+            return "cancelled";
     }
     return std::nullopt;
 }
@@ -220,6 +226,15 @@ auto job_state_from_json(jb::core::JsonValue const& value, JobState& state) -> b
     }
     else if (value.as_string() == "deleted") {
         state = JobState::Deleted;
+    }
+    else if (value.as_string() == "succeeded") {
+        state = JobState::Succeeded;
+    }
+    else if (value.as_string() == "failed") {
+        state = JobState::Failed;
+    }
+    else if (value.as_string() == "cancelled") {
+        state = JobState::Cancelled;
     }
     else {
         return false;
@@ -934,6 +949,8 @@ auto job_to_json(JobDefinition const& job, AttributeRegistry const& registry)
     auto       created    = encode_time(job.created_at);
     auto       updated    = encode_time(job.updated_at);
     if (!state || !type || !schedule || !attributes || !created || !updated || job.revision == 0 ||
+        (is_terminal_job_state(job.state) &&
+         (!std::holds_alternative<OnceSchedule>(job.schedule) || job.deleted_at.has_value())) ||
         !job.payload.is_object()) {
         return invalid<jb::core::JsonValue>(false);
     }
@@ -1027,6 +1044,10 @@ auto job_from_json(jb::core::JsonValue const& value, AttributeRegistry const& re
             return invalid<JobDefinition>(false);
         }
         result.deleted_at = deleted_time;
+    }
+    if (is_terminal_job_state(result.state) &&
+        (!std::holds_alternative<OnceSchedule>(result.schedule) || result.deleted_at.has_value())) {
+        return invalid<JobDefinition>(false);
     }
     return ConversionResult<JobDefinition>::success(std::move(result));
 }

@@ -758,6 +758,12 @@ auto job_state_text(JobState state) noexcept -> std::string_view
             return "suspended";
         case JobState::Deleted:
             return "deleted";
+        case JobState::Succeeded:
+            return "succeeded";
+        case JobState::Failed:
+            return "failed";
+        case JobState::Cancelled:
+            return "cancelled";
     }
     return "unknown";
 }
