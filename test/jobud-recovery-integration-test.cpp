@@ -102,9 +102,8 @@ private:
 /// The live observer is read-only and keeps no statement/transaction between readiness polls.
 class CrashFixture final {
 public:
-    explicit CrashFixture(RecoveryFixtureSchema schema = RecoveryFixtureSchema::Current)
-        : storage{{}, schema}
-        , report{storage.directory.path() / "report"}
+    CrashFixture()
+        : report{storage.directory.path() / "report"}
         , release{storage.directory.path() / "release"}
     {}
 
@@ -642,9 +641,9 @@ TEST_CASE("daemon crash recovery repairs recurrence and finishes owner suspensio
     fixture.unchanged_restart();
 }
 
-TEST_CASE("daemon upgrades version one before recovery and serving", "[jobud][recovery][schema][integration]")
+TEST_CASE("daemon validates the current schema before recovery and serving", "[jobud][recovery][schema][integration]")
 {
-    CrashFixture fixture{RecoveryFixtureSchema::VersionOne};
+    CrashFixture fixture;
     auto         queue   = recovery_queue(recovery_id(1));
     auto         job     = fixture.storage.make_job(recovery_id(2), queue.id, JobType::Http);
     auto         running = fixture.storage.make_run(recovery_id(3), job, RunState::Running);
@@ -652,9 +651,9 @@ TEST_CASE("daemon upgrades version one before recovery and serving", "[jobud][re
     fixture.storage.insert_job(job);
     fixture.storage.insert_run(running);
 
-    // start() includes a real system.info round trip; the stopped parent never upgrades this database.
+    // start() includes a real system.info round trip after schema validation and recovery.
     fixture.start();
-    CHECK(fixture.count("SELECT version FROM jobu_schema") == 2);
+    CHECK(fixture.count("SELECT version FROM jobu_schema") == 3);
     CHECK(fixture.count("SELECT count(*) FROM sqlite_schema WHERE name IN ('jobu_runs_planned_id_idx', "
                         "'jobu_runs_queue_planned_id_idx', 'jobu_runs_job_planned_id_idx')") == 3);
     CHECK(fixture.count("SELECT count(*) FROM jobu_attempts WHERE state = 'running'") == 0);
@@ -667,10 +666,11 @@ TEST_CASE("daemon schema rejection leaves recovery rows untouched and never list
           "[jobud][recovery][schema][integration]")
 {
     auto const* const corrupt = GENERATE("DROP INDEX jobu_runs_job_state_idx",
-                                         "CREATE INDEX jobu_runs_job_planned_id_idx ON jobu_runs(id)",
-                                         "UPDATE jobu_schema SET version = 3");
+                                         "ALTER TABLE jobu_jobs ADD COLUMN incompatible INTEGER",
+                                         "UPDATE jobu_schema SET version = 2",
+                                         "UPDATE jobu_schema SET version = 4");
     CAPTURE(corrupt);
-    CrashFixture fixture{RecoveryFixtureSchema::VersionOne};
+    CrashFixture fixture;
     auto         queue   = recovery_queue(recovery_id(1));
     auto         job     = fixture.storage.make_job(recovery_id(2), queue.id, JobType::Http);
     auto         running = fixture.storage.make_run(recovery_id(3), job, RunState::Running);
@@ -685,12 +685,4 @@ TEST_CASE("daemon schema rejection leaves recovery rows untouched and never list
     fixture.require_schema_startup_failure();
     CHECK(storage_snapshot(fixture.storage.database) == before);
     fixture.storage.require_run(running);
-    // Collision at the third added index must also roll back the first two DDL statements.
-    jb::db::Query query{fixture.storage.database};
-    REQUIRE(query.exec("SELECT count(*) FROM sqlite_schema WHERE name IN "
-                       "('jobu_runs_planned_id_idx', 'jobu_runs_queue_planned_id_idx')"));
-    auto next = query.next();
-    REQUIRE(next);
-    REQUIRE(*next);
-    CHECK(query.value(0) == jb::db::Value{std::int64_t{0}});
 }

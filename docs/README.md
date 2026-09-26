@@ -37,6 +37,12 @@ Start the daemon with a socket and database path in one terminal:
 jobud --socket /tmp/jobu.sock --database ./jobu.sqlite
 ```
 
+The daemon creates the current SQLite format (version 3) in an empty database
+and validates it on later starts. It rejects older and newer formats without
+changing them. If you have an earlier test database, keep it separately and
+point the daemon at a fresh database file; changing its version marker does not
+convert its contents.
+
 In another terminal, create a queue and a job due immediately:
 
 ```sh
