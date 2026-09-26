@@ -5,6 +5,7 @@
 #include "byte_buffer.hpp"
 #include "cli/process_adapter_priv.hpp"
 #include "json.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_process_adapter.hpp"
 #include "uuid.hpp"
 

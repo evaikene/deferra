@@ -1,6 +1,7 @@
 #include "cron_timezone_priv.hpp"
 
 #include "cron.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/temporary_directory.hpp"
 #include "utc_timestamp.hpp"
 

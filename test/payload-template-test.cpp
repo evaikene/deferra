@@ -4,6 +4,7 @@
 #include "http_job_payload_priv.hpp"
 #include "job_validation_priv.hpp"
 #include "json.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>

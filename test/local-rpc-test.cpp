@@ -4,6 +4,7 @@
 #include "local_server.hpp"
 #include "local_socket.hpp"
 #include "server.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -87,7 +88,7 @@ class LocalRpcFixture {
 public:
     explicit LocalRpcFixture(ServerOptions server_options = {}, LocalServerOptions local_options = {})
         : path{directory.path() / "local-rpc.sock"}
-        , rpc_server{server_options}
+        , rpc_server{std::move(server_options)}
     {
         local_server.new_connection.connect([this]() -> void { drain_connections(); });
         rpc_server.connection_opened.connect([this](ConnectionId id) -> void { opened_ids.push_back(id); });

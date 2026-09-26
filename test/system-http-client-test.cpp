@@ -8,6 +8,7 @@
 #include "http/curl_request_priv.hpp"
 #include "http/curl_runtime_priv.hpp"
 #include "http/http_url_priv.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_event_loop_backend.hpp"
 #include "support/http_test_certificates.hpp"
 #include "support/http_test_server.hpp"

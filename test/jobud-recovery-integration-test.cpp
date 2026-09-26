@@ -13,6 +13,7 @@
 #include "query.hpp"
 #include "queue_repository_priv.hpp"
 #include "run_repository_priv.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/http_test_server.hpp"
 #include "support/process_exit_watch.hpp"
 #include "support/recovery_fixture.hpp"

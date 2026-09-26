@@ -1,6 +1,7 @@
 #include "retry_policy_priv.hpp"
 
 #include "attribute_registry.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 
 #include <catch2/catch_test_macros.hpp>
 

@@ -1,3 +1,4 @@
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/recovery_fixture.hpp"
 
 #include "attempt_repository_priv.hpp"

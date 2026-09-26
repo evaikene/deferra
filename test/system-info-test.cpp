@@ -1,3 +1,4 @@
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "system_info.hpp"
 
 #include <catch2/catch_test_macros.hpp>

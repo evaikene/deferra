@@ -3,6 +3,7 @@
 #include "json.hpp"
 #include "object.hpp"
 #include "object_priv.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_attempt_executor.hpp"
 #include "uuid.hpp"
 

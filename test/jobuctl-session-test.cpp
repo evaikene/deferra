@@ -9,6 +9,7 @@
 #include "local_socket.hpp"
 #include "management_json.hpp"
 #include "process.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/temporary_directory.hpp"
 #include "system_info.hpp"
 #include "utc_timestamp.hpp"
