@@ -14,12 +14,13 @@ their introduction versions.
 
 ## Get and list attempts
 
-`attempt.get` takes a canonical `run_id` and positive `attempt_number`:
+`attempt.get` takes a canonical `run_id` and an `attempt_number` from 1 through
+9,223,372,036,854,775,807 (`INT64_MAX`), inclusive:
 
 | Params member | Type | Required | Since | Meaning |
 | --- | --- | --- | --- | --- |
 | `run_id` | ID | Yes | 1.3 | Parent run |
-| `attempt_number` | positive integer | Yes | 1.3 | Attempt within the run |
+| `attempt_number` | integer | Yes | 1.3 | Attempt within the run, in the range above |
 
 ```json
 {"run_id":"00112233-4455-6677-8899-aabbccddeeff","attempt_number":1}
@@ -47,7 +48,7 @@ eviction, restart, retry, and live-view rules match [run.list](run.md).
 
 ## Read one output chunk (`attempt.output`)
 
-Params contain `run_id`, positive `attempt_number`, and `channel`; optional
+Params contain `run_id`, an `attempt_number` in the same range, and `channel`; optional
 `offset` defaults to zero and `limit` to 16,384 raw retained bytes. Accepted
 limits are 1–65,536. CLI attempts accept `stdout`/`stderr`; HTTP attempts
 accept `body`/`headers`. An offset equal to the retained length requests EOF;
@@ -56,7 +57,7 @@ a larger or unrepresentable offset is invalid.
 | Params member | Type | Required | Default | Since | Meaning |
 | --- | --- | --- | --- | --- | --- |
 | `run_id` | ID | Yes | — | 1.3 | Parent run |
-| `attempt_number` | positive integer | Yes | — | 1.3 | Attempt within the run |
+| `attempt_number` | integer | Yes | — | 1.3 | Attempt within the run, from 1 through `INT64_MAX` |
 | `channel` | string | Yes | — | 1.3 | CLI `stdout`/`stderr` or HTTP `body`/`headers` |
 | `offset` | integer | No | 0 | 1.3 | Retained-byte offset |
 | `limit` | integer | No | 16384 | 1.3 | 1–65536 raw bytes |
@@ -80,8 +81,9 @@ evidence makes it `lost`. Loss can coexist with retained bytes. Unknown totals
 remain null, especially after interrupted recovery. Captured application output
 can itself contain secret values; it is not a generated diagnostic.
 
-Malformed params return JSON-RPC `-32602`. Ordinary missing, invalid-request,
-and cursor errors return application `-32000` with safe `data:{category,code}`.
+Malformed params, including an attempt number outside 1 through `INT64_MAX`,
+return JSON-RPC `-32602`. Ordinary missing, invalid-request, and cursor errors
+return application `-32000` with safe `data:{category,code}`.
 Fatal persisted-data or storage failures close read admission. The equivalent
 CLI and typed-client routes are listed above.
 

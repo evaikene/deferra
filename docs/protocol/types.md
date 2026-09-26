@@ -143,7 +143,7 @@ always requested separately.
 | Attempt member | Type | Since | Meaning |
 | --- | --- | --- | --- |
 | `run_id` | ID | 1.3 | Parent run |
-| `attempt_number` | integer | 1.3 | Positive number within that run |
+| `attempt_number` | integer | 1.3 | Number within that run, from 1 through 9,223,372,036,854,775,807 (`INT64_MAX`) |
 | `due_at` | time | 1.3 | Earliest eligible time |
 | `started_at` | time or null | 1.3 | Actual start |
 | `completed_at` | time or null | 1.3 | Terminal completion |
@@ -168,7 +168,7 @@ middle bytes.
 | Member | Type | Since | Meaning |
 | --- | --- | --- | --- |
 | `run_id` | ID | 1.3 | Requested run |
-| `attempt_number` | integer | 1.3 | Requested attempt |
+| `attempt_number` | integer | 1.3 | Requested attempt, in the same 1 through `INT64_MAX` range |
 | `channel` | string | 1.3 | `stdout`/`stderr` for CLI, `body`/`headers` for HTTP |
 | `status` | string | 1.3 | `available`, `pending`, `not_captured`, or `lost` |
 | `offset` | integer | 1.3 | Requested retained-byte offset |
