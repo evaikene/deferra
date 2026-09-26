@@ -183,6 +183,147 @@ TEST_CASE("Synchronous handshake and replies are delivered after accepting calls
     CHECK(events == std::vector<std::string>{"ready", "reply"});
 }
 
+TEST_CASE("A ready handler may destroy its wrapper or owning parent", "[jobu][client]")
+{
+    {
+        Fixture fixture;
+        auto    ready_count = 0;
+        fixture.typed->ready.connect([&](SystemInfo const& result) {
+            fixture.typed.reset();
+            CHECK(result.api_version.major == 1U);
+            ++ready_count;
+        });
+
+        REQUIRE(fixture.typed->initialize());
+        fixture.device.inject_input(success(1U, info()));
+        fixture.drain_tasks();
+        CHECK(ready_count == 1);
+
+        auto raw_call = fixture.rpc->call("after-ready-destruction");
+        REQUIRE(raw_call);
+        auto raw_replies = 0;
+        fixture.rpc->result_received.connect([&](RequestId const& id, JsonValue const&) {
+            if (id == raw_call.value()) {
+                ++raw_replies;
+            }
+        });
+        fixture.device.inject_input(success(2U, JsonValue{}));
+        CHECK(raw_replies == 1);
+    }
+
+    Fixture fixture;
+    fixture.typed.reset();
+    auto  parent      = std::make_unique<Object>();
+    auto* typed       = new ControlClient(*fixture.rpc, fixture.attributes, parent.get());
+    auto  ready_count = 0;
+    typed->ready.connect([&](SystemInfo const&) {
+        parent.reset();
+        ++ready_count;
+    });
+
+    REQUIRE(typed->initialize());
+    fixture.device.inject_input(success(1U, info()));
+    fixture.drain_tasks();
+    CHECK(ready_count == 1);
+    CHECK(parent == nullptr);
+}
+
+TEST_CASE("Destruction from a reply suppresses later queued outcomes", "[jobu][client]")
+{
+    for (auto count : {1U, 2U}) {
+        Fixture fixture;
+        fixture.initialize();
+        auto replies = 0;
+        fixture.typed->reply_received.connect([&](ControlCallId, ControlReply const& reply) {
+            fixture.typed.reset();
+            CHECK(std::holds_alternative<RunPage>(reply));
+            ++replies;
+        });
+
+        for (auto index = 0U; index < count; ++index) {
+            REQUIRE(fixture.typed->list_runs(RunQuery{}));
+            fixture.device.inject_input(success(2U + index, empty_run_page()));
+        }
+
+        fixture.drain_tasks();
+        CHECK(replies == 1);
+        CHECK(fixture.typed == nullptr);
+    }
+}
+
+TEST_CASE("Destruction from deferred handshake and decoded-result failures is safe", "[jobu][client]")
+{
+    {
+        Fixture fixture;
+        auto    failures = 0;
+        fixture.typed->failed.connect([&](Error const& error) {
+            fixture.typed.reset();
+            CHECK(error.code == "jobu.client.unsupported_api");
+            ++failures;
+        });
+
+        REQUIRE(fixture.typed->initialize());
+        auto incompatible = SystemInfo{
+            .daemon_version = "other",
+            .api_version    = {.major = 2, .minor = 0},
+        };
+        fixture.device.inject_input(success(1U, system_info_to_json(incompatible)));
+        fixture.drain_tasks();
+        CHECK(failures == 1);
+    }
+
+    Fixture fixture;
+    fixture.initialize();
+    auto failures = 0;
+    fixture.typed->call_failed.connect([&](ControlCallId id, ControlFailure const& failure) {
+        fixture.typed.reset();
+        CHECK(id == 1U);
+        CHECK(std::get<Error>(failure.error).code == "jobu.client.invalid_response");
+        ++failures;
+    });
+
+    REQUIRE(fixture.typed->list_runs(RunQuery{}));
+    fixture.device.inject_input(success(2U, info()));
+    fixture.drain_tasks();
+    CHECK(failures == 1);
+}
+
+TEST_CASE("Reply handlers may close or cancel a second queued call once", "[jobu][client]")
+{
+    for (auto close_wrapper : {false, true}) {
+        Fixture fixture;
+        fixture.initialize();
+        auto first  = fixture.typed->list_runs(RunQuery{});
+        auto second = fixture.typed->list_runs(RunQuery{});
+        REQUIRE(first);
+        REQUIRE(second);
+
+        auto replies  = std::vector<ControlCallId>{};
+        auto failures = std::vector<ControlCallId>{};
+        fixture.typed->reply_received.connect([&](ControlCallId id, ControlReply const&) {
+            replies.push_back(id);
+            if (close_wrapper) {
+                fixture.typed->close();
+            }
+            else {
+                fixture.typed->cancel_call(second.value());
+            }
+        });
+        fixture.typed->call_failed.connect([&](ControlCallId id, ControlFailure const& failure) {
+            CHECK(std::get<Error>(failure.error).code ==
+                  (close_wrapper ? "jobu.client.closed" : "jobu.client.cancelled"));
+            failures.push_back(id);
+        });
+
+        fixture.device.inject_input(success(2U, empty_run_page()));
+        fixture.device.inject_input(success(3U, empty_run_page()));
+        fixture.drain_tasks();
+        fixture.drain_tasks();
+        CHECK(replies == std::vector<ControlCallId>{first.value()});
+        CHECK(failures == std::vector<ControlCallId>{second.value()});
+    }
+}
+
 TEST_CASE("An earlier raw reply cannot hide a synchronous typed reply", "[jobu][client]")
 {
     Fixture fixture;
