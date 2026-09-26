@@ -7,6 +7,7 @@
 #include "secret_repository_priv.hpp"
 #include "secret_service.hpp"
 #include "server.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_time_source.hpp"
 #include "support/memory_io_device.hpp"
 #include "support/recovery_fixture.hpp"

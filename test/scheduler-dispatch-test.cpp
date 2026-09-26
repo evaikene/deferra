@@ -4,6 +4,7 @@
 #include "attribute_registry.hpp"
 #include "database.hpp"
 #include "domain_storage_priv.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_attempt_executor.hpp"
 #include "support/fake_database_driver.hpp"
 #include "support/rejecting_secret_provider.hpp"

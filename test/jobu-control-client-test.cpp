@@ -6,6 +6,7 @@
 #include "history_json.hpp"
 #include "management_json.hpp"
 #include "protocol_priv.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/memory_io_device.hpp"
 #include "system_info.hpp"
 #include "timer.hpp"

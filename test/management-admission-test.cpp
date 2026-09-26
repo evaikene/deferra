@@ -2,6 +2,7 @@
 
 #include "attribute_registry.hpp"
 #include "database.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_database_driver.hpp"
 #include "support/fake_time_source.hpp"

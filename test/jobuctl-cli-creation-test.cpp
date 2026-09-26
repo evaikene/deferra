@@ -5,6 +5,7 @@
 #include "process.hpp"
 #include "protocol.hpp"
 #include "server.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/temporary_directory.hpp"
 #include "system_info.hpp"
 

@@ -1,5 +1,6 @@
 #include "cron_expression_priv.hpp"
 
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "utc_timestamp.hpp"
 
 #include <catch2/catch_test_macros.hpp>

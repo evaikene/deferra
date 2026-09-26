@@ -4,6 +4,7 @@
 #include "byte_buffer.hpp"
 #include "json.hpp"
 #include "logging.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_http_client.hpp"
 #include "support/fake_time_source.hpp"
 #include "uuid.hpp"

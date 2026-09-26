@@ -1,5 +1,6 @@
 #include "error.hpp"
 #include "result.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -125,4 +126,24 @@ TEST_CASE("Error preserves its stable code", "[core][error]")
 
     CHECK(result.error() == error);
     CHECK(result.error().code == "jobu.job.revision_conflict");
+}
+
+TEST_CASE("Catch2 shows each Result state and a safe Error message", "[core][result]")
+{
+    auto const error = Error{
+        .category = ErrorCategory::Conflict,
+        .code     = "jobu.job.revision_conflict",
+        .message  = "Job revision does not match",
+        .detail   = "backend diagnostic",
+    };
+
+    auto const uninitialized = Result<int, Error>{};
+    auto const success       = Result<int, Error>::success(42);
+    auto const failure       = Result<int, Error>::failure(error);
+    auto const void_failure  = Result<void, Error>::failure(error);
+
+    CHECK(Catch::Detail::stringify(uninitialized) == "uninitialized");
+    CHECK(Catch::Detail::stringify(success) == "success");
+    CHECK(Catch::Detail::stringify(failure) == "error: (jobu.job.revision_conflict) Job revision does not match");
+    CHECK(Catch::Detail::stringify(void_failure) == "error: (jobu.job.revision_conflict) Job revision does not match");
 }

@@ -5,6 +5,7 @@
 #include "query.hpp"
 #include "secret_provider_priv.hpp"
 #include "secret_repository_priv.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/fault_database_driver.hpp"

@@ -10,6 +10,7 @@
 #  include <sys/event.h>
 #endif
 #include "process_posix_priv.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_event_loop_backend.hpp"
 #include "support/temporary_directory.hpp"
 

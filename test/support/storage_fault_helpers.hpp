@@ -2,6 +2,7 @@
 /// @brief Durable snapshots and safe-error assertions for SQLite-backed fault matrices.
 #pragma once
 
+#include "catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "fault_database_driver.hpp"
 
 #include "database.hpp"

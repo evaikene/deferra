@@ -4,6 +4,7 @@
 #include "local_socket.hpp"
 #include "process.hpp"
 #include "protocol.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/shutdown_fixture.hpp"
 
 #include <catch2/catch_test_macros.hpp>

@@ -10,6 +10,7 @@
 #include "scheduler_dispatch_priv.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_attempt_executor.hpp"
 #include "support/rejecting_secret_provider.hpp"
 #include "support/temporary_directory.hpp"

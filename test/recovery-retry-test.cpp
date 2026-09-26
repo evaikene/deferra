@@ -1,3 +1,4 @@
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_attempt_executor.hpp"
 #include "support/recovery_fixture.hpp"
 #include "support/rejecting_secret_provider.hpp"

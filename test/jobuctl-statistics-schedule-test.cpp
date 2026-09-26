@@ -1,5 +1,6 @@
 #include "command_registry_priv.hpp"
 #include "json.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/temporary_directory.hpp"
 #include "utc_timestamp.hpp"
 

@@ -3,6 +3,7 @@
 #include "byte_buffer.hpp"
 #include "json.hpp"
 #include "process.hpp"
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 
 #include <catch2/catch_test_macros.hpp>
 

@@ -1,3 +1,4 @@
+#include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fault_database_driver.hpp"
 
 #include "database.hpp"

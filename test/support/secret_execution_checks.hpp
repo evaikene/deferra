@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "database.hpp"
 #include "json.hpp"
 #include "logging.hpp"
