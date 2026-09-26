@@ -20,14 +20,12 @@ namespace {
 template <typename T>
 using ServiceResult = jb::core::Result<T, jb::core::Error>;
 
-constexpr std::size_t result_budget_bytes = std::size_t{512} * 1024U;
+constexpr std::size_t result_budget_bytes        = std::size_t{512} * 1024U;
 // The complete page wrapper and a UUID cursor use less than this reserve.
-constexpr std::size_t page_wrapper_bytes  = 128;
-constexpr std::size_t maximum_output_slice_bytes =
-    65'536;
+constexpr std::size_t page_wrapper_bytes         = 128;
+constexpr std::size_t maximum_output_slice_bytes = 65'536;
 
-    auto
-    error(jb::core::ErrorCategory category, std::string_view code, std::string_view message) -> jb::core::Error
+auto error(jb::core::ErrorCategory category, std::string_view code, std::string_view message) -> jb::core::Error
 {
     return {.category = category, .code = std::string{code}, .message = std::string{message}};
 }
@@ -78,8 +76,8 @@ auto valid_query(jb::jobu::AttemptQuery const& query) -> bool
 auto valid_output_request(jb::jobu::AttemptOutputRequest const& request) -> bool
 {
     auto const maximum_sql_offset = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() - 1);
-    return request.attempt.attempt_number > 0 && request.limit >= 1 && request.limit <= maximum_output_slice_bytes &&
-           request.offset <= maximum_sql_offset;
+    return jb::jobu::is_valid_attempt_number(request.attempt.attempt_number) && request.limit >= 1 &&
+           request.limit <= maximum_output_slice_bytes && request.offset <= maximum_sql_offset;
 }
 
 auto persisted_output_error(std::string_view reason) -> jb::core::Error
@@ -343,7 +341,7 @@ auto HistoryService::get_attempt(AttemptKey const& key) -> ServiceResult<Attempt
 {
     auto* data = d_ptr<Private>();
     return data->invoke<AttemptDetails>(*this, [&] {
-        if (key.attempt_number == 0) {
+        if (!is_valid_attempt_number(key.attempt_number)) {
             return ServiceResult<AttemptDetails>::failure(invalid_request());
         }
         auto found = data->repository.get_attempt(key);

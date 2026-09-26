@@ -251,15 +251,15 @@ auto decode_base64(std::string_view encoded) -> std::optional<jb::core::ByteBuff
 
 auto valid_request(AttemptOutputRequest const& request) -> bool
 {
-    return request.attempt.attempt_number > 0 && channel_text(request.channel).has_value() && request.limit >= 1 &&
-           request.limit <= maximum_slice_bytes &&
+    return is_valid_attempt_number(request.attempt.attempt_number) && channel_text(request.channel).has_value() &&
+           request.limit >= 1 && request.limit <= maximum_slice_bytes &&
            request.offset <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() - 1);
 }
 
 auto valid_chunk(AttemptOutputChunk const& chunk) -> bool
 {
-    if (chunk.attempt.attempt_number == 0 || !channel_text(chunk.channel) || !status_text(chunk.status) ||
-        !encoding_text(chunk.encoding) || chunk.bytes_returned != chunk.data.size() ||
+    if (!is_valid_attempt_number(chunk.attempt.attempt_number) || !channel_text(chunk.channel) ||
+        !status_text(chunk.status) || !encoding_text(chunk.encoding) || chunk.bytes_returned != chunk.data.size() ||
         chunk.bytes_returned > maximum_slice_bytes || chunk.offset > chunk.retained_bytes ||
         chunk.bytes_returned > chunk.retained_bytes - chunk.offset ||
         (chunk.total_bytes.has_value() != chunk.omitted_bytes.has_value()) ||

@@ -217,7 +217,7 @@ public:
     [[nodiscard]] auto cancel_run(jb::core::Uuid const& id, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
-    /// Reads one retained attempt by run ID and number; replies with AttemptDetails.
+    /// Reads one retained attempt by run ID and number in [1, maximum_attempt_number]; replies with AttemptDetails.
     [[nodiscard]] auto get_attempt(AttemptKey const& key, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
@@ -225,7 +225,7 @@ public:
     [[nodiscard]] auto list_attempts(AttemptListRequest const& request, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
-    /// Reads one bounded retained-output slice; replies with AttemptOutputChunk.
+    /// Reads one bounded retained-output slice for a valid attempt number; replies with AttemptOutputChunk.
     [[nodiscard]] auto read_attempt_output(AttemptOutputRequest const& request, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 

@@ -16,11 +16,11 @@ namespace jb::jobu {
 [[nodiscard]] auto run_get_request_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<jb::core::Uuid, jb::core::Error>;
 
-/// Encodes an attempt.get request containing a canonical run ID and positive attempt number.
+/// Encodes an attempt.get request containing a canonical run ID and attempt number in [1, maximum_attempt_number].
 [[nodiscard]] auto attempt_get_request_to_json(AttemptKey const& key)
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
-/// Strictly decodes attempt.get parameters.
+/// Strictly decodes attempt.get parameters, rejecting attempt numbers outside the durable domain.
 [[nodiscard]] auto attempt_get_request_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<AttemptKey, jb::core::Error>;
 
@@ -68,11 +68,12 @@ namespace jb::jobu {
 [[nodiscard]] auto run_details_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<RunDetails, jb::core::Error>;
 
-/// Encodes only lightweight attempt fields, without result or output.
+/// Encodes only lightweight attempt fields with a valid durable attempt number, without result or output.
 [[nodiscard]] auto attempt_summary_to_json(AttemptSummary const& summary)
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
-/// Decodes required lightweight attempt fields, allowing unknown response members for forward compatibility.
+/// Decodes required lightweight attempt fields, rejecting out-of-domain numbers while allowing unknown response
+/// members.
 [[nodiscard]] auto attempt_summary_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<AttemptSummary, jb::core::Error>;
 
@@ -92,11 +93,11 @@ namespace jb::jobu {
 [[nodiscard]] auto attempt_page_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<AttemptPage, jb::core::Error>;
 
-/// Encodes a validated output request using the public channel names and retained-byte offsets.
+/// Encodes a validated output request with a durable attempt number, public channel name, and retained-byte offset.
 [[nodiscard]] auto attempt_output_request_to_json(AttemptOutputRequest const& request)
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
-/// Strictly decodes attempt.output parameters; unknown fields and invalid channel/limit/offset values fail.
+/// Strictly decodes attempt.output parameters; unknown fields and invalid number/channel/limit/offset values fail.
 [[nodiscard]] auto attempt_output_request_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<AttemptOutputRequest, jb::core::Error>;
 
