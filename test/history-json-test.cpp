@@ -373,3 +373,108 @@ TEST_CASE("History get and page codecs preserve detail boundaries", "[jobu][hist
         {"next_cursor", json(std::string{"repeating"})}
     })));
 }
+
+TEST_CASE("History attempt identities stay within the durable number domain", "[jobu][history][json]")
+{
+    auto const run     = id("10112233-4455-6677-8899-aabbccddeeff");
+    auto const due     = at("2026-01-01T00:00:00Z");
+    auto       summary = AttemptSummary{.run_id = run, .attempt_number = 1, .due_at = due};
+    auto       output  = AttemptOutputChunk{
+        .attempt = {.run_id = run, .attempt_number = 1}
+    };
+    auto const valid_numbers = {AttemptNumber{1}, maximum_attempt_number};
+
+    for (auto number : valid_numbers) {
+        CHECK(is_valid_attempt_number(number));
+        auto key = AttemptKey{.run_id = run, .attempt_number = number};
+        auto get = attempt_get_request_to_json(key);
+        REQUIRE(get);
+        CHECK(attempt_get_request_from_json(*get)->attempt_number == number);
+
+        auto request         = AttemptOutputRequest{.attempt = key};
+        auto encoded_request = attempt_output_request_to_json(request);
+        REQUIRE(encoded_request);
+        CHECK(attempt_output_request_from_json(*encoded_request)->attempt.attempt_number == number);
+
+        summary.attempt_number = number;
+        auto encoded_summary   = attempt_summary_to_json(summary);
+        REQUIRE(encoded_summary);
+        CHECK(attempt_summary_from_json(*encoded_summary)->attempt_number == number);
+        auto detail                          = AttemptDetails{};
+        static_cast<AttemptSummary&>(detail) = summary;
+        auto encoded_detail                  = attempt_details_to_json(detail);
+        REQUIRE(encoded_detail);
+        CHECK(attempt_details_from_json(*encoded_detail)->attempt_number == number);
+        auto page = attempt_page_to_json(AttemptPage{.items = {summary}});
+        REQUIRE(page);
+        CHECK(attempt_page_from_json(*page)->items.front().attempt_number == number);
+
+        output.attempt.attempt_number = number;
+        auto encoded_output           = attempt_output_chunk_to_json(output);
+        REQUIRE(encoded_output);
+        CHECK(attempt_output_chunk_from_json(*encoded_output)->attempt.attempt_number == number);
+    }
+
+    for (auto number : {AttemptNumber{0}, maximum_attempt_number + 1, std::numeric_limits<AttemptNumber>::max()}) {
+        CHECK_FALSE(is_valid_attempt_number(number));
+        auto key = AttemptKey{.run_id = run, .attempt_number = number};
+        invalid_request(attempt_get_request_to_json(key));
+        invalid_request(attempt_output_request_to_json(AttemptOutputRequest{.attempt = key}));
+
+        summary.attempt_number = number;
+        invalid_response(attempt_summary_to_json(summary));
+        auto detail                          = AttemptDetails{};
+        static_cast<AttemptSummary&>(detail) = summary;
+        invalid_response(attempt_details_to_json(detail));
+        invalid_response(attempt_page_to_json(AttemptPage{.items = {summary}}));
+
+        output.attempt.attempt_number = number;
+        invalid_response(attempt_output_chunk_to_json(output));
+    }
+
+    // Mutate valid wire objects so each decoder's boundary is exercised independently.
+    summary.attempt_number               = 1;
+    output.attempt.attempt_number        = 1;
+    auto encoded_summary                 = attempt_summary_to_json(summary).value();
+    auto detail                          = AttemptDetails{};
+    static_cast<AttemptSummary&>(detail) = summary;
+    auto encoded_detail                  = attempt_details_to_json(detail).value();
+    auto encoded_page                    = attempt_page_to_json(AttemptPage{.items = {summary}}).value();
+    auto encoded_output                  = attempt_output_chunk_to_json(output).value();
+
+    for (auto value : {json(std::uint64_t{0}),
+                       json(maximum_attempt_number + 1),
+                       json(std::numeric_limits<AttemptNumber>::max()),
+                       json(std::int64_t{-1}),
+                       json(1.5),
+                       json(true),
+                       json(JsonNull{}),
+                       json(std::string{"1"})}) {
+        auto get = json(JsonValue::Object{
+            {"run_id",         json(run.to_string())},
+            {"attempt_number", value                }
+        });
+        invalid_request(attempt_get_request_from_json(get));
+
+        auto request = json(JsonValue::Object{
+            {"run_id",         json(run.to_string())      },
+            {"attempt_number", value                      },
+            {"channel",        json(std::string{"stdout"})}
+        });
+        invalid_request(attempt_output_request_from_json(request));
+
+        auto changed_summary                                                = encoded_summary;
+        std::get<JsonValue::Object>(changed_summary.data)["attempt_number"] = value;
+        invalid_response(attempt_summary_from_json(changed_summary));
+        auto changed_detail                                                = encoded_detail;
+        std::get<JsonValue::Object>(changed_detail.data)["attempt_number"] = value;
+        invalid_response(attempt_details_from_json(changed_detail));
+        auto  changed_page = encoded_page;
+        auto& page_items   = std::get<JsonValue::Array>(std::get<JsonValue::Object>(changed_page.data)["items"].data);
+        std::get<JsonValue::Object>(page_items.front().data)["attempt_number"] = value;
+        invalid_response(attempt_page_from_json(changed_page));
+        auto changed_output                                                = encoded_output;
+        std::get<JsonValue::Object>(changed_output.data)["attempt_number"] = value;
+        invalid_response(attempt_output_chunk_from_json(changed_output));
+    }
+}

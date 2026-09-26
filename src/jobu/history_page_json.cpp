@@ -82,7 +82,7 @@ auto decode_positive_number(JsonValue const& value, AttemptNumber& number) -> bo
     else {
         return false;
     }
-    return number != 0;
+    return is_valid_attempt_number(number);
 }
 
 auto checked_json(JsonValue value, bool request) -> CodecResult<JsonValue>
@@ -170,7 +170,7 @@ auto run_get_request_from_json(JsonValue const& value) -> CodecResult<jb::core::
 
 auto attempt_get_request_to_json(AttemptKey const& key) -> CodecResult<JsonValue>
 {
-    if (key.run_id.is_nil() || key.attempt_number == 0) {
+    if (key.run_id.is_nil() || !is_valid_attempt_number(key.attempt_number)) {
         return reject<JsonValue>(true);
     }
     return CodecResult<JsonValue>::success(json(JsonValue::Object{

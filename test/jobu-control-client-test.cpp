@@ -15,6 +15,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <utility>
@@ -132,6 +133,26 @@ struct Fixture {
 };
 
 } // anonymous namespace
+
+TEST_CASE("Typed history calls reject oversized attempt numbers before writing", "[jobu][client]")
+{
+    Fixture fixture;
+    fixture.initialize({"attempt.get", "attempt.output"});
+    auto const run = Uuid::parse("10112233-4455-6677-8899-aabbccddeeff");
+    REQUIRE(run);
+
+    for (auto number : {maximum_attempt_number + 1, std::numeric_limits<AttemptNumber>::max()}) {
+        auto key = AttemptKey{.run_id = *run, .attempt_number = number};
+        auto get = fixture.typed->get_attempt(key);
+        REQUIRE_FALSE(get);
+        CHECK(get.error().code == "jobu.protocol.invalid_request");
+
+        auto output = fixture.typed->read_attempt_output(AttemptOutputRequest{.attempt = key});
+        REQUIRE_FALSE(output);
+        CHECK(output.error().code == "jobu.protocol.invalid_request");
+        CHECK(fixture.device.take_written_data().empty());
+    }
+}
 
 TEST_CASE("Synchronous handshake and replies are delivered after accepting calls return", "[jobu][client]")
 {

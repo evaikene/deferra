@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -74,6 +75,34 @@ auto create_run(Fixture&             fixture,
 }
 
 } // namespace
+
+TEST_CASE("History service rejects out-of-domain attempt numbers without closing admission", "[jobu][history][sqlite]")
+{
+    Fixture    fixture;
+    auto const run = recovery_id(10);
+
+    for (auto number : {AttemptNumber{0}, maximum_attempt_number + 1, std::numeric_limits<AttemptNumber>::max()}) {
+        auto key     = AttemptKey{.run_id = run, .attempt_number = number};
+        auto attempt = fixture.history.get_attempt(key);
+        REQUIRE_FALSE(attempt);
+        CHECK(attempt.error().category == ErrorCategory::InvalidArgument);
+        CHECK(attempt.error().code == "jobu.history.invalid_request");
+
+        auto output = fixture.history.read_output(AttemptOutputRequest{.attempt = key});
+        REQUIRE_FALSE(output);
+        CHECK(output.error().category == ErrorCategory::InvalidArgument);
+        CHECK(output.error().code == "jobu.history.invalid_request");
+        CHECK(fixture.failures.empty());
+    }
+
+    for (auto number : {AttemptNumber{1}, maximum_attempt_number}) {
+        auto key = AttemptKey{.run_id = run, .attempt_number = number};
+        CHECK(fixture.history.get_attempt(key).error().code == "jobu.attempt.not_found");
+        CHECK(fixture.history.read_output(AttemptOutputRequest{.attempt = key}).error().code ==
+              "jobu.attempt.not_found");
+    }
+    CHECK(fixture.failures.empty());
+}
 
 TEST_CASE("History pages preserve equal-time keysets and descending attempt numbers", "[jobu][history][sqlite]")
 {

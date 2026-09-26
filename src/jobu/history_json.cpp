@@ -536,7 +536,8 @@ auto attempt_summary_to_json(AttemptSummary const& summary) -> ConversionResult<
     auto started   = encode_nullable_time(summary.started_at);
     auto completed = encode_nullable_time(summary.completed_at);
     auto outcome   = summary.outcome ? detail::history_wire_text(*summary.outcome) : std::optional<std::string_view>{};
-    if (!state || !due || !started || !completed || summary.attempt_number == 0 || (summary.outcome && !outcome)) {
+    if (!state || !due || !started || !completed || !is_valid_attempt_number(summary.attempt_number) ||
+        (summary.outcome && !outcome)) {
         return reject<JsonValue>(false);
     }
     return ConversionResult<JsonValue>::success(json(JsonValue::Object{
@@ -566,7 +567,7 @@ auto attempt_summary_from_json(JsonValue const& value) -> ConversionResult<Attem
     auto const* outcome   = member(object, "outcome");
 
     if (!run_id || !decode_uuid(*run_id, result.run_id) || !number || !decode_uint(*number, result.attempt_number) ||
-        result.attempt_number == 0 || !due || !decode_time(*due, result.due_at)) {
+        !is_valid_attempt_number(result.attempt_number) || !due || !decode_time(*due, result.due_at)) {
         return reject<AttemptSummary>(false);
     }
     if (!started || !decode_nullable_time(*started, result.started_at) || !completed ||

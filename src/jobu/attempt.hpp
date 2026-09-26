@@ -8,12 +8,23 @@
 #include "uuid.hpp"
 
 #include <cstdint>
+#include <limits>
 #include <optional>
 
 namespace jb::jobu {
 
-/// Positive sequence number identifying an attempt within one run.
+/// Sequence number identifying an attempt within one run; valid values fit a positive signed 64-bit storage integer.
 using AttemptNumber = std::uint64_t;
+
+/// Largest attempt number accepted by JobU's public history API and durable storage.
+inline constexpr AttemptNumber maximum_attempt_number =
+    static_cast<AttemptNumber>(std::numeric_limits<std::int64_t>::max());
+
+/// Returns whether a number belongs to the durable attempt-number domain [1, maximum_attempt_number].
+[[nodiscard]] constexpr auto is_valid_attempt_number(AttemptNumber value) noexcept -> bool
+{
+    return value >= 1 && value <= maximum_attempt_number;
+}
 
 /// Durable execution state of an attempt.
 enum class AttemptState : std::uint8_t {
