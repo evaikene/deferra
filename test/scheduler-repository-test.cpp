@@ -488,12 +488,36 @@ TEST_CASE("Scheduler repository reconstructs and validates manual barriers", "[j
                       "jobu.storage.invariant");
     }
 
-    SECTION("a manual row without its schedule-owned sibling is an invariant failure")
+    SECTION("one-time manual work remains eligible after its original occurrence is cancelled")
     {
         execute(fixture.database,
                 "UPDATE jobu_runs SET state = 'cancelled', completed_at_us = 200, "
                 "result_json = '{}' WHERE id = X'00000000000070008000000000000028'");
+        auto barriers = fixture.repository.list_manual_barriers(10, std::nullopt);
+        REQUIRE(barriers);
+        REQUIRE(barriers->size() == 2U);
+        auto candidates = fixture.repository.list_runnable(queue_id, JobType::Cli, at(100), 10);
+        REQUIRE(candidates);
+        REQUIRE(candidates->size() == 2U);
+        CHECK((*candidates)[0].run.id == id(41));
+        auto context = fixture.repository.find_dispatch_context(id(41), at(100));
+        REQUIRE(context);
+        REQUIRE(context->has_value());
+    }
+
+    SECTION("recurring manual work still requires its schedule-owned sibling")
+    {
+        execute(fixture.database,
+                "UPDATE jobu_jobs SET schedule_kind = 'cron', scheduled_at_us = NULL, "
+                "cron_expression = '* * * * *', cron_timezone = 'UTC' "
+                "WHERE id = X'0000000000007000800000000000001F'");
+        execute(fixture.database,
+                "UPDATE jobu_runs SET state = 'cancelled', completed_at_us = 200, "
+                "result_json = '{}' WHERE id = X'00000000000070008000000000000028'");
         require_error(fixture.repository.list_manual_barriers(10, std::nullopt),
+                      ErrorCategory::Internal,
+                      "jobu.storage.invariant");
+        require_error(fixture.repository.find_dispatch_context(id(41), at(100)),
                       ErrorCategory::Internal,
                       "jobu.storage.invariant");
     }

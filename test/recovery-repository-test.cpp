@@ -263,16 +263,19 @@ TEST_CASE("Recovery scans find orphan rows without inner joins hiding them", "[j
     }
 }
 
-TEST_CASE("Recovery barriers reject missing or duplicate siblings", "[jobu][recovery][sqlite]")
+TEST_CASE("Recovery barriers distinguish remaining one-time work from invalid siblings", "[jobu][recovery][sqlite]")
 {
-    auto            scenario = GENERATE(0, 1, 2);
+    auto            scenario = GENERATE(0, 1, 2, 3);
     RecoveryFixture fixture;
     auto            queue = recovery_queue(recovery_id(1));
     auto            job   = fixture.make_job(recovery_id(2), queue.id);
+    if (scenario == 3) {
+        job.schedule = CronSchedule{.expression = "* * * * *", .timezone = "UTC"};
+    }
     fixture.insert_queue(queue);
     fixture.insert_job(job);
     fixture.insert_run(fixture.make_run(recovery_id(3), job, RunState::Scheduled, 0, RunOrigin::Manual));
-    if (scenario != 0) {
+    if (scenario == 1 || scenario == 2) {
         fixture.insert_run(fixture.make_run(recovery_id(4), job));
     }
     if (scenario == 1) {
@@ -283,7 +286,12 @@ TEST_CASE("Recovery barriers reject missing or duplicate siblings", "[jobu][reco
         fixture.insert_run(fixture.make_run(recovery_id(5), job));
     }
     RecoveryRepository repository{fixture.database, fixture.registry};
-    require_invariant(repository.list_runs(1));
+    if (scenario == 0) {
+        require_scans(repository);
+    }
+    else {
+        require_invariant(repository.list_runs(1));
+    }
 }
 
 TEST_CASE("Recovery preserves historical owners and suspended manual work", "[jobu][recovery][sqlite]")

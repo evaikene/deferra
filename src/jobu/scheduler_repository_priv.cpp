@@ -2,6 +2,7 @@
 
 #include "attempt_repository_priv.hpp"
 #include "domain_storage_priv.hpp"
+#include "job_lifecycle_priv.hpp"
 #include "job_repository_priv.hpp"
 #include "query.hpp"
 #include "queue_repository_priv.hpp"
@@ -103,6 +104,31 @@ auto read_count(jb::db::Record const& record, std::string_view field) -> Reposit
     return RepositoryResult<std::uint64_t>::success(static_cast<std::uint64_t>(*integer));
 }
 
+struct ManualBarrierSummary {
+    NonterminalRunCounts counts;
+    std::uint64_t        live{0};
+};
+
+auto read_manual_barrier_summary(jb::db::Record const& record) -> RepositoryResult<ManualBarrierSummary>
+{
+    auto manual = read_count(record, "manual_sibling_count");
+    if (!manual) {
+        return RepositoryResult<ManualBarrierSummary>::failure(std::move(manual).error());
+    }
+    auto scheduled = read_count(record, "schedule_sibling_count");
+    if (!scheduled) {
+        return RepositoryResult<ManualBarrierSummary>::failure(std::move(scheduled).error());
+    }
+    auto live = read_count(record, "live_sibling_count");
+    if (!live) {
+        return RepositoryResult<ManualBarrierSummary>::failure(std::move(live).error());
+    }
+    return RepositoryResult<ManualBarrierSummary>::success({
+        .counts = {.scheduled = *scheduled, .manual = *manual},
+        .live   = *live,
+    });
+}
+
 template <typename T>
 auto scheduler_value(RepositoryResult<T> value, std::string_view reason) -> RepositoryResult<T>
 {
@@ -137,6 +163,7 @@ auto scheduler_run_columns() -> std::string
     // before using a run for selection, capacity accounting, cancellation, or completion.
     return std::string{job_run_columns()} +
            ", jobu_jobs.queue_id AS job_queue_id, jobu_jobs.state AS job_state, "
+           "jobu_jobs.schedule_kind AS job_schedule_kind, "
            "jobu_queues.state AS queue_state, "
            "(SELECT COUNT(*) FROM jobu_attempts AS active_attempts "
            "WHERE active_attempts.run_id = jobu_runs.id AND active_attempts.state IN ('pending', 'running')) "
@@ -161,10 +188,27 @@ auto scheduler_run_joins() -> std::string_view
            "JOIN jobu_queues ON jobu_queues.id = jobu_runs.queue_id ";
 }
 
+auto manual_barrier_columns() -> std::string_view
+{
+    // Total live rows detect malformed origin/ownership pairs that neither valid count includes.
+    return ", (SELECT COUNT(*) FROM jobu_runs AS manual_siblings "
+           "WHERE manual_siblings.job_id = jobu_runs.job_id AND manual_siblings.origin = 'manual' "
+           "AND manual_siblings.schedule_owned = 0 "
+           "AND manual_siblings.state IN ('scheduled', 'running', 'retry_wait')) AS manual_sibling_count, "
+           "(SELECT COUNT(*) FROM jobu_runs AS schedule_siblings "
+           "WHERE schedule_siblings.job_id = jobu_runs.job_id AND schedule_siblings.origin = 'scheduled' "
+           "AND schedule_siblings.schedule_owned = 1 "
+           "AND schedule_siblings.state IN ('scheduled', 'running', 'retry_wait')) AS schedule_sibling_count, "
+           "(SELECT COUNT(*) FROM jobu_runs AS live_siblings "
+           "WHERE live_siblings.job_id = jobu_runs.job_id "
+           "AND live_siblings.state IN ('scheduled', 'running', 'retry_wait')) AS live_sibling_count";
+}
+
 struct SchedulerRun {
     JobRun         run;
     jb::core::Uuid job_queue_id;
     JobState       job_state{JobState::Active};
+    bool           job_is_once{false};
     QueueState     queue_state{QueueState::Active};
     std::uint64_t  active_attempts{0};
     std::uint64_t  running_attempts{0};
@@ -188,6 +232,13 @@ auto decode_scheduler_run(jb::db::Record const&    record,
     auto job_state = scheduler_value(read_job_state(record, "job_state"), "invalid_job_state");
     if (!job_state) {
         return RepositoryResult<SchedulerRun>::failure(std::move(job_state).error());
+    }
+    auto schedule_kind = scheduler_value(read_text(record, "job_schedule_kind"), "invalid_job_schedule_kind");
+    if (!schedule_kind) {
+        return RepositoryResult<SchedulerRun>::failure(std::move(schedule_kind).error());
+    }
+    if (*schedule_kind != "once" && *schedule_kind != "cron") {
+        return RepositoryResult<SchedulerRun>::failure(invariant("invalid_job_schedule_kind"));
     }
     auto queue_state = scheduler_value(read_queue_state(record, "queue_state"), "invalid_queue_state");
     if (!queue_state) {
@@ -228,6 +279,7 @@ auto decode_scheduler_run(jb::db::Record const&    record,
         .run                    = std::move(run).value(),
         .job_queue_id           = *job_queue_id,
         .job_state              = *job_state,
+        .job_is_once            = *schedule_kind == "once",
         .queue_state            = *queue_state,
         .active_attempts        = *active_attempts,
         .running_attempts       = *running_attempts,
@@ -277,7 +329,8 @@ auto validate_candidate(SchedulerRun const&           row,
         }
     }
     else if (row.run.origin == RunOrigin::Manual) {
-        if (row.run.schedule_owned || row.job_state == JobState::Deleted) {
+        if (row.run.schedule_owned || (row.job_state != JobState::Active && row.job_state != JobState::Suspending &&
+                                       row.job_state != JobState::Suspended)) {
             return RepositoryResult<void>::failure(invariant("manual_candidate_relationship"));
         }
     }
@@ -618,14 +671,7 @@ auto SchedulerRepository::list_manual_barriers(std::size_t limit, std::optional<
     }
     // Scan every non-terminal manual run in bounded UUID pages, not only due candidates, so malformed sibling
     // relationships fail closed before any schedule-owned occurrence can dispatch.
-    auto sql = "SELECT " + scheduler_run_columns() +
-               ", (SELECT COUNT(*) FROM jobu_runs AS manual_siblings "
-               "WHERE manual_siblings.job_id = jobu_runs.job_id AND manual_siblings.origin = 'manual' "
-               "AND manual_siblings.state IN ('scheduled', 'running', 'retry_wait')) AS manual_sibling_count, "
-               "(SELECT COUNT(*) FROM jobu_runs AS schedule_siblings "
-               "WHERE schedule_siblings.job_id = jobu_runs.job_id AND schedule_siblings.origin = 'scheduled' "
-               "AND schedule_siblings.schedule_owned = 1 "
-               "AND schedule_siblings.state IN ('scheduled', 'running', 'retry_wait')) AS schedule_sibling_count" +
+    auto sql = "SELECT " + scheduler_run_columns() + std::string{manual_barrier_columns()} +
                std::string{scheduler_run_joins()} +
                "WHERE jobu_runs.origin = 'manual' "
                "AND jobu_runs.state IN ('scheduled', 'running', 'retry_wait')";
@@ -664,13 +710,13 @@ auto SchedulerRepository::list_manual_barriers(std::size_t limit, std::optional<
         if (!decoded) {
             return RepositoryResult<std::vector<ManualBarrier>>::failure(std::move(decoded).error());
         }
-        auto manual_count   = read_count(query.record(), "manual_sibling_count");
-        auto schedule_count = read_count(query.record(), "schedule_sibling_count");
-        if (!manual_count || !schedule_count) {
-            return RepositoryResult<std::vector<ManualBarrier>>::failure(
-                !manual_count ? std::move(manual_count).error() : std::move(schedule_count).error());
+        auto summary = read_manual_barrier_summary(query.record());
+        if (!summary) {
+            return RepositoryResult<std::vector<ManualBarrier>>::failure(std::move(summary).error());
         }
-        if (decoded->run.schedule_owned || *manual_count != 1 || *schedule_count != 1) {
+        if (decoded->run.schedule_owned || summary->counts.manual != 1 ||
+            summary->live != summary->counts.manual + summary->counts.scheduled ||
+            !valid_nonterminal_run_relationship(decoded->job_state, decoded->job_is_once, summary->counts)) {
             return RepositoryResult<std::vector<ManualBarrier>>::failure(invariant("manual_barrier_relationship"));
         }
         barriers.push_back({.run_id = decoded->run.id, .job_id = decoded->run.job_id});
@@ -796,15 +842,7 @@ auto SchedulerRepository::find_dispatch_context(jb::core::Uuid const& run_id, jb
 {
     // Re-read the selected run and sibling counts at the durable dispatch boundary. A state change is normal
     // ineligibility, while contradictory sibling cardinality remains a storage invariant violation.
-    auto sql = "SELECT " + scheduler_run_columns() +
-               ", (SELECT COUNT(*) FROM jobu_runs AS manual_siblings "
-               "WHERE manual_siblings.job_id = jobu_runs.job_id AND manual_siblings.origin = 'manual' "
-               "AND manual_siblings.schedule_owned = 0 "
-               "AND manual_siblings.state IN ('scheduled', 'running', 'retry_wait')) AS manual_sibling_count, "
-               "(SELECT COUNT(*) FROM jobu_runs AS schedule_siblings "
-               "WHERE schedule_siblings.job_id = jobu_runs.job_id AND schedule_siblings.origin = 'scheduled' "
-               "AND schedule_siblings.schedule_owned = 1 "
-               "AND schedule_siblings.state IN ('scheduled', 'running', 'retry_wait')) AS schedule_sibling_count" +
+    auto sql = "SELECT " + scheduler_run_columns() + std::string{manual_barrier_columns()} +
                std::string{scheduler_run_joins()} +
                "WHERE jobu_runs.id = :run_id AND jobu_runs.state IN ('scheduled', 'retry_wait')";
 
@@ -832,26 +870,28 @@ auto SchedulerRepository::find_dispatch_context(jb::core::Uuid const& run_id, jb
     if (!decoded) {
         return RepositoryResult<std::optional<DispatchContext>>::failure(std::move(decoded).error());
     }
-    auto manual_count   = read_count(query.record(), "manual_sibling_count");
-    auto schedule_count = read_count(query.record(), "schedule_sibling_count");
-    if (!manual_count || !schedule_count) {
-        return RepositoryResult<std::optional<DispatchContext>>::failure(
-            !manual_count ? std::move(manual_count).error() : std::move(schedule_count).error());
+    auto summary = read_manual_barrier_summary(query.record());
+    if (!summary) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(std::move(summary).error());
     }
 
-    // One manual run and one schedule-owned sibling form the valid barrier pair. The sibling stays ineligible until the
-    // manual run is terminal; extra siblings indicate corruption rather than a scheduling race.
+    // An accepted one-time manual run may outlive its original occurrence. Recurring manual work
+    // still needs a schedule-owned sibling; extra siblings indicate corruption, not a race.
+    if (summary->live != summary->counts.manual + summary->counts.scheduled ||
+        !valid_nonterminal_run_relationship(decoded->job_state, decoded->job_is_once, summary->counts)) {
+        return RepositoryResult<std::optional<DispatchContext>>::failure(invariant("manual_barrier_relationship"));
+    }
     if (decoded->run.origin == RunOrigin::Manual) {
-        if (decoded->run.schedule_owned || *manual_count != 1 || *schedule_count != 1) {
+        if (decoded->run.schedule_owned || summary->counts.manual != 1) {
             return RepositoryResult<std::optional<DispatchContext>>::failure(invariant("manual_barrier_relationship"));
         }
     }
     else if (decoded->run.origin == RunOrigin::Scheduled) {
-        if (!decoded->run.schedule_owned || *schedule_count != 1 || *manual_count > 1) {
+        if (!decoded->run.schedule_owned || summary->counts.scheduled != 1 || summary->counts.manual > 1) {
             return RepositoryResult<std::optional<DispatchContext>>::failure(
                 invariant("scheduled_candidate_relationship"));
         }
-        if (*manual_count == 1) {
+        if (summary->counts.manual == 1) {
             return RepositoryResult<std::optional<DispatchContext>>::success(std::nullopt);
         }
     }

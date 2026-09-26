@@ -58,6 +58,7 @@ auto materialized_attributes(StandardAttributeRegistry const& registry) -> std::
 auto dispatch_record(StandardAttributeRegistry const& registry, std::string_view payload = R"({"command":"/test"})")
     -> Record
 {
+    // Match the scheduler's dispatch-context projection, including owner schedule and sibling counts.
     return Record{
         {
          Field{"run_id", uuid_to_storage(id(1))},
@@ -78,6 +79,7 @@ auto dispatch_record(StandardAttributeRegistry const& registry, std::string_view
          Field{"run_result_json", Null{}},
          Field{"job_queue_id", uuid_to_storage(id(3))},
          Field{"job_state", make_text("active")},
+         Field{"job_schedule_kind", make_text("once")},
          Field{"queue_state", make_text("active")},
          Field{"active_attempt_count", std::int64_t{0}},
          Field{"running_attempt_count", std::int64_t{0}},
@@ -86,6 +88,7 @@ auto dispatch_record(StandardAttributeRegistry const& registry, std::string_view
          Field{"total_attempt_count", std::int64_t{0}},
          Field{"manual_sibling_count", std::int64_t{0}},
          Field{"schedule_sibling_count", std::int64_t{1}},
+         Field{"live_sibling_count", std::int64_t{1}},
          }
     };
 }
