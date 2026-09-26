@@ -96,11 +96,15 @@ The result is `{"disposition":"completed|requested","run":<full run view>}`.
 | `run` | full run object | 1.3 | State observed at cancellation |
 
 `completed` means pending scheduled or retry-waiting work became durably
-cancelled before the reply. Any required recurring successor and suspension
-drain commit in the same transaction. `requested` means an active executor
-accepted cancellation; the returned run is still Running and retains capacity
-until its completion is durably recorded. A repeated active cancellation may
-return `requested` again. A terminal run returns `jobu.run.state_conflict`.
+cancelled before the reply. Any required recurring successor, one-time job
+result, and suspension drain commit in the same transaction. A one-time job
+becomes Cancelled when this was its last unfinished run; an already accepted
+manual run can keep the job unfinished until that run reaches its own terminal
+outcome. `requested` means an active executor accepted cancellation; the returned
+run is still Running and retains capacity until its completion is durably
+recorded. A one-time job is reconciled when that completion becomes durable.
+A repeated active cancellation may return `requested` again. A terminal run
+returns `jobu.run.state_conflict`.
 
 The call cancels work owned by the run; it does not cancel a JSON-RPC request.
 A lost reply
