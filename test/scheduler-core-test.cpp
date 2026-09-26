@@ -2963,6 +2963,13 @@ TEST_CASE("Scheduler core completes pending cancellation atomically",
         CHECK(persisted->value().completed_at == at(200));
         REQUIRE(persisted->value().result);
         CHECK(persisted->value().result->as_object().at("reason").as_string() == "cancelled");
+        JobRepository jobs{fixture.database, fixture.registry};
+        auto          job = jobs.find_by_id(job_id, false);
+        REQUIRE(job);
+        REQUIRE(job->has_value());
+        CHECK(job->value().state == JobState::Cancelled);
+        CHECK(job->value().revision == 2);
+        CHECK(job->value().updated_at == at(200));
     }
 
     SECTION("blocking retry releases its queue slot after commit")
@@ -2989,6 +2996,13 @@ TEST_CASE("Scheduler core completes pending cancellation atomically",
         CHECK(cancelled->disposition == CancelDisposition::Completed);
         CHECK(cancelled->run.state == RunState::Cancelled);
         CHECK(cancelled->run.started_at == at(70));
+        JobRepository jobs{fixture.database, fixture.registry};
+        auto          job = jobs.find_by_id(id(121), false);
+        REQUIRE(job);
+        REQUIRE(job->has_value());
+        CHECK(job->value().state == JobState::Cancelled);
+        CHECK(job->value().revision == 2);
+        CHECK(job->value().updated_at == at(120));
 
         REQUIRE(core.process_cycle());
         REQUIRE(fixture.executor.pending_keys().size() == 1U);
@@ -3029,6 +3043,12 @@ TEST_CASE("Scheduler core retains running cancellation until forced terminal com
         CHECK(requested->run.state == RunState::Running);
         REQUIRE(fixture.executor.cancel_calls().size() == 1U);
         CHECK(fixture.executor.cancel_calls().front() == key);
+        JobRepository jobs{fixture.database, fixture.registry};
+        auto          pending_job = jobs.find_by_id(id(131), false);
+        REQUIRE(pending_job);
+        REQUIRE(pending_job->has_value());
+        CHECK(pending_job->value().state == JobState::Active);
+        CHECK(pending_job->value().revision == 1);
 
         auto repeated = core.cancel_run(key.run_id);
         REQUIRE(repeated);
@@ -3059,6 +3079,12 @@ TEST_CASE("Scheduler core retains running cancellation until forced terminal com
         REQUIRE(attempt->value().result);
         CHECK(attempt->value().result->as_object().at("reason").as_string() == "cancelled");
         check_captured_output(fixture.attempts, key);
+        auto finished_job = jobs.find_by_id(id(131), false);
+        REQUIRE(finished_job);
+        REQUIRE(finished_job->has_value());
+        CHECK(finished_job->value().state == JobState::Cancelled);
+        CHECK(finished_job->value().revision == 2);
+        CHECK(finished_job->value().updated_at == at(200));
 
         REQUIRE(core.process_cycle());
         REQUIRE(fixture.executor.pending_keys().size() == 1U);
@@ -3073,6 +3099,282 @@ TEST_CASE("Scheduler core retains running cancellation until forced terminal com
     {
         verify_completion(true);
     }
+}
+
+TEST_CASE("Cancelling a one-time occurrence leaves accepted manual work to determine the job result",
+          "[jobu][scheduler][core][cancellation][run-now][lifecycle][sqlite]")
+{
+    for (bool manual_running : {false, true}) {
+        for (auto result_state : {JobState::Succeeded, JobState::Failed, JobState::Cancelled}) {
+            DYNAMIC_SECTION("manual running " << manual_running << ", result " << static_cast<int>(result_state))
+            {
+                auto const  queue_id     = id(1);
+                auto const  job_id       = id(2);
+                auto const  scheduled_id = id(3);
+                auto const  manual_id    = id(4);
+                CoreFixture fixture{
+                    {queue_id, job_id, scheduled_id, manual_id}
+                };
+                ManagementService service{fixture.database,
+                                          fixture.registry,
+                                          fixture.cron,
+                                          fixture.generator,
+                                          fixture.time};
+                fixture.executor.set_available(JobType::Cli, true);
+                REQUIRE(service.create_queue({.name = "manual-after-cancel"}));
+                REQUIRE(service.create_job({.queue    = queue_id,
+                                            .schedule = OnceSchedule{.planned_at = at(300)},
+                                            .payload  = cli_payload("/manual")}));
+                REQUIRE(service.run_now({.job_id = job_id}));
+
+                SchedulerCore core{fixture.database,
+                                   fixture.registry,
+                                   fixture.cron,
+                                   fixture.generator,
+                                   fixture.time,
+                                   fixture.executor,
+                                   fixture.secrets};
+                if (manual_running) {
+                    REQUIRE(core.process_cycle());
+                    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+                    CHECK(fixture.executor.pending_keys().front().run_id == manual_id);
+                }
+
+                auto cancelled_original = core.cancel_run(scheduled_id);
+                REQUIRE(cancelled_original);
+                CHECK(cancelled_original->disposition == CancelDisposition::Completed);
+                CHECK(cancelled_original->run.state == RunState::Cancelled);
+                auto unfinished = service.get_job(job_id);
+                REQUIRE(unfinished);
+                CHECK(unfinished->state == JobState::Active);
+                CHECK(unfinished->revision == 1);
+
+                // Discovery and dispatch must accept the already-created manual run without an automatic sibling.
+                REQUIRE(core.process_cycle());
+                REQUIRE(fixture.executor.pending_keys().size() == 1U);
+                auto const key = fixture.executor.pending_keys().front();
+                CHECK(key.run_id == manual_id);
+
+                fixture.time.set_utc(at(200));
+                auto completion = success(key);
+                if (result_state == JobState::Failed) {
+                    completion = failure(key, FailureDisposition::Terminal);
+                }
+                else if (result_state == JobState::Cancelled) {
+                    auto requested = core.cancel_run(manual_id);
+                    REQUIRE(requested);
+                    CHECK(requested->disposition == CancelDisposition::Requested);
+                    auto still_unfinished = service.get_job(job_id);
+                    REQUIRE(still_unfinished);
+                    CHECK(still_unfinished->state == JobState::Active);
+                }
+                REQUIRE(fixture.executor.complete(key, std::move(completion)));
+                auto finished = service.get_job(job_id);
+                REQUIRE(finished);
+                CHECK(finished->state == result_state);
+                CHECK(finished->revision == 2);
+                CHECK(finished->updated_at == at(200));
+                auto original = fixture.runs.find_by_id(scheduled_id);
+                REQUIRE(original);
+                REQUIRE(original->has_value());
+                CHECK(original->value().state == RunState::Cancelled);
+            }
+        }
+    }
+}
+
+TEST_CASE("Cancelling a one-time manual run preserves its future occurrence",
+          "[jobu][scheduler][core][cancellation][run-now][lifecycle][sqlite]")
+{
+    auto const  queue_id     = id(1);
+    auto const  job_id       = id(2);
+    auto const  scheduled_id = id(3);
+    auto const  manual_id    = id(4);
+    CoreFixture fixture{
+        {queue_id, job_id, scheduled_id, manual_id}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    fixture.executor.set_available(JobType::Cli, true);
+    REQUIRE(service.create_queue({.name = "manual-cancel"}));
+    REQUIRE(service.create_job(
+        {.queue = queue_id, .schedule = OnceSchedule{.planned_at = at(300)}, .payload = cli_payload("/manual")}));
+    REQUIRE(service.run_now({.job_id = job_id}));
+
+    SchedulerCore core{fixture.database,
+                       fixture.registry,
+                       fixture.cron,
+                       fixture.generator,
+                       fixture.time,
+                       fixture.executor,
+                       fixture.secrets};
+    auto          cancelled_manual = core.cancel_run(manual_id);
+    REQUIRE(cancelled_manual);
+    CHECK(cancelled_manual->disposition == CancelDisposition::Completed);
+    auto unfinished = service.get_job(job_id);
+    REQUIRE(unfinished);
+    CHECK(unfinished->state == JobState::Active);
+    CHECK(unfinished->revision == 1);
+
+    fixture.time.set_utc(at(300));
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const key = fixture.executor.pending_keys().front();
+    CHECK(key.run_id == scheduled_id);
+    fixture.time.set_utc(at(310));
+    REQUIRE(fixture.executor.complete(key, success(key)));
+    auto finished = service.get_job(job_id);
+    REQUIRE(finished);
+    CHECK(finished->state == JobState::Succeeded);
+    CHECK(finished->revision == 2);
+}
+
+TEST_CASE("A one-time manual retry remains eligible after its original occurrence is cancelled",
+          "[jobu][scheduler][core][cancellation][run-now][retry][lifecycle][sqlite]")
+{
+    auto const  queue_id     = id(1);
+    auto const  job_id       = id(2);
+    auto const  scheduled_id = id(3);
+    auto const  manual_id    = id(4);
+    CoreFixture fixture{
+        {queue_id, job_id, scheduled_id, manual_id}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    fixture.executor.set_available(JobType::Cli, true);
+    REQUIRE(service.create_queue({.name = "manual-retry-after-cancel"}));
+    REQUIRE(service.create_job({
+        .queue    = queue_id,
+        .schedule = OnceSchedule{.planned_at = at(300)                                                        },
+        .attributes =
+            {
+                                 {"retry.initial_delay", {.data = std::chrono::duration_cast<Duration>(10us)}},
+                                 {"retry.max_attempts", {.data = std::int64_t{2}}},
+                                 },
+        .payload = cli_payload("/manual"),
+    }));
+    REQUIRE(service.run_now({.job_id = job_id}));
+
+    SchedulerCore core{fixture.database,
+                       fixture.registry,
+                       fixture.cron,
+                       fixture.generator,
+                       fixture.time,
+                       fixture.executor,
+                       fixture.secrets};
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const first_key = fixture.executor.pending_keys().front();
+    CHECK(first_key.run_id == manual_id);
+
+    fixture.time.set_utc(at(130));
+    REQUIRE(fixture.executor.complete(first_key, failure(first_key, FailureDisposition::Retryable)));
+    auto waiting = fixture.runs.find_by_id(manual_id);
+    REQUIRE(waiting);
+    REQUIRE(waiting->has_value());
+    CHECK(waiting->value().state == RunState::RetryWait);
+    CHECK(waiting->value().runnable_at == at(140));
+
+    fixture.time.set_utc(at(131));
+    REQUIRE(core.cancel_run(scheduled_id));
+    auto unfinished = service.get_job(job_id);
+    REQUIRE(unfinished);
+    CHECK(unfinished->state == JobState::Active);
+    CHECK(unfinished->revision == 1);
+
+    fixture.time.set_utc(at(140));
+    REQUIRE(core.process_cycle());
+    REQUIRE(fixture.executor.pending_keys().size() == 1U);
+    auto const retry_key = fixture.executor.pending_keys().front();
+    CHECK(retry_key.run_id == manual_id);
+    CHECK(retry_key.attempt_number == 2);
+    fixture.time.set_utc(at(150));
+    REQUIRE(fixture.executor.complete(retry_key, success(retry_key)));
+    auto finished = service.get_job(job_id);
+    REQUIRE(finished);
+    CHECK(finished->state == JobState::Succeeded);
+    CHECK(finished->revision == 2);
+    CHECK(finished->updated_at == at(150));
+}
+
+TEST_CASE("Pending cancellation respects suspended and deleted one-time owners",
+          "[jobu][scheduler][core][cancellation][lifecycle][suspension][sqlite]")
+{
+    for (auto owner_state : {JobState::Suspended, JobState::Deleted}) {
+        DYNAMIC_SECTION("owner state " << static_cast<int>(owner_state))
+        {
+            CoreFixture fixture;
+            auto const  queue_id = id(10);
+            auto const  job_id   = id(11);
+            auto const  run_id   = id(12);
+            insert_queue(fixture.database, queue_id, 1);
+            insert_job(fixture.database,
+                       job_id,
+                       queue_id,
+                       JobType::Cli,
+                       owner_state == JobState::Deleted ? JobState::Active : JobState::Suspended,
+                       std::nullopt,
+                       owner_state == JobState::Deleted ? 1 : 2);
+            insert_run(fixture.database, default_run(fixture, run_id, job_id, queue_id, JobType::Cli));
+            if (owner_state == JobState::Deleted) {
+                mark_job_deleted(fixture.database, job_id);
+            }
+
+            SchedulerCore core{fixture.database,
+                               fixture.registry,
+                               fixture.cron,
+                               fixture.generator,
+                               fixture.time,
+                               fixture.executor,
+                               fixture.secrets};
+            fixture.time.set_utc(at(200));
+            auto cancelled = core.cancel_run(run_id);
+            REQUIRE(cancelled);
+            CHECK(cancelled->disposition == CancelDisposition::Completed);
+
+            JobRepository jobs{fixture.database, fixture.registry};
+            auto          job = jobs.find_by_id(job_id, true);
+            REQUIRE(job);
+            REQUIRE(job->has_value());
+            CHECK(job->value().state == (owner_state == JobState::Deleted ? JobState::Deleted : JobState::Cancelled));
+            CHECK(job->value().revision == (owner_state == JobState::Deleted ? 2 : 3));
+            CHECK(job->value().updated_at == (owner_state == JobState::Deleted ? at(1) : at(200)));
+        }
+    }
+}
+
+TEST_CASE("Cancellation rejects a recurring manual run without its scheduled sibling",
+          "[jobu][scheduler][core][cancellation][run-now][barrier][sqlite]")
+{
+    CoreFixture fixture;
+    auto const  queue_id  = id(20);
+    auto const  job_id    = id(21);
+    auto const  manual_id = id(22);
+    insert_queue(fixture.database, queue_id, 1);
+    insert_job(fixture.database,
+               job_id,
+               queue_id,
+               JobType::Cli,
+               JobState::Active,
+               CronSchedule{.expression = "*/5 * * * *", .timezone = "UTC"});
+    auto manual           = default_run(fixture, manual_id, job_id, queue_id, JobType::Cli);
+    manual.origin         = RunOrigin::Manual;
+    manual.schedule_owned = false;
+    insert_run(fixture.database, manual);
+
+    SchedulerCore core{fixture.database,
+                       fixture.registry,
+                       fixture.cron,
+                       fixture.generator,
+                       fixture.time,
+                       fixture.executor,
+                       fixture.secrets};
+    auto          cancelled = core.cancel_run(manual_id);
+    REQUIRE_FALSE(cancelled);
+    CHECK(cancelled.error().code == "jobu.storage.invariant");
+    CHECK(cancelled.error().detail == "reason=manual_barrier_relationship");
+    auto run = fixture.runs.find_by_id(manual_id);
+    REQUIRE(run);
+    REQUIRE(run->has_value());
+    CHECK(run->value().state == RunState::Scheduled);
 }
 
 TEST_CASE("Scheduler core handles cancellation errors and invalid run states",

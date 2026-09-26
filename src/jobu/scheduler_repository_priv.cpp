@@ -959,8 +959,8 @@ auto SchedulerRepository::find_run_for_cancel(jb::core::Uuid const& run_id)
         return RepositoryResult<std::optional<JobRun>>::success(std::nullopt);
     }
 
-    auto const sql =
-        "SELECT " + scheduler_run_columns() + std::string{scheduler_run_joins()} + "WHERE jobu_runs.id = :run_id";
+    auto const    sql = "SELECT " + scheduler_run_columns() + std::string{manual_barrier_columns()} +
+                        std::string{scheduler_run_joins()} + "WHERE jobu_runs.id = :run_id";
     jb::db::Query query{_database};
     auto          prepared = query.prepare(sql);
     if (!prepared) {
@@ -984,6 +984,19 @@ auto SchedulerRepository::find_run_for_cancel(jb::core::Uuid const& run_id)
     auto decoded = decode_scheduler_run(query.record(), _attributes, true);
     if (!decoded) {
         return RepositoryResult<std::optional<JobRun>>::failure(std::move(decoded).error());
+    }
+    if (decoded->run.state == RunState::Scheduled || decoded->run.state == RunState::Running ||
+        decoded->run.state == RunState::RetryWait) {
+        auto summary = read_manual_barrier_summary(query.record());
+        if (!summary) {
+            return RepositoryResult<std::optional<JobRun>>::failure(std::move(summary).error());
+        }
+        // This is checked again under the cancellation transaction. A one-time manual run may remain after its
+        // scheduled sibling ends, while a recurring manual run still needs that sibling.
+        if (summary->live != summary->counts.manual + summary->counts.scheduled ||
+            !valid_nonterminal_run_relationship(decoded->job_state, decoded->job_is_once, summary->counts)) {
+            return RepositoryResult<std::optional<JobRun>>::failure(invariant("manual_barrier_relationship"));
+        }
     }
     auto finished = query.finish();
     if (!finished) {

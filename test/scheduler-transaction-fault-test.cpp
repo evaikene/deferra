@@ -76,6 +76,10 @@ auto boundary(std::string_view sql) -> std::string
         return "startup.running_state";
     }
     if (sql.find("AS manual_sibling_count") != std::string_view::npos) {
+        if (sql.find("WHERE jobu_runs.id = :run_id") != std::string_view::npos &&
+            sql.find("AND jobu_runs.state IN") == std::string_view::npos) {
+            return "cancellation.context";
+        }
         return "dispatch.context";
     }
     if (sql.find("WHERE jobu_runs.id = :run_id") != std::string_view::npos &&
@@ -104,13 +108,13 @@ auto boundary(std::string_view sql) -> std::string
         return "completion.run";
     }
     if (sql.starts_with("SELECT id AS job_id") && sql.find("WHERE id = :id") != std::string_view::npos) {
-        return "completion.job_read";
+        return "lifecycle.job_read";
     }
     if (sql.starts_with("SELECT origin AS live_origin")) {
-        return "completion.live_runs";
+        return "lifecycle.live_runs";
     }
     if (sql.starts_with("UPDATE jobu_jobs SET state = :next_state")) {
-        return "completion.job_state";
+        return "lifecycle.job_state";
     }
     if (sql.starts_with("INSERT INTO jobu_runs")) {
         return "completion.successor";
@@ -282,6 +286,19 @@ struct Fixture {
         return pending;
     }
 
+    auto insert_future_once_run(RunState initial) -> RecoveryRunFixture
+    {
+        auto future_job     = store.make_job(recovery_id(6), queue.id);
+        future_job.schedule = OnceSchedule{at(200)};
+        store.insert_job(future_job);
+
+        auto pending = store.make_run(recovery_id(7), future_job, initial, initial == RunState::RetryWait ? 1 : 0);
+        pending.run.planned_at  = at(200);
+        pending.run.runnable_at = at(200);
+        store.insert_run(pending);
+        return pending;
+    }
+
     auto start_completion(Scenario scenario) -> AttemptKey
     {
         REQUIRE(scheduler->start());
@@ -384,12 +401,12 @@ auto completion_faults(Scenario scenario) -> std::vector<DatabaseCall>
         writes.emplace_back("completion.successor");
     }
     if (!retries(scenario) && scenario != Scenario::Recurring) {
-        writes.emplace_back("completion.job_state");
+        writes.emplace_back("lifecycle.job_state");
     }
     if (suspends(scenario)) {
         writes.emplace_back("completion.queue_suspension");
         if (retries(scenario)) {
-            writes.emplace_back("completion.job_state");
+            writes.emplace_back("lifecycle.job_state");
         }
     }
     for (auto const& write : writes) {
@@ -399,7 +416,7 @@ auto completion_faults(Scenario scenario) -> std::vector<DatabaseCall>
         result.push_back({.boundary = write, .operation = Operation::Execute, .phase = Phase::AfterSuccess});
     }
     if (scenario == Scenario::Terminal) {
-        for (auto const* read : {"completion.job_read", "completion.live_runs"}) {
+        for (auto const* read : {"lifecycle.job_read", "lifecycle.live_runs"}) {
             result.push_back({.boundary = read, .operation = Operation::Prepare});
             result.push_back({.boundary = read, .operation = Operation::Execute});
             result.push_back({.boundary = read, .operation = Operation::Fetch});
@@ -875,6 +892,69 @@ TEST_CASE("Scheduler cancellation preserves its first fatal error when rollback 
 
     fixture.reopen();
     CHECK(snapshot(fixture.store.database) == before);
+}
+
+TEST_CASE("Pending one-time cancellation rolls back its run and job on lifecycle faults",
+          "[jobu][scheduler][fault][cancellation][lifecycle][sqlite]")
+{
+    auto const faults = std::vector<DatabaseCall>{
+        {.boundary = "cancellation.run", .operation = Operation::Execute, .phase = Phase::AfterSuccess},
+        {.boundary = "lifecycle.job_read", .operation = Operation::Prepare},
+        {.boundary = "lifecycle.live_runs", .operation = Operation::Fetch},
+        {.boundary = "lifecycle.job_state", .operation = Operation::Prepare},
+        {.boundary = "lifecycle.job_state", .operation = Operation::Execute, .phase = Phase::AfterSuccess},
+        {.boundary = "connection", .operation = Operation::Commit},
+    };
+    for (auto initial : {RunState::Scheduled, RunState::RetryWait}) {
+        for (auto const& fault : faults) {
+            DYNAMIC_SECTION("initial " << static_cast<int>(initial) << ' ' << fault.boundary << ' '
+                                       << static_cast<int>(fault.operation) << ' ' << static_cast<int>(fault.phase))
+            {
+                Fixture    fixture;
+                auto const pending = fixture.insert_future_once_run(initial);
+                (void)fixture.start_completion(Scenario::Terminal);
+                auto const before = snapshot(fixture.store.database);
+                fixture.arm(fault);
+
+                auto cancelled = fixture.scheduler->cancel_run(pending.run.id);
+                REQUIRE_FALSE(cancelled);
+                fixture.require_failure();
+                fixture.require_closed_gate();
+                fixture.reopen();
+                CHECK(snapshot(fixture.store.database) == before);
+                fixture.store.require_run(pending);
+            }
+        }
+    }
+}
+
+TEST_CASE("Lost cancellation commit acknowledgement retains the complete one-time transition",
+          "[jobu][scheduler][fault][cancellation][lifecycle][sqlite]")
+{
+    Fixture    fixture;
+    auto const pending = fixture.insert_future_once_run(RunState::Scheduled);
+    (void)fixture.start_completion(Scenario::Terminal);
+    fixture.arm({.boundary = "connection", .operation = Operation::Commit, .phase = Phase::AfterSuccess});
+
+    auto cancelled = fixture.scheduler->cancel_run(pending.run.id);
+    REQUIRE_FALSE(cancelled);
+    fixture.require_failure();
+    fixture.require_closed_gate();
+    fixture.reopen();
+
+    RunRepository runs{fixture.store.database, fixture.store.registry};
+    auto          run = runs.find_by_id(pending.run.id);
+    REQUIRE(run);
+    REQUIRE(run->has_value());
+    CHECK(run->value().state == RunState::Cancelled);
+    CHECK(run->value().completed_at == at(110));
+    JobRepository jobs{fixture.store.database, fixture.store.registry};
+    auto          job = jobs.find_by_id(pending.run.job_id, false);
+    REQUIRE(job);
+    REQUIRE(job->has_value());
+    CHECK(job->value().state == JobState::Cancelled);
+    CHECK(job->value().revision == pending.run.job_revision + 1);
+    CHECK(job->value().updated_at == at(110));
 }
 
 TEST_CASE("Scheduler core latches cancellation cleanup failure without asynchronous notification",

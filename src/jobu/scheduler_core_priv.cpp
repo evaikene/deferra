@@ -1048,7 +1048,8 @@ auto SchedulerCore::cancel_run_impl(jb::core::Uuid const& run_id) -> jb::core::R
     }
     run = std::move(**current);
 
-    // Terminalization, a possible recurring successor, and suspension drains must all commit or roll back together.
+    // The cancelled run, a possible recurring successor, its one-time definition, and suspension drains must commit
+    // or roll back together. A remaining manual or scheduled run keeps the definition unfinished.
     auto cancelled = repository.cancel_pending_run(run_id, run.state, completed_at, *serialized);
     if (!cancelled) {
         return CancellationResult::failure(std::move(cancelled).error());
@@ -1065,6 +1066,12 @@ auto SchedulerCore::cancel_run_impl(jb::core::Uuid const& run_id) -> jb::core::R
     if (!successor) {
         return CancellationResult::failure(std::move(successor).error());
     }
+    JobLifecycleRepository lifecycle{_database, _attributes};
+    auto                   finished = lifecycle.finish_after_terminal_run(run_id, completed_at);
+    if (!finished) {
+        return CancellationResult::failure(std::move(finished).error());
+    }
+
     auto drained = repository.complete_drained_suspensions(run.queue_id, run.job_id, completed_at);
     if (!drained) {
         return CancellationResult::failure(std::move(drained).error());
