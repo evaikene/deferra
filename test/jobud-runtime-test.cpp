@@ -130,11 +130,10 @@ private:
 };
 
 struct RuntimeFixture {
-    explicit RuntimeFixture(RecoveryFixtureSchema schema = RecoveryFixtureSchema::Current)
+    RuntimeFixture()
         : storage{[this](std::unique_ptr<jb::db::Driver> driver) {
-                      return std::make_unique<FaultDatabaseDriver>(std::move(driver), faults);
-                  },
-                  schema}
+            return std::make_unique<FaultDatabaseDriver>(std::move(driver), faults);
+        }}
     {
         faults->classify = [this](std::string_view sql) -> std::string {
             if (sql.starts_with("SELECT value_blob FROM jobu_secrets")) {
@@ -819,7 +818,7 @@ TEST_CASE("Daemon runner factory failure never enters serving")
 
 TEST_CASE("Daemon schema rollback poisoning prevents recovery and serving")
 {
-    RuntimeFixture fixture{RecoveryFixtureSchema::VersionOne};
+    RuntimeFixture fixture;
     fixture.seed(1, JobType::Http, RunState::Running);
     fixture.create_runtime();
     fixture.faults->faults.push_back({

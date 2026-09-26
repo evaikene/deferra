@@ -143,7 +143,7 @@ TEST_CASE("Recovery fixtures preserve absent empty binary and lost capture", "[j
     auto next = schema.next();
     REQUIRE(next);
     REQUIRE(*next);
-    CHECK(std::get<std::int64_t>(*schema.record().value("version")) == 2);
+    CHECK(std::get<std::int64_t>(*schema.record().value("version")) == 3);
 }
 
 TEST_CASE("Recovery fixtures support owner states and both persisted recovery policies", "[jobu][recovery][sqlite]")
