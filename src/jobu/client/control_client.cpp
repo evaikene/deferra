@@ -206,7 +206,9 @@ void ControlClient::Private::schedule_delivery()
 
 void ControlClient::Private::deliver_ready_outcomes()
 {
-    delivery_scheduled = false;
+    auto const lifetime            = std::weak_ptr<int>{lifetime_guard};
+    auto const delivery_generation = generation;
+    delivery_scheduled             = false;
     while (!ready_outcomes.empty() && (phase == Phase::Initializing || phase == Phase::Ready)) {
         auto const id = ready_outcomes.front();
         ready_outcomes.erase(ready_outcomes.begin());
@@ -219,6 +221,14 @@ void ControlClient::Private::deliver_ready_outcomes()
         pending.erase(entry);
         rearm_deadline();
         deliver_one(id, std::move(call));
+
+        // A handler can destroy or close the wrapper. Check lifetime before reading private state again.
+        if (lifetime.expired()) {
+            return;
+        }
+        if (generation != delivery_generation) {
+            return;
+        }
     }
 }
 
