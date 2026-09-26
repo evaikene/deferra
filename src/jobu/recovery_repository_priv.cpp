@@ -2,6 +2,7 @@
 
 #include "attempt_repository_priv.hpp"
 #include "domain_storage_priv.hpp"
+#include "job_lifecycle_priv.hpp"
 #include "job_repository_priv.hpp"
 #include "json.hpp"
 #include "query.hpp"
@@ -229,15 +230,16 @@ auto history(jb::db::Database& database, jb::core::Uuid const& id) -> RecoveryRe
                                              .invalid_prior = *invalid_prior});
 }
 
-auto validate_barriers(jb::db::Database& database, jb::core::Uuid const& job_id) -> RecoveryResult<void>
+auto validate_barriers(jb::db::Database& database, JobDefinition const& job) -> RecoveryResult<void>
 {
     jb::db::Query query{database};
     auto          result =
-        query.prepare("SELECT COUNT(CASE WHEN schedule_owned = 1 THEN 1 END) AS scheduled, "
-                      "COUNT(CASE WHEN origin = 'manual' THEN 1 END) AS manual "
+        query.prepare("SELECT COUNT(CASE WHEN origin = 'scheduled' AND schedule_owned = 1 THEN 1 END) AS scheduled, "
+                      "COUNT(CASE WHEN origin = 'manual' AND schedule_owned = 0 THEN 1 END) AS manual, "
+                      "COUNT(*) AS live "
                       "FROM jobu_runs WHERE job_id = :id AND state IN ('scheduled', 'running', 'retry_wait')");
     if (result) {
-        result = query.bind_value(":id", uuid_to_storage(job_id));
+        result = query.bind_value(":id", uuid_to_storage(job.id));
     }
     if (result) {
         result = query.exec();
@@ -254,7 +256,12 @@ auto validate_barriers(jb::db::Database& database, jb::core::Uuid const& job_id)
     }
     auto scheduled = read_count(query.record(), "scheduled");
     auto manual    = read_count(query.record(), "manual");
-    if (!scheduled || !manual || *scheduled > 1 || *manual > 1 || (*manual == 1 && *scheduled != 1)) {
+    auto live      = read_count(query.record(), "live");
+    if (!scheduled || !manual || !live || *live != *scheduled + *manual) {
+        return RecoveryResult<void>::failure(invariant("manual_barrier_relationship"));
+    }
+    auto const counts = NonterminalRunCounts{.scheduled = *scheduled, .manual = *manual};
+    if (!valid_nonterminal_run_relationship(job.state, std::holds_alternative<OnceSchedule>(job.schedule), counts)) {
         return RecoveryResult<void>::failure(invariant("manual_barrier_relationship"));
     }
     return RecoveryResult<void>::success();
@@ -712,7 +719,7 @@ auto RecoveryRepository::repair_missing_successor(jb::core::Uuid const&    job_i
         }
         return RecoveryResult<bool>::success(false);
     }
-    auto barriers = validate_barriers(_database, job_id);
+    auto barriers = validate_barriers(_database, *job);
     if (!barriers) {
         return RecoveryResult<bool>::failure(std::move(barriers).error());
     }
@@ -784,7 +791,7 @@ auto RecoveryRepository::find_run(jb::core::Uuid const& id) -> RecoveryResult<Jo
                                                 (run.schedule_owned && (*job)->state == JobState::Suspended)))) {
             return RecoveryResult<JobRun>::failure(invariant("nonterminal_ownership"));
         }
-        auto barriers = validate_barriers(_database, run.job_id);
+        auto barriers = validate_barriers(_database, **job);
         if (!barriers) {
             return RecoveryResult<JobRun>::failure(std::move(barriers).error());
         }
@@ -959,7 +966,7 @@ auto RecoveryRepository::list_jobs(std::size_t limit, std::optional<jb::core::Uu
         if (!*queue || ((*queue)->state == QueueState::Deleted && (*job)->state != JobState::Deleted)) {
             return RecoveryResult<std::vector<JobDefinition>>::failure(invariant("job_ownership"));
         }
-        auto barriers = validate_barriers(_database, id);
+        auto barriers = validate_barriers(_database, **job);
         if (!barriers) {
             return RecoveryResult<std::vector<JobDefinition>>::failure(std::move(barriers).error());
         }

@@ -374,6 +374,14 @@ if(TARGET jobu-sqlite)
     target_link_libraries(recovery-fixture-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME recovery-fixture-test COMMAND $<TARGET_FILE:recovery-fixture-test>)
 
+    add_executable(jobu-job-lifecycle-test
+        jobu-job-lifecycle-test.cpp
+        support/recovery_fixture.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(jobu-job-lifecycle-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME jobu-job-lifecycle-test COMMAND $<TARGET_FILE:jobu-job-lifecycle-test>)
+
     add_executable(recovery-repository-test
         recovery-repository-test.cpp
         support/recovery_fixture.cpp

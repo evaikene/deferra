@@ -53,6 +53,8 @@ target_sources(${TARGET}
         idempotency_codec_priv.hpp
         idempotency_repository_priv.cpp
         idempotency_repository_priv.hpp
+        job_lifecycle_priv.cpp
+        job_lifecycle_priv.hpp
         job_repository_priv.cpp
         job_repository_priv.hpp
         job_validation_priv.cpp
