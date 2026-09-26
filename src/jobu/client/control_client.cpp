@@ -279,8 +279,17 @@ void ControlClient::Private::on_terminated(Error const& raw_error)
                 return;
             }
             data->owner->emit(data->owner->failed, safe_error);
+            if (guard.expired()) {
+                return;
+            }
+
+            // The failures were latched before the terminal signal. A live wrapper still owes them after reentrant
+            // close().
             for (auto const& [id, uncertain] : failures) {
                 data->owner->emit(data->owner->call_failed, id, local_failure(safe_error, uncertain));
+                if (guard.expired()) {
+                    return;
+                }
             }
         });
 }
@@ -306,8 +315,9 @@ void ControlClient::Private::rearm_deadline()
 
 void ControlClient::Private::on_timeout()
 {
-    auto       expired = std::vector<std::pair<ControlCallId, bool>>{};
-    auto const now     = jb::core::Clock::now();
+    auto const lifetime = std::weak_ptr<int>{lifetime_guard};
+    auto       expired  = std::vector<std::pair<ControlCallId, bool>>{};
+    auto const now      = jb::core::Clock::now();
     for (auto entry = pending.begin(); entry != pending.end();) {
         if (entry->second.deadline > now || !std::holds_alternative<std::monostate>(entry->second.outcome)) {
             ++entry;
@@ -333,6 +343,11 @@ void ControlClient::Private::on_timeout()
             return;
         }
         owner->emit(owner->call_failed, id, local_failure(timeout_error(), uncertain));
+        // Expired calls are already retired. Reentrant close() cannot settle them, so deliver the remaining local
+        // batch.
+        if (lifetime.expired()) {
+            return;
+        }
     }
 }
 
@@ -364,10 +379,24 @@ auto ControlClient::Private::start_call(Method                   method,
     auto const local_id = next_id;
     next_id             = local_id == std::numeric_limits<ControlCallId>::max() ? 0U : local_id + 1U;
     pending.emplace(local_id, Pending{.method = method, .deadline = *deadline});
-    establishing = local_id;
-    auto wire    = rpc.call(name, std::move(params), [this, local_id](jb::rpc::RequestId const& id) {
-        bind_wire_id(local_id, id);
-    });
+    establishing          = local_id;
+    auto const lifetime   = std::weak_ptr<int>{lifetime_guard};
+    auto*      raw_client = &rpc;
+    auto       wire =
+        raw_client->call(name, std::move(params), [lifetime, data = this, local_id](jb::rpc::RequestId const& id) {
+            if (!lifetime.expired()) {
+                data->bind_wire_id(local_id, id);
+            }
+        });
+
+    // A device callback during the write can close the wrapper and destroy it from an earlier call's failure handler.
+    if (lifetime.expired()) {
+        if (!wire) {
+            return CallResult::failure(std::move(wire).error());
+        }
+        raw_client->cancel(wire.value());
+        return CallResult::success(local_id);
+    }
     establishing.reset();
 
     if (phase == Phase::Failed || phase == Phase::Closed) {
@@ -440,11 +469,19 @@ void ControlClient::Private::close(bool emit_failures)
         lifetime_guard.reset();
         return;
     }
+    auto const lifetime = std::weak_ptr<int>{lifetime_guard};
+
     if (initializing && !defer_initialization_failure) {
         owner->emit(owner->failed, closed_error());
+        if (lifetime.expired()) {
+            return;
+        }
     }
     for (auto const& [id, uncertain] : failures) {
         owner->emit(owner->call_failed, id, local_failure(closed_error(), uncertain));
+        if (lifetime.expired()) {
+            return;
+        }
     }
     if (defer_initialization_failure) {
         auto       guard              = std::weak_ptr<int>{lifetime_guard};

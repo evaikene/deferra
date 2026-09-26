@@ -94,9 +94,10 @@ struct ControlFailure {
 /// mutation is never retried automatically.
 /// Every accepted typed method call emits one reply or failure unless this wrapper is destroyed. Signals for
 /// synchronous raw responses are delivered later through the event loop, after the accepting method has returned.
-/// A handler for a deferred ready or reply outcome, including handshake or decoded-result failure, may destroy the
-/// wrapper or its parent, stopping subsequent wrapper outcomes. An emission already in progress retains Signal's
-/// connection-snapshot semantics. Handlers may call close() or cancel_call() reentrantly.
+/// A ready, reply_received, failed, or call_failed handler may destroy the wrapper or its parent, stopping subsequent
+/// wrapper outcomes. An emission already in progress retains Signal's connection-snapshot semantics, including any
+/// queued receiver deliveries from that emission. Destruction emits no new outcomes. Handlers may call close() or
+/// cancel_call() reentrantly; close() during terminal failed delivery does not discard its latched per-call failures.
 ///
 /// Local `jobu.client.*` errors have fixed safe text and no backend detail:
 ///
