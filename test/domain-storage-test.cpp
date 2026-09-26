@@ -408,7 +408,18 @@ TEST_CASE("Domain storage uses stable lower-case enum text", "[jobu][storage]")
 {
     CHECK(storage_text(QueueState::Suspending) == "suspending");
     CHECK(storage_text(RecoveryPolicy::RetryInterrupted) == "retry_interrupted");
-    CHECK(storage_text(JobState::Suspended) == "suspended");
+    for (auto const [state, text] : {
+             std::pair{JobState::Active,     std::string_view{"active"}    },
+             std::pair{JobState::Suspending, std::string_view{"suspending"}},
+             std::pair{JobState::Suspended,  std::string_view{"suspended"} },
+             std::pair{JobState::Deleted,    std::string_view{"deleted"}   },
+             std::pair{JobState::Succeeded,  std::string_view{"succeeded"} },
+             std::pair{JobState::Failed,     std::string_view{"failed"}    },
+             std::pair{JobState::Cancelled,  std::string_view{"cancelled"} },
+    }) {
+        CHECK(storage_text(state) == text);
+        CHECK(*read_job_state(record("state", std::string{text}), "state") == state);
+    }
     CHECK(storage_text(JobType::Http) == "http");
     CHECK(storage_text(RunOrigin::Submitted) == "submitted");
     CHECK(storage_text(RunState::RetryWait) == "retry_wait");
@@ -418,7 +429,6 @@ TEST_CASE("Domain storage uses stable lower-case enum text", "[jobu][storage]")
     CHECK(*read_queue_state(record("state", std::string{"deleted"}), "state") == QueueState::Deleted);
     CHECK(*read_recovery_policy(record("policy", std::string{"fail_interrupted"}), "policy") ==
           RecoveryPolicy::FailInterrupted);
-    CHECK(*read_job_state(record("state", std::string{"active"}), "state") == JobState::Active);
     CHECK(*read_job_type(record("type", std::string{"cli"}), "type") == JobType::Cli);
     CHECK(*read_run_origin(record("origin", std::string{"manual"}), "origin") == RunOrigin::Manual);
     CHECK(*read_run_state(record("state", std::string{"cancelled"}), "state") == RunState::Cancelled);
@@ -429,6 +439,7 @@ TEST_CASE("Domain storage uses stable lower-case enum text", "[jobu][storage]")
     REQUIRE_FALSE(invalid);
     CHECK(invalid.error().code == "jobu.storage.invalid_enum");
     CHECK(invalid.error().detail.find("unknown-secret-text") == std::string::npos);
+    CHECK(read_job_state(record("state", std::string{"unknown"}), "state").error().code == "jobu.storage.invalid_enum");
 }
 
 TEST_CASE("Domain storage round-trips bounded deterministic JSON", "[jobu][storage]")

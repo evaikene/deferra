@@ -205,7 +205,7 @@ TEST_CASE("Job JSON uses the stable shape and round trips owning values", "[jobu
     CHECK(tolerant_time->created_at == parse_time("2026-07-21T08:00:00Z"));
 }
 
-TEST_CASE("Job JSON covers optional values, cron, and every enum spelling", "[jobu][management][json][job][enum]")
+TEST_CASE("Job JSON covers optional values, cron, and state/type spellings", "[jobu][management][json][job][enum]")
 {
     StandardAttributeRegistry registry;
     auto                      job = sample_job(registry);
@@ -241,7 +241,26 @@ TEST_CASE("Job JSON covers optional values, cron, and every enum spelling", "[jo
         auto decoded = job_from_json(*encoded, registry);
         REQUIRE(decoded);
         CHECK(decoded->state == state);
+        CHECK_FALSE(is_terminal_job_state(state));
     }
+    job.schedule = OnceSchedule{.planned_at = parse_time("2026-07-21T21:00:00.123456Z")};
+    for (auto const [state, text] : {
+             std::pair{JobState::Succeeded, std::string_view{"succeeded"}},
+             std::pair{JobState::Failed,    std::string_view{"failed"}   },
+             std::pair{JobState::Cancelled, std::string_view{"cancelled"}},
+    }) {
+        job.state    = state;
+        auto encoded = job_to_json(job, registry);
+        REQUIRE(encoded);
+        CHECK(encoded->as_object().at("state").as_string() == text);
+        auto decoded = job_from_json(*encoded, registry);
+        REQUIRE(decoded);
+        CHECK(decoded->state == state);
+        CHECK(is_terminal_job_state(state));
+    }
+    CHECK_FALSE(is_terminal_job_state(static_cast<JobState>(255)));
+
+    job.state = JobState::Active;
     for (auto const [type, text] : {
              std::pair{JobType::Cli,  std::string_view{"cli"} },
              std::pair{JobType::Http, std::string_view{"http"}},
@@ -254,6 +273,33 @@ TEST_CASE("Job JSON covers optional values, cron, and every enum spelling", "[jo
         REQUIRE(decoded);
         CHECK(decoded->type == type);
     }
+}
+
+TEST_CASE("Terminal job results require a one-time schedule and no deletion time", "[jobu][management][json][job]")
+{
+    StandardAttributeRegistry registry;
+    auto                      job = sample_job(registry);
+    job.state                     = JobState::Succeeded;
+    job.deleted_at.reset();
+
+    auto valid = job_to_json(job, registry);
+    REQUIRE(valid);
+
+    job.schedule = CronSchedule{.expression = "0 * * * *", .timezone = "UTC"};
+    check_invalid_response(job_to_json(job, registry));
+    auto recurring                   = *valid;
+    object(recurring).at("schedule") = make_json(JsonValue::Object{
+        {"kind",       make_json(std::string{"cron"})     },
+        {"expression", make_json(std::string{"0 * * * *"})},
+        {"timezone",   make_json(std::string{"UTC"})      },
+    });
+    check_invalid_response(job_from_json(recurring, registry));
+
+    job.schedule   = OnceSchedule{.planned_at = parse_time("2026-07-21T21:00:00.123456Z")};
+    job.deleted_at = parse_time("2026-07-21T22:00:00Z");
+    check_invalid_response(job_to_json(job, registry));
+    object(*valid).at("deleted_at") = make_json(std::string{"2026-07-21T22:00:00Z"});
+    check_invalid_response(job_from_json(*valid, registry));
 }
 
 TEST_CASE("Job response conversion rejects invalid known fields", "[jobu][management][json][job][invalid]")
@@ -618,6 +664,15 @@ TEST_CASE("Job list request JSON round trips filters and defaults", "[jobu][mana
     CHECK_FALSE(defaults->type);
     CHECK(defaults->page.limit == 100U);
     CHECK_FALSE(defaults->page.after_id);
+
+    for (auto state : {JobState::Succeeded, JobState::Failed, JobState::Cancelled}) {
+        auto terminal_filter = JobListRequest{.state = state};
+        auto terminal_json   = job_list_request_to_json(terminal_filter);
+        REQUIRE(terminal_json);
+        auto decoded_filter = job_list_request_from_json(*terminal_json);
+        REQUIRE(decoded_filter);
+        CHECK(decoded_filter->state == state);
+    }
 }
 
 TEST_CASE("Job list request decoding rejects ambiguous and malformed filters",

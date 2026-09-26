@@ -167,7 +167,8 @@ namespace jb::jobu {
 /// Encodes a job-definition result using the stable management wire shape.
 ///
 /// Job attributes are encoded through @p registry at AttributeScope::Job. UUIDs and timestamps use their canonical
-/// textual forms, schedules retain their explicit kind, and the payload remains an owning JSON object.
+/// textual forms, schedules retain their explicit kind, and the payload remains an owning JSON object. Terminal
+/// execution states require a one-time schedule and no deletion timestamp.
 ///
 /// @param job Job definition to encode without retaining it.
 /// @param registry Attribute registry borrowed for this conversion.
@@ -179,7 +180,8 @@ namespace jb::jobu {
 /// Decodes and validates a job-definition result.
 ///
 /// Every known field is mandatory and validated. Unknown result and nested schedule members are ignored for forward
-/// compatibility. Attributes must form a complete materialized Job-scope set according to @p registry.
+/// compatibility. Attributes must form a complete materialized Job-scope set according to @p registry. Terminal
+/// execution states require a one-time schedule and no deletion timestamp.
 ///
 /// @param value JSON result object to decode without retaining references to it.
 /// @param registry Attribute registry borrowed for this conversion.
