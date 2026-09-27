@@ -198,7 +198,7 @@ struct MoveJobRequest {
     QueueSelector  target_queue;
 };
 
-/// Values used to soft-delete one suspended job using optimistic concurrency.
+/// Values used to soft-delete one suspended or drained terminal job using optimistic concurrency.
 struct DeleteJobRequest {
     /// Stable job-definition UUID to delete.
     jb::core::Uuid job_id;
@@ -208,11 +208,12 @@ struct DeleteJobRequest {
 
 /// Values used to create one immediate manual occurrence of a job definition.
 ///
-/// Run Now preserves the definition's existing schedule-owned occurrence. The optional idempotency key is scoped to
-/// the selected job and durably replays the original manual run.
+/// Run Now preserves the definition's existing schedule-owned occurrence. A new request requires an unfinished
+/// definition; the optional idempotency key is scoped to the selected job and durably replays the original manual run
+/// even after that definition becomes terminal.
 ///
 struct RunNowRequest {
-    /// Existing non-deleted job definition whose current execution values are snapshotted.
+    /// Job definition to test. Fresh requests require a non-deleted, unfinished definition; replay uses the saved run.
     jb::core::Uuid             job_id;
     /// Optional 1-through-128-byte UTF-8 key reserved for durable Run Now replay.
     std::optional<std::string> idempotency_key;
@@ -371,11 +372,11 @@ public:
     /// @param request Job ID and optional job-scoped idempotency key consumed after validation. A matching key replays
     /// the original committed manual run without allocating another UUID.
     /// @return Committed or replayed manual run, or a job, queue, manual-precondition, idempotency, generator, storage,
-    /// or database Error. A fresh operation requires one future scheduled schedule-owned occurrence, no running or
-    /// retry-waiting run, and no other non-terminal manual run. Job suspension is permitted; queue suspension prevents
-    /// later scheduler dispatch but not creation. The returned run snapshots the current definition and sets both
-    /// planned_at and runnable_at to the transaction's single sampled current time. No external work or execution
-    /// starts; a successful mutation emits mutation_committed after commit.
+    /// or database Error. A fresh operation requires an unfinished definition, one future scheduled schedule-owned
+    /// occurrence, no running or retry-waiting run, and no other non-terminal manual run. Job suspension is permitted;
+    /// queue suspension prevents later scheduler dispatch but not creation. The returned run snapshots the current
+    /// definition and sets both planned_at and runnable_at to the transaction's single sampled current time. No
+    /// external work or execution starts; only fresh creation emits mutation_committed after commit.
     ///
     [[nodiscard]] auto run_now(RunNowRequest request) -> jb::core::Result<JobRun, jb::core::Error>;
 
@@ -383,15 +384,15 @@ public:
     /// @param id Stable job-definition UUID, borrowed only for this call.
     /// @return Committed definition. Active jobs pass through suspending and complete immediately when no running work
     /// is present; suspending jobs complete when running work has drained. Each actual transition increments the
-    /// revision once, while suspended jobs are returned unchanged. Deleted, not-found, state-conflict,
-    /// revision-exhausted, and database failures are reported as Error values.
+    /// revision once, while suspended jobs are returned unchanged. Terminal definitions cannot be suspended. Deleted,
+    /// not-found, state-conflict, revision-exhausted, and database failures are reported as Error values.
     ///
     [[nodiscard]] auto suspend_job(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>;
 
     /// Resumes one suspending or suspended job without changing its schedule-owned run or execution snapshot.
     /// @param id Stable job-definition UUID, borrowed only for this call.
     /// @return Committed active definition with one revision increment, the unchanged definition when already active,
-    /// or a deleted, not-found, state-conflict, revision-exhausted, or database Error.
+    /// or a deleted, terminal-state conflict, not-found, revision-exhausted, or database Error.
     ///
     [[nodiscard]] auto resume_job(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>;
 
@@ -403,10 +404,10 @@ public:
     ///
     [[nodiscard]] auto move_job(MoveJobRequest const& request) -> jb::core::Result<JobDefinition, jb::core::Error>;
 
-    /// Soft-deletes one fully suspended job in one immediate transaction.
+    /// Soft-deletes one fully suspended or drained terminal job in one immediate transaction.
     /// @param request Job ID and positive expected revision.
     /// @return Success after one revision increment, pending-run cancellation, and current secret-reference cleanup,
-    /// or a validation, not-found, deleted, not-suspended, revision, running-work, invariant, or database Error.
+    /// or a validation, not-found, deleted, state, revision, running-work, invariant, or database Error.
     /// Definition and execution history remain durable for retention.
     ///
     [[nodiscard]] auto delete_job(DeleteJobRequest const& request) -> jb::core::Result<void, jb::core::Error>;
@@ -432,8 +433,9 @@ public:
     ///
     /// Emission occurs on the service and Database owner thread. The transaction has committed and the successful state
     /// returned by the method is durable before any slot runs. Reads and failed operations do not emit. Successful
-    /// idempotency replays and successful suspend/resume no-ops emit to match existing RPC rescan behavior, as does
-    /// run_now(), even though its public RPC method remains deferred.
+    /// create replays and successful suspend/resume no-ops emit to match existing RPC rescan behavior. A replayed
+    /// run_now() returns its saved response without a mutation notification; fresh run_now() creation emits after
+    /// commit, even though its public RPC method remains deferred.
     ///
     /// A direct slot may request coalesced later work, but it must not block, start nested event processing, re-enter
     /// ManagementService, or use the same Database during delivery. Slots must not destroy the service before signal
@@ -469,7 +471,7 @@ private:
     auto resume_queue_impl(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>;
     auto delete_queue_impl(QueueSelector const& selector) -> jb::core::Result<void, jb::core::Error>;
     auto create_job_impl(CreateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
-    auto run_now_impl(RunNowRequest request) -> jb::core::Result<JobRun, jb::core::Error>;
+    auto run_now_impl(RunNowRequest request, bool& created_new_run) -> jb::core::Result<JobRun, jb::core::Error>;
     auto update_job_impl(UpdateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>;
     auto suspend_job_impl(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>;
     auto resume_job_impl(jb::core::Uuid const& id) -> jb::core::Result<JobDefinition, jb::core::Error>;

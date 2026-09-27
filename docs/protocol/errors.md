@@ -56,7 +56,7 @@ For example, a stale job update can return:
 | `jobu.job.revision_conflict` | Conflict | `expected_revision` is stale. |
 | `jobu.job.revision_exhausted` | ResourceExhausted | The durable revision cannot advance. |
 | `jobu.job.state_conflict` | Conflict | Current state is incompatible with the operation. |
-| `jobu.job.not_suspended` | Conflict | Move or delete requires a fully suspended job. |
+| `jobu.job.not_suspended` | Conflict | Move requires a fully suspended job; deletion requires a suspended or drained terminal job. |
 | `jobu.job.has_running_attempt` | Conflict | Running work blocks deletion. |
 | `jobu.job.immutable` | Conflict | A one-time definition cannot be changed after an attempt starts. |
 | `jobu.run.schedule_conflict` | Conflict | Its current scheduled occurrence cannot be refreshed. |
@@ -142,7 +142,7 @@ backend detail and submitted payloads are not echoed.
 
 | Code | Category | Meaning |
 | --- | --- | --- |
-| `jobu.run.manual_conflict` | Conflict | Run Now's manual barrier or eligible schedule condition is not satisfied. |
+| `jobu.run.manual_conflict` | Conflict | Run Now's terminal-state, manual-barrier, or eligible-schedule condition is not satisfied. |
 | `jobu.idempotency.conflict` | Conflict | A retained key was reused with different canonical Run Now input. |
 | `jobu.run.not_found` | NotFound | Cancellation's run ID does not exist. |
 | `jobu.run.state_conflict` | Conflict | Cancellation found a run that is already terminal or otherwise cannot be cancelled. |

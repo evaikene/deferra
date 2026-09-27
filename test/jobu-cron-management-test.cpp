@@ -3,6 +3,7 @@
 #include "attempt_repository_priv.hpp"
 #include "attribute_registry.hpp"
 #include "database.hpp"
+#include "job_lifecycle_priv.hpp"
 #include "query.hpp"
 #include "run_repository_priv.hpp"
 #include "sqlite/sqlite_driver.hpp"
@@ -208,8 +209,8 @@ TEST_CASE("Recurring create persists one future schedule-owned snapshot", "[jobu
     REQUIRE(fixture.cron.next_calls().size() == 1);
     CHECK(fixture.cron.next_calls().front().exclusive_lower_bound == UtcTimePoint{10s});
 
-    detail::RunRepository runs{fixture.database, fixture.registry};
-    auto                  stored = runs.find_schedule_owned(job_id);
+    jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                            stored = runs.find_schedule_owned(job_id);
     REQUIRE(stored);
     REQUIRE(stored->has_value());
     CHECK((**stored).id == run_id);
@@ -354,8 +355,8 @@ TEST_CASE("Recurring create idempotency preserves its first occurrence across re
     CHECK(fixture.cron.validation_calls().size() == 1);
     CHECK(fixture.cron.next_calls().size() == 1);
 
-    detail::RunRepository runs{fixture.database, fixture.registry};
-    auto                  stored = runs.find_schedule_owned(job_id);
+    jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                            stored = runs.find_schedule_owned(job_id);
     REQUIRE(stored);
     REQUIRE(stored->has_value());
     CHECK((**stored).id == run_id);
@@ -420,8 +421,8 @@ TEST_CASE("Recurring update replans one unstarted run with a complete new snapsh
     CHECK(fixture.cron.next_calls().back().schedule.expression == updated_schedule.expression);
     CHECK(fixture.cron.next_calls().back().exclusive_lower_bound == UtcTimePoint{20s});
 
-    detail::RunRepository runs{fixture.database, fixture.registry};
-    auto                  stored = runs.find_schedule_owned(job_id);
+    jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                            stored = runs.find_schedule_owned(job_id);
     REQUIRE(stored);
     REQUIRE(stored->has_value());
     CHECK((**stored).id == run_id);
@@ -496,7 +497,7 @@ TEST_CASE("Recurring update ignores historical attempts while refreshing the cur
     execute(fixture.database,
             "UPDATE jobu_runs SET state = 'succeeded', started_at_us = 11000000, completed_at_us = 12000000 "
             "WHERE state = 'scheduled'");
-    detail::AttemptRepository attempts{fixture.database};
+    jb::jobu::detail::AttemptRepository attempts{fixture.database};
     REQUIRE(attempts.insert_attempt({
         .run_id         = historical_id,
         .attempt_number = 1,
@@ -507,7 +508,7 @@ TEST_CASE("Recurring update ignores historical attempts while refreshing the cur
         .outcome        = AttemptOutcome::Succeeded,
     }));
 
-    detail::RunRepository runs{fixture.database, fixture.registry};
+    jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
     REQUIRE(runs.insert_schedule_owned({
         .id           = current_id,
         .job_id       = job_id,
@@ -560,7 +561,7 @@ TEST_CASE("Running recurring updates preserve the active snapshot for the newest
         .payload  = original_payload,
     }));
 
-    detail::AttemptRepository attempts{fixture.database};
+    jb::jobu::detail::AttemptRepository attempts{fixture.database};
     SECTION("running")
     {
         execute(fixture.database,
@@ -613,8 +614,8 @@ TEST_CASE("Running recurring updates preserve the active snapshot for the newest
     CHECK(newest->priority == 10);
     CHECK(fixture.cron.next_calls().size() == 1);
 
-    detail::RunRepository runs{fixture.database, fixture.registry};
-    auto                  active = runs.find_schedule_owned(job_id);
+    jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                            active = runs.find_schedule_owned(job_id);
     REQUIRE(active);
     REQUIRE(active->has_value());
     CHECK((**active).id == run_id);
@@ -667,8 +668,8 @@ TEST_CASE("Unstarted schedule conversions preserve the run identity and reject p
         REQUIRE(updated);
         check_schedule(updated->schedule, schedule);
 
-        detail::RunRepository runs{fixture.database, fixture.registry};
-        auto                  active = runs.find_schedule_owned(job_id);
+        jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+        auto                            active = runs.find_schedule_owned(job_id);
         REQUIRE(active);
         REQUIRE(active->has_value());
         CHECK((**active).id == run_id);
@@ -689,8 +690,8 @@ TEST_CASE("Unstarted schedule conversions preserve the run identity and reject p
         REQUIRE(std::holds_alternative<OnceSchedule>(updated->schedule));
         CHECK(std::get<OnceSchedule>(updated->schedule).planned_at == UtcTimePoint{180s});
 
-        detail::RunRepository runs{fixture.database, fixture.registry};
-        auto                  active = runs.find_schedule_owned(job_id);
+        jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+        auto                            active = runs.find_schedule_owned(job_id);
         REQUIRE(active);
         REQUIRE(active->has_value());
         CHECK((**active).id == run_id);
@@ -702,7 +703,7 @@ TEST_CASE("Unstarted schedule conversions preserve the run identity and reject p
         auto const schedule = cron_schedule();
         fixture.cron.set_occurrences(schedule, {UtcTimePoint{60s}});
         REQUIRE(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("/cron")}));
-        detail::AttemptRepository attempts{fixture.database};
+        jb::jobu::detail::AttemptRepository attempts{fixture.database};
         REQUIRE(attempts.insert_attempt({
             .run_id         = run_id,
             .attempt_number = 1,
@@ -774,8 +775,8 @@ TEST_CASE("Run Now snapshots a suspended definition and replays without consumin
     CHECK_FALSE(manual->completed_at);
     CHECK_FALSE(manual->result);
 
-    detail::RunRepository runs{fixture.database, fixture.registry};
-    auto                  scheduled = runs.find_schedule_owned(job_id);
+    jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                            scheduled = runs.find_schedule_owned(job_id);
     REQUIRE(scheduled);
     REQUIRE(scheduled->has_value());
     CHECK((**scheduled).id == scheduled_id);
@@ -795,6 +796,96 @@ TEST_CASE("Run Now snapshots a suspended definition and replays without consumin
     CHECK(count_rows(fixture.database, "jobu_runs") == 2);
     CHECK(count_rows(fixture.database, "jobu_idempotency") == 1);
     require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+}
+
+TEST_CASE("Run Now replay stays observational after one-time terminalization",
+          "[jobu][management][run-now][terminal][idempotency][sqlite]")
+{
+    auto const     queue_id       = sequence_id(1);
+    auto const     job_id         = sequence_id(2);
+    auto const     scheduled_id   = sequence_id(3);
+    auto const     manual_id      = sequence_id(4);
+    auto const     next_job_id    = sequence_id(5);
+    auto const     next_run_id    = sequence_id(6);
+    auto const     next_manual_id = sequence_id(7);
+    ServiceFixture fixture{
+        {queue_id, job_id, scheduled_id, manual_id, next_job_id, next_run_id, next_manual_id}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "once-replay"}));
+    REQUIRE(service.create_job({.queue    = queue_id,
+                                .schedule = OnceSchedule{.planned_at = UtcTimePoint{60s}},
+                                .payload  = cli_payload("/weekend-test")}));
+
+    auto emissions = std::size_t{0};
+    service.mutation_committed.connect([&emissions] { ++emissions; });
+    auto const request = RunNowRequest{.job_id = job_id, .idempotency_key = "accepted"};
+    auto       manual  = service.run_now(request);
+    REQUIRE(manual);
+    CHECK(manual->id == manual_id);
+    CHECK(emissions == 1);
+
+    jb::jobu::detail::JobLifecycleRepository lifecycle{fixture.database, fixture.registry};
+    {
+        execute(fixture.database, "BEGIN IMMEDIATE");
+        execute(fixture.database,
+                "UPDATE jobu_runs SET state = 'succeeded', started_at_us = 11000000, completed_at_us = 12000000, "
+                "result_json = '{}' WHERE origin = 'manual'");
+        auto finished = lifecycle.finish_after_terminal_run(manual_id, UtcTimePoint{12s});
+        REQUIRE(finished);
+        CHECK_FALSE(*finished);
+        execute(fixture.database, "COMMIT");
+    }
+    auto unfinished = service.get_job(job_id);
+    REQUIRE(unfinished);
+    CHECK(unfinished->state == JobState::Active);
+    jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                            scheduled = runs.find_by_id(scheduled_id);
+    REQUIRE(scheduled);
+    REQUIRE(scheduled->has_value());
+    CHECK((**scheduled).state == RunState::Scheduled);
+
+    {
+        execute(fixture.database, "BEGIN IMMEDIATE");
+        execute(fixture.database,
+                "UPDATE jobu_runs SET state = 'cancelled', completed_at_us = 13000000, result_json = '{}' "
+                "WHERE origin = 'scheduled'");
+        auto finished = lifecycle.finish_after_terminal_run(scheduled_id, UtcTimePoint{13s});
+        REQUIRE(finished);
+        CHECK(*finished);
+        execute(fixture.database, "COMMIT");
+    }
+    auto terminal = service.get_job(job_id);
+    REQUIRE(terminal);
+    CHECK(terminal->state == JobState::Cancelled);
+    CHECK(terminal->revision == 2);
+
+    auto replay = service.run_now(request);
+    REQUIRE(replay);
+    CHECK(replay->id == manual_id);
+    CHECK(replay->state == RunState::Scheduled);
+    CHECK(emissions == 1);
+    require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+    require_error(service.run_now({.job_id = job_id, .idempotency_key = "fresh"}),
+                  ErrorCategory::Conflict,
+                  "jobu.run.manual_conflict");
+    CHECK(emissions == 1);
+    CHECK(count_rows(fixture.database, "jobu_runs") == 2);
+    CHECK(count_rows(fixture.database, "jobu_idempotency") == 1);
+
+    // Neither replay nor rejection uses an identity or changes the terminal definition.
+    auto eligible = service.create_job({.queue    = queue_id,
+                                        .schedule = OnceSchedule{.planned_at = UtcTimePoint{90s}},
+                                        .payload  = cli_payload("/next")});
+    REQUIRE(eligible);
+    CHECK(eligible->id == next_job_id);
+    auto next_manual = service.run_now({.job_id = next_job_id});
+    REQUIRE(next_manual);
+    CHECK(next_manual->id == next_manual_id);
+    terminal = service.get_job(job_id);
+    REQUIRE(terminal);
+    CHECK(terminal->state == JobState::Cancelled);
+    CHECK(terminal->revision == 2);
 }
 
 TEST_CASE("Run Now enforces every state-dependent manual-run precondition",
@@ -956,7 +1047,7 @@ TEST_CASE("Run Now accepts future one-time jobs and scopes idempotency by job",
     CHECK(count_rows(fixture.database, "jobu_idempotency") == 2);
 }
 
-TEST_CASE("Run Now signals fresh and replayed durable success", "[jobu][management][run-now][signal][sqlite]")
+TEST_CASE("Run Now signals fresh creation without signalling replay", "[jobu][management][run-now][signal][sqlite]")
 {
     auto const     queue_id = sequence_id(221);
     auto const     job_id   = sequence_id(222);
@@ -987,10 +1078,10 @@ TEST_CASE("Run Now signals fresh and replayed durable success", "[jobu][manageme
         REQUIRE(service.run_now(request));
         CHECK(emissions == 1);
         REQUIRE(service.run_now(request));
-        CHECK(emissions == 2);
+        CHECK(emissions == 1);
 
         require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
         require_error(service.run_now({.job_id = sequence_id(250)}), ErrorCategory::NotFound, "jobu.job.not_found");
-        CHECK(emissions == 2);
+        CHECK(emissions == 1);
     }
 }

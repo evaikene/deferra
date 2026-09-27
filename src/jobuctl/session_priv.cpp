@@ -196,6 +196,11 @@ auto observe_suspension(CommandKind kind, ControlReply const& reply, std::option
             if (job->state == JobState::Suspended) {
                 return SuspensionObservation::Complete;
             }
+            // An accepted suspension can finish through the last one-time run.
+            // Return the observed outcome instead of waiting for a Suspended state it will never reach.
+            if (is_terminal_job_state(job->state)) {
+                return SuspensionObservation::Complete;
+            }
         }
     }
     return SuspensionObservation::Conflict;
@@ -319,9 +324,15 @@ void Session::deadline_expired()
     auto const unknown = data->phase == SessionPhase::Command && data->active_call && is_mutation(data->command.kind);
     auto       message = std::string_view{"Overall command deadline expired"};
     if (data->phase == SessionPhase::Polling) {
-        message = data->command.kind == CommandKind::RunCancel
-                    ? "Cancelled state was not confirmed before the deadline"
-                    : "Suspended state was not confirmed before the deadline";
+        if (data->command.kind == CommandKind::RunCancel) {
+            message = "Cancelled state was not confirmed before the deadline";
+        }
+        else if (data->command.kind == CommandKind::JobSuspend) {
+            message = "Job drain was not confirmed before the deadline";
+        }
+        else {
+            message = "Suspended state was not confirmed before the deadline";
+        }
     }
     finish(3,
            local_error(

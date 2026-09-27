@@ -46,6 +46,11 @@ enum class PeerBehavior : std::uint8_t {
     LargeRevision,
     QueueSuspendPolling,
     JobSuspendPolling,
+    JobSuspendSucceeded,
+    JobSuspendFailed,
+    JobSuspendCancelled,
+    JobSuspendActive,
+    JobSuspendNeverSettles,
     SuspendNeverSettles,
     RunCancelPolling,
     RunCancelOtherTerminal,
@@ -61,6 +66,21 @@ struct Exchange {
     std::string                error;
     std::optional<ProcessExit> exit;
 };
+
+auto is_job_suspend_behavior(PeerBehavior behavior) noexcept -> bool
+{
+    switch (behavior) {
+        case PeerBehavior::JobSuspendPolling:
+        case PeerBehavior::JobSuspendSucceeded:
+        case PeerBehavior::JobSuspendFailed:
+        case PeerBehavior::JobSuspendCancelled:
+        case PeerBehavior::JobSuspendActive:
+        case PeerBehavior::JobSuspendNeverSettles:
+            return true;
+        default:
+            return false;
+    }
+}
 
 /// Runs the executable against a scripted peer, driven entirely by socket/process readiness.
 /// @throws Catch::TestFailureException when setup, framing, or the child watchdog fails.
@@ -195,7 +215,7 @@ auto run_session(PeerBehavior             behavior,
                 REQUIRE(encoded);
                 response.emplace("result", std::move(*encoded));
             }
-            else if (method == "job.suspend" || (method == "job.get" && behavior == PeerBehavior::JobSuspendPolling)) {
+            else if (method == "job.suspend" || (method == "job.get" && is_job_suspend_behavior(behavior))) {
                 StandardAttributeRegistry registry;
                 auto                      id         = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff");
                 auto                      at         = parse_utc_timestamp("2030-01-01T00:00:00Z");
@@ -213,8 +233,29 @@ auto run_session(PeerBehavior             behavior,
                                          .payload    = *payload,
                                          .created_at = *at,
                                          .updated_at = *at};
-                if (method == "job.get" && ++poll_count == 2) {
-                    job.state = JobState::Suspended;
+                if (method == "job.get") {
+                    ++poll_count;
+                    if (behavior == PeerBehavior::JobSuspendActive) {
+                        job.state = JobState::Active;
+                    }
+                    else if (poll_count == 2) {
+                        switch (behavior) {
+                            case PeerBehavior::JobSuspendPolling:
+                                job.state = JobState::Suspended;
+                                break;
+                            case PeerBehavior::JobSuspendSucceeded:
+                                job.state = JobState::Succeeded;
+                                break;
+                            case PeerBehavior::JobSuspendFailed:
+                                job.state = JobState::Failed;
+                                break;
+                            case PeerBehavior::JobSuspendCancelled:
+                                job.state = JobState::Cancelled;
+                                break;
+                            default:
+                                break;
+                        }
+                    }
                 }
                 auto encoded = job_to_json(job, registry);
                 REQUIRE(encoded);
@@ -455,6 +496,48 @@ TEST_CASE("jobuctl suspend wait submits once and reads until suspension complete
     auto job_result = parse_json(job.output);
     REQUIRE(job_result);
     CHECK(job_result->as_object().at("state").as_string() == "suspended");
+}
+
+TEST_CASE("jobuctl accepted job suspension wait completes with the actual terminal outcome", "[jobuctl][session]")
+{
+    auto const command = std::vector<std::string>{"job", "suspend", "00112233-4455-6677-8899-aabbccddeeff", "--wait"};
+    for (auto const& [behavior, expected] : {
+             std::pair{PeerBehavior::JobSuspendSucceeded, "succeeded"},
+             std::pair{PeerBehavior::JobSuspendFailed,    "failed"   },
+             std::pair{PeerBehavior::JobSuspendCancelled, "cancelled"}
+    }) {
+        auto exchange = run_session(behavior, command, {"--json"});
+        CHECK(exchange.exit->exit_code == 0);
+        CHECK(exchange.methods == std::vector<std::string>{"system.info", "job.suspend", "job.get", "job.get"});
+        auto result = parse_json(exchange.output);
+        REQUIRE(result);
+        CHECK(result->as_object().at("state").as_string() == expected);
+        CHECK(exchange.error.empty());
+    }
+
+    auto changed = run_session(PeerBehavior::JobSuspendActive, command, {"--json"});
+    CHECK(changed.exit->exit_code == 1);
+    CHECK(changed.methods == std::vector<std::string>{"system.info", "job.suspend", "job.get"});
+    auto error = parse_json(changed.error);
+    REQUIRE(error);
+    CHECK(error->as_object().at("error").as_object().at("code").as_string() == "jobuctl.wait.state_changed");
+}
+
+TEST_CASE("jobuctl accepted job suspension wait keeps its original deadline", "[jobuctl][session]")
+{
+    auto exchange = run_session(PeerBehavior::JobSuspendNeverSettles,
+                                {"job", "suspend", "00112233-4455-6677-8899-aabbccddeeff", "--wait"},
+                                {"--json", "--timeout", "250"});
+    CHECK(exchange.exit->exit_code == 3);
+    CHECK(exchange.methods.front() == "system.info");
+    CHECK(exchange.methods[1] == "job.suspend");
+    CHECK(std::count(exchange.methods.begin(), exchange.methods.end(), "job.suspend") == 1);
+    auto error = parse_json(exchange.error);
+    REQUIRE(error);
+    CHECK(error->as_object().at("error").as_object().at("code").as_string() == "jobu.client.timeout");
+    CHECK(error->as_object().at("error").as_object().at("message").as_string() ==
+          "Job drain was not confirmed before the deadline");
+    CHECK_FALSE(error->as_object().at("error").as_object().at("outcome_unknown").as_bool());
 }
 
 TEST_CASE("jobuctl wait deadline reports an unconfirmed state after observed mutation", "[jobuctl][session]")

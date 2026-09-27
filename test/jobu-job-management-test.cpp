@@ -6,9 +6,12 @@
 #include "database.hpp"
 #include "domain_storage_priv.hpp"
 #include "idempotency_repository_priv.hpp"
+#include "job_repository_priv.hpp"
+#include "management_json.hpp"
 #include "query.hpp"
 #include "recovery.hpp"
 #include "run_repository_priv.hpp"
+#include "secret_repository_priv.hpp"
 #include "secret_service.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
@@ -19,6 +22,7 @@
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <fmt/format.h>
 
 #include <array>
 #include <chrono>
@@ -235,6 +239,35 @@ auto updated_queue_defaults() -> AttributeSet
 auto once_at(UtcTimePoint time) -> OnceSchedule
 {
     return OnceSchedule{.planned_at = time};
+}
+
+auto terminal_run_state(JobState state) -> RunState
+{
+    switch (state) {
+        case JobState::Succeeded:
+            return RunState::Succeeded;
+        case JobState::Failed:
+            return RunState::Failed;
+        case JobState::Cancelled:
+            return RunState::Cancelled;
+        default:
+            FAIL("Expected a terminal job state");
+            return RunState::Failed;
+    }
+}
+
+void finish_stored_one_time_job(Database& database, JobState state)
+{
+    // These fixtures start with one scheduled run. Persist its completion and owner outcome
+    // together so management reads a valid terminal definition with retained run history.
+    execute(database,
+            fmt::format("UPDATE jobu_runs SET state = '{}', started_at_us = 11000000, "
+                        "completed_at_us = 12000000, result_json = '{{}}' WHERE state = 'scheduled'",
+                        detail::storage_text(terminal_run_state(state))));
+    execute(database,
+            fmt::format("UPDATE jobu_jobs SET state = '{}', revision = revision + 1, "
+                        "updated_at_us = 12000000 WHERE state = 'active'",
+                        detail::storage_text(state)));
 }
 
 auto attributes_json(AttributeSet const& values, AttributeRegistry const& registry) -> jb::core::JsonValue
@@ -1377,6 +1410,169 @@ TEST_CASE("Job deletion cancels pending work cleans references and enforces prer
     REQUIRE(pending);
     REQUIRE(pending->has_value());
     CHECK((**pending).state == RunState::Scheduled);
+}
+
+TEST_CASE("Terminal one-time jobs reject management changes and permit drained deletion", "[jobu][job][terminal]")
+{
+    for (auto state : {JobState::Succeeded, JobState::Failed, JobState::Cancelled}) {
+        INFO(detail::storage_text(state));
+        auto const     queue_id      = sequence_id(1);
+        auto const     target_id     = sequence_id(2);
+        auto const     job_id        = sequence_id(3);
+        auto const     run_id        = sequence_id(4);
+        auto const     next_job_id   = sequence_id(5);
+        auto const     next_run_id   = sequence_id(6);
+        auto const     manual_run_id = sequence_id(7);
+        ServiceFixture fixture{
+            {queue_id, target_id, job_id, run_id, next_job_id, next_run_id, manual_run_id}
+        };
+        detail::SecretRepository secrets{fixture.database};
+        REQUIRE(secrets.set("terminal.token", {}, fixture.time.utc_now()));
+        ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+        REQUIRE(service.create_queue({.name = "terminal"}));
+        REQUIRE(service.create_queue({.name = "destination"}));
+        auto payload = parse_json(R"({"command":"/terminal","arguments":[{"secret":"terminal.token"}]})");
+        REQUIRE(payload);
+        REQUIRE(service.create_job({.queue = queue_id, .schedule = once_at(UtcTimePoint{60s}), .payload = *payload}));
+        finish_stored_one_time_job(fixture.database, state);
+
+        auto notifications = std::size_t{0};
+        service.mutation_committed.connect([&notifications] { ++notifications; });
+
+        auto current = service.get_job(job_id);
+        REQUIRE(current);
+        CHECK(current->state == state);
+        CHECK(current->revision == 2);
+        auto encoded = job_to_json(*current, fixture.registry);
+        REQUIRE(encoded);
+        auto decoded = job_from_json(*encoded, fixture.registry);
+        REQUIRE(decoded);
+        CHECK(decoded->state == state);
+
+        auto listed = service.list_jobs({.state = state, .page = {.limit = 10}});
+        REQUIRE(listed);
+        REQUIRE(listed->items.size() == 1);
+        CHECK(listed->items.front().id == job_id);
+        auto encoded_page = job_page_to_json(*listed, fixture.registry);
+        REQUIRE(encoded_page);
+        auto decoded_page = job_page_from_json(*encoded_page, fixture.registry);
+        REQUIRE(decoded_page);
+        CHECK(decoded_page->items.front().state == state);
+
+        require_error(service.update_job({.job_id = job_id, .expected_revision = 1, .priority = 2}),
+                      ErrorCategory::Conflict,
+                      "jobu.job.revision_conflict");
+        require_error(service.update_job({.job_id = job_id, .expected_revision = 2, .priority = 2}),
+                      ErrorCategory::Conflict,
+                      "jobu.job.state_conflict");
+        require_error(service.suspend_job(job_id), ErrorCategory::Conflict, "jobu.job.state_conflict");
+        require_error(service.resume_job(job_id), ErrorCategory::Conflict, "jobu.job.state_conflict");
+        require_error(service.move_job({.job_id = job_id, .expected_revision = 1, .target_queue = target_id}),
+                      ErrorCategory::Conflict,
+                      "jobu.job.revision_conflict");
+        require_error(service.move_job({.job_id = job_id, .expected_revision = 2, .target_queue = target_id}),
+                      ErrorCategory::Conflict,
+                      "jobu.job.not_suspended");
+        require_error(service.delete_job({.job_id = job_id, .expected_revision = 1}),
+                      ErrorCategory::Conflict,
+                      "jobu.job.revision_conflict");
+        require_error(service.run_now({.job_id = job_id}), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+        require_error(service.run_now({.job_id = job_id, .idempotency_key = "fresh"}),
+                      ErrorCategory::Conflict,
+                      "jobu.run.manual_conflict");
+        CHECK(notifications == 0);
+        CHECK(count_rows(fixture.database, "jobu_runs") == 1);
+        CHECK(count_rows(fixture.database, "jobu_idempotency") == 0);
+        CHECK(*secrets.reference_count("terminal.token") == 1);
+        require_error(secrets.erase("terminal.token"), ErrorCategory::Conflict, "jobu.secret.in_use");
+
+        // Rejected Run Now calls must leave the next generated identity untouched.
+        auto eligible = service.create_job(
+            {.queue = queue_id, .schedule = once_at(UtcTimePoint{90s}), .payload = cli_payload("/eligible")});
+        REQUIRE(eligible);
+        CHECK(eligible->id == next_job_id);
+        auto manual = service.run_now({.job_id = next_job_id});
+        REQUIRE(manual);
+        CHECK(manual->id == manual_run_id);
+
+        execute(fixture.database,
+                "UPDATE jobu_jobs SET revision = 9223372036854775807 WHERE state IN "
+                "('succeeded', 'failed', 'cancelled')");
+        require_error(service.delete_job(
+                          {.job_id            = job_id,
+                           .expected_revision = static_cast<JobRevision>(std::numeric_limits<std::int64_t>::max())}),
+                      ErrorCategory::ResourceExhausted,
+                      "jobu.job.revision_exhausted");
+        execute(fixture.database,
+                "UPDATE jobu_jobs SET revision = 2 WHERE state IN "
+                "('succeeded', 'failed', 'cancelled')");
+
+        REQUIRE(service.delete_job({.job_id = job_id, .expected_revision = 2}));
+        auto deleted = service.get_job(job_id, true);
+        REQUIRE(deleted);
+        CHECK(deleted->state == JobState::Deleted);
+        CHECK(deleted->revision == 3);
+        CHECK(*secrets.reference_count("terminal.token") == 0);
+        REQUIRE(secrets.erase("terminal.token"));
+        require_error(service.get_job(job_id), ErrorCategory::NotFound, "jobu.job.not_found");
+    }
+}
+
+TEST_CASE("Queue deletion tombstones terminal jobs and releases their secret references", "[jobu][job][terminal]")
+{
+    auto const     queue_id = sequence_id(1);
+    auto const     job_id   = sequence_id(2);
+    auto const     run_id   = sequence_id(3);
+    ServiceFixture fixture{
+        {queue_id, job_id, run_id}
+    };
+    detail::SecretRepository secrets{fixture.database};
+    REQUIRE(secrets.set("terminal.token", {}, fixture.time.utc_now()));
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "terminal"}));
+    auto payload = parse_json(R"({"command":"/terminal","arguments":[{"secret":"terminal.token"}]})");
+    REQUIRE(payload);
+    REQUIRE(service.create_job({.queue = queue_id, .schedule = once_at(UtcTimePoint{60s}), .payload = *payload}));
+    finish_stored_one_time_job(fixture.database, JobState::Succeeded);
+
+    REQUIRE(service.suspend_queue(queue_id));
+    REQUIRE(service.delete_queue(queue_id));
+    auto deleted = service.get_job(job_id, true);
+    REQUIRE(deleted);
+    CHECK(deleted->state == JobState::Deleted);
+    CHECK(deleted->revision == 3);
+    CHECK(*secrets.reference_count("terminal.token") == 0);
+    REQUIRE(secrets.erase("terminal.token"));
+}
+
+TEST_CASE("Terminal deletion refuses contradictory live work", "[jobu][job][terminal][invariant]")
+{
+    auto const     queue_id = sequence_id(1);
+    auto const     job_id   = sequence_id(2);
+    auto const     run_id   = sequence_id(3);
+    ServiceFixture fixture{
+        {queue_id, job_id, run_id}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "terminal"}));
+    REQUIRE(service.create_job(
+        {.queue = queue_id, .schedule = once_at(UtcTimePoint{60s}), .payload = cli_payload("/unfinished")}));
+    execute(fixture.database, "UPDATE jobu_jobs SET state = 'succeeded', revision = 2, updated_at_us = 11000000");
+
+    // The repository predicate is a final guard even if a caller bypasses the service check.
+    detail::JobRepository jobs{fixture.database, fixture.registry};
+    auto                  blocked = jobs.mark_deleted(job_id, 2, 3, UtcTimePoint{12s});
+    REQUIRE(blocked);
+    CHECK_FALSE(*blocked);
+
+    require_error(service.delete_job({.job_id = job_id, .expected_revision = 2}),
+                  ErrorCategory::Internal,
+                  "jobu.storage.invariant");
+    auto unchanged = service.get_job(job_id);
+    REQUIRE(unchanged);
+    CHECK(unchanged->state == JobState::Succeeded);
+    CHECK(unchanged->revision == 2);
+    CHECK(count_rows(fixture.database, "jobu_runs") == 1);
 }
 
 TEST_CASE("Job update validates revisions state and replacement fields", "[jobu][job][update][validation]")

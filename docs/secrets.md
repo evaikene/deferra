@@ -86,9 +86,11 @@ path. External execution starts only after the durable Running transition commit
 Recovery validates stored templates without resolving them.
 
 Deletion is blocked while either a current job definition or any nonterminal run
-snapshot references the name. Updating a definition does not release references
-held by an older running or retrying snapshot. Terminal historical snapshots alone
-do not prevent deletion. There is no force-delete option.
+snapshot references the name. A terminal definition retains its references until
+individual or queue soft deletion removes them in the deletion transaction.
+Updating a definition does not release references held by an older running or
+retrying snapshot. Terminal historical snapshots alone do not prevent deletion.
+There is no force-delete option.
 
 ## Redirects and generated diagnostics
 

@@ -99,7 +99,14 @@ Job create/update accept repeated `--attribute NAME=JSON_VALUE` for distinct reg
 
 For CLI jobs, repeat `--arg`, `--env`, `--unset-env`, and `--expected-exit-code` as needed. For HTTP jobs, use `--url`, optional `--method`, repeated `--header NAME=VALUE`, and optional `--body TEXT` for a UTF-8 body. CLI and HTTP fields cannot be mixed. Use `--request-file` for complete nested configuration, binary HTTP bodies, secret references, or a full job type/payload replacement on update. For example, a job request file can contain a header value such as `{"secret":"service.token"}`; the secret name must already exist on the daemon.
 
-`queue suspend --wait` and `job suspend --wait` return when the resource reaches `suspended`. They submit the suspension once and use read requests while waiting. The same overall `--timeout` applies. A timeout after an observed suspension reply means the final state was not confirmed; inspect the resource before deciding what to do next.
+`queue suspend --wait` returns when the queue reaches `suspended`. An accepted
+`job suspend --wait` returns when the job reaches `suspended` or when its last
+one-time run drains to `succeeded`, `failed`, or `cancelled`. The command returns
+the actual observed job state; a `failed` job outcome does not make the wait
+command fail. Both commands submit suspension once and use read requests while
+waiting. The same overall `--timeout` applies. A timeout after an observed
+suspension reply means the final state was not confirmed; inspect the resource
+before deciding what to do next.
 
 ## Runs and attempts
 
