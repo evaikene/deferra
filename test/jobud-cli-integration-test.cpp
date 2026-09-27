@@ -980,6 +980,13 @@ TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls
     CHECK(finished_job.as_object().at("revision").as_uint() == created.as_object().at("revision").as_uint() + 1);
     auto retained_reference = fixture.control({"secret", "delete", "workflow.token", "--json"}, 1);
     CHECK(retained_reference.find("jobu.secret.in_use") != std::string::npos);
+    auto active_jobs = json(fixture.control({"job", "list", "--json"}));
+    CHECK(active_jobs.as_object().at("items").as_array().empty());
+    auto succeeded_jobs = json(fixture.control({"job", "list", "--state", "succeeded", "--json"}));
+    REQUIRE(succeeded_jobs.as_object().at("items").as_array().size() == 1);
+    CHECK(succeeded_jobs.as_object().at("items").as_array().front().as_object().at("id").as_string() == retry_job_id);
+    auto terminal_run_now = fixture.control({"job", "run-now", retry_job_id, "--json"}, 1);
+    CHECK(terminal_run_now.find("jobu.run.manual_conflict") != std::string::npos);
 
     // A future cron occurrence remains scheduled while Run Now creates a separate manual run.
     jb::test::HttpTestServer manual_server;
@@ -1040,7 +1047,8 @@ TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls
     active_server.release_responses();
     fixture.until([&] { return fixture.run_state(active_id) == "cancelled"; });
 
-    // A new daemon incarnation serves the same immutable history and output through public commands.
+    // Restart with a suspended queue and mixed terminal and recurring definitions still in the same database.
+    static_cast<void>(fixture.control({"queue", "suspend", "--id", queue_id, "--wait"}));
     fixture.restart();
     auto retained = json(fixture.control({"run", "get", retry_run_id, "--json"}));
     CHECK(retained == run);
@@ -1051,6 +1059,17 @@ TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls
     CHECK(retained_output == output);
     CHECK(fixture.run_state(pending_id) == "cancelled");
     CHECK(fixture.run_state(active_id) == "cancelled");
+    auto held_queue = json(fixture.control({"queue", "get", "--id", queue_id, "--json"}));
+    CHECK(held_queue.as_object().at("state").as_string() == "suspended");
+    auto listed_jobs = json(fixture.control({"job", "list", "--json"}));
+    REQUIRE(listed_jobs.as_object().at("items").as_array().size() == 1);
+    CHECK(listed_jobs.as_object().at("items").as_array().front().as_object().at("id").as_string() == cron_job_id);
+    CHECK(fixture.rpc("job.create", request) == created);
+    auto replayed_manual =
+        json(fixture.control({"job", "run-now", cron_job_id, "--idempotency-key", "workflow-manual", "--json"}));
+    CHECK(replayed_manual == manual);
+    auto retained_cron_runs = json(fixture.control({"run", "list", "--job-id", cron_job_id, "--json"}));
+    CHECK(retained_cron_runs.as_object().at("items").as_array().size() == 2);
     fixture.responsive();
 }
 
