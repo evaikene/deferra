@@ -29,7 +29,9 @@
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -127,6 +129,7 @@ void require_report(RecoveryReport const& actual, RecoveryReport const& expected
     CHECK(actual.interrupted_attempts == expected.interrupted_attempts);
     CHECK(actual.retrying_runs == expected.retrying_runs);
     CHECK(actual.terminal_runs == expected.terminal_runs);
+    CHECK(actual.finished_jobs == expected.finished_jobs);
     CHECK(actual.inserted_successors == expected.inserted_successors);
     CHECK(actual.suspended_jobs == expected.suspended_jobs);
     CHECK(actual.suspended_queues == expected.suspended_queues);
@@ -205,11 +208,17 @@ TEST_CASE("Recovery pages interruption units and preserves complete snapshots", 
     auto result = fixture.recover(batch);
     REQUIRE(result);
     auto retries = policy == RecoveryPolicy::RetryInterrupted ? 2U : 0U;
-    require_report(*result, {.interrupted_attempts = 3, .retrying_runs = retries, .terminal_runs = 3 - retries});
+    require_report(*result,
+                   {.interrupted_attempts = 3,
+                    .retrying_runs        = retries,
+                    .terminal_runs        = 3 - retries,
+                    .finished_jobs        = 3 - retries});
     for (auto const& original : originals) {
-        require_interrupted(fixture,
-                            original,
-                            policy == RecoveryPolicy::RetryInterrupted && original.attempts.size() < 3);
+        auto const retry = policy == RecoveryPolicy::RetryInterrupted && original.attempts.size() < 3;
+        require_interrupted(fixture, original, retry);
+        auto current = fixture.job(original.run.job_id);
+        CHECK(current.state == (retry ? JobState::Active : JobState::Failed));
+        CHECK(current.revision == original.run.job_revision + (retry ? 0U : 1U));
     }
     fixture.storage.reopen();
     auto again = fixture.recover(batch);
@@ -220,6 +229,177 @@ TEST_CASE("Recovery pages interruption units and preserves complete snapshots", 
                             original,
                             policy == RecoveryPolicy::RetryInterrupted && original.attempts.size() < 3);
     }
+}
+
+TEST_CASE("Recovery finishes the last accepted one-time manual run after original cancellation",
+          "[jobu][recovery][sqlite]")
+{
+    auto const     retry = GENERATE(false, true);
+    ServiceFixture fixture;
+    auto           queue = recovery_queue(recovery_id(1),
+                                          QueueState::Active,
+                                          retry ? RecoveryPolicy::RetryInterrupted : RecoveryPolicy::FailInterrupted);
+    fixture.storage.insert_queue(queue);
+    auto job                                      = fixture.storage.make_job(recovery_id(2), queue.id);
+    job.attributes.at("retry.initial_delay").data = Duration{5s};
+    fixture.storage.insert_job(job);
+    auto original = fixture.storage.make_run(recovery_id(3), job, RunState::Cancelled);
+    auto manual   = fixture.storage.make_run(recovery_id(4), job, RunState::Running, 0, RunOrigin::Manual);
+    fixture.storage.insert_run(original);
+    fixture.storage.insert_run(manual);
+
+    auto report = fixture.recover();
+    REQUIRE(report);
+    require_report(*report,
+                   {.interrupted_attempts = 1,
+                    .retrying_runs        = retry ? 1U : 0U,
+                    .terminal_runs        = retry ? 0U : 1U,
+                    .finished_jobs        = retry ? 0U : 1U});
+    fixture.storage.require_run(original);
+    require_interrupted(fixture, manual, retry);
+    auto current = fixture.job(job.id);
+    CHECK(current.state == (retry ? JobState::Active : JobState::Failed));
+    CHECK(current.revision == job.revision + (retry ? 0U : 1U));
+    RunRepository runs{fixture.storage.database, fixture.storage.registry};
+    auto          successor = runs.find_schedule_owned(job.id);
+    REQUIRE(successor);
+    CHECK_FALSE(*successor);
+    CHECK(fixture.cron.next_calls().empty());
+
+    fixture.storage.reopen();
+    auto again = fixture.recover();
+    REQUIRE(again);
+    require_report(*again);
+    auto unchanged = fixture.job(job.id);
+    CHECK(unchanged.state == current.state);
+    CHECK(unchanged.revision == current.revision);
+    CHECK(unchanged.updated_at == current.updated_at);
+}
+
+TEST_CASE("Recovery keeps a one-time definition unfinished while its original occurrence remains",
+          "[jobu][recovery][sqlite]")
+{
+    ServiceFixture fixture;
+    auto           queue = recovery_queue(recovery_id(1));
+    fixture.storage.insert_queue(queue);
+    auto job = fixture.storage.make_job(recovery_id(2), queue.id);
+    fixture.storage.insert_job(job);
+    auto original = fixture.storage.make_run(recovery_id(3), job);
+    auto manual   = fixture.storage.make_run(recovery_id(4), job, RunState::Running, 0, RunOrigin::Manual);
+    fixture.storage.insert_run(original);
+    fixture.storage.insert_run(manual);
+
+    auto report = fixture.recover();
+    REQUIRE(report);
+    require_report(*report, {.interrupted_attempts = 1, .terminal_runs = 1});
+    fixture.storage.require_run(original);
+    require_interrupted(fixture, manual, false);
+    auto current = fixture.job(job.id);
+    CHECK(current.state == JobState::Active);
+    CHECK(current.revision == job.revision);
+    CHECK(current.updated_at == job.updated_at);
+    CHECK(fixture.cron.next_calls().empty());
+}
+
+TEST_CASE("Recovery preserves terminal one-time definitions without retained history", "[jobu][recovery][sqlite]")
+{
+    auto const     state = GENERATE(JobState::Succeeded, JobState::Failed, JobState::Cancelled);
+    ServiceFixture fixture;
+    auto           queue = recovery_queue(recovery_id(1));
+    fixture.storage.insert_queue(queue);
+    auto job  = fixture.storage.make_job(recovery_id(2), queue.id);
+    job.state = state;
+    fixture.storage.insert_job(job);
+
+    auto report = fixture.recover();
+    REQUIRE(report);
+    require_report(*report);
+    auto current = fixture.job(job.id);
+    CHECK(current.state == state);
+    CHECK(current.revision == job.revision);
+    CHECK(current.updated_at == job.updated_at);
+    CHECK(fixture.cron.next_calls().empty());
+
+    fixture.storage.reopen();
+    auto again = fixture.recover();
+    REQUIRE(again);
+    require_report(*again);
+}
+
+TEST_CASE("Recovery rejects unfinished one-time definitions with no outstanding work before repair",
+          "[jobu][recovery][sqlite]")
+{
+    auto const     history = GENERATE(false, true);
+    ServiceFixture fixture;
+    auto           queue = recovery_queue(recovery_id(1));
+    fixture.storage.insert_queue(queue);
+    auto broken = fixture.storage.make_job(recovery_id(2), queue.id);
+    fixture.storage.insert_job(broken);
+    if (history) {
+        fixture.storage.insert_run(fixture.storage.make_run(recovery_id(3), broken, RunState::Failed, 1));
+    }
+    auto healthy = fixture.storage.make_job(recovery_id(4), queue.id);
+    fixture.storage.insert_job(healthy);
+    auto running = fixture.storage.make_run(recovery_id(5), healthy, RunState::Running);
+    fixture.storage.insert_run(running);
+
+    auto rejected = fixture.recover();
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == "jobu.storage.invariant");
+    fixture.storage.require_run(running);
+    CHECK(fixture.job(broken.id).state == JobState::Active);
+}
+
+TEST_CASE("Recovery rejects terminal one-time definitions with outstanding work", "[jobu][recovery][sqlite]")
+{
+    ServiceFixture fixture;
+    auto           queue = recovery_queue(recovery_id(1));
+    fixture.storage.insert_queue(queue);
+    auto job  = fixture.storage.make_job(recovery_id(2), queue.id);
+    job.state = JobState::Failed;
+    fixture.storage.insert_job(job);
+    auto work = fixture.storage.make_run(recovery_id(3), job);
+    fixture.storage.insert_run(work);
+
+    auto rejected = fixture.recover();
+    REQUIRE_FALSE(rejected);
+    fixture.storage.require_run(work);
+    CHECK(fixture.job(job.id).state == JobState::Failed);
+}
+
+TEST_CASE("Recovery final validation rejects a lifecycle broken after an interruption commit",
+          "[jobu][recovery][sqlite]")
+{
+    ServiceFixture fixture;
+    auto           queue = recovery_queue(recovery_id(1));
+    fixture.storage.insert_queue(queue);
+    auto job = fixture.storage.make_job(recovery_id(2), queue.id);
+    fixture.storage.insert_job(job);
+    auto running = fixture.storage.make_run(recovery_id(3), job, RunState::Running);
+    fixture.storage.insert_run(running);
+
+    bool saw_precommit = false;
+    bool corrupted     = false;
+    auto rejected      = fixture.recover(1, [&] {
+        if (fixture.run(running.run.id).state == RunState::Interrupted && !corrupted) {
+            if (saw_precommit) {
+                // Insert a current-format inconsistency after the interruption unit commits.
+                execute(fixture.storage.database, "UPDATE jobu_jobs SET state = 'active'");
+                corrupted = true;
+            }
+            else {
+                saw_precommit = true;
+            }
+        }
+        return false;
+    });
+    REQUIRE(corrupted);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == "jobu.storage.invariant");
+    require_interrupted(fixture, running, false);
+    CHECK(fixture.job(job.id).state == JobState::Active);
+    fixture.storage.reopen();
+    CHECK_FALSE(fixture.recover());
 }
 
 TEST_CASE("Recovery repairs recurring work and all drained owner shapes", "[jobu][recovery][sqlite]")
@@ -235,6 +415,8 @@ TEST_CASE("Recovery repairs recurring work and all drained owner shapes", "[jobu
     auto once        = fixture.storage.make_job(recovery_id(13), queue.id);
     once.state       = JobState::Suspending;
     fixture.storage.insert_job(once);
+    auto waiting = fixture.storage.make_run(recovery_id(21), once, RunState::RetryWait, 1);
+    fixture.storage.insert_run(waiting);
     auto original = fixture.storage.make_run(recovery_id(20), running_job, RunState::Running);
     fixture.storage.insert_run(original);
 
@@ -261,7 +443,10 @@ TEST_CASE("Recovery repairs recurring work and all drained owner shapes", "[jobu
     CHECK(fixture.job(suspended.id).revision == suspended.revision);
     auto no_once = runs.find_schedule_owned(once.id);
     REQUIRE(no_once);
-    CHECK_FALSE(*no_once);
+    REQUIRE(*no_once);
+    CHECK((*no_once)->id == waiting.run.id);
+    fixture.storage.require_run(waiting);
+    CHECK(fixture.job(once.id).state == JobState::Suspended);
     CHECK(fixture.queue(queue.id).state == QueueState::Suspended);
     CHECK(fixture.queue(empty.id).state == QueueState::Suspended);
     auto again = fixture.recover();
@@ -308,7 +493,8 @@ TEST_CASE("Recovery checks every family before committing any repair", "[jobu][r
     fixture.storage.insert_job(job);
     auto original = fixture.storage.make_run(recovery_id(3), job, RunState::Running);
     fixture.storage.insert_run(original);
-    auto historical_job = fixture.storage.make_job(recovery_id(4), queue.id);
+    auto historical_job  = fixture.storage.make_job(recovery_id(4), queue.id);
+    historical_job.state = JobState::Failed;
     fixture.storage.insert_job(historical_job);
     auto historical = fixture.storage.make_run(recovery_id(5), historical_job, RunState::Failed, 1);
     fixture.storage.insert_run(historical);
@@ -379,6 +565,66 @@ TEST_CASE("Recovery cancellation rolls back the complete current repair unit", "
                     .suspended_queues     = 1});
 }
 
+TEST_CASE("Recovery cancellation rolls back the terminal run and one-time definition together",
+          "[jobu][recovery][sqlite]")
+{
+    ServiceFixture fixture;
+    auto           queue = recovery_queue(recovery_id(1), QueueState::Suspending);
+    fixture.storage.insert_queue(queue);
+    auto job  = fixture.storage.make_job(recovery_id(2), queue.id);
+    job.state = JobState::Suspending;
+    fixture.storage.insert_job(job);
+    auto running = fixture.storage.make_run(recovery_id(3), job, RunState::Running);
+    fixture.storage.insert_run(running);
+
+    bool saw_terminal = false;
+    auto cancelled    = fixture.recover(1, [&] {
+        saw_terminal = fixture.run(running.run.id).state == RunState::Interrupted;
+        if (saw_terminal) {
+            CHECK(fixture.job(job.id).state == JobState::Failed);
+            CHECK(fixture.queue(queue.id).state == QueueState::Suspended);
+        }
+        return saw_terminal;
+    });
+    REQUIRE_FALSE(cancelled);
+    CHECK(cancelled.error().code == "jobu.recovery.cancelled");
+    REQUIRE(saw_terminal);
+    fixture.storage.reopen();
+    fixture.storage.require_run(running);
+    CHECK(fixture.job(job.id).state == JobState::Suspending);
+    CHECK(fixture.job(job.id).revision == job.revision);
+    CHECK(fixture.queue(queue.id).state == QueueState::Suspending);
+
+    auto recovered = fixture.recover();
+    REQUIRE(recovered);
+    require_report(*recovered,
+                   {.interrupted_attempts = 1, .terminal_runs = 1, .finished_jobs = 1, .suspended_queues = 1});
+    CHECK(fixture.job(job.id).state == JobState::Failed);
+    CHECK(fixture.job(job.id).revision == job.revision + 1);
+    CHECK(fixture.job(job.id).updated_at == UtcTimePoint{120s});
+}
+
+TEST_CASE("Recovery rolls back interruption when the final job revision is exhausted", "[jobu][recovery][sqlite]")
+{
+    ServiceFixture fixture;
+    auto           queue = recovery_queue(recovery_id(1));
+    fixture.storage.insert_queue(queue);
+    auto job = fixture.storage.make_job(recovery_id(2), queue.id);
+    fixture.storage.insert_job(job);
+    auto running = fixture.storage.make_run(recovery_id(3), job, RunState::Running);
+    fixture.storage.insert_run(running);
+    auto const maximum = std::numeric_limits<std::int64_t>::max();
+    execute(fixture.storage.database, "UPDATE jobu_jobs SET revision = " + std::to_string(maximum));
+
+    auto rejected = fixture.recover();
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == "jobu.job.revision_exhausted");
+    fixture.storage.reopen();
+    fixture.storage.require_run(running);
+    CHECK(fixture.job(job.id).state == JobState::Active);
+    CHECK(fixture.job(job.id).revision == static_cast<JobRevision>(maximum));
+}
+
 TEST_CASE("Recovery restart retains committed units and retries only unfinished units", "[jobu][recovery][sqlite]")
 {
     ServiceFixture fixture;
@@ -403,6 +649,8 @@ TEST_CASE("Recovery restart retains committed units and retries only unfinished 
     CHECK(failed.error().detail.find("private") == std::string::npos);
     fixture.storage.reopen();
     require_interrupted(fixture, first, false);
+    CHECK(fixture.job(first_job.id).state == JobState::Failed);
+    CHECK(fixture.job(first_job.id).revision == first_job.revision + 1);
     fixture.storage.require_run(second);
     fixture.cron.set_next_error({});
     auto resumed = fixture.recover();

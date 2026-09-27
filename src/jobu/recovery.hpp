@@ -36,6 +36,8 @@ struct RecoveryReport {
     std::uint64_t retrying_runs{};
     /// Interrupted runs made terminal instead of retried.
     std::uint64_t terminal_runs{};
+    /// One-time definitions made terminal by interrupted-run processing in this invocation.
+    std::uint64_t finished_jobs{};
     /// Recurring runs inserted during interruption or independent missing-successor repair.
     std::uint64_t inserted_successors{};
     /// Jobs changed from Suspending to Suspended after their running work was gone.
@@ -55,7 +57,8 @@ struct RecoveryReport {
 /// and reopen after storage failure and rerun recovery before serving. A commit error can also
 /// mean the current unit committed but its acknowledgement was lost; inspect reopened state.
 /// Repeated recovery is safe and does not duplicate retries or recurring successors. Success proves
-/// no Running work remains, required recurring work exists, barriers are valid, and suspensions drained.
+/// no Running work remains, current job lifecycles and barriers are valid, required recurring
+/// work exists, and suspensions are drained.
 ///
 /// @return Committed change counts, `jobu.recovery.invalid_options` for an out-of-range batch
 /// size, `jobu.recovery.invariant` for inconsistent durable state or counter overflow, or a

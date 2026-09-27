@@ -176,14 +176,14 @@ public:
         REQUIRE(sqlite3_busy_timeout(raw, 100) == SQLITE_OK);
     }
 
-    void require_schema_startup_failure()
+    void require_startup_failure(std::string_view expected_code)
     {
         launch(false);
         until([&] { return exit.has_value(); }, true);
         INFO(log);
         REQUIRE(exit->kind == ProcessExitKind::Exited);
         CHECK(exit->exit_code == EXIT_FAILURE);
-        CHECK(log.find("jobu.schema.") != std::string::npos);
+        CHECK(log.find(expected_code) != std::string::npos);
         CHECK_FALSE(std::filesystem::exists(socket_path));
         daemon.reset();
         REQUIRE(storage.database.open());
@@ -422,8 +422,20 @@ TEST_CASE("daemon crash recovers each runner under both policies and exhausted r
     fixture.start(type == JobType::Cli);
     REQUIRE(fixture.count("SELECT count(*) FROM jobu_attempts WHERE state='running'") == 0);
     REQUIRE(fixture.count("SELECT count(*) FROM jobu_runs") == 1);
+    auto const retry = policy == RecoveryPolicy::RetryInterrupted && !exhausted;
+    CHECK(fixture.count(retry ? "SELECT count(*) FROM jobu_jobs WHERE state='active'"
+                              : "SELECT count(*) FROM jobu_jobs WHERE state='failed'") == 1);
     fixture.crash();
-    require_interrupted(fixture, running, policy == RecoveryPolicy::RetryInterrupted && !exhausted);
+    require_interrupted(fixture, running, retry);
+    JobRepository jobs{fixture.storage.database, fixture.storage.registry};
+    auto          current = jobs.find_by_id(job.id, false);
+    REQUIRE(current);
+    REQUIRE(*current);
+    CHECK((*current)->state == (retry ? JobState::Active : JobState::Failed));
+    CHECK((*current)->revision == job.revision + (retry ? 0U : 1U));
+    if (!retry) {
+        CHECK((*current)->updated_at == fixture.read_run(seed.run.id).run.completed_at);
+    }
     fixture.unchanged_restart(type == JobType::Cli);
 }
 
@@ -663,6 +675,24 @@ TEST_CASE("daemon validates the current schema before recovery and serving", "[j
     fixture.unchanged_restart();
 }
 
+TEST_CASE("daemon rejects an unfinished one-time owner with no work before serving", "[jobud][recovery][integration]")
+{
+    CrashFixture fixture;
+    auto         queue = recovery_queue(recovery_id(1));
+    fixture.storage.insert_queue(queue);
+    auto broken = fixture.storage.make_job(recovery_id(2), queue.id, JobType::Http);
+    fixture.storage.insert_job(broken);
+    auto healthy = fixture.storage.make_job(recovery_id(4), queue.id, JobType::Http);
+    fixture.storage.insert_job(healthy);
+    auto running = fixture.storage.make_run(recovery_id(5), healthy, RunState::Running);
+    fixture.storage.insert_run(running);
+
+    auto before = storage_snapshot(fixture.storage.database);
+    fixture.require_startup_failure("jobu.storage.invariant");
+    CHECK(storage_snapshot(fixture.storage.database) == before);
+    fixture.storage.require_run(running);
+}
+
 TEST_CASE("daemon schema rejection leaves recovery rows untouched and never listens",
           "[jobud][recovery][schema][integration]")
 {
@@ -683,7 +713,7 @@ TEST_CASE("daemon schema rejection leaves recovery rows untouched and never list
         REQUIRE(query.exec(corrupt));
     }
     auto const before = storage_snapshot(fixture.storage.database);
-    fixture.require_schema_startup_failure();
+    fixture.require_startup_failure("jobu.schema.");
     CHECK(storage_snapshot(fixture.storage.database) == before);
     fixture.storage.require_run(running);
 }

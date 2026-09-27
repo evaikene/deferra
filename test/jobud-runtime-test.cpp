@@ -181,6 +181,10 @@ struct RuntimeFixture {
         -> RecoveryRunFixture
     {
         auto job = storage.make_job(recovery_id(suffix + 10), recovery_id(1), type);
+        if (state == RunState::Succeeded) {
+            // Startup requires a finished one-time definition when its final run has completed.
+            job.state = JobState::Succeeded;
+        }
         auto run = storage.make_run(recovery_id(suffix + 100), job, state);
         storage.insert_job(job);
         storage.insert_run(run);
@@ -1014,6 +1018,7 @@ TEST_CASE("Daemon history and statistics RPC read retained data without exposing
     auto           other_queue = recovery_queue(recovery_id(2));
     fixture.storage.insert_queue(other_queue);
     auto other_job                   = fixture.storage.make_job(recovery_id(22), other_queue.id);
+    other_job.state                  = JobState::Succeeded;
     auto other_run                   = fixture.storage.make_run(recovery_id(202), other_job, RunState::Succeeded);
     auto captured                    = ByteBuffer(65'536U, std::byte{0xff});
     other_run.attempts.back().output = jb::jobu::detail::AttemptOutput{.stdout_bytes = captured};

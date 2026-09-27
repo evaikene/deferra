@@ -1,5 +1,6 @@
 #include "recovery.hpp"
 
+#include "job_lifecycle_priv.hpp"
 #include "recovery_priv.hpp"
 #include "recovery_repository_priv.hpp"
 #include "run_repository_priv.hpp"
@@ -46,6 +47,7 @@ public:
              std::function<bool()> const& should_stop)
         : _database{database}
         , _repository{database, attributes}
+        , _lifecycle{database, attributes}
         , _runs{database, attributes}
         , _scheduler{database, attributes}
         , _cron{cron}
@@ -184,6 +186,10 @@ private:
             [this](auto after) { return _repository.list_jobs(_batch_size, after); },
             [](auto const& row) { return row.id; },
             [this, final](JobDefinition const& job) -> RecoveryResult<> {
+                auto lifecycle = _lifecycle.validate_job_lifecycle(job);
+                if (!lifecycle) {
+                    return RecoveryResult<>::failure(std::move(lifecycle).error());
+                }
                 if (!final) {
                     return RecoveryResult<>::success();
                 }
@@ -255,6 +261,7 @@ private:
         constexpr auto counters = std::array{&RecoveryReport::interrupted_attempts,
                                              &RecoveryReport::retrying_runs,
                                              &RecoveryReport::terminal_runs,
+                                             &RecoveryReport::finished_jobs,
                                              &RecoveryReport::inserted_successors,
                                              &RecoveryReport::suspended_jobs,
                                              &RecoveryReport::suspended_queues};
@@ -298,6 +305,14 @@ private:
                                         .retrying_runs        = decision->retry ? 1U : 0U,
                                         .terminal_runs        = decision->retry ? 0U : 1U};
             if (!decision->retry) {
+                // Reconcile the final one-time definition in the same unit as its terminal run.
+                // A retry remains outstanding work and cannot finish the definition.
+                auto finished = _lifecycle.finish_after_terminal_run(run.id, _recovery_time);
+                if (!finished) {
+                    return RecoveryResult<RecoveryReport>::failure(std::move(finished).error());
+                }
+                delta.finished_jobs = *finished ? 1U : 0U;
+
                 auto successor = _repository.insert_interrupted_successor(run.id, lower_bound, _cron, _generator);
                 if (!successor) {
                     return RecoveryResult<RecoveryReport>::failure(std::move(successor).error());
@@ -341,6 +356,7 @@ private:
 
     jb::db::Database&            _database;
     RecoveryRepository           _repository;
+    JobLifecycleRepository       _lifecycle;
     RunRepository                _runs;
     SchedulerRepository          _scheduler;
     CronEngine const&            _cron;

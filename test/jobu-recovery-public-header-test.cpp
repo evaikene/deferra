@@ -6,6 +6,7 @@ static_assert(std::is_default_constructible_v<jb::jobu::RecoveryOptions>);
 static_assert(std::is_copy_constructible_v<jb::jobu::RecoveryReport>);
 static_assert(jb::jobu::RecoveryOptions{}.scan_batch_size == 256);
 static_assert(jb::jobu::RecoveryReport{}.interrupted_attempts == 0);
+static_assert(jb::jobu::RecoveryReport{}.finished_jobs == 0);
 
 using RecoveryFunction =
     jb::core::Result<jb::jobu::RecoveryReport, jb::core::Error> (*)(jb::db::Database&,
