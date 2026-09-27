@@ -310,7 +310,7 @@ auto write_all(int fd, void const* data, std::size_t size) noexcept -> bool
 }
 
 // Report the actual target context so daemon tests can compare it with the durable job/run identities.
-auto inspect_daemon(int argc, char** argv) -> int
+auto inspect_daemon(int argc, char** argv, int first_argument = 2) -> int
 {
     using jb::core::JsonValue;
     char cwd[4096];
@@ -318,7 +318,7 @@ auto inspect_daemon(int argc, char** argv) -> int
         return 48;
     }
     JsonValue::Array arguments;
-    for (int index = 2; index < argc; ++index) {
+    for (int index = first_argument; index < argc; ++index) {
         arguments.push_back({.data = std::string{argv[index]}});
     }
     JsonValue::Object environment;
@@ -358,6 +358,26 @@ auto daemon_wait(char const* report_path, char const* release_path) noexcept -> 
         ::close(fd);
     }
     return reported && wait_for_permission_path(release_path) ? 0 : 45;
+}
+
+// A retry test holds only the first attempt, so a suspended queue can fence the next secret resolution.
+auto inspect_daemon_first_wait(int argc, char** argv) -> int
+{
+    if (argc < 4) {
+        return 46;
+    }
+    auto const result = inspect_daemon(argc, argv, 4);
+    if (result != 37) {
+        return result;
+    }
+    auto const* attempt = ::getenv("JOBU_ATTEMPT");
+    if (!attempt) {
+        return 46;
+    }
+    if (std::strcmp(attempt, "1") != 0) {
+        return 37;
+    }
+    return daemon_wait(argv[2], argv[3]) == 0 ? 37 : 45;
 }
 
 #if defined(__linux__)
@@ -626,6 +646,9 @@ auto main(int argc, char** argv) -> int
     }
     if (mode == "inspect-daemon") {
         return inspect_daemon(argc, argv);
+    }
+    if (mode == "inspect-daemon-first-wait") {
+        return inspect_daemon_first_wait(argc, argv);
     }
     if (mode == "daemon-wait" && argc == 4) {
         return daemon_wait(argv[2], argv[3]);
