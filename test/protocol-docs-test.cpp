@@ -43,7 +43,11 @@ TEST_CASE("Published protocol requests use production decoders", "[jobu][protoco
 
     REQUIRE(create_queue_request_from_json(example("queue-create.params.json"), attributes));
     REQUIRE(create_job_request_from_json(example("job-create.params.json"), attributes));
+    REQUIRE(create_job_request_from_json(example("job-create-secret.params.json"), attributes));
+    REQUIRE(job_list_request_from_json(example("job-list.params.json")));
+    REQUIRE(job_list_request_from_json(example("job-list-all.params.json")));
     REQUIRE(run_list_request_from_json(example("run-list.params.json")));
+    REQUIRE(attempt_get_request_from_json(example("attempt-get-max.params.json")));
     REQUIRE(attempt_output_request_from_json(example("attempt-output.params.json")));
     REQUIRE(set_secret_request_from_json(example("secret-set.params.json")));
     REQUIRE(schedule_next_request_from_json(example("schedule-next.params.json")));
@@ -55,11 +59,44 @@ TEST_CASE("Published protocol results use production decoders", "[jobu][protocol
     auto const attributes = StandardAttributeRegistry{};
 
     REQUIRE(queue_page_from_json(example("queue-list.result.json"), attributes));
+    REQUIRE(job_page_from_json(example("job-list.result.json"), attributes));
     REQUIRE(run_page_from_json(example("run-list.result.json")));
     REQUIRE(attempt_page_from_json(example("attempt-list.result.json")));
     REQUIRE(secret_metadata_from_json(example("secret-set.result.json")));
     REQUIRE(schedule_next_result_from_json(example("schedule-next.result.json")));
     REQUIRE(statistics_page_from_json(example("system-stats.result.json")));
+}
+
+TEST_CASE("Published closure examples preserve terminal and raw request semantics", "[jobu][protocol][docs]")
+{
+    auto const attributes = StandardAttributeRegistry{};
+
+    auto const filtered = job_list_request_from_json(example("job-list.params.json"));
+    REQUIRE(filtered);
+    CHECK(filtered->state == JobState::Succeeded);
+
+    auto const unfiltered = job_list_request_from_json(example("job-list-all.params.json"));
+    REQUIRE(unfiltered);
+    CHECK_FALSE(unfiltered->state);
+
+    auto const finished = job_page_from_json(example("job-list.result.json"), attributes);
+    REQUIRE(finished);
+    REQUIRE(finished->items.size() == 1U);
+    CHECK(finished->items.front().state == JobState::Succeeded);
+    CHECK(std::holds_alternative<OnceSchedule>(finished->items.front().schedule));
+    CHECK_FALSE(finished->items.front().deleted_at);
+
+    auto const boundary = attempt_get_request_from_json(example("attempt-get-max.params.json"));
+    REQUIRE(boundary);
+    CHECK(boundary->attempt_number == maximum_attempt_number);
+
+    auto const secret_job = create_job_request_from_json(example("job-create-secret.params.json"), attributes);
+    REQUIRE(secret_job);
+    auto const& payload     = secret_job->payload.as_object();
+    auto const& arguments   = payload.at("arguments").as_array();
+    auto const& environment = payload.at("environment").as_object();
+    CHECK(arguments.at(1).as_object().at("secret").as_string() == "reports.token");
+    CHECK(environment.at("REPORT_PASSWORD").as_object().at("secret").as_string() == "reports.password");
 }
 
 TEST_CASE("Published statistics request and result describe one empty cohort", "[jobu][protocol][docs]")

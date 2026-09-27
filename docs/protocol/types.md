@@ -100,9 +100,12 @@ Every job definition result contains:
 | `updated_at` | time | 1.1 | Last durable mutation time |
 | `deleted_at` | time or null | 1.1 | Soft-deletion time |
 
-`succeeded`, `failed`, and `cancelled` are durable outcomes of a one-time job definition after its final outstanding
-run finishes. A recurring definition cannot have one of these states. A terminal definition has no deletion timestamp;
-`deleted` remains the separate soft-deletion state. Run and attempt states describe individual execution history.
+`succeeded`, `failed`, and `cancelled` are durable outcomes of a one-time job
+definition after its final outstanding run finishes. That final run determines
+the job outcome; an earlier failed run does not override a later success. A
+recurring definition cannot have one of these states. A terminal definition has
+no deletion timestamp; `deleted` remains the separate soft-deletion state. The
+stored job outcome remains authoritative even if its old run history is removed.
 
 Retention and runnable-wait warning settings are stored configuration. The
 current daemon does not automatically purge retained history or emit
@@ -119,9 +122,9 @@ ascending ID bytes. Their page members are:
 ## Run and attempt history
 
 `run.list` returns summaries. `run.get`, `job.run_now`, and `run.cancel.run`
-return full details. Scheduled-run history is an immutable snapshot of the
-definition at run creation; updating or moving today's definition does not
-rewrite an earlier run.
+return full details. Each run retains the definition fields captured at its
+creation; updating or moving today's definition does not rewrite those fields.
+Its execution state and attempts can still change as work proceeds.
 
 | Run member | Type | Since | Meaning |
 | --- | --- | --- | --- |

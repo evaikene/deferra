@@ -2,11 +2,8 @@
 
 Revision: **2** (supersedes the unnumbered initial closure plan)  
 Date: 2026-09-25  
-Download filename: `jobu-phase8-closure-code-design-r2.md`  
-Status: proposed implementation contract; no closure code implemented by this document  
+Repository path: `docs/planning/jobu-phase8-closure-code-design-r2.md`
 Repository: <https://github.com/evaikene/deferra>  
-Reviewed `main`: [`aaec33ca3a5d39d9d5bdd5af8c4c5c8474ad5efd`](https://github.com/evaikene/deferra/commit/aaec33ca3a5d39d9d5bdd5af8c4c5c8474ad5efd)  
-Intended repository location: `docs/planning/jobu-phase8-closure-code-design.md` (replace the canonical plan with this revision; the download filename is revisioned to avoid stale downloads)
 
 ## 1. Purpose, authority, and scope
 
@@ -493,7 +490,7 @@ Support the parser's ordinary attached-value forms as well. For example:
 
 ```sh
 jobuctl --socket /path/to/jobud.sock job create \
-  --queue-name default --now \
+  --queue-name default --type cli --now \
   --command /usr/local/bin/report \
   --arg=--token --arg-secret reports.token \
   --arg=--mode --arg=daily \
@@ -546,7 +543,7 @@ Update public Doxygen and relevant documents during their implementation stages.
 - `docs/jobuctl.md`: Active default, `--state`, `--all`, `--include-deleted`, request-file distinction, secret flags and help.
 - `docs/secrets.md`: ordinary CLI construction and unchanged reference ownership until explicit definition deletion.
 - `docs/cpp-client.md`: safe destruction/reentrancy and the borrowed-dependency lifetime contract.
-- `docs/planning/README.md`: closure pending until the final gate passes, then exact closure/evidence links.
+- `docs/planning/README.md`: index the closure design; keep stage status, source identities, and executed evidence in the shared verification record.
 - Existing schema/recovery documentation and the appended verification record: fresh-format marker 3, removal of upgrades, older-format rejection, current-format interruption recovery, source identities, actual commands/results, and skips. Update any startup/troubleshooting text promising automatic upgrade; keep old verification evidence historical.
 
 Add/extend behavior-focused tests, reusing existing fixtures and `test/support/fault_database_driver.*` rather than introducing another fault framework:
@@ -572,7 +569,7 @@ Do not replace assertions of old behavior indiscriminately. For each changed exp
 
 Stages **8.29–8.44** deliver and verify the Linux closure. **8.45** is optional native macOS verification. **8.46** is the final clean Linux gate and closure decision. Every implementation stage includes its corresponding Doxygen/comments, relevant tests, and changed-file diagnostics; the final documentation stage is an audit, not permission to defer all documentation.
 
-### Stage 8.29 — Attempt-number domain and history validation <- NEXT
+### Stage 8.29 — Attempt-number domain and history validation
 
 **Implement:** §3 common bound/predicate, request encode/decode validation, direct service guards, and relevant result validation. Leave storage corruption classification intact.
 

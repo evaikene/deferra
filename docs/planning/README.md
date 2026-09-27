@@ -3,27 +3,29 @@
 This directory contains approved technical and code-level plans for JobU.
 
 These documents describe intended behavior and staged implementation boundaries.
-The phase status records project progress, while the repository root README and
-current source tree remain authoritative for exact implemented behavior.
+The repository root README and current source tree remain authoritative for
+exact implemented behavior. Stage results and source identities belong in the
+shared verification records outside this directory.
 
 ## Documents
 
-| Document | Phase status | Purpose |
-| --- | --- | --- |
-| [JobU v1 technical plan](jobu-v1-technical-plan.md) | Active | Defines v1 product scope, architecture, invariants, phased delivery, acceptance criteria, and explicitly deferred work. |
-| [JobU Phase 0 code-level design](jobu-phase0-code-design.md) | Completed | Defines the initial module boundaries and reusable error, buffer, UUID, time, and attribute contracts. |
-| [JobU Phase 1 code-level design](jobu-phase1-code-design.md) | Completed | Defines the backend-independent database API and isolated SQLite driver. |
-| [JobU Phase 2 code-level design](jobu-phase2-code-design.md) | Completed | Defines bounded local IPC, JSON and JSON-RPC infrastructure, and the first `system.info` round trip. |
-| [JobU Phase 3 code-level design](jobu-phase3-code-design.md) | Completed | Defines the durable application model, persistence repositories, management service, RPC methods, and command-line control plane. |
-| [JobU Phase 4 code-level design](jobu-phase4-code-design.md) | Completed | Defines cron evaluation and the centralized, event-driven scheduler with deterministic attempt execution. |
-| [JobU Phase 5 code-level design](jobu-phase5-code-design.md) | Completed | Defines the asynchronous HTTP implementation, stage boundaries, verification requirements, and Phase 6/7 entry boundaries. |
-| [JobU Phase 5 Stage 5.4a code-level design](jobu-phase5-stage5.4a-code-design.md) | Completed | Defines explicit EventLoop readiness trigger modes and the level-triggered libcurl integration correction. |
-| [JobU Phase 5 closure code-level design](jobu-phase5-closure-code-design.md) | Completed | Defines the Object private-data and signal/callback architecture, closure stages, and Phase 6 entry boundary. |
-| [JobU Phase 6 code-level design](jobu-phase6-code-design.md) | Completed | Defines asynchronous local command execution, process supervision, CLI policy, executor integration, and platform stage boundaries. |
-| [JobU Phase 6 closure code-level design](jobu-phase6-closure-code-design.md) | Completed | Corrects disabled CLI capture retention and records the final verification and closure disposition. |
-| [JobU Phase 7 code-level design](jobu-phase7-code-design.md) | Completed | Defines startup recovery, terminal storage-failure gates, immediate shutdown, and platform verification boundaries. |
-| [JobU Phase 7 closure code-level design](jobu-phase7-closure-code-design.md) | Completed | Corrects cancellation rollback failure handling and records final Linux verification with explicit native coverage limits. |
-| [JobU Phase 8 code-level design](jobu-phase8-code-design.md) | Completed | Secrets, complete RPC, and `jobuctl` |
+| Document | Purpose |
+| --- | --- |
+| [JobU v1 technical plan](jobu-v1-technical-plan.md) | Defines v1 product scope, architecture, invariants, phased delivery, acceptance criteria, and explicitly deferred work. |
+| [JobU Phase 0 code-level design](jobu-phase0-code-design.md) | Defines the initial module boundaries and reusable error, buffer, UUID, time, and attribute contracts. |
+| [JobU Phase 1 code-level design](jobu-phase1-code-design.md) | Defines the backend-independent database API and isolated SQLite driver. |
+| [JobU Phase 2 code-level design](jobu-phase2-code-design.md) | Defines bounded local IPC, JSON and JSON-RPC infrastructure, and the first `system.info` round trip. |
+| [JobU Phase 3 code-level design](jobu-phase3-code-design.md) | Defines the durable application model, persistence repositories, management service, RPC methods, and command-line control plane. |
+| [JobU Phase 4 code-level design](jobu-phase4-code-design.md) | Defines cron evaluation and the centralized, event-driven scheduler with deterministic attempt execution. |
+| [JobU Phase 5 code-level design](jobu-phase5-code-design.md) | Defines the asynchronous HTTP implementation, stage boundaries, verification requirements, and Phase 6/7 entry boundaries. |
+| [JobU Phase 5 Stage 5.4a code-level design](jobu-phase5-stage5.4a-code-design.md) | Defines explicit EventLoop readiness trigger modes and the level-triggered libcurl integration correction. |
+| [JobU Phase 5 closure code-level design](jobu-phase5-closure-code-design.md) | Defines the Object private-data and signal/callback architecture, closure stages, and Phase 6 entry boundary. |
+| [JobU Phase 6 code-level design](jobu-phase6-code-design.md) | Defines asynchronous local command execution, process supervision, CLI policy, executor integration, and platform stage boundaries. |
+| [JobU Phase 6 closure code-level design](jobu-phase6-closure-code-design.md) | Corrects disabled CLI capture retention and records the final verification and closure disposition. |
+| [JobU Phase 7 code-level design](jobu-phase7-code-design.md) | Defines startup recovery, terminal storage-failure gates, immediate shutdown, and platform verification boundaries. |
+| [JobU Phase 7 closure code-level design](jobu-phase7-closure-code-design.md) | Corrects cancellation rollback failure handling and records final Linux verification with explicit native coverage limits. |
+| [JobU Phase 8 code-level design](jobu-phase8-code-design.md) | Defines secrets, complete RPC, and `jobuctl`. |
+| [JobU Phase 8 closure code-level design, revision 2](jobu-phase8-closure-code-design-r2.md) | Defines attempt validation, client delivery lifetime, one-time terminal jobs, list filters, CLI secret references, and closure verification gates. |
 
 ## Authority
 
