@@ -35,6 +35,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant> // IWYU pragma: keep std::get accesses the mutable JsonValue alternative.
 #include <vector>
 
 #include <fcntl.h>
@@ -60,6 +61,13 @@ void require_execution_environment(JobType type)
 auto text(std::string value) -> JsonValue
 {
     return {.data = std::move(value)};
+}
+
+auto json(std::string_view value) -> JsonValue
+{
+    auto parsed = parse_json(value);
+    REQUIRE(parsed);
+    return std::move(*parsed);
 }
 
 /// Separate FIFOs prevent the helper from consuming its own readiness report.
@@ -239,7 +247,7 @@ public:
         REQUIRE(output.find("API version: 1.3") != std::string::npos);
     }
 
-    void rpc(std::string_view method, JsonValue parameters)
+    auto rpc(std::string_view method, JsonValue parameters) -> JsonValue
     {
         jb::net::LocalSocket socket;
         bool                 connected{false};
@@ -247,16 +255,18 @@ public:
         socket.connect_to_server(socket_path);
         until([&] { return connected; });
         jb::rpc::Client                  client{socket};
-        bool                             received{false};
+        std::optional<JsonValue>         response;
         std::optional<jb::rpc::RpcError> error;
-        client.result_received.connect(&app, [&](jb::rpc::RequestId const&, JsonValue const&) { received = true; });
+        client.result_received.connect(&app,
+                                       [&](jb::rpc::RequestId const&, JsonValue const& value) { response = value; });
         client.error_received.connect(&app, [&](jb::rpc::RequestId const&, jb::rpc::RpcError const& value) {
             error = value;
         });
         REQUIRE(client.call(method, std::move(parameters)));
-        until([&] { return received || error.has_value(); });
+        until([&] { return response.has_value() || error.has_value(); });
         INFO((error ? error->message : ""));
         REQUIRE_FALSE(error);
+        return std::move(*response);
     }
 
     auto count(std::string const& sql) -> std::int64_t
@@ -672,6 +682,93 @@ TEST_CASE("daemon validates the current schema before recovery and serving", "[j
     CHECK(fixture.count("SELECT count(*) FROM jobu_attempts WHERE state = 'running'") == 0);
     fixture.crash();
     require_interrupted(fixture, running, false);
+    fixture.unchanged_restart();
+}
+
+TEST_CASE("daemon restart recovers mixed current-format work without losing references or replay records",
+          "[jobud][recovery][phase8][integration]")
+{
+    CrashFixture fixture;
+    fixture.server.enqueue_response({});
+    fixture.start();
+
+    auto active_queue = fixture.rpc("queue.create", json(R"({"name":"mixed-active"})"));
+    auto held_queue   = fixture.rpc("queue.create", json(R"({"name":"mixed-held"})"));
+    auto held_id      = Uuid::parse(held_queue.as_object().at("id").as_string());
+    REQUIRE(held_id);
+    auto held_selector = queue_selector_to_json(QueueSelector{*held_id});
+    REQUIRE(held_selector);
+    auto suspended = fixture.rpc("queue.suspend", *held_selector);
+    CHECK(suspended.as_object().at("state").as_string() == "suspended");
+    CHECK(active_queue.as_object().at("state").as_string() == "active");
+
+    auto secret =
+        fixture.rpc("secret.set",
+                    json(R"({"name":"restart.token","value":{"encoding":"utf8","data":"private-restart-value"}})"));
+    CHECK(secret.as_object().at("name").as_string() == "restart.token");
+    CHECK_FALSE(secret.as_object().contains("value"));
+
+    // The active one-time attempt stays in flight through the crash. The suspended queue holds a cron successor.
+    auto  once_request = json(R"({"name":"mixed-once","queue_name":"mixed-active","type":"http",
+        "schedule":{"kind":"once","at":"now"},"payload":{"url":"",
+        "headers":[{"name":"X-Restart-Token","value":{"secret":"restart.token"}}]},
+        "idempotency_key":"mixed-once-create"})");
+    auto& once_payload = std::get<JsonValue::Object>(std::get<JsonValue::Object>(once_request.data).at("payload").data);
+    once_payload.at("url")  = text(fixture.server.url());
+    auto       once_created = fixture.rpc("job.create", once_request);
+    auto const once_id_text = once_created.as_object().at("id").as_string();
+
+    auto  cron_request = json(R"({"name":"mixed-cron","queue_name":"mixed-held","type":"http",
+        "schedule":{"kind":"cron","expression":"0 0 1 1 *","timezone":"UTC"},
+        "payload":{"url":""},"idempotency_key":"mixed-cron-create"})");
+    auto& cron_payload = std::get<JsonValue::Object>(std::get<JsonValue::Object>(cron_request.data).at("payload").data);
+    cron_payload.at("url")  = text(fixture.server.url());
+    auto       cron_created = fixture.rpc("job.create", cron_request);
+    auto const cron_id_text = cron_created.as_object().at("id").as_string();
+
+    fixture.running(JobType::Http);
+    auto once_runs = fixture.rpc("run.list", JsonValue{.data = JsonValue::Object{{"job_id", text(once_id_text)}}});
+    REQUIRE(once_runs.as_object().at("items").as_array().size() == 1);
+    auto run_id = Uuid::parse(once_runs.as_object().at("items").as_array().front().as_object().at("id").as_string());
+    REQUIRE(run_id);
+    CHECK(fixture.count("SELECT count(*) FROM jobu_runs WHERE state='scheduled'") == 1);
+    fixture.crash();
+    auto const interrupted = fixture.read_run(*run_id);
+
+    fixture.start();
+    CHECK(fixture.count("SELECT version FROM jobu_schema") == 3);
+    CHECK(fixture.count("SELECT count(*) FROM jobu_runs") == 2);
+    CHECK(fixture.count("SELECT count(*) FROM jobu_attempts WHERE state='running'") == 0);
+    CHECK(fixture.server.requests().size() == 1);
+
+    auto once_id = Uuid::parse(once_id_text);
+    auto cron_id = Uuid::parse(cron_id_text);
+    REQUIRE(once_id);
+    REQUIRE(cron_id);
+    auto once_selector = job_id_to_json(*once_id);
+    auto cron_selector = job_id_to_json(*cron_id);
+    REQUIRE(once_selector);
+    REQUIRE(cron_selector);
+    auto finished_once = fixture.rpc("job.get", *once_selector);
+    auto retained_cron = fixture.rpc("job.get", *cron_selector);
+    CHECK(finished_once.as_object().at("state").as_string() == "failed");
+    CHECK(retained_cron.as_object().at("state").as_string() == "active");
+    CHECK(finished_once.as_object().at("payload").as_object().at("headers").as_array().front().as_object().at(
+              "value") == json(R"({"secret":"restart.token"})"));
+    CHECK(fixture.rpc("queue.get", *held_selector).as_object().at("state").as_string() == "suspended");
+    auto cron_runs = fixture.rpc("run.list", JsonValue{.data = JsonValue::Object{{"job_id", text(cron_id_text)}}});
+    REQUIRE(cron_runs.as_object().at("items").as_array().size() == 1);
+    CHECK(cron_runs.as_object().at("items").as_array().front().as_object().at("state").as_string() == "scheduled");
+
+    // Saved create responses are observations of the earlier acceptance, not new execution after recovery.
+    CHECK(fixture.rpc("job.create", once_request) == once_created);
+    CHECK(fixture.rpc("job.create", cron_request) == cron_created);
+    CHECK(fixture.count("SELECT count(*) FROM jobu_jobs") == 2);
+    CHECK(fixture.count("SELECT count(*) FROM jobu_runs") == 2);
+    CHECK(fixture.server.requests().size() == 1);
+
+    fixture.crash();
+    require_interrupted(fixture, interrupted, false);
     fixture.unchanged_restart();
 }
 
