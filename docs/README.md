@@ -43,6 +43,12 @@ changing them. If you have an earlier test database, keep it separately and
 point the daemon at a fresh database file; changing its version marker does not
 convert its contents.
 
+Before opening the socket, the daemon validates current-format job and run
+relationships and resolves work interrupted by a previous stop. Depending on
+the queue policy, an interrupted run may wait for a retry or finish as failed.
+When that run was the last outstanding work for a one-time job, the job also
+becomes failed. A schema or recovery error prevents the daemon from serving.
+
 In another terminal, create a queue and a job due immediately:
 
 ```sh
@@ -50,12 +56,14 @@ jobuctl --socket /tmp/jobu.sock queue create examples
 jobuctl --socket /tmp/jobu.sock job create \
     --queue-name examples --type cli --now \
     --command /bin/echo --arg='hello from JobU'
-jobuctl --socket /tmp/jobu.sock job list
+jobuctl --socket /tmp/jobu.sock job list --all
 jobuctl --socket /tmp/jobu.sock run list
 ```
 
 Use paths appropriate for your machine. `jobud` must be running for remote
 `jobuctl` commands, and each command must use the daemon's socket path.
+`job list` alone shows only active definitions; `--all` also shows a one-time
+job after it has finished.
 Successful output is not retained by the default `output.capture=on_error`
 policy. Set `output.capture` to `always` on a job if you need to inspect
 successful output through `attempt output`.

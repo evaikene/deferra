@@ -146,7 +146,12 @@ before deciding what to do next.
 
 ## Runs and attempts
 
-`job run-now JOB_UUID` creates a manual run from the current job definition. Use `--idempotency-key KEY` when a retry after a lost response must return the original run. Run Now preserves the job's scheduled occurrence and follows the daemon's eligibility rules.
+`job run-now JOB_UUID` creates a manual run from an eligible unfinished job
+definition. It preserves the future scheduled occurrence; a new request for a
+`succeeded`, `failed`, or `cancelled` job is rejected. Use `--idempotency-key KEY`
+when a retry after a lost response must return the original run. A matching
+retained key replays its saved response even if the job has since finished,
+without creating new work.
 
 ```sh
 jobuctl --socket /run/jobu.sock job run-now JOB_UUID --idempotency-key manual-42 --json
@@ -166,7 +171,11 @@ jobuctl --socket /run/jobu.sock attempt list RUN_UUID --limit 20 --json
 jobuctl --socket /run/jobu.sock attempt get RUN_UUID 1 --json
 ```
 
-`attempt list` returns newest attempt numbers first. Its summaries contain no result or output. Continue with `attempt list --cursor TOKEN` and no run ID or limit. `attempt get RUN_UUID NUMBER` returns one attempt's details; `NUMBER` must be positive.
+`attempt list` returns newest attempt numbers first. Its summaries contain no
+result or output. Continue with `attempt list --cursor TOKEN` and no run ID or
+limit. `attempt get RUN_UUID NUMBER` returns one attempt's details; `NUMBER`
+must be from 1 through 9,223,372,036,854,775,807 (`INT64_MAX`). The same range
+applies to `attempt output`.
 
 `attempt output RUN_UUID NUMBER --channel CHANNEL` reads one retained chunk. Use `stdout` or `stderr` for a CLI job, and `body` or `headers` for an HTTP job. `--offset N` addresses retained bytes, default 0; `--limit N` requests 1–65,536 raw bytes, default 16,384. Follow `next_offset` to read another chunk. Truncated output may have an omitted middle section; retained offsets do not recover omitted bytes. The response distinguishes available, pending, not-captured, and lost output, and reports retained size, known total/omitted size, truncation, and capture loss.
 
