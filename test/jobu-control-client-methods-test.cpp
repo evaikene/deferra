@@ -254,6 +254,8 @@ TEST_CASE("Every distinct typed result decodes into its public reply alternative
     auto queue       = Queue{.id = *id, .name = "queue", .created_at = *at, .updated_at = *at};
     auto job         = JobDefinition{.id         = *id,
                                      .queue_id   = *id,
+                                     .revision   = 2,
+                                     .state      = JobState::Succeeded,
                                      .schedule   = OnceSchedule{.planned_at = *at},
                                      .attributes = *attributes,
                                      .created_at = *at,
@@ -357,6 +359,7 @@ TEST_CASE("Every distinct typed result decodes into its public reply alternative
         }
         if (auto const* page = std::get_if<JobPage>(&reply)) {
             REQUIRE(page->items.size() == 1U);
+            CHECK(page->items.front().state == JobState::Succeeded);
             CHECK(page->items.front().payload.as_object().at("large").as_string().size() == 100000U);
         }
     });

@@ -127,7 +127,17 @@ constexpr std::array job_create{
     value_option("header", "NAME=VALUE", "HTTP header; repeat in order.", true),
     value_option("body", "TEXT", "UTF-8 HTTP request body; use --request-file for binary data or references."),
 };
-constexpr std::array job_list{queue_id, queue_name, deleted, limit, after};
+constexpr std::array job_list{
+    queue_id,
+    queue_name,
+    value_option("state",
+                 "STATE",
+                 "Filter by active, suspending, suspended, succeeded, failed, cancelled, or deleted."),
+    flag("all", "List all nondeleted states; excludes --state."),
+    deleted,
+    limit,
+    after,
+};
 constexpr std::array job_update{
     revision,
     value_option("name", "NAME", "Replace the job name; mutually exclusive with --clear-name."),
@@ -399,8 +409,11 @@ constexpr CommandSpec job_list_command{
     .operands         = {},
     .maximum_operands = 0,
     .options          = job_list,
-    .rules            = "Optionally select one queue; omit both queue selectors to list across queues.",
-    .example          = "jobuctl --socket /run/jobu.sock job list --queue-name reports",
+    .rules            = "Defaults to active jobs. --all lists all nondeleted states and excludes --state.\n"
+                        "--include-deleted alone lists all states; with --state it also permits a deleted queue.\n"
+                        "--state deleted includes deleted jobs. --request-file uses the supplied JSON without this default.\n"
+                        "Optionally select one queue; omit both queue selectors to list across queues.",
+    .example          = "jobuctl --socket /run/jobu.sock job list --state succeeded",
     .capability       = "job.list",
     .build            = parse_job_command,
 };

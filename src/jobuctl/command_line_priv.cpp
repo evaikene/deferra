@@ -47,6 +47,7 @@ auto is_cli_argument_value(std::string_view token, std::span<CommandLineOption c
         "job-id",
         "cursor",
         "state",
+        "all",
         "origin",
         "planned-from",
         "planned-to",
