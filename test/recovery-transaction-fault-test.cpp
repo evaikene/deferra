@@ -55,7 +55,7 @@ auto has_run(Scenario scenario) -> bool
     return scenario <= Scenario::RecurringSuspension;
 }
 
-auto boundary(std::string_view sql) -> std::string
+auto boundary(std::string_view sql, Scenario scenario) -> std::string
 {
     if (sql.starts_with("SELECT id FROM jobu_runs WHERE 1 = 1")) {
         return sql.find("AND state = :state") == std::string_view::npos ? "scan.runs" : "scan.running";
@@ -88,6 +88,11 @@ auto boundary(std::string_view sql) -> std::string
         return "repair.successor";
     }
     if (sql.starts_with("UPDATE jobu_jobs SET state = :next_state")) {
+        // Both transitions share JobRepository::set_state SQL; the seeded scenario identifies
+        // whether this write finishes a definition or drains its suspension.
+        if (scenario == Scenario::Terminal || scenario == Scenario::Exhausted) {
+            return "repair.job_terminal";
+        }
         return "repair.job_suspension";
     }
     if (sql.starts_with("UPDATE jobu_queues SET state = :next_state")) {
@@ -101,6 +106,7 @@ void check_report(RecoveryReport const& actual, RecoveryReport const& expected =
     CHECK(actual.interrupted_attempts == expected.interrupted_attempts);
     CHECK(actual.retrying_runs == expected.retrying_runs);
     CHECK(actual.terminal_runs == expected.terminal_runs);
+    CHECK(actual.finished_jobs == expected.finished_jobs);
     CHECK(actual.inserted_successors == expected.inserted_successors);
     CHECK(actual.suspended_jobs == expected.suspended_jobs);
     CHECK(actual.suspended_queues == expected.suspended_queues);
@@ -122,7 +128,7 @@ struct Fixture {
 
     explicit Fixture(Scenario scenario = Scenario::Terminal)
     {
-        faults->classify = boundary;
+        faults->classify = [scenario](std::string_view sql) { return boundary(sql, scenario); };
         time.set_utc(UtcTimePoint{120s});
         if (scenario == Scenario::Retry || scenario == Scenario::Exhausted) {
             queue.recovery_policy = RecoveryPolicy::RetryInterrupted;
@@ -136,6 +142,10 @@ struct Fixture {
         if (scenario == Scenario::RecurringSuspension || scenario == Scenario::JobSuspension) {
             job.state = JobState::Suspending;
         }
+        if (scenario == Scenario::QueueSuspension) {
+            // A completed one-time definition needs no retained run history.
+            job.state = JobState::Failed;
+        }
         if (scenario == Scenario::RecurringSuspension || scenario == Scenario::MissingSuccessor) {
             job.schedule = CronSchedule{.expression = "* * * * *", .timezone = "UTC"};
             cron.set_occurrences(std::get<CronSchedule>(job.schedule), {UtcTimePoint{180s}, UtcTimePoint{300s}});
@@ -145,6 +155,10 @@ struct Fixture {
             original =
                 storage.make_run(recovery_id(3), job, RunState::Running, scenario == Scenario::Exhausted ? 2 : 0);
             storage.insert_run(*original);
+        }
+        if (scenario == Scenario::JobSuspension) {
+            // RetryWait is unfinished work, but does not keep suspension draining.
+            storage.insert_run(storage.make_run(recovery_id(3), job, RunState::RetryWait, 1));
         }
         faults->calls.clear();
     }
@@ -216,9 +230,18 @@ struct Fixture {
         REQUIRE(*owner);
         REQUIRE(parent);
         REQUIRE(*parent);
-        bool const job_drained = job.state == JobState::Suspending;
-        CHECK((*owner)->state == (job_drained ? JobState::Suspended : job.state));
-        CHECK((*owner)->revision == job.revision + (job_drained ? 1 : 0));
+        auto expected_state    = job.state;
+        auto expected_revision = job.revision;
+        if (scenario == Scenario::Terminal || scenario == Scenario::Exhausted) {
+            expected_state = JobState::Failed;
+            ++expected_revision;
+        }
+        else if (job.state == JobState::Suspending) {
+            expected_state = JobState::Suspended;
+            ++expected_revision;
+        }
+        CHECK((*owner)->state == expected_state);
+        CHECK((*owner)->revision == expected_revision);
         CHECK((*parent)->state == (queue.state == QueueState::Suspending ? QueueState::Suspended : queue.state));
     }
 
@@ -241,6 +264,9 @@ auto repair_faults(Scenario scenario) -> std::vector<DatabaseCall>
     std::vector<std::string> writes;
     if (has_run(scenario)) {
         writes = {"repair.attempt", "repair.output", scenario == Scenario::Retry ? "repair.retry" : "repair.terminal"};
+    }
+    if (scenario == Scenario::Terminal || scenario == Scenario::Exhausted) {
+        writes.emplace_back("repair.job_terminal");
     }
     if (scenario == Scenario::RecurringSuspension || scenario == Scenario::MissingSuccessor) {
         writes.emplace_back("repair.successor");
@@ -355,7 +381,8 @@ TEST_CASE("Recovery failures after a committed unit retain progress under both p
                 check_report(*resumed,
                              {.interrupted_attempts = 1,
                               .retrying_runs        = scenario == Scenario::Retry ? 1U : 0U,
-                              .terminal_runs        = scenario == Scenario::Terminal ? 1U : 0U});
+                              .terminal_runs        = scenario == Scenario::Terminal ? 1U : 0U,
+                              .finished_jobs        = scenario == Scenario::Terminal ? 1U : 0U});
                 fixture.check_interrupted(*fixture.original, scenario == Scenario::Retry);
                 fixture.check_interrupted(second, scenario == Scenario::Retry);
                 fixture.check_idempotent();
