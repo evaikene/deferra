@@ -234,6 +234,12 @@ auto column_uuid(sqlite3_stmt* statement, int column) -> std::string
     return Uuid{bytes}.to_string();
 }
 
+void check_no_secret_value(std::string_view value)
+{
+    CHECK(value.find("stage89-private-") == std::string_view::npos);
+    CHECK(value.find("c3RhZ2U4OS1wcml2YXRl") == std::string_view::npos);
+}
+
 /// Real daemon/client lifecycle with atomic read-only observation of durable completion.
 /// @throws Catch::TestFailureException when setup, RPC, or a bounded readiness check fails.
 class DaemonFixture {
@@ -597,6 +603,40 @@ private:
         return prepared == SQLITE_OK && sqlite3_step(raw) == SQLITE_ROW;
     }
 };
+
+auto cli_create_argv(std::string name, std::string queue_name, std::vector<std::string> options)
+    -> std::vector<std::string>
+{
+    auto command = std::vector<std::string>{"job",
+                                            "create",
+                                            "--name",
+                                            std::move(name),
+                                            "--queue-name",
+                                            std::move(queue_name),
+                                            "--type",
+                                            "cli",
+                                            "--command",
+                                            PROCESS_TEST_HELPER};
+    command.insert(command.end(), options.begin(), options.end());
+    return command;
+}
+
+void check_generated_secret_metadata(sqlite3* database)
+{
+    // The secret table and captured child output deliberately contain values; generated records must not.
+    constexpr auto sql = "SELECT payload_json FROM jobu_jobs UNION ALL SELECT payload_json FROM jobu_runs UNION ALL "
+                         "SELECT result_json FROM jobu_runs WHERE result_json IS NOT NULL UNION ALL "
+                         "SELECT result_json FROM jobu_attempts WHERE result_json IS NOT NULL UNION ALL "
+                         "SELECT request_json FROM jobu_idempotency UNION ALL SELECT result_json FROM jobu_idempotency";
+    sqlite3_stmt*  raw{};
+    REQUIRE(sqlite3_prepare_v2(database, sql, -1, &raw, nullptr) == SQLITE_OK);
+    auto statement = std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)>{raw, sqlite3_finalize};
+    int  status;
+    while ((status = sqlite3_step(raw)) == SQLITE_ROW) {
+        check_no_secret_value(column_bytes(raw, 0));
+    }
+    REQUIRE(status == SQLITE_DONE);
+}
 
 void check_capture(DurableAttempt const& value,
                    std::string const&    output,
@@ -1048,4 +1088,203 @@ TEST_CASE("lost real-transport creation response replays one durable job and run
     REQUIRE(retained.as_object().at("items").as_array().size() == 1);
     CHECK(retained.as_object().at("items").as_array().front().as_object().at("id").as_string() == run_id);
     CHECK(fixture.run_state(run_id) == "scheduled");
+}
+
+TEST_CASE("CLI secret flags stay symbolic and resolve the rotated value at real daemon dispatch",
+          "[jobud][phase8][cli][secrets][integration]")
+{
+    require_execution_environment();
+    DaemonFixture fixture;
+    fixture.queue("flag-secrets");
+    static_cast<void>(fixture.control({"queue", "suspend", "--name", "flag-secrets", "--wait"}));
+
+    auto const secret_file = fixture.directory.path() / "flag-secret";
+    write_file(secret_file, "stage89-private-first");
+    auto first_set = fixture.control({"secret", "set", "flags.token", "--file", secret_file.string(), "--json"});
+    check_no_secret_value(first_set);
+
+    auto create_command = cli_create_argv("flagged-cli",
+                                          "flag-secrets",
+                                          {"--now",
+                                           "--arg",
+                                           "inspect-daemon",
+                                           "--arg=--token",
+                                           "--arg-secret",
+                                           "flags.token",
+                                           "--arg=--mode",
+                                           "--arg=daily",
+                                           "--env",
+                                           "MODE=daily",
+                                           "--env-secret",
+                                           "REPORT_TOKEN=flags.token",
+                                           "--expected-exit-code",
+                                           "37",
+                                           "--idempotency-key",
+                                           "flags-create",
+                                           "--json"});
+    auto created        = json(fixture.control(create_command));
+    auto replayed       = json(fixture.control(create_command));
+    CHECK(replayed == created);
+    CHECK(fixture.job_count("flagged-cli") == 1);
+
+    auto const  job_id    = created.as_object().at("id").as_string();
+    auto        job       = json(fixture.control({"job", "get", job_id, "--json"}));
+    auto const& payload   = job.as_object().at("payload").as_object();
+    auto const& arguments = payload.at("arguments").as_array();
+    REQUIRE(arguments.size() == 5);
+    CHECK(arguments.at(0).as_string() == "inspect-daemon");
+    CHECK(arguments.at(1).as_string() == "--token");
+    CHECK(arguments.at(2) == json(R"({"secret":"flags.token"})"));
+    CHECK(arguments.at(3).as_string() == "--mode");
+    CHECK(arguments.at(4).as_string() == "daily");
+    CHECK(payload.at("environment").as_object().at("MODE").as_string() == "daily");
+    CHECK(payload.at("environment").as_object().at("REPORT_TOKEN") == json(R"({"secret":"flags.token"})"));
+
+    auto page = json(fixture.control({"run", "list", "--job-id", job_id, "--json"}));
+    REQUIRE(page.as_object().at("items").as_array().size() == 1);
+    auto const run_id = page.as_object().at("items").as_array().front().as_object().at("id").as_string();
+    CHECK(fixture.run_state(run_id) == "scheduled");
+    auto run = json(fixture.control({"run", "get", run_id, "--json"}));
+    CHECK(run.as_object().at("payload") == job.as_object().at("payload"));
+
+    write_file(secret_file, "stage89-private-second");
+    auto rotated = fixture.control({"secret", "set", "flags.token", "--file", secret_file.string(), "--json"});
+    check_no_secret_value(rotated);
+    static_cast<void>(fixture.control({"queue", "resume", "--name", "flag-secrets"}));
+
+    auto completed = fixture.complete("flagged-cli");
+    REQUIRE(completed.output);
+    auto        report   = json(*completed.output);
+    auto const& executed = report.as_object();
+    CHECK(executed.at("arguments").as_array() ==
+          json(R"(["--token","stage89-private-second","--mode","daily"])").as_array());
+    CHECK(executed.at("environment").as_object().at("MODE").as_string() == "daily");
+    CHECK(executed.at("environment").as_object().at("REPORT_TOKEN").as_string() == "stage89-private-second");
+
+    // A future original occurrence keeps a flag-created definition eligible after its manual test completes.
+    auto       future_command = cli_create_argv("future-flags",
+                                                "flag-secrets",
+                                                {"--at",
+                                                 "2100-01-01T00:00:00Z",
+                                                 "--arg",
+                                                 "inspect-daemon",
+                                                 "--arg-secret",
+                                                 "flags.token",
+                                                 "--env-secret",
+                                                 "REPORT_TOKEN=flags.token",
+                                                 "--expected-exit-code",
+                                                 "37",
+                                                 "--json"});
+    auto       future         = json(fixture.control(std::move(future_command)));
+    auto const future_id      = future.as_object().at("id").as_string();
+    auto manual = json(fixture.control({"job", "run-now", future_id, "--idempotency-key", "flags-manual", "--json"}));
+    auto const manual_id = manual.as_object().at("id").as_string();
+    fixture.until([&] { return fixture.run_state(manual_id) == "succeeded"; });
+    auto manual_replay =
+        json(fixture.control({"job", "run-now", future_id, "--idempotency-key", "flags-manual", "--json"}));
+    CHECK(manual_replay == manual);
+    auto future_runs = json(fixture.control({"run", "list", "--job-id", future_id, "--json"}));
+    REQUIRE(future_runs.as_object().at("items").as_array().size() == 2);
+    auto future_job = json(fixture.control({"job", "get", future_id, "--json"}));
+    CHECK(future_job.as_object().at("state").as_string() == "active");
+    auto manual_run = json(fixture.control({"run", "get", manual_id, "--json"}));
+    CHECK(manual_run.as_object().at("payload") == future_job.as_object().at("payload"));
+    auto manual_output = json(fixture.control({"attempt", "output", manual_id, "1", "--channel", "stdout", "--json"}));
+    REQUIRE(manual_output.as_object().at("status").as_string() == "available");
+    auto manual_report = json(manual_output.as_object().at("data").as_string());
+    CHECK(manual_report.as_object().at("arguments").as_array().at(0).as_string() == "stage89-private-second");
+    CHECK(manual_report.as_object().at("environment").as_object().at("REPORT_TOKEN").as_string() ==
+          "stage89-private-second");
+
+    auto delete_error = fixture.control({"secret", "delete", "flags.token", "--json"}, 1);
+    CHECK(delete_error.find("jobu.secret.in_use") != std::string::npos);
+    check_no_secret_value(delete_error);
+
+    check_generated_secret_metadata(fixture.database.get());
+    check_no_secret_value(fixture.log);
+}
+
+TEST_CASE("CLI secret flags resolve again after a gated real daemon retry",
+          "[jobud][phase8][cli][secrets][integration]")
+{
+    require_execution_environment();
+    DaemonFixture fixture;
+    fixture.queue("retry-flags");
+
+    Channel    report{fixture.directory.path() / "retry-report"};
+    Channel    release{fixture.directory.path() / "retry-release"};
+    auto const secret_file = fixture.directory.path() / "retry-secret";
+    write_file(secret_file, "stage89-private-first");
+    static_cast<void>(fixture.control({"secret", "set", "retry.token", "--file", secret_file.string()}));
+
+    auto       create_command = cli_create_argv("retry-secret-cli",
+                                                "retry-flags",
+                                                {"--now",
+                                                 "--arg",
+                                                 "inspect-daemon-first-wait",
+                                                 "--arg",
+                                                 report.path(),
+                                                 "--arg",
+                                                 release.path(),
+                                                 "--arg=--token",
+                                                 "--arg-secret",
+                                                 "retry.token",
+                                                 "--env-secret",
+                                                 "REPORT_TOKEN=retry.token",
+                                                 "--attribute",
+                                                 "job.timeout=10000",
+                                                 "--attribute",
+                                                 "retry.max_attempts=2",
+                                                 "--attribute",
+                                                 "retry.initial_delay=0",
+                                                 "--attribute",
+                                                 "retry.max_delay=0",
+                                                 "--idempotency-key",
+                                                 "flags-retry-create",
+                                                 "--json"});
+    auto       created        = json(fixture.control(std::move(create_command)));
+    auto const job_id         = created.as_object().at("id").as_string();
+    auto       runs           = json(fixture.control({"run", "list", "--job-id", job_id, "--json"}));
+    REQUIRE(runs.as_object().at("items").as_array().size() == 1);
+    auto const run_id = runs.as_object().at("items").as_array().front().as_object().at("id").as_string();
+
+    // Retain the consumed FIFO notification across until's final predicate recheck.
+    bool first_attempt_ready{false};
+    fixture.until([&] {
+        if (!first_attempt_ready) {
+            first_attempt_ready = report.identities<1>().has_value();
+        }
+        return first_attempt_ready;
+    });
+
+    // Attempt one has resolved its secret but cannot finish until queue suspension fences the retry.
+    static_cast<void>(fixture.control({"queue", "suspend", "--name", "retry-flags"}));
+    write_file(secret_file, "stage89-private-second");
+    static_cast<void>(fixture.control({"secret", "set", "retry.token", "--file", secret_file.string()}));
+    release.release();
+    fixture.until([&] { return fixture.run_state(run_id) == "retry_wait"; });
+    static_cast<void>(fixture.control({"queue", "resume", "--name", "retry-flags"}));
+    fixture.until([&] { return fixture.run_state(run_id) == "failed"; });
+
+    auto attempts = json(fixture.control({"attempt", "list", run_id, "--json"}));
+    REQUIRE(attempts.as_object().at("items").as_array().size() == 2);
+    for (auto const* number : {"1", "2"}) {
+        auto output = json(fixture.control({"attempt", "output", run_id, number, "--channel", "stdout", "--json"}));
+        CHECK(output.as_object().at("status").as_string() == "available");
+        auto        report_json = json(output.as_object().at("data").as_string());
+        auto const* expected    = std::string_view{number} == "1" ? "stage89-private-first" : "stage89-private-second";
+        auto const& arguments   = report_json.as_object().at("arguments").as_array();
+        REQUIRE(arguments.size() == 2);
+        CHECK(arguments.at(0).as_string() == "--token");
+        CHECK(arguments.at(1).as_string() == expected);
+        CHECK(report_json.as_object().at("environment").as_object().at("REPORT_TOKEN").as_string() == expected);
+    }
+
+    auto job = json(fixture.control({"job", "get", job_id, "--json"}));
+    auto run = json(fixture.control({"run", "get", run_id, "--json"}));
+    CHECK(run.as_object().at("payload") == job.as_object().at("payload"));
+    CHECK(job.as_object().at("payload").as_object().at("arguments").as_array().at(4) ==
+          json(R"({"secret":"retry.token"})"));
+    check_generated_secret_metadata(fixture.database.get());
+    check_no_secret_value(fixture.log);
 }

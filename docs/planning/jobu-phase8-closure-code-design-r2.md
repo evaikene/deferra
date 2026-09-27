@@ -493,7 +493,7 @@ Support the parser's ordinary attached-value forms as well. For example:
 
 ```sh
 jobuctl --socket /path/to/jobud.sock job create \
-  --queue-name default --at now \
+  --queue-name default --now \
   --command /usr/local/bin/report \
   --arg=--token --arg-secret reports.token \
   --arg=--mode --arg=daily \
