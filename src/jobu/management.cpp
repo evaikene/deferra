@@ -8,6 +8,7 @@
 #include "cron.hpp"
 #include "idempotency_codec_priv.hpp"
 #include "idempotency_repository_priv.hpp"
+#include "job_lifecycle_priv.hpp"
 #include "job_repository_priv.hpp"
 #include "job_validation_priv.hpp"
 #include "json.hpp"
@@ -453,7 +454,10 @@ struct ManagementService::Private : jb::core::priv::ObjectPrivate {
     // Only the public boundary emits notifications. The operation returns first,
     // releasing its queries and rolling back any uncommitted transaction.
     template <typename T, typename Operation>
-    auto invoke(ManagementService& owner, detail::StorageOperation context, Operation&& operation) -> ServiceResult<T>
+    auto invoke(ManagementService&       owner,
+                detail::StorageOperation context,
+                Operation&&              operation,
+                bool const*              committed_mutation = nullptr) -> ServiceResult<T>
     {
         if (context == detail::StorageOperation::Mutation && mutations_stopped) {
             return ServiceResult<T>::failure(service_error(jb::core::ErrorCategory::Unavailable,
@@ -478,7 +482,10 @@ struct ManagementService::Private : jb::core::priv::ObjectPrivate {
             fatal = true;
         }
         if (result) {
-            if (context == detail::StorageOperation::Mutation) {
+            // Run Now reports whether it created durable work. Its saved-response replay
+            // succeeds without asking the scheduler to rescan unchanged state.
+            if (context == detail::StorageOperation::Mutation &&
+                (committed_mutation == nullptr || *committed_mutation)) {
                 owner.emit_mutation_committed();
             }
             return result;
@@ -623,9 +630,12 @@ auto ManagementService::create_job(CreateJobRequest request) -> jb::core::Result
 
 auto ManagementService::run_now(RunNowRequest request) -> jb::core::Result<JobRun, jb::core::Error>
 {
-    return d_ptr<Private>()->invoke<JobRun>(*this, detail::StorageOperation::Mutation, [&]() {
-        return run_now_impl(std::move(request));
-    });
+    auto created_new_run = false;
+    return d_ptr<Private>()->invoke<JobRun>(
+        *this,
+        detail::StorageOperation::Mutation,
+        [&]() { return run_now_impl(std::move(request), created_new_run); },
+        &created_new_run);
 }
 
 auto ManagementService::update_job(UpdateJobRequest request) -> jb::core::Result<JobDefinition, jb::core::Error>
@@ -1426,7 +1436,8 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
     return ServiceResult<JobDefinition>::success(std::move(job));
 }
 
-auto ManagementService::run_now_impl(RunNowRequest request) -> jb::core::Result<JobRun, jb::core::Error>
+auto ManagementService::run_now_impl(RunNowRequest request, bool& created_new_run)
+    -> jb::core::Result<JobRun, jb::core::Error>
 {
     auto* data = d_ptr<Private>();
 
@@ -1500,6 +1511,9 @@ auto ManagementService::run_now_impl(RunNowRequest request) -> jb::core::Result<
     auto const& job = **found_job;
     if (job.state == JobState::Deleted) {
         return ServiceResult<JobRun>::failure(job_deleted());
+    }
+    if (is_terminal_job_state(job.state)) {
+        return ServiceResult<JobRun>::failure(manual_run_conflict());
     }
     auto found_queue = data->queues.find_by_id(job.queue_id, true);
     if (!found_queue) {
@@ -1597,6 +1611,7 @@ auto ManagementService::run_now_impl(RunNowRequest request) -> jb::core::Result<
         return ServiceResult<JobRun>::failure(std::move(committed).error());
     }
 
+    created_new_run = true;
     return ServiceResult<JobRun>::success(std::move(run));
 }
 
@@ -1832,6 +1847,9 @@ auto ManagementService::suspend_job_impl(jb::core::Uuid const& id) -> jb::core::
     if (job.state == JobState::Deleted) {
         return ServiceResult<JobDefinition>::failure(job_deleted());
     }
+    if (is_terminal_job_state(job.state)) {
+        return ServiceResult<JobDefinition>::failure(job_state_conflict());
+    }
     if (job.state == JobState::Suspended) {
         auto committed = transaction.commit();
         if (!committed) {
@@ -1920,6 +1938,9 @@ auto ManagementService::resume_job_impl(jb::core::Uuid const& id) -> jb::core::R
     auto job = std::move(**found);
     if (job.state == JobState::Deleted) {
         return ServiceResult<JobDefinition>::failure(job_deleted());
+    }
+    if (is_terminal_job_state(job.state)) {
+        return ServiceResult<JobDefinition>::failure(job_state_conflict());
     }
     if (job.state != JobState::Active) {
         if (job.revision >= kMaximumPersistedJobRevision) {
@@ -2076,11 +2097,20 @@ auto ManagementService::delete_job_impl(DeleteJobRequest const& request) -> jb::
     if (job.revision != request.expected_revision) {
         return ServiceResult<void>::failure(job_revision_conflict());
     }
-    if (job.state != JobState::Suspended) {
+    if (job.state != JobState::Suspended && !is_terminal_job_state(job.state)) {
         return ServiceResult<void>::failure(job_not_suspended());
     }
-    // Deletion requires a suspended, drained job before atomically tombstoning
-    // it, cancelling pending runs, and removing its secret references.
+    // A terminal definition is valid for deletion only after all work has drained.
+    // Validate before tombstoning; the existing cleanup then removes its references atomically.
+    if (is_terminal_job_state(job.state)) {
+        detail::JobLifecycleRepository lifecycle{data->database, data->attributes};
+        auto                           valid = lifecycle.validate_job_lifecycle(job);
+        if (!valid) {
+            return ServiceResult<void>::failure(std::move(valid).error());
+        }
+    }
+
+    // Suspended jobs may still have pending runs; deletion cancels them in the same transaction.
     auto running = data->runs.count_running_for_job(job.id);
     if (!running) {
         return ServiceResult<void>::failure(std::move(running).error());
@@ -2110,7 +2140,7 @@ auto ManagementService::delete_job_impl(DeleteJobRequest const& request) -> jb::
         if ((**diagnosed).revision != request.expected_revision) {
             return ServiceResult<void>::failure(job_revision_conflict());
         }
-        if ((**diagnosed).state != JobState::Suspended) {
+        if ((**diagnosed).state != JobState::Suspended && !is_terminal_job_state((**diagnosed).state)) {
             return ServiceResult<void>::failure(job_not_suspended());
         }
         return ServiceResult<void>::failure(data->persisted_error(job_state_conflict()));

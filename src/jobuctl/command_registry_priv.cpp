@@ -138,7 +138,7 @@ constexpr std::array job_update{
     timezone,
     attribute,
 };
-constexpr std::array job_suspend{flag("wait", "Wait until the job is fully suspended.")};
+constexpr std::array job_suspend{flag("wait", "Wait until the job drains to suspended or a terminal outcome.")};
 constexpr std::array job_move{revision, queue_id, queue_name};
 constexpr std::array job_delete{revision};
 constexpr std::array job_run_now{key};

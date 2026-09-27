@@ -14,7 +14,7 @@ captured when that occurrence was created. See [shared result fields](../types.m
 | `job.suspend` | Stop eligibility and drain work | 1.1 | `job suspend` | `suspend_job()` |
 | `job.resume` | Admit scheduled work again | 1.1 | `job resume` | `resume_job()` |
 | `job.move` | Move a suspended job to another queue | 1.1 | `job move` | `move_job()` |
-| `job.delete` | Soft-delete a suspended job | 1.1 | `job delete` | `delete_job()` |
+| `job.delete` | Soft-delete a suspended or drained terminal job | 1.1 | `job delete` | `delete_job()` |
 | `job.run_now` | Create a separate manual run | 1.3 | `job run-now` | `run_now()` |
 
 Every method takes object params and rejects unknown members. `job.get`,
@@ -96,8 +96,9 @@ field may equal its current value; an accepted same-value update still advances
 the revision.
 
 A changed schedule can replace an unstarted scheduled occurrence; a running
-or retry-waiting occurrence keeps its immutable snapshot. A stale revision
-returns `jobu.job.revision_conflict` without modifying either definition or
+or retry-waiting occurrence keeps its immutable snapshot. Terminal definitions
+cannot be updated. A stale revision returns `jobu.job.revision_conflict`
+without modifying either definition or
 secret-reference ownership. Updates commit before replying.
 
 ```json
@@ -108,8 +109,8 @@ secret-reference ownership. Updates commit before replying.
 
 `job.suspend` and `job.resume` require only `job_id` and return a full
 committed definition. Suspension can report `suspending` while running work
-drains; resume reports `active`. `job.move` requires a suspended job and these
-params:
+drains; resume reports `active`. Neither operation reopens a terminal definition.
+`job.move` requires a suspended job and these params:
 
 | Params member | Type | Required | Since | Meaning |
 | --- | --- | --- | --- | --- |
@@ -119,9 +120,17 @@ params:
 
 The move returns the full definition with its new `queue_id` and revision.
 Earlier runs retain their original queue ID. `job.delete` takes exactly
-`job_id` and `expected_revision`, requires the job to be suspended, and
-returns JSON `null` after a soft delete. Retained run history remains
-queryable. Both operations use revision checks.
+`job_id` and `expected_revision`, requires the job to be suspended or terminal
+with no nonterminal work, and returns JSON `null` after a soft delete. Retained
+run history remains queryable. Both operations use revision checks; a stale
+revision is rejected before the state check.
+
+`job.get` and an explicitly filtered `job.list` return terminal definitions
+normally. Terminal definitions keep their current secret references until
+explicit individual or queue deletion. Deletion removes those definition
+references in its transaction; retained terminal snapshots do not keep a
+secret referenced. Queue suspension and deletion keep their existing behavior,
+and terminal definitions do not count as running work.
 
 For example, move a job with revision 2 to another queue:
 
@@ -147,14 +156,19 @@ The result is the [full run view](../types.md#run-and-attempt-history), with
 definition but leaves its future schedule-owned occurrence intact. It requires
 that occurrence to be strictly in the future, with no running/retry-waiting
 work or other nonterminal manual run. Job suspension does not prevent creating
-the manual run; queue suspension still prevents dispatch.
+the manual run; queue suspension still prevents dispatch. A new Run Now request
+for a `succeeded`, `failed`, or `cancelled` definition returns Conflict /
+`jobu.run.manual_conflict` without creating a run or changing the definition.
 
 ```json
 {"job_id":"00112233-4455-6677-8899-aabbccddeeff","idempotency_key":"manual-42"}
 ```
 
-A matching retained key replays the originally recorded run, even if its
-state has since changed. A conflicting key returns `jobu.idempotency.conflict`;
+A matching retained key is checked before current-job eligibility and replays
+the originally recorded run, even if the definition has since become terminal.
+Replay does not create work, change revisions, resolve secrets, or request a
+scheduler rescan. A fresh or expired key is a new request and follows current
+eligibility. A conflicting key returns `jobu.idempotency.conflict`;
 an ineligible manual barrier returns `jobu.run.manual_conflict`. A lost reply
 can be reconciled with `run.list` or the same keyed request.
 

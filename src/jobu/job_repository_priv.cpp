@@ -494,10 +494,14 @@ auto JobRepository::mark_deleted(jb::core::Uuid const&  id,
     }
 
     jb::db::Query query{_database};
+    // A terminal owner can be deleted only when it has no live work. Suspended owners retain
+    // the existing pending-run cancellation path in the management transaction.
     auto          prepared = query.prepare(
         "UPDATE jobu_jobs SET state = 'deleted', revision = :next_revision, updated_at_us = :updated_at_us, "
-        "deleted_at_us = :deleted_at_us WHERE id = :id AND state = 'suspended' "
-        "AND revision = :expected_revision AND deleted_at_us IS NULL");
+        "deleted_at_us = :deleted_at_us WHERE id = :id AND revision = :expected_revision "
+        "AND deleted_at_us IS NULL AND (state = 'suspended' OR "
+        "(state IN ('succeeded', 'failed', 'cancelled') AND NOT EXISTS "
+        "(SELECT 1 FROM jobu_runs WHERE job_id = :id AND state IN ('scheduled', 'running', 'retry_wait'))))");
     if (!prepared) {
         return RepositoryResult<bool>::failure(std::move(prepared).error());
     }
