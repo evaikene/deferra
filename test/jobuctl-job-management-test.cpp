@@ -1118,6 +1118,27 @@ auto main(int argc, char* argv[]) -> int
         return fail("job move did not use and return the carried revision");
     }
 
+    auto active_only    = run_success(argv[2], socket_path, {"job", "list"});
+    auto all_states     = run_success(argv[2], socket_path, {"job", "list", "--all"});
+    auto suspended_only = run_success(argv[2], socket_path, {"job", "list", "--state", "suspended"});
+    if (!active_only || *active_only != *http_created || !all_states || *all_states != *moved + *http_created ||
+        !suspended_only || *suspended_only != *moved) {
+        return fail("job list did not apply its default and explicit state filters");
+    }
+
+    auto const list_request_path = directory.path() / "job-list.json";
+    {
+        auto request_file = std::ofstream{list_request_path};
+        if (!request_file) {
+            return fail("unable to write the raw job-list request fixture");
+        }
+        request_file << "{}";
+    }
+    auto raw_all = run_success(argv[2], socket_path, {"job", "list", "--request-file", list_request_path.string()});
+    if (!raw_all || *raw_all != *all_states) {
+        return fail("raw job-list request file unexpectedly inherited the CLI Active default");
+    }
+
     daemon->terminate();
 
     auto const reopen_socket = directory.path() / "jobud-reopen.sock";
@@ -1163,6 +1184,30 @@ auto main(int argc, char* argv[]) -> int
     if (!listed_deleted || *listed_deleted != deleted_summary + *http_created) {
         fmt::print(stderr, "{}", listed_deleted.value_or(""));
         return fail("job list did not show the complete durable lifecycle state");
+    }
+    auto default_after_delete = run_success(argv[2], reopen_socket, {"job", "list"});
+    auto all_after_delete     = run_success(argv[2], reopen_socket, {"job", "list", "--all"});
+    auto deleted_only =
+        run_success(argv[2], reopen_socket, {"job", "list", "--state", "deleted", "--queue-name", "target"});
+    auto all_with_deleted = run_success(argv[2], reopen_socket, {"job", "list", "--all", "--include-deleted"});
+    if (!default_after_delete || *default_after_delete != *http_created || !all_after_delete ||
+        *all_after_delete != *http_created || !deleted_only || *deleted_only != deleted_summary || !all_with_deleted ||
+        *all_with_deleted != *listed_deleted) {
+        return fail("job list did not honor its deleted and all-state combinations");
+    }
+
+    auto active_json  = run_success(argv[2], reopen_socket, {"job", "list", "--json"});
+    auto deleted_json = run_success(argv[2], reopen_socket, {"job", "list", "--state", "deleted", "--json"});
+    if (!active_json || !deleted_json) {
+        return fail("job list JSON output could not be read");
+    }
+    auto active_page  = jb::core::parse_json(*active_json);
+    auto deleted_page = jb::core::parse_json(*deleted_json);
+    if (!active_page || !deleted_page || active_page->as_object().at("items").as_array().size() != 1U ||
+        deleted_page->as_object().at("items").as_array().size() != 1U ||
+        active_page->as_object().at("items").as_array().front().as_object().at("state").as_string() != "active" ||
+        deleted_page->as_object().at("items").as_array().front().as_object().at("state").as_string() != "deleted") {
+        return fail("job list JSON output did not reflect the selected durable states");
     }
 
     reopened->terminate();

@@ -80,6 +80,34 @@ Use a future UTC timestamp appropriate for your job. `job create` and `job add` 
 
 An idempotency key makes an identical `--now` creation replay the original job and scheduled run. Supply the same key and request when retrying after a lost response; changing the request with the same key is a conflict.
 
+## Listing jobs
+
+Ordinary `job list` shows only `active` definitions. Use `--state STATE` to
+select one of `active`, `suspending`, `suspended`, `succeeded`, `failed`,
+`cancelled`, or `deleted`. State names are lowercase. `--state deleted` includes
+deleted definitions automatically. `--all` lists every nondeleted state;
+`--include-deleted` by itself lists every state, including deleted. The two
+flags can be combined. `--state STATE --include-deleted` retains that one state
+filter while also allowing selection of a deleted queue. `--all` and `--state`
+cannot be combined.
+
+```sh
+jobuctl --socket /run/jobu.sock job list
+jobuctl --socket /run/jobu.sock job list --state succeeded
+jobuctl --socket /run/jobu.sock job list --state deleted --queue-name reports
+jobuctl --socket /run/jobu.sock job list --all --include-deleted
+```
+
+Queue selectors, `--limit`, and `--after` work with these filters. Pages are
+ordered by job UUID and bounded by the result size budget. Keep the same
+filters when continuing with `--after`. Filtering happens before paging, so a
+page contains only matching jobs. `job get` can inspect a known finished job.
+
+A `job list --request-file` command uses its JSON object exactly as supplied.
+In particular, `{}` leaves `state` absent and lists all nondeleted states,
+following the raw `job.list` API. Request-file input cannot be combined with
+`--state`, `--all`, `--include-deleted`, or other command options.
+
 ## Queue and job configuration
 
 Queue create/update accept `--recovery-policy fail_interrupted|retry_interrupted`, `--history-retention-seconds N`, `--runnable-wait-warning-ms N`, and `--defaults-file FILE`. Retention `0` means unlimited. Omit retention at creation to inherit the daemon policy; use `--inherit-history-retention` on update to restore inheritance. These two update options are mutually exclusive. The warning delay is nonnegative milliseconds. A defaults file contains a JSON object of registered queue default attributes; `{}` clears all queue defaults on update. Omitted update fields stay unchanged.

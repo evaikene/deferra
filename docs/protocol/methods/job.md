@@ -60,7 +60,7 @@ keyed request; an unkeyed retry is a new creation.
 | --- | --- | --- | --- | --- |
 | `queue_id` or `queue_name` | ID or string | All queues | 1.1 | Optional single queue selector |
 | `include_deleted` | boolean | `false` | 1.1 | Include soft-deleted definitions |
-| `state` | `JobState` | All allowed states | 1.1 | Lifecycle filter |
+| `state` | `JobState` | Absent (all nondeleted states) | 1.1 | Lifecycle filter |
 | `type` | `JobType` | Both | 1.1 | Runner-family filter |
 | `limit` | integer | 100 | 1.1 | 1–200 items |
 | `after_id` | ID | Beginning | 1.1 | Exclusive ascending-ID boundary |
@@ -69,6 +69,14 @@ The result has `items` (full definitions) and nullable `next_after_id`.
 Continue using that ID as `after_id`. These lists are live and can stop early
 at the 512 KiB result budget. Use `run.list` to inspect occurrence history;
 `job.list` describes current definitions.
+
+The raw API applies a supplied state filter before ordering, limit, and result
+budgeting. An absent `state` includes all matching nondeleted definitions;
+`include_deleted:true` also permits deleted definitions and selection of a
+deleted queue. The ordinary `jobuctl job list` command instead sends
+`state:active` by default. Its explicit state and all-state options are
+described in [jobuctl](../../jobuctl.md#listing-jobs). A request file keeps the
+raw API defaults. Repeat a page with the same filters when using `after_id`.
 
 ```json
 {"queue_name":"reports","type":"cli","limit":20}

@@ -445,11 +445,39 @@ auto parse_job_create(std::filesystem::path                socket_path,
     };
 }
 
+auto parse_job_list_state(std::string_view text) -> std::optional<JobState>
+{
+    if (text == "active") {
+        return JobState::Active;
+    }
+    if (text == "suspending") {
+        return JobState::Suspending;
+    }
+    if (text == "suspended") {
+        return JobState::Suspended;
+    }
+    if (text == "succeeded") {
+        return JobState::Succeeded;
+    }
+    if (text == "failed") {
+        return JobState::Failed;
+    }
+    if (text == "cancelled") {
+        return JobState::Cancelled;
+    }
+    if (text == "deleted") {
+        return JobState::Deleted;
+    }
+    return std::nullopt;
+}
+
 auto parse_job_list(std::filesystem::path socket_path, std::span<CommandLineArgument const> arguments)
     -> CommandBuildResult
 {
     auto request              = JobListRequest{};
     auto include_deleted_seen = false;
+    auto all_seen             = false;
+    auto state_seen           = false;
     auto limit_seen           = false;
     auto after_seen           = false;
 
@@ -468,6 +496,10 @@ auto parse_job_list(std::filesystem::path socket_path, std::span<CommandLineArgu
             include_deleted_seen    = true;
             continue;
         }
+        if (argument.name() == "all" && !all_seen && !argument.has_value()) {
+            all_seen = true;
+            continue;
+        }
 
         auto const value = option_value(argument);
         if (!value) {
@@ -482,6 +514,16 @@ auto parse_job_list(std::filesystem::path socket_path, std::span<CommandLineArgu
             limit_seen         = true;
             continue;
         }
+        if (argument.name() == "state" && !state_seen) {
+            auto state = parse_job_list_state(*value);
+            if (!state) {
+                return parse_failure(
+                    "--state must be active, suspending, suspended, succeeded, failed, cancelled, or deleted");
+            }
+            request.state = state;
+            state_seen    = true;
+            continue;
+        }
         if (argument.name() == "after" && !after_seen) {
             auto id = Uuid::parse(*value);
             if (!id) {
@@ -492,6 +534,18 @@ auto parse_job_list(std::filesystem::path socket_path, std::span<CommandLineArgu
             continue;
         }
         return parse_failure("job list has an unknown or duplicate option");
+    }
+
+    if (all_seen && state_seen) {
+        return parse_failure("--all and --state cannot be combined");
+    }
+
+    // Explicit breadth wins over the ordinary CLI default; request-file decoding never enters this builder.
+    if (request.state == JobState::Deleted) {
+        request.include_deleted = true;
+    }
+    else if (!all_seen && !include_deleted_seen && !state_seen) {
+        request.state = JobState::Active;
     }
 
     auto params = job_list_request_to_json(request);

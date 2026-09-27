@@ -321,14 +321,18 @@ TEST_CASE("A malformed summary row closes history admission", "[jobu][history][s
     CHECK(fixture.history.get_run(run.run.id).error().code == "jobu.service.stopping");
 }
 
-TEST_CASE("Management job lists advance within their serialized result budget", "[jobu][history][management]")
+TEST_CASE("Management job lists filter before their serialized result budget", "[jobu][history][management]")
 {
     Fixture fixture;
     auto    queue = recovery_queue(recovery_id(1));
     fixture.storage.insert_queue(queue);
-    for (auto suffix = std::uint32_t{2}; suffix < 6; ++suffix) {
+    for (auto suffix = std::uint32_t{2}; suffix < 8; ++suffix) {
         auto job = fixture.storage.make_job(recovery_id(suffix), queue.id);
         std::get<JsonValue::Object>(job.payload.data).emplace("padding", JsonValue{.data = std::string(200000, 'x')});
+        if (suffix % 2U != 0) {
+            job.state    = JobState::Succeeded;
+            job.revision = 2;
+        }
         fixture.storage.insert_job(job);
     }
 
@@ -351,7 +355,33 @@ TEST_CASE("Management job lists advance within their serialized result budget", 
         }
         request.page.after_id = page->next_after_id;
     } while (request.page.after_id);
-    CHECK(seen == std::vector<Uuid>{recovery_id(2), recovery_id(3), recovery_id(4), recovery_id(5)});
+    CHECK(seen == std::vector<Uuid>{recovery_id(2),
+                                    recovery_id(3),
+                                    recovery_id(4),
+                                    recovery_id(5),
+                                    recovery_id(6),
+                                    recovery_id(7)});
+
+    request.page.after_id = std::nullopt;
+    request.state         = JobState::Active;
+    seen.clear();
+    do {
+        auto page = management.list_jobs(request);
+        REQUIRE(page);
+        REQUIRE_FALSE(page->items.empty());
+        auto encoded = job_page_to_json(*page, fixture.storage.registry);
+        REQUIRE(encoded);
+        auto serialized = serialize_json(*encoded);
+        REQUIRE(serialized);
+        CHECK(serialized->size() <= std::size_t{512} * 1024U);
+        for (auto const& job : page->items) {
+            CHECK(job.state == JobState::Active);
+            seen.push_back(job.id);
+        }
+        request.page.after_id = page->next_after_id;
+        REQUIRE(seen.size() <= 3U);
+    } while (request.page.after_id);
+    CHECK(seen == std::vector<Uuid>{recovery_id(2), recovery_id(4), recovery_id(6)});
 }
 
 TEST_CASE("History service distinguishes transient reads from fatal durable failures", "[jobu][history][failure]")

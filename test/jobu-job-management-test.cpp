@@ -684,6 +684,92 @@ TEST_CASE("Job management lists filtered keyset pages and controls deleted visib
     CHECK(historical->items.front().id == first_job);
 }
 
+TEST_CASE("Job listing filters mixed states before keyset pagination", "[jobu][job][list]")
+{
+    auto generated = std::vector<Uuid>{};
+    for (auto suffix = std::uint8_t{1}; suffix <= 13; ++suffix) {
+        generated.push_back(sequence_id(suffix));
+    }
+    ServiceFixture    fixture{std::move(generated)};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              queue = service.create_queue({.name = "mixed"});
+    REQUIRE(queue);
+
+    auto jobs = std::vector<Uuid>{};
+    for (auto const* name : {"active-1", "succeeded", "active-2", "failed", "active-3", "deleted"}) {
+        auto created = service.create_job({.queue    = queue->id,
+                                           .name     = std::string{name},
+                                           .schedule = once_at(UtcTimePoint{60s}),
+                                           .payload  = cli_payload("/true")});
+        REQUIRE(created);
+        jobs.push_back(created->id);
+    }
+
+    // Keep each terminal definition and its scheduled run consistent while interleaving states by UUID.
+    for (auto const& [name, state] : {
+             std::pair{"succeeded", JobState::Succeeded},
+             std::pair{"failed",    JobState::Failed   }
+    }) {
+        execute(fixture.database,
+                fmt::format("UPDATE jobu_runs SET state = '{}', started_at_us = 11000000, "
+                            "completed_at_us = 12000000, result_json = '{{}}' "
+                            "WHERE job_id = (SELECT id FROM jobu_jobs WHERE name = '{}')",
+                            detail::storage_text(terminal_run_state(state)),
+                            name));
+        execute(fixture.database,
+                fmt::format("UPDATE jobu_jobs SET state = '{}', revision = revision + 1, "
+                            "updated_at_us = 12000000 WHERE name = '{}'",
+                            detail::storage_text(state),
+                            name));
+    }
+    auto suspended = service.suspend_job(jobs[5]);
+    REQUIRE(suspended);
+    REQUIRE(service.delete_job({.job_id = jobs[5], .expected_revision = suspended->revision}));
+
+    auto all_request = JobListRequest{.page = {.limit = 2}};
+    auto all_ids     = std::vector<Uuid>{};
+    do {
+        auto page = service.list_jobs(all_request);
+        REQUIRE(page);
+        REQUIRE_FALSE(page->items.empty());
+        for (auto const& item : page->items) {
+            all_ids.push_back(item.id);
+        }
+        all_request.page.after_id = page->next_after_id;
+        REQUIRE(all_ids.size() <= 5U);
+    } while (all_request.page.after_id);
+    CHECK(all_ids == std::vector<Uuid>{jobs[0], jobs[1], jobs[2], jobs[3], jobs[4]});
+
+    auto active_request = JobListRequest{.state = JobState::Active, .page = {.limit = 1}};
+    auto active_ids     = std::vector<Uuid>{};
+    do {
+        auto page = service.list_jobs(active_request);
+        REQUIRE(page);
+        REQUIRE(page->items.size() == 1U);
+        active_ids.push_back(page->items.front().id);
+        active_request.page.after_id = page->next_after_id;
+        REQUIRE(active_ids.size() <= 3U);
+    } while (active_request.page.after_id);
+    CHECK(active_ids == std::vector<Uuid>{jobs[0], jobs[2], jobs[4]});
+
+    auto succeeded = service.list_jobs({.state = JobState::Succeeded});
+    auto failed    = service.list_jobs({.state = JobState::Failed});
+    REQUIRE(succeeded);
+    REQUIRE(failed);
+    REQUIRE(succeeded->items.size() == 1U);
+    REQUIRE(failed->items.size() == 1U);
+    CHECK(succeeded->items.front().id == jobs[1]);
+    CHECK(failed->items.front().id == jobs[3]);
+
+    auto hidden  = service.list_jobs({.state = JobState::Deleted});
+    auto deleted = service.list_jobs({.include_deleted = true, .state = JobState::Deleted});
+    REQUIRE(hidden);
+    REQUIRE(deleted);
+    CHECK(hidden->items.empty());
+    REQUIRE(deleted->items.size() == 1U);
+    CHECK(deleted->items.front().id == jobs[5]);
+}
+
 TEST_CASE("Job management rejects invalid requests before durable creation", "[jobu][job][validation]")
 {
     auto const     queue_id = uuid("00000000-0000-7000-8000-000000000020");

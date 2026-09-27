@@ -20,8 +20,10 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <variant> // IWYU pragma: keep for std::get in Catch assertions
 #include <vector>
@@ -74,6 +76,133 @@ TEST_CASE("jobuctl parser retains socket selection and command family errors", "
     CHECK(parse({"--socket", "/tmp/custom.sock", "job", "unknown"}).error == "unknown command action");
     CHECK(parse({"--socket", "/tmp/custom.sock", "queue", "list", "--socket", "/tmp/other.sock"}).error ==
           "--socket may be supplied only once");
+}
+
+TEST_CASE("jobuctl job list builds explicit state and deletion filters", "[jobuctl][parse][job][list]")
+{
+    using Case       = std::tuple<std::vector<std::string>, std::optional<JobState>, bool>;
+    auto const cases = std::vector<Case>{
+        {{},                                            JobState::Active,     false},
+        {{"--state", "active"},                         JobState::Active,     false},
+        {{"--state", "suspending"},                     JobState::Suspending, false},
+        {{"--state", "suspended"},                      JobState::Suspended,  false},
+        {{"--state", "succeeded"},                      JobState::Succeeded,  false},
+        {{"--state", "failed"},                         JobState::Failed,     false},
+        {{"--state", "cancelled"},                      JobState::Cancelled,  false},
+        {{"--state", "deleted"},                        JobState::Deleted,    true },
+        {{"--state", "deleted", "--include-deleted"},   JobState::Deleted,    true },
+        {{"--all"},                                     std::nullopt,         false},
+        {{"--include-deleted"},                         std::nullopt,         true },
+        {{"--all", "--include-deleted"},                std::nullopt,         true },
+        {{"--state", "succeeded", "--include-deleted"}, JobState::Succeeded,  true },
+    };
+    for (auto const& [options, expected_state, include_deleted] : cases) {
+        CAPTURE(options);
+        auto arguments = std::vector<std::string>{"--socket", "fixture.sock", "job", "list"};
+        arguments.insert(arguments.end(), options.begin(), options.end());
+        auto parsed = parse(std::move(arguments));
+        REQUIRE(parsed.command);
+        auto const& request = std::get<JobListRequest>(parsed.command->request);
+        CHECK(request.state == expected_state);
+        CHECK(request.include_deleted == include_deleted);
+
+        auto encoded = job_list_request_to_json(request);
+        REQUIRE(encoded);
+        CHECK(encoded->as_object().contains("state") == expected_state.has_value());
+        CHECK(encoded->as_object().at("include_deleted").as_bool() == include_deleted);
+    }
+
+    auto scoped = parse({"--socket",
+                         "fixture.sock",
+                         "job",
+                         "list",
+                         "--queue-name",
+                         "reports",
+                         "--state",
+                         "failed",
+                         "--limit",
+                         "2",
+                         "--after",
+                         job_id});
+    REQUIRE(scoped.command);
+    auto const& request = std::get<JobListRequest>(scoped.command->request);
+    REQUIRE(request.queue);
+    CHECK(std::get<std::string>(*request.queue) == "reports");
+    CHECK(request.state == JobState::Failed);
+    CHECK(request.page.limit == 2);
+    auto after_id = Uuid::parse(job_id);
+    REQUIRE(after_id);
+    CHECK(request.page.after_id == *after_id);
+
+    auto deleted_queue =
+        parse({"--socket", "fixture.sock", "job", "list", "--queue-name", "gone", "--state", "deleted"});
+    REQUIRE(deleted_queue.command);
+    auto const& deleted_request = std::get<JobListRequest>(deleted_queue.command->request);
+    REQUIRE(deleted_request.queue);
+    CHECK(std::get<std::string>(*deleted_request.queue) == "gone");
+    CHECK(deleted_request.state == JobState::Deleted);
+    CHECK(deleted_request.include_deleted);
+}
+
+TEST_CASE("jobuctl job list rejects conflicting or invalid state options locally", "[jobuctl][parse][job][list]")
+{
+    for (auto const& options : std::vector<std::vector<std::string>>{
+             {"--all", "--state", "active"},
+             {"--state", "active", "--all"},
+             {"--all", "--all"},
+             {"--state", "failed", "--state", "cancelled"},
+             {"--state", "ACTIVE"},
+             {"--state", "unknown"},
+             {"--state", ""},
+             {"--state"},
+             {"--all=true"},
+    }) {
+        CAPTURE(options);
+        auto arguments = std::vector<std::string>{"--socket", "fixture.sock", "job", "list"};
+        arguments.insert(arguments.end(), options.begin(), options.end());
+        CHECK_FALSE(parse(std::move(arguments)).command);
+    }
+}
+
+TEST_CASE("jobuctl job list request files keep raw state defaults", "[jobuctl][input][job][list]")
+{
+    jb::test::TemporaryDirectory directory;
+    StandardAttributeRegistry    registry;
+    auto const                   path = directory.path() / "jobs.json";
+
+    auto ordinary = parse({"--socket", "fixture.sock", "job", "list"});
+    REQUIRE(ordinary.command);
+    CHECK(std::get<JobListRequest>(ordinary.command->request).state == JobState::Active);
+
+    auto file = parse({"--socket", "fixture.sock", "job", "list", "--request-file", path.string()});
+    REQUIRE(file.command);
+    for (auto const& document : {R"({})", R"({"state":"failed"})"}) {
+        auto output = std::ofstream{path, std::ios::binary | std::ios::trunc};
+        REQUIRE(output);
+        output << document;
+        output.close();
+
+        REQUIRE(load_request_file(*file.command, registry));
+        auto const& request = std::get<JobListRequest>(file.command->request);
+        CHECK(request.state == (document == std::string_view{R"({})"} ? std::optional<JobState>{}
+                                                                      : std::optional<JobState>{JobState::Failed}));
+    }
+
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "job", "list", "--all", "--request-file", path.string()}).command);
+    CHECK_FALSE(parse({"--socket", "fixture.sock", "job", "list", "--state", "failed", "--request-file", path.string()})
+                    .command);
+}
+
+TEST_CASE("jobuctl job list help explains local defaults without a socket", "[jobuctl][help][job][list]")
+{
+    auto parsed = parse_action({"job", "list", "--help"});
+    REQUIRE(parsed.action);
+    auto const& help = render_help(std::get<HelpCommand>(*parsed.action));
+    CHECK(help.find("Defaults to active jobs") != std::string::npos);
+    CHECK(help.find("--state STATE") != std::string::npos);
+    CHECK(help.find("--all") != std::string::npos);
+    CHECK(help.find("--include-deleted alone") != std::string::npos);
+    CHECK(help.find("--request-file uses the supplied JSON") != std::string::npos);
 }
 
 TEST_CASE("jobuctl parses machine options before or after the command", "[jobuctl][parse]")
@@ -735,6 +864,7 @@ TEST_CASE("jobuctl help-looking option values and terminator operands remain dat
              {"--arg", "--json"},
              {"--arg", "--timeout"},
              {"--arg", "--request-file"},
+             {"--arg", "--all"},
              {"--arg", "--unknown"},
              {"--arg", "--env"}
     }) {
