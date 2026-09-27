@@ -115,8 +115,13 @@ constexpr std::array job_create{
     attribute,
     value_option("command", "PATH", "CLI executable: absolute path or bare name with explicit --env PATH=... ."),
     value_option("arg", "VALUE", "CLI argument; repeat in order. Use --arg=VALUE for dash-leading values.", true),
+    value_option("arg-secret", "SECRET_NAME", "CLI argument from a named secret; repeat in argument order.", true),
     value_option("working-directory", "PATH", "Absolute CLI working directory; default: /."),
     value_option("env", "NAME=VALUE", "CLI environment assignment; repeat for distinct names.", true),
+    value_option("env-secret",
+                 "NAME=SECRET_NAME",
+                 "CLI environment value from a named secret; use a distinct name.",
+                 true),
     value_option("unset-env", "NAME", "Remove a CLI environment variable; repeat for distinct names.", true),
     value_option("expected-exit-code",
                  "N",
@@ -377,10 +382,13 @@ constexpr CommandSpec job_create_command{
     .options          = job_create,
     .rules            = "Require exactly one queue selector, --type, and one of --now, --at, or --cron.\n"
                         "--timezone applies only to --cron. CLI requires --command; HTTP requires --url.\n"
-                        "CLI and HTTP options cannot be mixed. Environment names must be unique across --env and --unset-env.\n"
+                        "CLI and HTTP options cannot be mixed. Environment names must be unique across --env, "
+                        "--env-secret, and --unset-env.\n"
+                        "Secret options name existing secrets and replace whole values; arguments retain option order.\n"
                         "CLI environment defaults to empty apart from JobU-provided variables; arguments default to empty.",
     .example          = "jobuctl --socket /run/jobu.sock job create --queue-name reports --type cli \\\n"
-                        "      --at 2030-01-01T00:00:00Z --command /bin/echo --arg=hello",
+                        "      --at 2030-01-01T00:00:00Z --command /bin/echo --arg=--token \\\n"
+                        "      --arg-secret reports.token --env-secret REPORT_TOKEN=reports.token",
     .capability       = "job.create",
     .build            = parse_job_command,
 };

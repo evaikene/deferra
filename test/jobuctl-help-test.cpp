@@ -202,6 +202,7 @@ TEST_CASE("jobuctl executable prints local help with blocked or closed stdin", "
                  {"queue", "add", "--help"},
                  {"help", "queue", "add"},
                  {"job", "create", "--help"},
+                 {"job", "add", "--help"},
                  {"secret"},
                  {"secret", "set", "--stdin", "--help"},
                  {"secret", "list", "--help"},
@@ -227,6 +228,11 @@ TEST_CASE("jobuctl executable prints local help with blocked or closed stdin", "
     auto alias = run({"queue", "add", "--help"});
     CHECK(alias.out.find("queue create NAME") != std::string::npos);
     CHECK(alias.out.find("Alias: queue add") != std::string::npos);
+
+    auto job = run({"job", "add", "--help"});
+    CHECK(job.out.find("--arg-secret SECRET_NAME") != std::string::npos);
+    CHECK(job.out.find("--env-secret NAME=SECRET_NAME") != std::string::npos);
+    CHECK(job.out.find("Alias: job add") != std::string::npos);
 }
 
 TEST_CASE("jobuctl help reaches every registered command and alias without a daemon", "[jobuctl][help]")
@@ -258,6 +264,8 @@ TEST_CASE("jobuctl executable rejects invalid help syntax with contextual stderr
              {"queue", "get", "--name", "--help"},
              {"queue", "list", "--unknown", "--help"},
              {"queue", "list", "--", "--help"},
+             {"job", "create", "--arg-secret", "--help"},
+             {"job", "add", "--env-secret", "--help"},
              {"queue", "list"},
              {"run", "unknown", "--help"},
              {"secret", "unknown", "--help"}
@@ -296,5 +304,22 @@ TEST_CASE("jobuctl local selection does not open supplied file paths", "[jobuctl
         CHECK(secret.code == 0);
         CHECK(secret.out.find("Usage:\n") == 0);
         CHECK(secret.err.empty());
+
+        for (auto const* action : {"create", "add"}) {
+            auto job = run({"job",
+                            action,
+                            "--socket",
+                            fifo.string(),
+                            "--request-file",
+                            path.string(),
+                            "--arg-secret",
+                            "reports.token",
+                            "--env-secret",
+                            "TOKEN=reports.token",
+                            "--help"});
+            CHECK(job.code == 0);
+            CHECK(job.out.find("Usage:\n") == 0);
+            CHECK(job.err.empty());
+        }
     }
 }

@@ -1,5 +1,6 @@
 #include "attribute_registry.hpp"
 #include "byte_buffer.hpp"
+#include "cli_job_payload_priv.hpp"
 #include "command_line_priv.hpp"
 #include "command_registry_priv.hpp"
 #include "control_json.hpp"
@@ -7,6 +8,7 @@
 #include "input_priv.hpp"
 #include "json.hpp"
 #include "management_json.hpp"
+#include "payload_template_priv.hpp"
 #include "statistics_json.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/temporary_directory.hpp"
@@ -15,6 +17,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <fstream>
@@ -58,6 +61,24 @@ auto parse(std::vector<std::string> arguments) -> CommandBuildResult
         }
     }
     return {.error = std::move(result.error)};
+}
+
+auto parse_cli_job_create(std::vector<std::string> options, std::string action = "create") -> CommandBuildResult
+{
+    auto arguments = std::vector<std::string>{"--socket",
+                                              "fixture.sock",
+                                              "job",
+                                              std::move(action),
+                                              "--queue-name",
+                                              "reports",
+                                              "--type",
+                                              "cli",
+                                              "--at",
+                                              "2030-01-01T00:00:00Z",
+                                              "--command",
+                                              "/bin/true"};
+    arguments.insert(arguments.end(), options.begin(), options.end());
+    return parse(std::move(arguments));
 }
 
 } // namespace
@@ -696,6 +717,105 @@ TEST_CASE("jobuctl parser retains exact repeated subprocess argument bytes", "[j
     CHECK(request.payload == *expected);
 }
 
+TEST_CASE("jobuctl constructs ordered symbolic CLI secret references", "[jobuctl][parse][secret]")
+{
+    auto options = std::vector<std::string>{"--arg=--token",
+                                            "--arg-secret",
+                                            "reports.token",
+                                            "--arg=--mode",
+                                            "--arg",
+                                            "daily",
+                                            "--arg-secret=reports.token",
+                                            "--env",
+                                            "MODE=daily",
+                                            "--env-secret=REPORT_TOKEN=reports.token",
+                                            "--unset-env",
+                                            "OLD",
+                                            "--env-secret",
+                                            "NEXT_TOKEN=reports.next"};
+    auto parsed  = parse_cli_job_create(options);
+    REQUIRE(parsed.command);
+    auto expected = parse_json(
+        R"({"command":"/bin/true","arguments":["--token",{"secret":"reports.token"},"--mode","daily",{"secret":"reports.token"}],"environment":{"MODE":"daily","REPORT_TOKEN":{"secret":"reports.token"},"OLD":null,"NEXT_TOKEN":{"secret":"reports.next"}}})");
+    REQUIRE(expected);
+    CHECK(std::get<CreateJobRequest>(parsed.command->request).payload == *expected);
+
+    auto alias = parse_cli_job_create(std::move(options), "add");
+    REQUIRE(alias.command);
+    CHECK(alias.command->method == "job.create");
+    CHECK(std::get<CreateJobRequest>(alias.command->request).payload == *expected);
+}
+
+TEST_CASE("jobuctl counts secret arguments and reference occurrences in shared limits", "[jobuctl][parse][secret]")
+{
+    auto arguments = std::vector<std::string>(jb::jobu::detail::maximum_cli_arguments - 1U, "--arg=");
+    arguments.emplace_back("--arg-secret=reports.token");
+    auto accepted_arguments = parse_cli_job_create(arguments);
+    REQUIRE(accepted_arguments.command);
+    CHECK(std::get<CreateJobRequest>(accepted_arguments.command->request)
+              .payload.as_object()
+              .at("arguments")
+              .as_array()
+              .size() == jb::jobu::detail::maximum_cli_arguments);
+
+    arguments.emplace_back("--arg=x");
+    CHECK_FALSE(parse_cli_job_create(std::move(arguments)).command);
+
+    // Repeated uses of one name still consume one reference occurrence each.
+    auto references = std::vector<std::string>(jb::jobu::detail::maximum_payload_secret_references - 1U,
+                                               "--arg-secret=reports.token");
+    references.emplace_back("--env-secret=TOKEN=reports.token");
+    REQUIRE(parse_cli_job_create(references).command);
+    references.emplace_back("--arg-secret=reports.token");
+    CHECK_FALSE(parse_cli_job_create(std::move(references)).command);
+}
+
+TEST_CASE("jobuctl rejects invalid secret flags before creating a request", "[jobuctl][parse][secret]")
+{
+    for (auto const& options : std::vector<std::vector<std::string>>{
+             {"--arg-secret"},
+             {"--arg-secret="},
+             {"--arg-secret=Reports.token"},
+             {"--arg-secret=reports..token"},
+             {"--arg-secret=" + std::string(129, 'a')},
+             {"--env-secret"},
+             {"--env-secret="},
+             {"--env-secret=TOKEN"},
+             {"--env-secret==reports.token"},
+             {"--env-secret=9TOKEN=reports.token"},
+             {"--env-secret=TOKEN="},
+             {"--env-secret=TOKEN=Reports.token"},
+             {"--env-secret=TOKEN=reports.token=extra"},
+             {"--env-secret=PATH=reports.token"},
+             {"--env-secret=JOBU_CUSTOM=reports.token"},
+             {"--env-secret=JOBU_JOB_ID=reports.token"},
+             {"--arg-secret=reports.token", "--request-file", "request.json"},
+             {"--env-secret=TOKEN=reports.token", "--request-file", "request.json"},
+             {"--request-file", "request.json", "--arg-secret=reports.token"},
+    }) {
+        CAPTURE(options);
+        CHECK_FALSE(parse_cli_job_create(options).command);
+    }
+}
+
+TEST_CASE("jobuctl rejects duplicate environment keys across literal reference and removal flags",
+          "[jobuctl][parse][secret]")
+{
+    auto const entries = std::array<std::vector<std::string>, 3>{
+        std::vector<std::string>{"--env",        "TOKEN=value"        },
+        std::vector<std::string>{"--env-secret", "TOKEN=reports.token"},
+        std::vector<std::string>{"--unset-env",  "TOKEN"              },
+    };
+    for (auto const& first : entries) {
+        for (auto const& second : entries) {
+            auto options = first;
+            options.insert(options.end(), second.begin(), second.end());
+            CAPTURE(options);
+            CHECK_FALSE(parse_cli_job_create(std::move(options)).command);
+        }
+    }
+}
+
 TEST_CASE("jobuctl help is local at root group leaf and alias paths", "[jobuctl][help]")
 {
     for (auto const& args : std::vector<std::vector<std::string>>{{}, {"--help"}, {"-h"}, {"help"}}) {
@@ -866,7 +986,11 @@ TEST_CASE("jobuctl help-looking option values and terminator operands remain dat
              {"--arg", "--request-file"},
              {"--arg", "--all"},
              {"--arg", "--unknown"},
-             {"--arg", "--env"}
+             {"--arg", "--env"},
+             {"--arg", "--arg-secret"},
+             {"--arg", "--arg-secret=reports.token"},
+             {"--arg", "--env-secret"},
+             {"--arg", "--env-secret=TOKEN=reports.token"}
     }) {
         CAPTURE(suffix);
         auto args = std::vector<std::string>{"job",

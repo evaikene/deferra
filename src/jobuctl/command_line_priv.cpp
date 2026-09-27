@@ -33,6 +33,8 @@ auto is_cli_argument_value(std::string_view token, std::span<CommandLineOption c
     auto const     name          = spelling.substr(0, spelling.find('='));
     // Newly registered options were literal --arg values in earlier releases.
     constexpr auto added_options = std::array{
+        "arg-secret",
+        "env-secret",
         "now",
         "cron",
         "timezone",

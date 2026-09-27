@@ -125,7 +125,15 @@ jobuctl --socket /run/jobu.sock queue update --name reports --inherit-history-re
 
 Job create/update accept repeated `--attribute NAME=JSON_VALUE` for distinct registered job attributes. JSON values keep their types, so a numeric value is written as `--attribute retry.max_attempts=2`. On update, supplied attributes replace those named values; omitted attributes remain unchanged. `job update` still requires the current `--revision`, and `--clear-name` explicitly clears the name. A stale revision is returned as a conflict; the CLI does not fetch a newer revision and retry.
 
-For CLI jobs, repeat `--arg`, `--env`, `--unset-env`, and `--expected-exit-code` as needed. For HTTP jobs, use `--url`, optional `--method`, repeated `--header NAME=VALUE`, and optional `--body TEXT` for a UTF-8 body. CLI and HTTP fields cannot be mixed. Use `--request-file` for complete nested configuration, binary HTTP bodies, secret references, or a full job type/payload replacement on update. For example, a job request file can contain a header value such as `{"secret":"service.token"}`; the secret name must already exist on the daemon.
+For CLI jobs, repeat `--arg`, `--arg-secret`, `--env`, `--env-secret`,
+`--unset-env`, and `--expected-exit-code` as needed. For HTTP jobs, use `--url`,
+optional `--method`, repeated `--header NAME=VALUE`, and optional `--body TEXT`
+for a UTF-8 body. CLI and HTTP fields cannot be mixed.
+
+Use `--request-file` for complete nested configuration, binary HTTP bodies,
+HTTP secret references, or a full job type/payload replacement on update. For
+example, a job request file can contain a header value such as
+`{"secret":"service.token"}`; the secret name must already exist on the daemon.
 
 `queue suspend --wait` returns when the queue reaches `suspended`. An accepted
 `job suspend --wait` returns when the job reaches `suspended` or when its last
@@ -255,6 +263,31 @@ Input and generated errors do not echo secret bytes. Secret values remain
 plaintext in the database, and application-generated output can contain them;
 see [Named secrets](secrets.md) for those exposure boundaries.
 
+## Secret references in CLI jobs
+
+`job create` and `job add` accept `--arg-secret SECRET_NAME` and
+`--env-secret NAME=SECRET_NAME` alongside literal CLI options. They pass secret
+names in the job template; they do not read or put secret values in the create
+request. The named secrets must exist on the daemon. Both options also accept
+attached values, such as `--arg-secret=reports.token` and
+`--env-secret=REPORT_TOKEN=reports.token`.
+
+```sh
+jobuctl --socket /run/jobu.sock job create \
+    --queue-name reports --type cli --at 2030-01-01T00:00:00Z \
+    --command /usr/local/bin/report \
+    --arg=--token --arg-secret reports.token --arg=--mode --arg=daily \
+    --env MODE=daily --env-secret REPORT_PASSWORD=reports.password
+```
+
+Arguments retain the order of literal `--arg` and `--arg-secret` options. Each
+secret reference replaces one whole argument or environment value; the CLI does
+not interpolate part of a string. Environment names must be unique across
+`--env`, `--env-secret`, and `--unset-env`, regardless of order. References cannot
+target `PATH` or a `JOBU_*` environment name. The existing argument and template
+reference limits apply. These options cannot be mixed with `--request-file` or
+used for HTTP jobs. `job update` still uses a request file to replace a payload.
+
 ## Literal arguments
 
 Repeat `--arg` to pass multiple arguments to a CLI job. Each value becomes one argument, preserving order and empty strings. Use `--arg=VALUE` for values beginning with a dash, especially values that resemble `jobuctl` options:
@@ -265,7 +298,12 @@ jobuctl --socket /run/jobu.sock job create \
     --command /bin/echo --arg=--help --arg=-h --arg= --arg='two words'
 ```
 
-Here `--help` and `-h` are arguments to the scheduled program. They do not request `jobuctl` help. Attached values such as `--name=--help` are also literal values.
+Here `--help` and `-h` are arguments to the scheduled program. They do not
+request `jobuctl` help. Attached values such as `--name=--help` are also literal
+values.
+An existing `--arg --arg-secret` or `--arg --env-secret` still passes the option
+spelling as a literal argument; use `--arg=VALUE` for any option-like value when
+writing a new command.
 
 `--` ends option handling. Following tokens are positional data where the command accepts them; otherwise they are extra-operand errors. For example, this creates a queue named `--help`:
 

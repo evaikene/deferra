@@ -5,6 +5,7 @@
 #include "control_json.hpp"
 #include "job_validation_priv.hpp"
 #include "management_json.hpp"
+#include "payload_template_priv.hpp"
 #include "utc_timestamp.hpp"
 
 #include <fmt/format.h>
@@ -24,7 +25,8 @@ using namespace jb::jobu;
 
 auto is_cli_creation_option(std::string_view name) -> bool
 {
-    return name == "working-directory" || name == "env" || name == "unset-env" || name == "expected-exit-code";
+    return name == "working-directory" || name == "env" || name == "env-secret" || name == "unset-env" ||
+           name == "expected-exit-code";
 }
 
 namespace {
@@ -150,6 +152,11 @@ struct CliCreationOptions {
     auto supplied() const -> bool { return working_directory || !environment.empty() || !expected_exit_codes.empty(); }
 };
 
+auto secret_reference(std::string_view name) -> JsonValue
+{
+    return JsonValue{.data = JsonValue::Object{{"secret", JsonValue{.data = std::string{name}}}}};
+}
+
 auto add_cli_creation_option(CliCreationOptions& options, std::string_view name, std::string_view value)
     -> std::optional<std::string>
 {
@@ -171,19 +178,28 @@ auto add_cli_creation_option(CliCreationOptions& options, std::string_view name,
         return std::nullopt;
     }
 
-    // Keep one namespace for assignments and removals so neither can silently overwrite the other.
+    // Keep one namespace for literals, references, and removals so none can silently overwrite another.
     auto entry = JsonValue{.data = JsonNull{}};
     auto key   = value;
-    if (name == "env") {
+    if (name == "env" || name == "env-secret") {
         auto const separator = value.find('=');
         if (separator == std::string_view::npos) {
-            return "--env requires NAME=VALUE";
+            return name == "env" ? "--env requires NAME=VALUE" : "--env-secret requires NAME=SECRET_NAME";
         }
-        key        = value.substr(0, separator);
-        entry.data = std::string{value.substr(separator + 1U)};
+        key = value.substr(0, separator);
+        if (name == "env-secret") {
+            auto const secret_name = value.substr(separator + 1U);
+            if (!jb::jobu::detail::is_valid_secret_name(secret_name)) {
+                return "--env-secret requires a valid secret name";
+            }
+            entry = secret_reference(secret_name);
+        }
+        else {
+            entry.data = std::string{value.substr(separator + 1U)};
+        }
     }
     if (!options.environment.emplace(std::string{key}, std::move(entry)).second) {
-        return "environment names must be unique across --env and --unset-env";
+        return "environment names must be unique across --env, --env-secret, and --unset-env";
     }
     return std::nullopt;
 }
@@ -231,6 +247,14 @@ auto parse_job_create(std::filesystem::path                socket_path,
                 return parse_failure("--arg requires a value");
             }
             arguments_json.push_back(JsonValue{.data = std::string{*value}});
+            continue;
+        }
+        if (argument.name() == "arg-secret") {
+            auto const value = option_value(argument);
+            if (!value || !jb::jobu::detail::is_valid_secret_name(*value)) {
+                return parse_failure("--arg-secret requires a valid secret name");
+            }
+            arguments_json.push_back(secret_reference(*value));
             continue;
         }
         if (argument.name() == "now" && argument.kind() == CommandLineArgumentKind::Option && argument.known() &&
