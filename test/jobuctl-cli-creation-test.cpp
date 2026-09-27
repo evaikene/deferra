@@ -187,6 +187,21 @@ TEST_CASE("jobuctl sends CLI creation fields through job.create on older API min
     }
 }
 
+TEST_CASE("jobuctl sends secret references as symbolic job.create fields", "[jobuctl][cli][secret]")
+{
+    auto exchange = run_client(cli_create({"--arg=--token",
+                                           "--arg-secret",
+                                           "reports.token",
+                                           "--arg=--mode",
+                                           "--arg=daily",
+                                           "--env",
+                                           "MODE=daily",
+                                           "--env-secret=REPORT_TOKEN=reports.token"}));
+    check_request(
+        exchange,
+        R"({"command":"/bin/true","arguments":["--token",{"secret":"reports.token"},"--mode","daily"],"environment":{"MODE":"daily","REPORT_TOKEN":{"secret":"reports.token"}}})");
+}
+
 TEST_CASE("jobuctl sends a complete request file through the typed session", "[jobuctl][cli]")
 {
     jb::test::TemporaryDirectory directory;
@@ -314,6 +329,14 @@ TEST_CASE("jobuctl preserves literal CLI arguments after registering new option 
                                            "--arg",
                                            "--env=NAME=value",
                                            "--arg",
+                                           "--arg-secret",
+                                           "--arg",
+                                           "--arg-secret=reports.token",
+                                           "--arg",
+                                           "--env-secret",
+                                           "--arg",
+                                           "--env-secret=TOKEN=reports.token",
+                                           "--arg",
                                            "--unset-env",
                                            "--arg",
                                            "--working-directory",
@@ -354,7 +377,7 @@ TEST_CASE("jobuctl preserves literal CLI arguments after registering new option 
                                            "ACTUAL=value"}));
     check_request(
         exchange,
-        R"({"command":"/bin/true","arguments":["","-abc","--unknown","--env","--env=NAME=value","--unset-env","--working-directory","--expected-exit-code","--now","--cron","--timezone","--attribute","--header","--body","--wait","--defaults-file","--history-retention-seconds","--runnable-wait-warning-ms","--inherit-history-retention","--command","","--help","--help","-h","-ahb"],"environment":{"ACTUAL":"value"}})");
+        R"({"command":"/bin/true","arguments":["","-abc","--unknown","--env","--env=NAME=value","--arg-secret","--arg-secret=reports.token","--env-secret","--env-secret=TOKEN=reports.token","--unset-env","--working-directory","--expected-exit-code","--now","--cron","--timezone","--attribute","--header","--body","--wait","--defaults-file","--history-retention-seconds","--runnable-wait-warning-ms","--inherit-history-retention","--command","","--help","--help","-h","-ahb"],"environment":{"ACTUAL":"value"}})");
 }
 
 TEST_CASE("jobuctl rejects invalid CLI creation options before connecting", "[jobuctl][cli]")
@@ -384,6 +407,13 @@ TEST_CASE("jobuctl rejects invalid CLI creation options before connecting", "[jo
         {"--unset-env"},
         {"--env", "NAME=value", "--unset-env", "NAME"},
         {"--unset-env", "NAME", "--env", "NAME="},
+        {"--arg-secret="},
+        {"--arg-secret=Reports.token"},
+        {"--env-secret=TOKEN"},
+        {"--env-secret=PATH=reports.token"},
+        {"--env-secret=JOBU_CUSTOM=reports.token"},
+        {"--env", "TOKEN=value", "--env-secret", "TOKEN=reports.token"},
+        {"--env-secret", "TOKEN=reports.token", "--unset-env", "TOKEN"},
         {"--expected-exit-code", "0", "--expected-exit-code", "00"},
         {"--expected-exit-code", "256"},
         {"--expected-exit-code=-1"},
@@ -428,12 +458,14 @@ TEST_CASE("jobuctl validates commands and explicit PATH before connecting", "[jo
 TEST_CASE("jobuctl rejects CLI-only options for HTTP creation", "[jobuctl][cli]")
 {
     for (auto const& options : std::vector<std::vector<std::string>>{
-             {"--working-directory",  "/"        },
-             {"--env",                "NAME="    },
-             {"--unset-env",          "NAME"     },
-             {"--expected-exit-code", "0"        },
-             {"--command",            "/bin/true"},
-             {"--arg",                ""         }
+             {"--working-directory",  "/"                  },
+             {"--env",                "NAME="              },
+             {"--unset-env",          "NAME"               },
+             {"--expected-exit-code", "0"                  },
+             {"--command",            "/bin/true"          },
+             {"--arg",                ""                   },
+             {"--arg-secret",         "reports.token"      },
+             {"--env-secret",         "TOKEN=reports.token"}
     }) {
         CAPTURE(options);
         auto arguments = std::vector<std::string>{"job",
@@ -468,10 +500,10 @@ TEST_CASE("jobuctl preserves major-version and capability checks for CLI creatio
 
 TEST_CASE("jobuctl creation aliases send the canonical methods and identical requests", "[jobuctl][cli]")
 {
-    auto       job_arguments = cli_create({"--arg=--help"});
-    auto const job           = run_client(job_arguments);
-    job_arguments[1]         = "add";
-    auto const job_alias     = run_client(job_arguments);
+    auto job_arguments = cli_create({"--arg=--help", "--arg-secret=reports.token", "--env-secret=TOKEN=reports.token"});
+    auto const job     = run_client(job_arguments);
+    job_arguments[1]   = "add";
+    auto const job_alias = run_client(job_arguments);
     CHECK(job_alias.methods == std::vector<std::string>{"system.info", "job.create"});
     CHECK(job_alias.params == job.params);
 

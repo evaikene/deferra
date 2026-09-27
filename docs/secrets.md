@@ -44,6 +44,14 @@ For example, a CLI payload can use an environment reference:
 }
 ```
 
+For `jobuctl job create` or `job add`, ordinary `--arg-secret SECRET_NAME` and
+`--env-secret NAME=SECRET_NAME` flags construct these same reference objects.
+They carry names, not secret bytes, and can be mixed with literal `--arg` and
+`--env` flags. See
+[Secret references in CLI jobs](jobuctl.md#secret-references-in-cli-jobs) for
+the ordered-argument and environment-key rules. A request file remains available
+for nested templates and payload replacement on update.
+
 An HTTP payload can refer to both a header and a binary body:
 
 ```json
