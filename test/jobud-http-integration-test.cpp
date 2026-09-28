@@ -257,6 +257,7 @@ auto spawn_jobud(std::filesystem::path const& executable,
 {
     auto arguments = std::vector<std::string>{
         executable.string(),
+        "--no-config",
         "--socket",
         socket_path.string(),
         "--database",
@@ -301,10 +302,11 @@ auto rejects_usage(std::filesystem::path const& jobud,
                    std::filesystem::path const& database_path,
                    std::vector<std::string>     extra_arguments) -> bool
 {
-    auto arguments = std::vector<std::string>{"--socket", socket_path.string(), "--database", database_path.string()};
+    auto arguments =
+        std::vector<std::string>{"--no-config", "--socket", socket_path.string(), "--database", database_path.string()};
     arguments.insert(arguments.end(), extra_arguments.begin(), extra_arguments.end());
     auto result = run_command(jobud, std::move(arguments));
-    return failed(result) && result.output.find("Usage: jobud") != std::string::npos &&
+    return failed(result) && result.output.find("jobud.startup.invalid_arguments") != std::string::npos &&
            !std::filesystem::exists(socket_path) && !std::filesystem::exists(database_path);
 }
 
@@ -316,6 +318,7 @@ auto rejects_client_options(std::filesystem::path const& jobud,
 {
     auto result = run_command(jobud,
                               {
+                                  "--no-config",
                                   "--socket",
                                   socket_path.string(),
                                   "--database",
@@ -323,7 +326,7 @@ auto rejects_client_options(std::filesystem::path const& jobud,
                                   std::string{option},
                                   std::string{value},
                               });
-    return failed(result) && result.output.find("net.http.invalid_options") != std::string::npos &&
+    return failed(result) && result.output.find("jobud.config.invalid") != std::string::npos &&
            !std::filesystem::exists(socket_path);
 }
 

@@ -37,7 +37,8 @@ public:
         daemon = std::make_unique<Process>();
         daemon->finished.connect(&work.app, [&](ProcessExit const& value) { exit = value; });
         daemon->standard_error.connect(&work.app, [&](ByteBuffer const& bytes) { log.append(as_string_view(bytes)); });
-        auto arguments = std::vector<std::string>{"--database",
+        auto arguments = std::vector<std::string>{"--no-config",
+                                                  "--database",
                                                   work.storage.database_file.string(),
                                                   "--socket",
                                                   socket.string(),

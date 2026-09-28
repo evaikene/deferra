@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -40,15 +41,35 @@ using namespace jb::jobud::detail;
 
 namespace {
 
-auto parse(std::vector<std::string> extra = {}) -> std::optional<StartupOptions>
+auto parse_arguments(std::vector<std::string> extra) -> Result<StartupArguments, StartupError>
 {
-    auto arguments = std::vector<std::string>{"jobud", "--socket", "daemon.sock", "--database", "daemon.sqlite"};
+    auto arguments = std::vector<std::string>{"jobud"};
     arguments.insert(arguments.end(), extra.begin(), extra.end());
     auto argv = std::vector<char const*>{};
     for (auto const& argument : arguments) {
         argv.push_back(argument.c_str());
     }
-    return parse_startup_options(static_cast<int>(argv.size()), argv.data());
+    return parse_startup_arguments(static_cast<int>(argv.size()), argv.data());
+}
+
+auto parse(std::vector<std::string> extra = {}) -> std::optional<StartupOptions>
+{
+    auto arguments =
+        std::vector<std::string>{"jobud", "--no-config", "--socket", "daemon.sock", "--database", "daemon.sqlite"};
+    arguments.insert(arguments.end(), extra.begin(), extra.end());
+    auto argv = std::vector<char const*>{};
+    for (auto const& argument : arguments) {
+        argv.push_back(argument.c_str());
+    }
+    auto parsed = parse_startup_arguments(static_cast<int>(argv.size()), argv.data());
+    if (!parsed) {
+        return std::nullopt;
+    }
+    auto resolved = resolve_startup_options(*parsed, {}, compiled_paths(), "/invocation");
+    if (!resolved) {
+        return std::nullopt;
+    }
+    return std::move(resolved).value();
 }
 
 struct IdentityState {
@@ -128,10 +149,14 @@ auto http_request(TimeSource& time) -> AttemptStartRequest
 
 TEST_CASE("daemon startup maps default and explicit concurrency to Scheduler options", "[jobud][startup]")
 {
+    jb::test::TemporaryDirectory directory;
+    auto const                   ca_bundle = directory.path() / "ca.pem";
+    std::ofstream{ca_bundle} << "test CA bundle";
+
     auto defaults = parse();
     REQUIRE(defaults);
-    CHECK(defaults->socket_path == "daemon.sock");
-    CHECK(defaults->database_path == "daemon.sqlite");
+    CHECK(defaults->socket_path == "/invocation/daemon.sock");
+    CHECK(defaults->database_path == "/invocation/daemon.sqlite");
     CHECK_FALSE(defaults->allow_root_cli);
     CHECK_FALSE(defaults->http_proxy);
     CHECK_FALSE(defaults->http_ca_bundle);
@@ -145,13 +170,13 @@ TEST_CASE("daemon startup maps default and explicit concurrency to Scheduler opt
                                    "--http-proxy",
                                    "https://proxy.test",
                                    "--http-ca-bundle",
-                                   "/test/ca.pem"});
+                                   ca_bundle.string()});
     REQUIRE(explicit_options);
     CHECK(scheduler_options(*explicit_options).cli_concurrency == 4294967295U);
     CHECK(scheduler_options(*explicit_options).http_concurrency == 1U);
     CHECK(explicit_options->allow_root_cli);
     CHECK(explicit_options->http_proxy == "https://proxy.test");
-    CHECK(explicit_options->http_ca_bundle == "/test/ca.pem");
+    CHECK(explicit_options->http_ca_bundle == ca_bundle);
     auto cli_only = parse({"--cli-concurrency", "1"});
     REQUIRE(cli_only);
     CHECK(scheduler_options(*cli_only).cli_concurrency == 1U);
@@ -188,6 +213,168 @@ TEST_CASE("daemon startup rejects malformed values duplicates and values on the 
         CAPTURE(arguments);
         CHECK_FALSE(parse(arguments));
     }
+}
+
+TEST_CASE("daemon startup keeps flag absence distinct from explicit negative overrides", "[jobud][startup]")
+{
+    auto absent = parse_arguments({"--check-config"});
+    REQUIRE(absent);
+    CHECK(absent->action == StartupAction::CheckConfig);
+    CHECK_FALSE(absent->allow_root_cli);
+    CHECK_FALSE(absent->allow_root_daemon);
+
+    auto negative = parse_arguments({"--no-allow-root-cli", "--no-allow-root-daemon"});
+    REQUIRE(negative);
+    CHECK(negative->allow_root_cli == false);
+    CHECK(negative->allow_root_daemon == false);
+
+    for (auto const& flags : std::vector<std::vector<std::string>>{
+             {"--config", "/file", "--no-config"},
+             {"--no-config", "--config", "/file"},
+             {"--allow-root-cli", "--no-allow-root-cli"},
+             {"--no-allow-root-daemon", "--allow-root-daemon"},
+             {"--run-as-user", "first", "--run-as-user", "second"},
+             {"--help", "--version"},
+             {"--check-config", "--check-config"},
+    }) {
+        CAPTURE(flags);
+        CHECK_FALSE(parse_arguments(flags));
+    }
+    CHECK(parse_arguments({"--help", "--config", "/missing/jobud.ini"}));
+    CHECK(parse_arguments({"--version", "--run-as-user", "no-such-account"}));
+}
+
+TEST_CASE("daemon startup resolves compiled config and flag precedence", "[jobud][startup]")
+{
+    auto const paths = CompiledPaths{.config   = "/compiled/jobud.ini",
+                                     .database = "/compiled/jobu.sqlite3",
+                                     .socket   = "/compiled/jobud.sock"};
+    auto       empty = resolve_startup_options({}, {}, paths, "/invocation");
+    REQUIRE(empty);
+    CHECK(empty->socket_path == paths.socket);
+    CHECK(empty->database_path == paths.database);
+    CHECK_FALSE(empty->allow_root_cli);
+    CHECK(empty->default_retention == std::chrono::seconds{2'592'000});
+
+    auto config = parse_configuration_text("socket.path = /configured/jobud.sock\n"
+                                           "database.path = /configured/jobu.sqlite3\n"
+                                           "cli.concurrency = 7\n"
+                                           "cli.allow_root = true\n"
+                                           "daemon.allow_root = true\n"
+                                           "daemon.run_as_group = operators\n"
+                                           "history.default_retention = 0\n");
+    REQUIRE(config);
+
+    auto flags = parse_arguments({"--socket",
+                                  "relative.sock",
+                                  "--cli-concurrency",
+                                  "3",
+                                  "--no-allow-root-cli",
+                                  "--no-allow-root-daemon",
+                                  "--run-as-user",
+                                  "daemon"});
+    REQUIRE(flags);
+    auto resolved = resolve_startup_options(*flags, *config, paths, "/invocation");
+    REQUIRE(resolved);
+    CHECK(resolved->socket_path == "/invocation/relative.sock");
+    CHECK(resolved->database_path == "/configured/jobu.sqlite3");
+    CHECK(resolved->cli_concurrency == 3U);
+    CHECK_FALSE(resolved->allow_root_cli);
+    CHECK_FALSE(resolved->allow_root_daemon);
+    CHECK(resolved->run_as_user == "daemon");
+    CHECK(resolved->run_as_group == "operators");
+    CHECK(resolved->default_retention == std::chrono::seconds::zero());
+    CHECK(resolved->rpc_read_buffer_capacity == 1'064'960U);
+
+    CHECK_FALSE(resolve_startup_options({}, *config, paths, "/invocation"));
+
+    jb::test::TemporaryDirectory directory;
+    auto const                   ca_bundle = directory.path() / "ca.pem";
+    std::ofstream{ca_bundle} << "test CA bundle";
+    auto relative = parse_arguments({"--database", "state/daemon.sqlite", "--http-ca-bundle", "ca.pem"});
+    REQUIRE(relative);
+    auto relative_options = resolve_startup_options(*relative, {}, paths, directory.path());
+    REQUIRE(relative_options);
+    CHECK(relative_options->database_path == directory.path() / "state/daemon.sqlite");
+    CHECK(relative_options->http_ca_bundle == ca_bundle);
+
+    CHECK_FALSE(resolve_startup_options(
+        {},
+        {},
+        {.config = paths.config, .database = paths.database, .socket = "/" + std::string(200, 'x')},
+        "/invocation"));
+}
+
+TEST_CASE("daemon local validation checks supplied account names", "[jobud][startup]")
+{
+    StartupOptions options;
+    options.run_as_user = "jobud-stage93-no-such-account";
+    auto invalid_user   = validate_readonly_accounts(options);
+    REQUIRE_FALSE(invalid_user);
+    CHECK(invalid_user.error().key == "daemon.run_as_user");
+
+    options.run_as_user.reset();
+    options.socket_group = "jobud-stage93-no-such-group";
+    auto invalid_group   = validate_readonly_accounts(options);
+    REQUIRE_FALSE(invalid_group);
+    CHECK(invalid_group.error().key == "socket.group");
+
+    options.socket_group.reset();
+    CHECK(validate_readonly_accounts(options));
+}
+
+TEST_CASE("daemon configuration file selection is bounded and read only", "[jobud][startup]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   config_path = directory.path() / "jobud.ini";
+    auto const                   paths =
+        CompiledPaths{.config = config_path, .database = "/compiled/jobu.sqlite3", .socket = "/compiled/jobud.sock"};
+
+    auto absent = load_configuration({}, paths, directory.path());
+    REQUIRE(absent);
+    CHECK_FALSE(absent->source_path);
+
+    auto explicit_missing = parse_arguments({"--config", "missing.ini"});
+    REQUIRE(explicit_missing);
+    auto missing = load_configuration(*explicit_missing, paths, directory.path());
+    REQUIRE_FALSE(missing);
+    CHECK(missing.error().code == "jobud.config.read_failed");
+    CHECK(missing.error().category == ErrorCategory::Io);
+
+    std::ofstream{config_path} << "cli.concurrency = 8\n";
+    auto loaded = load_configuration({}, paths, directory.path());
+    REQUIRE(loaded);
+    CHECK(loaded->source_path == config_path);
+    CHECK(loaded->input.cli_concurrency == 8U);
+
+    auto explicit_relative = parse_arguments({"--config", "jobud.ini"});
+    REQUIRE(explicit_relative);
+    auto selected = load_configuration(*explicit_relative, paths, directory.path());
+    REQUIRE(selected);
+    CHECK(selected->source_path == config_path);
+
+    auto skipped = parse_arguments({"--no-config"});
+    REQUIRE(skipped);
+    std::ofstream{config_path} << "unknown = secret-value\n";
+    CHECK(load_configuration(*skipped, paths, directory.path()));
+    auto invalid = load_configuration({}, paths, directory.path());
+    REQUIRE_FALSE(invalid);
+    CHECK(invalid.error().code == "jobud.config.unknown_key");
+    CHECK(invalid.error().message.find("secret-value") == std::string::npos);
+
+    std::ofstream{config_path} << std::string(65'537U, 'x');
+    auto oversized = load_configuration({}, paths, directory.path());
+    REQUIRE_FALSE(oversized);
+    CHECK(oversized.error().code == "jobud.config.invalid");
+
+    auto const link_path = directory.path() / "linked.ini";
+    std::filesystem::create_symlink(config_path, link_path);
+    auto linked = load_configuration({},
+                                     {.config = link_path, .database = paths.database, .socket = paths.socket},
+                                     directory.path());
+    REQUIRE_FALSE(linked);
+    CHECK(linked.error().code == "jobud.config.read_failed");
+    CHECK(linked.error().category == ErrorCategory::PermissionDenied);
 }
 
 TEST_CASE("daemon composition applies live identity policy and warns once only for unsafe root", "[jobud][startup]")

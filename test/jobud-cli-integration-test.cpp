@@ -571,7 +571,8 @@ public:
 private:
     auto daemon_arguments() const -> std::vector<std::string>
     {
-        auto arguments = std::vector<std::string>{"--socket",
+        auto arguments = std::vector<std::string>{"--no-config",
+                                                  "--socket",
                                                   socket_path.string(),
                                                   "--database",
                                                   database_path.string(),

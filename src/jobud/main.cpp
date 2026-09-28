@@ -23,20 +23,42 @@
 
 #include <cstdio> // IWYU pragma: keep for stderr and stdout
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <memory>
-#include <string_view>
 #include <utility>
 
 namespace {
 
-void print_usage()
+void print_help(jb::jobud::detail::CompiledPaths const& paths)
 {
-    fmt::print(stderr,
-               "Usage: jobud --socket <filesystem-path> --database <sqlite-file> "
-               "[--cli-concurrency <positive-integer>] [--allow-root-cli] "
-               "[--http-concurrency <positive-integer>] [--http-proxy <http-or-https-url>] "
-               "[--http-ca-bundle <filesystem-path>]\n");
+    fmt::print(stdout,
+               "Usage: jobud [--config PATH | --no-config] [--check-config] [options]\n"
+               "       jobud --help | --version\n\n"
+               "Config: {} (used if present; --config requires its file).\n"
+               "Precedence: compiled defaults < config file < explicit flags.\n"
+               "Default database: {}\nDefault socket: {}\n\n"
+               "Options:\n"
+               "  --config PATH            Require and load this config file.\n"
+               "  --socket PATH             Override the socket path.\n"
+               "  --database PATH           Override the SQLite database path.\n"
+               "  --cli-concurrency N       Positive worker limit (default 4).\n"
+               "  --http-concurrency N      Positive worker limit (default 16).\n"
+               "  --http-proxy URL          HTTP or HTTPS proxy.\n"
+               "  --http-ca-bundle PATH     CA bundle file.\n"
+               "  --run-as-user NAME        Requested daemon account.\n"
+               "  --run-as-group NAME       Requested group; requires a user.\n"
+               "  --allow-root-daemon | --no-allow-root-daemon\n"
+               "  --allow-root-cli | --no-allow-root-cli\n"
+               "  --check-config            Validate locally without starting the daemon.\n"
+               "  --no-config               Skip config loading.\n"
+               "  --help, --version         Show local information.\n\n"
+               "CLI relative paths use the invocation directory. Config paths must be absolute.\n"
+               "Config intervals use seconds or s/m/h/d; byte quantities use bytes or k/m/g (1024 base).\n"
+               "The two root switches are independent unsafe overrides.\n",
+               paths.config.string(),
+               paths.database.string(),
+               paths.socket.string());
 }
 
 } // anonymous namespace
@@ -46,16 +68,54 @@ auto main(int argc, char* argv[]) -> int
     using namespace jb::core;
     using namespace jb::jobu;
 
-    if (argc == 2 && std::string_view{argv[1]} == "--version") {
+    auto const paths  = jb::jobud::detail::compiled_paths();
+    auto       parsed = jb::jobud::detail::parse_startup_arguments(argc, argv);
+    if (!parsed) {
+        fmt::print(stderr, "jobud: {} ({}); use --help\n", parsed.error().message, parsed.error().code);
+        return 2;
+    }
+    auto const& arguments = parsed.value();
+    if (arguments.action == jb::jobud::detail::StartupAction::Help) {
+        print_help(paths);
+        return EXIT_SUCCESS;
+    }
+    if (arguments.action == jb::jobud::detail::StartupAction::Version) {
         fmt::print(stdout, "jobud {}\n", jb::jobu::detail::project_version);
         return EXIT_SUCCESS;
     }
 
-    auto const startup = jb::jobud::detail::parse_startup_options(argc, argv);
-    if (!startup) {
-        print_usage();
+    std::error_code cwd_error;
+    auto const      invocation_directory = std::filesystem::current_path(cwd_error);
+    if (cwd_error) {
+        fmt::print(stderr, "jobud: invocation directory is unavailable\n");
         return EXIT_FAILURE;
     }
+
+    auto loaded = jb::jobud::detail::load_configuration(arguments, paths, invocation_directory);
+    if (!loaded) {
+        fmt::print(stderr, "jobud: {} ({})\n", loaded.error().message, loaded.error().code);
+        return loaded.error().code == "jobud.config.read_failed" ? EXIT_FAILURE : 2;
+    }
+    auto resolved = jb::jobud::detail::resolve_startup_options(arguments, loaded->input, paths, invocation_directory);
+    if (!resolved) {
+        fmt::print(stderr, "jobud: {} ({})\n", resolved.error().message, resolved.error().code);
+        return 2;
+    }
+    auto accounts = jb::jobud::detail::validate_readonly_accounts(*resolved);
+    if (!accounts) {
+        fmt::print(stderr, "jobud: {} ({})\n", accounts.error().message, accounts.error().code);
+        return 2;
+    }
+    if (arguments.action == jb::jobud::detail::StartupAction::CheckConfig) {
+        if (loaded->source_path) {
+            fmt::print(stdout, "Configuration valid: {}\n", loaded->source_path->string());
+        }
+        else {
+            fmt::print(stdout, "Configuration valid (compiled defaults)\n");
+        }
+        return EXIT_SUCCESS;
+    }
+    auto const startup = std::move(resolved).value();
 
     // The relay precedes Application and every worker-capable dependency. Its checked retirement
     // follows their complete scope teardown, including every early startup return.
@@ -72,7 +132,7 @@ auto main(int argc, char* argv[]) -> int
         Application      app{0, nullptr};
         SystemTimeSource time_source;
         jb::db::Database database{
-            std::make_unique<jb::db::sqlite::Driver>(jb::db::sqlite::Options{.database_file = startup->database_path})};
+            std::make_unique<jb::db::sqlite::Driver>(jb::db::sqlite::Options{.database_file = startup.database_path})};
         UuidV7Generator           uuid_generator{time_source};
         StandardAttributeRegistry attribute_registry;
         SystemCronEngine          cron;
@@ -87,7 +147,7 @@ auto main(int argc, char* argv[]) -> int
                                                  cron,
                                                  uuid_generator,
                                                  time_source,
-                                                 *startup,
+                                                 startup,
                                                  std::move(should_stop)};
 #if defined(__linux__) || defined(__APPLE__)
         auto attached = relay->attach(*app.event_loop(), [&runtime] { runtime.request_stop(); });
@@ -117,7 +177,7 @@ auto main(int argc, char* argv[]) -> int
             using RunnersResult = Result<jb::jobud::detail::RuntimeRunners, Error>;
             auto created        = jb::net::http::SystemHttpClient::create(
                 *app.event_loop(),
-                {.ca_bundle = startup->http_ca_bundle, .proxy = startup->http_proxy});
+                {.ca_bundle = startup.http_ca_bundle, .proxy = startup.http_proxy});
             if (!created) {
                 return RunnersResult::failure(std::move(created).error());
             }
@@ -126,7 +186,7 @@ auto main(int argc, char* argv[]) -> int
             auto registered = jb::jobud::detail::register_attempt_executors(*runners.executors,
                                                                             *runners.http,
                                                                             time_source,
-                                                                            startup->allow_root_cli);
+                                                                            startup.allow_root_cli);
             if (!registered) {
                 return RunnersResult::failure(std::move(registered).error());
             }
