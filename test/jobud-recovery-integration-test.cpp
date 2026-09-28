@@ -149,7 +149,8 @@ public:
         daemon->standard_output.connect(&app, [&](ByteBuffer const& bytes) { log.append(as_string_view(bytes)); });
         daemon->standard_error.connect(&app, [&](ByteBuffer const& bytes) { log.append(as_string_view(bytes)); });
         daemon->finished.connect(&app, [&](ProcessExit const& value) { exit = value; });
-        auto arguments = std::vector<std::string>{"--database",
+        auto arguments = std::vector<std::string>{"--no-config",
+                                                  "--database",
                                                   storage.database_file.string(),
                                                   "--socket",
                                                   socket_path.string(),

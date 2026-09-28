@@ -10,11 +10,11 @@ configure_file(
 
 add_executable(${TARGET} main.cpp composition_priv.cpp)
 
-add_library(jobud-runtime STATIC runtime_priv.cpp startup_priv.cpp configuration_priv.cpp)
+add_library(jobud-runtime STATIC runtime_priv.cpp startup_priv.cpp configuration_priv.cpp configuration_file_priv.cpp)
 target_include_directories(jobud-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
     PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(jobud-runtime PUBLIC jobu net rpc PRIVATE net-http)
-target_link_libraries(${TARGET} PRIVATE jobud-runtime)
+target_link_libraries(jobud-runtime PUBLIC jobu net rpc PRIVATE net-http jobu-paths-private)
+target_link_libraries(${TARGET} PRIVATE jobud-runtime jobu-paths-private)
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
     if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")

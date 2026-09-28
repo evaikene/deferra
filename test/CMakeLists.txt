@@ -821,24 +821,30 @@ if(TARGET jobud)
         endif()
         add_executable(jobud-startup-test
             jobud-startup-test.cpp
-            ../src/jobud/startup_priv.cpp
             ../src/jobud/composition_priv.cpp
             support/fake_http_client.cpp
             support/temporary_directory.cpp
         )
         target_include_directories(jobud-startup-test PRIVATE ../src/jobud)
-        target_link_libraries(jobud-startup-test PRIVATE jobu-sqlite jobu-http jobu-cli Catch2::Catch2WithMain)
+        target_link_libraries(jobud-startup-test PRIVATE jobud-runtime jobu-sqlite jobu-http jobu-cli Catch2::Catch2WithMain)
         add_test(NAME jobud-startup-test COMMAND $<TARGET_FILE:jobud-startup-test>)
+        set_tests_properties(jobud-startup-test PROPERTIES TIMEOUT 30)
 
         add_executable(jobud-configuration-test jobud-configuration-test.cpp support/temporary_directory.cpp)
         target_link_libraries(jobud-configuration-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
         add_test(NAME jobud-configuration-test COMMAND $<TARGET_FILE:jobud-configuration-test>)
     endif()
-    add_test(NAME jobud-version COMMAND $<TARGET_FILE:jobud> --version)
-    add_test(NAME jobud-usage COMMAND $<TARGET_FILE:jobud>)
-    add_test(NAME jobud-missing-database COMMAND $<TARGET_FILE:jobud> --socket unused.sock)
-    add_test(NAME jobud-missing-socket COMMAND $<TARGET_FILE:jobud> --database unused.sqlite)
-    set_tests_properties(jobud-usage jobud-missing-database jobud-missing-socket PROPERTIES
+    add_test(NAME jobud-version COMMAND $<TARGET_FILE:jobud> --version --config /missing/jobud.ini
+        --run-as-user jobud-stage93-no-such-account)
+    add_test(NAME jobud-help COMMAND $<TARGET_FILE:jobud> --help --config /missing/jobud.ini)
+    add_test(NAME jobud-check-defaults COMMAND $<TARGET_FILE:jobud> --check-config --no-config)
+    add_test(NAME jobud-check-config-local COMMAND ${CMAKE_COMMAND}
+        -DJOBUD_EXECUTABLE=$<TARGET_FILE:jobud>
+        -DTEST_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/jobud-check-config
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/jobud-check-config.cmake)
+    add_test(NAME jobud-invalid-option COMMAND $<TARGET_FILE:jobud> --unknown)
+    add_test(NAME jobud-conflicting-config COMMAND $<TARGET_FILE:jobud> --config /missing/jobud.ini --no-config)
+    set_tests_properties(jobud-invalid-option jobud-conflicting-config PROPERTIES
         WILL_FAIL TRUE
     )
 endif()

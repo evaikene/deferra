@@ -1,11 +1,11 @@
-# JobU Phase 9: code-level design — Revision 2
+# JobU Phase 9: code-level design — Revision 3
 
-- Revision: **2**
+- Revision: **3**
 - Date: 2026-09-28
 - Status: proposed implementation contract; no implementation is claimed by this document
 - Repository: <https://github.com/evaikene/deferra>
 - Baseline: [`cebb4cb278942eb5eb939d2dc64ab9129e035841`](https://github.com/evaikene/deferra/commit/cebb4cb278942eb5eb939d2dc64ab9129e035841)
-- Download: `jobu-phase9-code-design-r2.md`
+- Download: `jobu-phase9-code-design-r3.md`
 - Repository destination: `docs/planning/jobu-phase9-code-design.md`
 
 ## 1. Phase boundary and authority
@@ -550,15 +550,17 @@ Use GNUInstallDirs for binaries, libraries, headers, package metadata and docume
 
 | Cache variable | Default for a configured prefix | Result |
 | --- | --- | --- |
-| `JB_JOBU_SYSCONFDIR` | `${CMAKE_INSTALL_PREFIX}/etc/jobu` | default config `jobud.ini` |
-| `JB_JOBU_STATEDIR` | `${CMAKE_INSTALL_PREFIX}/var/lib/jobu` | default database `jobu.sqlite3` |
-| `JB_JOBU_RUNDIR` | `${CMAKE_INSTALL_PREFIX}/var/run/jobu` | default socket `jobud.sock` |
+| `JB_JOBU_SYSCONFDIR` | `${CMAKE_INSTALL_PREFIX}/etc` | default config `jobud.ini` |
+| `JB_JOBU_STATEDIR` | `${CMAKE_INSTALL_PREFIX}/var/lib` | default database `jobu.sqlite3` |
+| `JB_JOBU_RUNDIR` | `${CMAKE_INSTALL_PREFIX}/var/run` | default socket `jobud.sock` |
 
 Generate a private `jobu_paths_priv.hpp` consumed by both applications through a small common build interface. Generate service/config templates from the same values. Do not place daemon installation policy in `jb::core` or the generic ControlClient constructor.
 
-A Linux system-service profile explicitly uses prefix `/usr`, config `/etc/jobu`, state `/var/lib/jobu`, runtime `/run/jobu`. The generic prefix profile remains useful for development and private installations. Native socket length is checked at configuration/startup; reject unusable paths rather than truncate them. Escape generated C++ strings, INI paths and service syntax correctly; reject newline/NUL and service-profile paths that cannot be represented safely.
+A Linux system-service profile explicitly uses prefix `/usr`, config `/etc/jobu`, state `/var/lib/jobu`, runtime `/run/jobu`. The flat generic defaults avoid repeating `jobu` under a dedicated prefix such as `/opt/jobu` or `$HOME/jobu`. State and runtime directories still require the protected ownership and modes in §9.2; a shared prefix needs explicit operational-path overrides or administrator-provisioned private directories.
 
-`DESTDIR` stages files and is never compiled into runtime defaults. `cmake --install --prefix` changes installation destinations, not previously compiled absolute operational defaults. To change those defaults, reconfigure and rebuild with the intended prefix/cache settings. State this clearly in installation help and packaging checks.
+Native socket length is checked at configuration/startup; reject unusable paths rather than truncate them. Escape generated C++ strings, INI paths and service syntax correctly; reject newline/NUL and service-profile paths that cannot be represented safely.
+
+`DESTDIR` stages files and is never compiled into runtime defaults. `cmake --install --prefix` changes installation destinations, not previously compiled absolute operational defaults. Cache variables initialized from the prefix retain their values when an existing build directory is reconfigured with a different prefix; use a fresh build directory or explicitly reset all three operational paths. State this clearly in installation help and packaging checks.
 
 ### 10.2 CLI behavior
 
@@ -576,7 +578,7 @@ Add `include(CTest)` and honor `BUILD_TESTING` around the test subtree so packag
 
 Provide standard `install` rules with components:
 
-- **Runtime:** `jobud`, `jobuctl` in `${CMAKE_INSTALL_BINDIR}`, LICENSE/notices, example config, and service templates. No live database, lock, socket, secret, account, enable/start action or writable runtime directory belongs in the package.
+- **Runtime:** `jobud`, `jobuctl` in `${CMAKE_INSTALL_BINDIR}` (`${CMAKE_INSTALL_PREFIX}/bin` with its default `bin` value), LICENSE/notices, example config, and service templates. No live database, lock, socket, secret, account, enable/start action or writable runtime directory belongs in the package.
 - **Development:** static libraries, the audited header closure, imported CMake targets/config/version files, and buildable SDK examples.
 - **Documentation:** protocol/client/CLI/operations guides and configuration reference under the configured documentation directory. Planning/handoff records need not be installed as user manuals.
 

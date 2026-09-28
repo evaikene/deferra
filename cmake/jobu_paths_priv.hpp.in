@@ -1,0 +1,11 @@
+#pragma once
+
+#include <string_view>
+
+namespace jb::jobu::detail {
+
+inline constexpr std::string_view default_config_path{"@JB_JOBU_SYSCONFDIR_CPP@/jobud.ini"};
+inline constexpr std::string_view default_database_path{"@JB_JOBU_STATEDIR_CPP@/jobu.sqlite3"};
+inline constexpr std::string_view default_socket_path{"@JB_JOBU_RUNDIR_CPP@/jobud.sock"};
+
+} // namespace jb::jobu::detail

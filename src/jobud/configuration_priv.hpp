@@ -1,6 +1,7 @@
 #pragma once
 
 #include "attribute.hpp"
+#include "error.hpp"
 #include "logging.hpp"
 #include "result.hpp"
 
@@ -20,6 +21,7 @@ struct StartupError {
     std::optional<std::string> key;
     std::optional<std::size_t> line;
     std::string                message;
+    jb::core::ErrorCategory    category{jb::core::ErrorCategory::InvalidArgument};
 };
 
 enum class LoggingFormat : std::uint8_t {
