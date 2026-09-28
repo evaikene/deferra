@@ -129,6 +129,13 @@ IniFile::IniFile(std::filesystem::path const& path)
     parse(path, include_stack);
 }
 
+auto IniFile::from_text(std::string_view text) -> IniFile
+{
+    IniFile ini;
+    ini.parse_text(text);
+    return ini;
+}
+
 auto IniFile::contains(std::string_view key) const -> bool
 {
     return find(key) != end(); // NOLINT(readability-container-contains) this is not a container
@@ -285,6 +292,37 @@ auto IniFile::parse(std::filesystem::path const& path, std::vector<std::filesyst
 
     include_stack.pop_back();
     return true;
+}
+
+auto IniFile::parse_text(std::string_view text) -> void
+{
+    std::size_t line_number = 0;
+    while (!text.empty()) {
+        ++line_number;
+
+        auto const line_end = text.find('\n');
+        auto const line     = text.substr(0, line_end);
+        if (line_end == std::string_view::npos) {
+            text = {};
+        }
+        else {
+            text.remove_prefix(line_end + 1);
+        }
+
+        ParsedLine parsed;
+        if (!parse_line(line, line_number, parsed, _error)) {
+            return;
+        }
+        if (parsed.key.empty()) {
+            continue;
+        }
+        if (parsed.key == "include") {
+            _error = make_error(line_number, "include directives are not allowed in text input");
+            return;
+        }
+
+        _values[std::string{parsed.key}].emplace_back(parsed.value);
+    }
 }
 
 } // namespace jb::core

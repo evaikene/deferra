@@ -54,7 +54,8 @@
 ///
 /// Full-line comments beginning with `#` or `;` are ignored. Inline comments
 /// after values are preserved, and include cycles or file and parse errors are
-/// reported through `ok()` and `error()`.
+/// reported through `ok()` and `error()`. Use `from_text()` to parse already
+/// loaded input without filesystem access; text input does not allow includes.
 #pragma once
 
 #include "event_loop_types.hpp"
@@ -93,6 +94,13 @@ public:
     ///
     /// File I/O and parse errors are stored in `error()` and reported by `ok()`.
     explicit IniFile(std::filesystem::path const& path);
+
+    /// Parses already loaded INI text without accessing the filesystem.
+    ///
+    /// Keys and values are copied, so `text` need not outlive the result. Include
+    /// directives are rejected, including empty ones. Parse failures are reported
+    /// through `ok()` and `error()` with a line number and fixed, value-free reason.
+    [[nodiscard]] static auto from_text(std::string_view text) -> IniFile;
 
     /// Returns true when the file was opened and parsed successfully.
     auto ok() const noexcept -> bool { return _error.empty(); }
@@ -156,7 +164,10 @@ public:
     auto interval_or(std::string_view key, Duration default_value) const -> IniValueResult<Duration>;
 
 private:
+    IniFile() = default;
+
     auto parse(std::filesystem::path const& path, std::vector<std::filesystem::path>& include_stack) -> bool;
+    auto parse_text(std::string_view text) -> void;
 
     map_type    _values;
     std::string _error;
