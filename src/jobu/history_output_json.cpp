@@ -1,6 +1,6 @@
 #include "history_json.hpp"
 
-#include "text_validation_priv.hpp"
+#include "text_validation.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -276,7 +276,7 @@ auto valid_chunk(AttemptOutputChunk const& chunk) -> bool
          (!chunk.data.empty() || chunk.retained_bytes != 0))) {
         return false;
     }
-    return chunk.encoding != OutputEncoding::Utf8 || detail::is_valid_utf8(jb::core::as_string_view(chunk.data));
+    return chunk.encoding != OutputEncoding::Utf8 || jb::core::is_valid_utf8(jb::core::as_string_view(chunk.data));
 }
 
 auto nullable_uint(std::optional<std::uint64_t> value) -> JsonValue
@@ -425,7 +425,7 @@ auto attempt_output_chunk_from_json(JsonValue const& value) -> CodecResult<Attem
         return reject<AttemptOutputChunk>(false);
     }
     if (chunk.encoding == OutputEncoding::Utf8) {
-        if (data->as_string().size() > maximum_slice_bytes || !detail::is_valid_utf8(data->as_string())) {
+        if (data->as_string().size() > maximum_slice_bytes || !jb::core::is_valid_utf8(data->as_string())) {
             return reject<AttemptOutputChunk>(false);
         }
         auto const view = jb::core::as_bytes(data->as_string());

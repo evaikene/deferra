@@ -1,8 +1,8 @@
-#include "text_validation_priv.hpp"
+#include "text_validation.hpp"
 
 #include <cstddef>
 
-namespace jb::jobu::detail {
+namespace jb::core {
 
 namespace {
 
@@ -82,4 +82,4 @@ auto has_ascii_control(std::string_view text) noexcept -> bool
     return false;
 }
 
-} // namespace jb::jobu::detail
+} // namespace jb::core

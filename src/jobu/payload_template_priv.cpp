@@ -5,7 +5,7 @@
 #include "http_job_payload_priv.hpp"
 #include "secret_repository_priv.hpp"
 #include "storage_failure_priv.hpp"
-#include "text_validation_priv.hpp"
+#include "text_validation.hpp"
 
 #include <algorithm>
 #include <map>
@@ -210,7 +210,7 @@ auto substitute_text(jb::core::JsonValue& value, SecretValues const& values) -> 
         return true;
     }
     auto const text = jb::core::as_string_view(reference_bytes(value, values));
-    if (!is_valid_utf8(text) || text.find('\0') != std::string_view::npos) {
+    if (!jb::core::is_valid_utf8(text) || text.find('\0') != std::string_view::npos) {
         return false;
     }
     value.data = std::string{text};

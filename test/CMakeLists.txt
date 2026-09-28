@@ -647,6 +647,17 @@ add_executable(${TARGET} core-json-public-header-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Core text validation public header and behavior tests
+set(TARGET "core-text-validation-public-header-test")
+add_executable(${TARGET} core-text-validation-public-header-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+set(TARGET "text-validation-test")
+add_executable(${TARGET} text-validation-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # EventLoop public header must compile as the first include.
 set(TARGET "core-event-loop-public-header-test")
 add_executable(${TARGET} core-event-loop-public-header-test.cpp)
@@ -669,6 +680,17 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 set(TARGET "net-http-public-header-test")
 add_executable(${TARGET} net-http-public-header-test.cpp)
 target_link_libraries(${TARGET} PRIVATE net-http)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+# HTTP URL validation public header and behavior tests
+set(TARGET "net-http-url-validation-public-header-test")
+add_executable(${TARGET} net-http-url-validation-public-header-test.cpp)
+target_link_libraries(${TARGET} PRIVATE net-http)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
+set(TARGET "net-http-url-validation-test")
+add_executable(${TARGET} net-http-url-validation-test.cpp)
+target_link_libraries(${TARGET} PRIVATE net-http Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JSON codec test
@@ -807,6 +829,10 @@ if(TARGET jobud)
         target_include_directories(jobud-startup-test PRIVATE ../src/jobud)
         target_link_libraries(jobud-startup-test PRIVATE jobu-sqlite jobu-http jobu-cli Catch2::Catch2WithMain)
         add_test(NAME jobud-startup-test COMMAND $<TARGET_FILE:jobud-startup-test>)
+
+        add_executable(jobud-configuration-test jobud-configuration-test.cpp support/temporary_directory.cpp)
+        target_link_libraries(jobud-configuration-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
+        add_test(NAME jobud-configuration-test COMMAND $<TARGET_FILE:jobud-configuration-test>)
     endif()
     add_test(NAME jobud-version COMMAND $<TARGET_FILE:jobud> --version)
     add_test(NAME jobud-usage COMMAND $<TARGET_FILE:jobud>)

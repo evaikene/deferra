@@ -7,7 +7,7 @@
 #include "json.hpp"
 #include "object_priv.hpp"
 #include "storage_failure_priv.hpp"
-#include "text_validation_priv.hpp"
+#include "text_validation.hpp"
 
 #include <cstdint>
 #include <limits>
@@ -477,8 +477,8 @@ auto HistoryService::read_output(AttemptOutputRequest const& request) -> Service
         if (end < chunk.retained_bytes) {
             chunk.next_offset = end;
         }
-        chunk.encoding =
-            detail::is_valid_utf8(jb::core::as_string_view(chunk.data)) ? OutputEncoding::Utf8 : OutputEncoding::Base64;
+        chunk.encoding = jb::core::is_valid_utf8(jb::core::as_string_view(chunk.data)) ? OutputEncoding::Utf8
+                                                                                       : OutputEncoding::Base64;
         return ServiceResult<AttemptOutputChunk>::success(std::move(chunk));
     });
 }

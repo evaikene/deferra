@@ -2,7 +2,7 @@
 
 #include "json.hpp"
 #include "payload_template_priv.hpp"
-#include "text_validation_priv.hpp"
+#include "text_validation.hpp"
 
 #include <cstddef>
 #include <utility>
@@ -17,7 +17,7 @@ constexpr std::size_t kMaximumJobNameBytes = 256;
 
 auto is_valid_job_name(std::string_view name) noexcept -> bool
 {
-    return name.size() <= kMaximumJobNameBytes && is_valid_utf8(name) && !has_ascii_control(name);
+    return name.size() <= kMaximumJobNameBytes && jb::core::is_valid_utf8(name) && !jb::core::has_ascii_control(name);
 }
 
 ValidatedJobPayload::ValidatedJobPayload(std::string serialized) noexcept

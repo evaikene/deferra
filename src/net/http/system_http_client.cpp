@@ -5,9 +5,9 @@
 #include "curl_runtime_priv.hpp"
 #include "http_validation_priv.hpp"
 #include "object_priv.hpp"
+#include "url_validation.hpp"
 
 #include <curl/curl.h>
-#include <curl/urlapi.h>
 
 #include <fstream>
 #include <ios>
@@ -57,6 +57,23 @@ auto runtime_unavailable(std::string_view reason) -> jb::core::Error
         .message  = "The system HTTP runtime does not satisfy the requested configuration",
         .detail   = std::string{reason},
     };
+}
+
+auto proxy_option_error(UrlValidationIssue issue) -> jb::core::Error
+{
+    switch (issue) {
+        case UrlValidationIssue::InvalidUrl:
+            return invalid_options("proxy.invalid_url");
+        case UrlValidationIssue::InvalidAbsoluteUrl:
+            return invalid_options("proxy.invalid_absolute_url");
+        case UrlValidationIssue::UnsupportedScheme:
+            return invalid_options("proxy.unsupported_scheme");
+        case UrlValidationIssue::UserinfoForbidden:
+            return invalid_options("proxy.userinfo_forbidden");
+        case UrlValidationIssue::Unavailable:
+            return runtime_unavailable("runtime.url_parser_unavailable");
+    }
+    return invalid_options("proxy.invalid_url");
 }
 
 auto unavailable() -> jb::core::Error
@@ -118,107 +135,6 @@ auto validate_ca_bundle(std::filesystem::path const& path) -> VoidResult
     auto input = std::ifstream{path, std::ios::binary};
     if (!input.is_open()) {
         return VoidResult::failure(invalid_options("ca_bundle.not_readable"));
-    }
-    return VoidResult::success();
-}
-
-struct CurlUrlDeleter {
-    void operator()(CURLU* url) const noexcept { curl_url_cleanup(url); }
-};
-
-struct CurlStringDeleter {
-    void operator()(char* value) const noexcept { curl_free(value); }
-};
-
-using CurlUrl    = std::unique_ptr<CURLU, CurlUrlDeleter>;
-using CurlString = std::unique_ptr<char, CurlStringDeleter>;
-
-constexpr auto ascii_lower(unsigned char value) noexcept -> unsigned char
-{
-    if (value >= static_cast<unsigned char>('A') && value <= static_cast<unsigned char>('Z')) {
-        return static_cast<unsigned char>(value + ('a' - 'A'));
-    }
-    return value;
-}
-
-auto ascii_equal(std::string_view lhs, std::string_view rhs) noexcept -> bool
-{
-    if (lhs.size() != rhs.size()) {
-        return false;
-    }
-    for (std::size_t index = 0; index < lhs.size(); ++index) {
-        if (ascii_lower(static_cast<unsigned char>(lhs[index])) !=
-            ascii_lower(static_cast<unsigned char>(rhs[index]))) {
-            return false;
-        }
-    }
-    return true;
-}
-
-auto get_url_part(CURLU* url, CURLUPart part, CurlString& value) -> bool
-{
-    char*      raw_value{nullptr};
-    auto const result = curl_url_get(url, part, &raw_value, 0);
-    value.reset(raw_value);
-    return result == CURLUE_OK;
-}
-
-auto has_userinfo_part(CURLU* url, CURLUPart part) -> jb::core::Result<bool, jb::core::Error>
-{
-    char*      raw_value{nullptr};
-    auto const result = curl_url_get(url, part, &raw_value, 0);
-    auto       value  = CurlString{raw_value};
-    if (result == CURLUE_OK) {
-        return jb::core::Result<bool, jb::core::Error>::success(true);
-    }
-    auto const missing_part = part == CURLUPART_USER ? CURLUE_NO_USER : CURLUE_NO_PASSWORD;
-    if (result == missing_part) {
-        return jb::core::Result<bool, jb::core::Error>::success(false);
-    }
-    return jb::core::Result<bool, jb::core::Error>::failure(invalid_options("proxy.invalid_url"));
-}
-
-auto validate_proxy(std::string const& proxy, detail::CurlRuntimeCapabilities const& capabilities) -> VoidResult
-{
-    if (proxy.empty() || proxy.find('\0') != std::string::npos) {
-        return VoidResult::failure(invalid_options("proxy.invalid_url"));
-    }
-
-    auto url = CurlUrl{curl_url()};
-    if (!url) {
-        return VoidResult::failure(runtime_unavailable("runtime.url_parser_unavailable"));
-    }
-    if (curl_url_set(url.get(), CURLUPART_URL, proxy.c_str(), 0) != CURLUE_OK) {
-        return VoidResult::failure(invalid_options("proxy.invalid_url"));
-    }
-
-    auto scheme = CurlString{};
-    auto host   = CurlString{};
-    if (!get_url_part(url.get(), CURLUPART_SCHEME, scheme) || !get_url_part(url.get(), CURLUPART_HOST, host) || !host ||
-        std::string_view{host.get()}.empty()) {
-        return VoidResult::failure(invalid_options("proxy.invalid_absolute_url"));
-    }
-
-    auto const is_http  = scheme && ascii_equal(scheme.get(), "http");
-    auto const is_https = scheme && ascii_equal(scheme.get(), "https");
-    if (!is_http && !is_https) {
-        return VoidResult::failure(invalid_options("proxy.unsupported_scheme"));
-    }
-
-    auto user_present = has_userinfo_part(url.get(), CURLUPART_USER);
-    if (!user_present) {
-        return VoidResult::failure(std::move(user_present).error());
-    }
-    auto password_present = has_userinfo_part(url.get(), CURLUPART_PASSWORD);
-    if (!password_present) {
-        return VoidResult::failure(std::move(password_present).error());
-    }
-    if (*user_present || *password_present) {
-        return VoidResult::failure(invalid_options("proxy.userinfo_forbidden"));
-    }
-
-    if (is_https && !capabilities.supports_https_proxy) {
-        return VoidResult::failure(runtime_unavailable("runtime.https_proxy_unavailable"));
     }
     return VoidResult::success();
 }
@@ -620,9 +536,12 @@ auto SystemHttpClient::create(jb::core::EventLoop& loop, SystemHttpClientOptions
         return ClientResult::failure(std::move(capabilities).error());
     }
     if (options.proxy) {
-        auto proxy = validate_proxy(*options.proxy, *capabilities);
+        auto proxy = validate_url(*options.proxy);
         if (!proxy) {
-            return ClientResult::failure(std::move(proxy).error());
+            return ClientResult::failure(proxy_option_error(proxy.error()));
+        }
+        if (*proxy == UrlScheme::Https && !capabilities->supports_https_proxy) {
+            return ClientResult::failure(runtime_unavailable("runtime.https_proxy_unavailable"));
         }
     }
 
