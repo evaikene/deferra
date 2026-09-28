@@ -109,8 +109,6 @@ target_sources(${TARGET}
         storage_failure_priv.hpp
         system_info.cpp
         system_info_rpc.cpp
-        text_validation_priv.cpp
-        text_validation_priv.hpp
         utc_timestamp.cpp
     PUBLIC
         attempt.hpp

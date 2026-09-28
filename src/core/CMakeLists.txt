@@ -29,6 +29,7 @@ set(HDRS
     shared_data.hpp
     signal.hpp
     timer.hpp
+    text_validation.hpp
     time_source.hpp
     utils.hpp
     uuid.hpp
@@ -68,6 +69,7 @@ set(SRCS
     process_request_priv.cpp
     thread_context.cpp
     timer.cpp
+    text_validation.cpp
     time_source.cpp
     utils.cpp
     uuid.cpp

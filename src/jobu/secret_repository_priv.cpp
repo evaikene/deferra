@@ -3,7 +3,7 @@
 #include "domain_storage_priv.hpp"
 #include "job_validation_priv.hpp"
 #include "query.hpp"
-#include "text_validation_priv.hpp"
+#include "text_validation.hpp"
 #include "value.hpp"
 
 #include <cstdint>
@@ -70,7 +70,7 @@ auto invalid_record(std::string_view reason) -> jb::core::Error
 
 auto valid_field_path(std::string_view path) noexcept -> bool
 {
-    return !path.empty() && is_valid_utf8(path) && !has_ascii_control(path);
+    return !path.empty() && jb::core::is_valid_utf8(path) && !jb::core::has_ascii_control(path);
 }
 
 auto affected_rows(jb::db::Query const& query) -> RepositoryResult<std::size_t>

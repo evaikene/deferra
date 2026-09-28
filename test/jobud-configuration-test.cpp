@@ -170,6 +170,12 @@ TEST_CASE("daemon configuration checks numbers paths and timezone", "[jobud][con
     CHECK(failure("database.path = relative.db\n").key == "database.path");
     CHECK(failure("socket.path = /tmp/" + std::string(200, 'a') + "\n").key == "socket.path");
     CHECK(failure("http.proxy = http://user:pass@proxy.test\n").key == "http.proxy");
+    for (auto const* malformed_proxy : {"http://proxy.test:99999", "http://[invalid]:8080"}) {
+        auto const error = failure(std::string{"http.proxy = "} + malformed_proxy + "\n");
+        CHECK(error.code == "jobud.config.invalid");
+        CHECK(error.key == "http.proxy");
+        CHECK(error.message.find(malformed_proxy) == std::string::npos);
+    }
     CHECK(failure("http.ca_bundle = /missing/jobu-ca.pem\n").key == "http.ca_bundle");
     CHECK(failure("schedule.default_timezone = ../UTC\n").key == "schedule.default_timezone");
     CHECK(failure("history.default_retention = 9223372036855s\n").key == "history.default_retention");

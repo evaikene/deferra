@@ -1,7 +1,7 @@
 #include "attribute_codec_priv.hpp"
 
 #include "attribute_registry.hpp"
-#include "text_validation_priv.hpp"
+#include "text_validation.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -169,7 +169,7 @@ auto typed_value_to_json(AttributeValue const& value, std::size_t depth) -> Resu
         encoded_value = make_json(*number);
     }
     else if (auto const* text = std::get_if<std::string>(&value.data)) {
-        if (!is_valid_utf8(*text)) {
+        if (!jb::core::is_valid_utf8(*text)) {
             return Result<jb::core::JsonValue>::failure(
                 attribute_input_error("JobU attribute text is not valid UTF-8"));
         }
@@ -208,7 +208,7 @@ auto typed_value_to_json(AttributeValue const& value, std::size_t depth) -> Resu
         else {
             auto object = jb::core::JsonValue::Object{};
             for (auto const& [name, entry] : std::get<AttributeValue::Map>(value.data)) {
-                if (!is_valid_utf8(name)) {
+                if (!jb::core::is_valid_utf8(name)) {
                     return Result<jb::core::JsonValue>::failure(
                         attribute_input_error("JobU attribute text is not valid UTF-8"));
                 }
@@ -241,7 +241,7 @@ auto typed_value_from_json(jb::core::JsonValue const& value, std::size_t depth) 
     }
 
     auto const& tag = type->as_string();
-    if (!is_valid_utf8(tag)) {
+    if (!jb::core::is_valid_utf8(tag)) {
         return document_failure<AttributeValue>("invalid_utf8");
     }
     if (tag == "boolean") {
@@ -267,7 +267,7 @@ auto typed_value_from_json(jb::core::JsonValue const& value, std::size_t depth) 
         if (!payload->is_string()) {
             return document_failure<AttributeValue>("string_shape");
         }
-        if (!is_valid_utf8(payload->as_string())) {
+        if (!jb::core::is_valid_utf8(payload->as_string())) {
             return document_failure<AttributeValue>("invalid_utf8");
         }
         return Result<AttributeValue>::success({.data = payload->as_string()});
@@ -313,7 +313,7 @@ auto typed_value_from_json(jb::core::JsonValue const& value, std::size_t depth) 
     }
     auto result = AttributeValue::Map{};
     for (auto const& [name, entry] : payload->as_object()) {
-        if (!is_valid_utf8(name)) {
+        if (!jb::core::is_valid_utf8(name)) {
             return document_failure<AttributeValue>("invalid_utf8");
         }
         auto decoded = typed_value_from_json(entry, depth + 1U);
@@ -424,7 +424,7 @@ auto decode_attribute_document(AttributeRegistry const&   registry,
 
     auto result = AttributeSet{};
     for (auto const& [name, encoded] : values->as_object()) {
-        if (!is_valid_utf8(name)) {
+        if (!jb::core::is_valid_utf8(name)) {
             return document_failure<AttributeSet>("invalid_utf8");
         }
         auto const* definition = registry.find(name);

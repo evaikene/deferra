@@ -1,6 +1,6 @@
 #include "queue_validation_priv.hpp"
 
-#include "text_validation_priv.hpp"
+#include "text_validation.hpp"
 
 #include <cstddef>
 
@@ -46,13 +46,13 @@ auto has_reserved_deletion_suffix(std::string_view name) noexcept -> bool
 
 auto is_valid_queue_name(std::string_view name) noexcept -> bool
 {
-    return !name.empty() && name.size() <= kMaximumQueueNameBytes && is_valid_utf8(name) && !has_ascii_control(name) &&
-           !has_reserved_deletion_suffix(name);
+    return !name.empty() && name.size() <= kMaximumQueueNameBytes && jb::core::is_valid_utf8(name) &&
+           !jb::core::has_ascii_control(name) && !has_reserved_deletion_suffix(name);
 }
 
 auto is_valid_idempotency_key(std::string_view key) noexcept -> bool
 {
-    return !key.empty() && key.size() <= kMaximumIdempotencyKeyBytes && is_valid_utf8(key);
+    return !key.empty() && key.size() <= kMaximumIdempotencyKeyBytes && jb::core::is_valid_utf8(key);
 }
 
 } // namespace jb::jobu::detail

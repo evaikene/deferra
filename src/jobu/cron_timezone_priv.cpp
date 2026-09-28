@@ -1,7 +1,7 @@
 #include "cron_timezone_priv.hpp"
 
 #include "file.hpp"
-#include "text_validation_priv.hpp"
+#include "text_validation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -969,8 +969,8 @@ auto gap_shift(TimezoneData const& data, TimezoneLocalTimePoint local)
 
 auto valid_timezone_name(std::string_view timezone) noexcept -> bool
 {
-    if (timezone.empty() || timezone.size() > 255 || !detail::is_valid_utf8(timezone) ||
-        detail::has_ascii_control(timezone) || timezone.find('\\') != std::string_view::npos ||
+    if (timezone.empty() || timezone.size() > 255 || !jb::core::is_valid_utf8(timezone) ||
+        jb::core::has_ascii_control(timezone) || timezone.find('\\') != std::string_view::npos ||
         timezone.front() == '/') {
         return false;
     }

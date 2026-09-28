@@ -2,7 +2,7 @@
 
 #include "payload_template_priv.hpp"
 #include "secret_repository_priv.hpp"
-#include "text_validation_priv.hpp"
+#include "text_validation.hpp"
 #include "utc_timestamp.hpp"
 
 #include <cstddef>
@@ -228,7 +228,7 @@ auto set_secret_request_from_json(JsonValue const& value) -> ConversionResult<Se
     auto request = SetSecretRequest{.name = name->as_string()};
     if (encoding->as_string() == "utf8") {
         auto const& text = data->as_string();
-        if (!detail::is_valid_utf8(text)) {
+        if (!jb::core::is_valid_utf8(text)) {
             return reject<SetSecretRequest>(true);
         }
         if (text.size() > detail::kMaximumSecretValueBytes) {

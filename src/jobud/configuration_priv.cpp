@@ -2,10 +2,10 @@
 
 #include "attribute_registry.hpp"
 #include "cron.hpp"
-#include "http_validation_priv.hpp"
+#include "http/url_validation.hpp"
 #include "ini_file.hpp"
 #include "json.hpp"
-#include "text_validation_priv.hpp"
+#include "text_validation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -170,12 +170,12 @@ auto assign_boolean(std::optional<bool>& target, std::string_view value) -> bool
 
 auto valid_name(std::string_view value) -> bool
 {
-    return !value.empty() && !jb::jobu::detail::has_ascii_control(value);
+    return !value.empty() && !jb::core::has_ascii_control(value);
 }
 
 auto absolute_path(std::string_view value) -> std::optional<std::filesystem::path>
 {
-    if (value.empty() || jb::jobu::detail::has_ascii_control(value)) {
+    if (value.empty() || jb::core::has_ascii_control(value)) {
         return std::nullopt;
     }
     auto path = std::filesystem::path{value};
@@ -296,7 +296,7 @@ auto parse_setting(ConfigurationInput& config, std::string_view key, std::string
         if (value.empty()) {
             config.http_proxy.reset();
         }
-        else if (!jb::net::detail::validate_http_url(value)) {
+        else if (!jb::net::http::validate_url(value)) {
             return Status::Invalid;
         }
         else {
@@ -411,7 +411,7 @@ auto validate_rpc_budgets(ConfigurationInput& config) -> std::optional<StartupEr
 auto parse_configuration_text(std::string_view text) -> ConfigurationResult
 {
     if (text.size() > kMaximumConfigurationBytes || text.find('\0') != std::string_view::npos ||
-        !jb::jobu::detail::is_valid_utf8(text)) {
+        !jb::core::is_valid_utf8(text)) {
         return ConfigurationResult::failure(invalid());
     }
 

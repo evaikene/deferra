@@ -456,6 +456,7 @@ TEST_CASE("system HTTP client validates owning options without leaking their val
     options                 = SystemHttpClientOptions{.proxy = secret_proxy};
     client                  = SystemHttpClient::create(*app.event_loop(), options);
     check_safe_option_error(client, "secret-user");
+    CHECK(client.error().detail == "proxy.userinfo_forbidden");
     CHECK(client.error().message.find("secret-password") == std::string::npos);
     CHECK(client.error().detail.find("secret-password") == std::string::npos);
 
@@ -466,6 +467,13 @@ TEST_CASE("system HTTP client validates owning options without leaking their val
     options = SystemHttpClientOptions{.proxy = "ftp://example.test"};
     client  = SystemHttpClient::create(*app.event_loop(), options);
     check_safe_option_error(client, "ftp://example.test");
+
+    for (auto const* malformed_proxy : {"http://proxy.test:99999", "http://[invalid]:8080"}) {
+        options = SystemHttpClientOptions{.proxy = malformed_proxy};
+        client  = SystemHttpClient::create(*app.event_loop(), options);
+        check_safe_option_error(client, malformed_proxy);
+        CHECK(client.error().detail == "proxy.invalid_url");
+    }
 
     options = SystemHttpClientOptions{.proxy = "http://127.0.0.1:1"};
     client  = SystemHttpClient::create(*app.event_loop(), options);

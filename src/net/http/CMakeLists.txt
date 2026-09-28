@@ -20,8 +20,10 @@ target_sources(${TARGET}
         http_url_priv.cpp
         http_url_priv.hpp
         system_http_client.cpp
+        url_validation.cpp
     PUBLIC
         system_http_client.hpp
+        url_validation.hpp
 )
 
 target_compile_features(${TARGET} PUBLIC cxx_std_20)

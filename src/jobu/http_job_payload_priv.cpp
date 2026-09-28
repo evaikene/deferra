@@ -3,7 +3,7 @@
 #include "attempt.hpp"
 #include "http_validation_priv.hpp"
 #include "payload_template_priv.hpp"
-#include "text_validation_priv.hpp"
+#include "text_validation.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -226,7 +226,7 @@ auto decode_body(jb::core::JsonValue const* value) -> DecodeResult<std::optional
     }
 
     if (encoding->as_string() == "utf8") {
-        if (!is_valid_utf8(data->as_string())) {
+        if (!jb::core::is_valid_utf8(data->as_string())) {
             return DecodeResult<std::optional<jb::core::ByteBuffer>>::failure(JobPayloadIssue::InvalidBody);
         }
         auto const bytes = jb::core::as_bytes(data->as_string());
