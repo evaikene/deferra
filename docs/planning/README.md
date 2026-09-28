@@ -26,6 +26,7 @@ shared verification records outside this directory.
 | [JobU Phase 7 closure code-level design](jobu-phase7-closure-code-design.md) | Corrects cancellation rollback failure handling and records final Linux verification with explicit native coverage limits. |
 | [JobU Phase 8 code-level design](jobu-phase8-code-design.md) | Defines secrets, complete RPC, and `jobuctl`. |
 | [JobU Phase 8 closure code-level design, revision 2](jobu-phase8-closure-code-design-r2.md) | Defines attempt validation, client delivery lifetime, one-time terminal jobs, list filters, CLI secret references, and closure verification gates. |
+| [JobU Phase 9 code-level design](jobu-phase9-code-design.md) | Retention, observability, security, and packaging |
 
 ## Authority
 
