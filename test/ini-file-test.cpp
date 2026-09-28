@@ -71,6 +71,70 @@ empty =
     CHECK(ini.value("empty") == "");
 }
 
+TEST_CASE("INI text and file parsing share the same key and value grammar", "[core][ini]")
+{
+    std::string source = "# comment\r\n"
+                         "; another comment\n"
+                         "queue.priority = default\r\n"
+                         "queue.priority = high\n"
+                         "quoted = '  keep spaces  '\n"
+                         "inline = value # kept verbatim\n"
+                         "empty =\n"
+                         "last = no final newline";
+
+    auto const path = write_ini(source);
+    IniFile    from_file{path};
+    auto       from_text = IniFile::from_text(source);
+    REQUIRE(from_file.ok());
+    REQUIRE(from_text.ok());
+
+    auto const file_entries = IniFile::map_type{from_file.begin(), from_file.end()};
+    auto const text_entries = IniFile::map_type{from_text.begin(), from_text.end()};
+    CHECK(text_entries == file_entries);
+    CHECK(from_text.value("queue.priority") == "high");
+    CHECK(from_text.value("quoted") == "  keep spaces  ");
+    CHECK(from_text.value("inline") == "value # kept verbatim");
+
+    source.assign(source.size(), 'x');
+    CHECK(from_text.value("last") == "no final newline");
+}
+
+TEST_CASE("INI text parsing rejects malformed lines without echoing values", "[core][ini]")
+{
+    auto const missing_separator = IniFile::from_text("valid = value\nsecret-value\n");
+    CHECK_FALSE(missing_separator.ok());
+    CHECK(missing_separator.error() == "line 2: expected key=value");
+
+    auto const path = write_ini("valid = value\nsecret-value\n");
+    IniFile    from_file{path};
+    CHECK_FALSE(from_file.ok());
+    CHECK(from_file.error().ends_with(missing_separator.error()));
+
+    auto const empty_key = IniFile::from_text(" = secret-value\n");
+    CHECK_FALSE(empty_key.ok());
+    CHECK(empty_key.error() == "line 1: empty key");
+
+    auto const unterminated_quote = IniFile::from_text("key = 'secret-value\n");
+    CHECK_FALSE(unterminated_quote.ok());
+    CHECK(unterminated_quote.error() == "line 1: unterminated quoted value");
+}
+
+TEST_CASE("INI text parsing rejects includes with value-free errors", "[core][ini]")
+{
+    auto const path  = write_ini("loaded = from-file\n");
+    auto const input = "before = present\ninclude = " + path.string() + "\n";
+
+    auto const included = IniFile::from_text(input);
+    CHECK_FALSE(included.ok());
+    CHECK(included.error() == "line 2: include directives are not allowed in text input");
+    CHECK_FALSE(included.contains("loaded"));
+    CHECK(included.error().find(path.string()) == std::string_view::npos);
+
+    auto const empty_include = IniFile::from_text("include =\n");
+    CHECK_FALSE(empty_include.ok());
+    CHECK(empty_include.error() == "line 1: include directives are not allowed in text input");
+}
+
 TEST_CASE("INI file typed getters return parsed values and defaults", "[core][ini]")
 {
     auto const path = write_ini(R"(

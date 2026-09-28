@@ -933,6 +933,12 @@ add_executable(${TARGET} ini-file-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# INI public header must compile as the first include.
+set(TARGET "core-ini-file-public-header-test")
+add_executable(${TARGET} core-ini-file-public-header-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+
 # Utils test
 set(TARGET "utils-test")
 add_executable(${TARGET} utils-test.cpp)
