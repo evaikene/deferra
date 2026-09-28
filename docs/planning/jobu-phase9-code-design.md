@@ -1,12 +1,12 @@
-# JobU Phase 9: code-level design — Revision 1
+# JobU Phase 9: code-level design — Revision 2
 
-Revision: **1**  
-Date: 2026-09-27  
-Status: proposed implementation contract; no implementation is claimed by this document  
-Repository: <https://github.com/evaikene/deferra>  
-Baseline: [`cebb4cb278942eb5eb939d2dc64ab9129e035841`](https://github.com/evaikene/deferra/commit/cebb4cb278942eb5eb939d2dc64ab9129e035841)  
-Download: `jobu-phase9-code-design-r1.md`  
-Repository destination: `docs/planning/jobu-phase9-code-design-r1.md`
+- Revision: **2**
+- Date: 2026-09-28
+- Status: proposed implementation contract; no implementation is claimed by this document
+- Repository: <https://github.com/evaikene/deferra>
+- Baseline: [`cebb4cb278942eb5eb939d2dc64ab9129e035841`](https://github.com/evaikene/deferra/commit/cebb4cb278942eb5eb939d2dc64ab9129e035841)
+- Download: `jobu-phase9-code-design-r2.md`
+- Repository destination: `docs/planning/jobu-phase9-code-design.md`
 
 ## 1. Phase boundary and authority
 
@@ -149,7 +149,7 @@ Current-format creation, marker write and validation commit atomically. Formats 
 
 ### 4.1 Exact retention rule
 
-`history.default_retention_seconds` defaults to **2,592,000 seconds (30 days)**. Queue `history_retention` retains its existing meaning: null inherits the current daemon default, zero is unlimited, positive is an override.
+`history.default_retention` defaults to **2,592,000 seconds (30 days)**. Queue `history_retention` retains its existing meaning: null inherits the current daemon default, zero is unlimited, positive is an override.
 
 For each retained run, use its own persisted `queue_id` and that queue's current retention policy, including a deleted queue. Do not use the job definition's current queue after a move. Policy edits affect future cleanup immediately; payload and execution attributes remain snapshotted as before.
 
@@ -384,7 +384,7 @@ Add `IniFile::from_text(std::string_view)` returning an `IniFile` whose `ok()/er
 
 The daemon opens the selected file with checked ownership/type and no final-component symlink following, reads at most **64 KiB**, and passes the owned text to `from_text`. Repeated keys are errors in daemon configuration even though the generic parser permits them. Section headings, includes, unknown keys, embedded NULs, malformed UTF-8, and trailing number garbage are rejected. Full-line `#`/`;` comments remain supported; there are no inline comments. No environment-variable, tilde, command, or secret substitution is performed.
 
-Accept only lowercase `true` and `false` for daemon booleans. Parse integers with full-consumption checked conversion; reject negative unsigned quantities and overflow before unit conversion. Do not use the generic permissive boolean accessor. Paths and URLs have their own validators. Configuration is read once at startup; no SIGHUP reload or mutable shared configuration object is introduced.
+Daemon booleans accept `true`, `1`, `on`, `yes` and `false`, `0`, `off`, `no`, with ASCII case-insensitive words; reject every other token. Do not use the generic permissive boolean accessor, which maps unknown tokens to false. Bare interval values count seconds, while lowercase `s`, `m`, `h`, and `d` suffixes select seconds, minutes, hours, and days. Bare byte quantities count bytes, while lowercase `k`, `m`, and `g` suffixes use 1024-based multipliers. Parse the unsigned number with full consumption; reject signs, trailing garbage, and overflow before multiplying or checking each key's range. Paths and URLs have their own validators. Configuration is read once at startup; no SIGHUP reload or mutable shared configuration object is introduced.
 
 ### 8.2 Precedence and command-line behavior
 
@@ -420,15 +420,15 @@ The following table is the complete initial key set, apart from the registry-dri
 | `http.proxy` | unset | Existing validated explicit HTTP proxy contract; never log credentials/URL. |
 | `http.ca_bundle` | system trust | Absolute readable regular file when supplied; checked again under final identity by HTTP setup. |
 | `schedule.default_timezone` | `UTC` | Valid IANA zone supported by the existing CronEngine. |
-| `history.default_retention_seconds` | `2592000` | Nonnegative; zero unlimited; checked durable-time range. |
-| `history.sweep_interval_seconds` | `60` | 1..86400. |
+| `history.default_retention` | `30d` (2592000 seconds) | Nonnegative; zero unlimited; checked durable-time range. |
+| `history.sweep_interval` | `1m` (60 seconds) | 1..86400 seconds. |
 | `history.batch_size` | `100` | 1..1000 parent records. |
-| `telemetry.checkpoint_interval_seconds` | `30` | 1..86400; a sweep interval, not a guaranteed crash-loss bound. |
-| `rpc.header_limit_bytes` | `16384` | 1024..65536. |
-| `rpc.body_limit_bytes` | `1048576` | 1048576..16777216; existing narrower method-specific request/result limits remain. |
+| `telemetry.checkpoint_interval` | `30s` | 1..86400 seconds; a sweep interval, not a guaranteed crash-loss bound. |
+| `rpc.header_limit_bytes` | `16k` (16384 bytes) | 1024..65536 bytes. |
+| `rpc.body_limit_bytes` | `1m` (1048576 bytes) | 1048576..16777216 bytes; existing narrower method-specific request/result limits remain. |
 | `rpc.max_batch_entries` | `64` | 1..64; keep the existing application budget. |
 | `rpc.max_connections` | `128` | 1..4096. |
-| `rpc.queued_output_bytes` | `2097152` | At least body limit + header limit; at most 64 MiB, with checked addition. |
+| `rpc.queued_output_bytes` | `2m` (2097152 bytes) | At least body limit + header limit; at most 64 MiB, with checked addition. |
 | `logging.level` | `info` | `fatal`, `error`, `warning`, `info`, `debug1`, `debug2`, `debug3`. |
 | `logging.format` | `json` | `json` or `text`. |
 | `defaults.<registered attribute name>` | existing built-in registry layer | One strict JSON value per key, decoded and validated by the existing attribute registry. |
@@ -452,10 +452,13 @@ http.concurrency = 16
 cli.allow_root = false
 daemon.allow_root = false
 schedule.default_timezone = UTC
-history.default_retention_seconds = 2592000
-history.sweep_interval_seconds = 60
+history.default_retention = 30d
+history.sweep_interval = 1m
 history.batch_size = 100
-telemetry.checkpoint_interval_seconds = 30
+telemetry.checkpoint_interval = 30s
+rpc.header_limit_bytes = 16k
+rpc.body_limit_bytes = 1m
+rpc.queued_output_bytes = 2m
 logging.level = info
 logging.format = json
 ```
