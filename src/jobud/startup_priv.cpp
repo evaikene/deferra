@@ -61,7 +61,8 @@ auto assign_text(std::optional<std::string>& target, std::string_view value) -> 
 auto absolute_cli_path(std::filesystem::path const& path, std::filesystem::path const& directory)
     -> std::filesystem::path
 {
-    return (path.is_absolute() ? path : directory / path).lexically_normal();
+    // Keep ".." components: removing them before traversal changes the target after a symlink.
+    return path.is_absolute() ? path : directory / path;
 }
 
 auto valid_path(std::filesystem::path const& path) -> bool

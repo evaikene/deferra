@@ -828,6 +828,7 @@ if(TARGET jobud)
         target_include_directories(jobud-startup-test PRIVATE ../src/jobud)
         target_link_libraries(jobud-startup-test PRIVATE jobud-runtime jobu-sqlite jobu-http jobu-cli Catch2::Catch2WithMain)
         add_test(NAME jobud-startup-test COMMAND $<TARGET_FILE:jobud-startup-test>)
+        set_tests_properties(jobud-startup-test PROPERTIES TIMEOUT 30)
 
         add_executable(jobud-configuration-test jobud-configuration-test.cpp support/temporary_directory.cpp)
         target_link_libraries(jobud-configuration-test PRIVATE jobud-runtime Catch2::Catch2WithMain)

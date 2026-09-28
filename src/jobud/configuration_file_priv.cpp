@@ -44,8 +44,9 @@ auto read_configuration_file(std::filesystem::path const& path, bool allow_missi
 {
     using ReadResult = jb::core::Result<std::optional<std::string>, StartupError>;
 
+    // Nonblocking open lets us reject FIFOs without waiting for a writer. Regular-file reads are unaffected.
     // The descriptor, rather than a later pathname lookup, owns the file we inspect and read.
-    auto const raw = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    auto const raw = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (raw < 0) {
         if (allow_missing && errno == ENOENT) {
             return ReadResult::success(std::nullopt);

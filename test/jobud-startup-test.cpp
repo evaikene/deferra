@@ -32,6 +32,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <sys/stat.h>
 #include <utility>
 #include <vector>
 
@@ -375,6 +376,52 @@ TEST_CASE("daemon configuration file selection is bounded and read only", "[jobu
     REQUIRE_FALSE(linked);
     CHECK(linked.error().code == "jobud.config.read_failed");
     CHECK(linked.error().category == ErrorCategory::PermissionDenied);
+}
+
+TEST_CASE("daemon configuration rejects a FIFO without waiting for a writer", "[jobud][startup]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   fifo_path = directory.path() / "jobud.ini";
+    REQUIRE(::mkfifo(fifo_path.c_str(), 0600) == 0);
+
+    auto arguments = parse_arguments({"--config", fifo_path.string()});
+    REQUIRE(arguments);
+    auto loaded = load_configuration(*arguments, compiled_paths(), directory.path());
+    REQUIRE_FALSE(loaded);
+    CHECK(loaded.error().code == "jobud.config.read_failed");
+    CHECK(loaded.error().category == ErrorCategory::PermissionDenied);
+}
+
+TEST_CASE("daemon CLI paths preserve symlink traversal through dot-dot", "[jobud][startup]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   target = directory.path() / "target";
+    std::filesystem::create_directories(target / "child");
+    std::filesystem::create_directory_symlink(target / "child", directory.path() / "link");
+    std::ofstream{target / "jobud.ini"} << "cli.concurrency = 9\n";
+    std::ofstream{directory.path() / "jobud.ini"} << "unknown = wrong-file\n";
+    std::ofstream{target / "ca.pem"} << "test CA bundle";
+
+    auto arguments = parse_arguments({"--config",
+                                      "link/../jobud.ini",
+                                      "--database",
+                                      "link/../state.sqlite",
+                                      "--socket",
+                                      "/tmp/jobu-link/../daemon.sock",
+                                      "--http-ca-bundle",
+                                      "link/../ca.pem"});
+    REQUIRE(arguments);
+
+    auto loaded = load_configuration(*arguments, compiled_paths(), directory.path());
+    REQUIRE(loaded);
+    CHECK(loaded->input.cli_concurrency == 9U);
+    CHECK(loaded->source_path == directory.path() / "link/../jobud.ini");
+
+    auto resolved = resolve_startup_options(*arguments, loaded->input, compiled_paths(), directory.path());
+    REQUIRE(resolved);
+    CHECK(resolved->database_path == directory.path() / "link/../state.sqlite");
+    CHECK(resolved->socket_path == "/tmp/jobu-link/../daemon.sock");
+    CHECK(resolved->http_ca_bundle == directory.path() / "link/../ca.pem");
 }
 
 TEST_CASE("daemon composition applies live identity policy and warns once only for unsafe root", "[jobud][startup]")
