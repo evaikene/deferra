@@ -252,7 +252,8 @@ namespace jb::jobu {
 ///
 /// Exactly one queue selector, `schedule`, and object-valued `payload` are required. Omitted `type`, `priority`, and
 /// `attributes` members use their typed request defaults. Unknown request and nested schedule members are rejected.
-/// Cron schedules are structurally accepted for service-level validation and occurrence calculation.
+/// Cron input preserves an omitted timezone for service-level default resolution; an explicit empty timezone is
+/// rejected. Expression and timezone availability remain service-level validation.
 /// A once schedule with at:"now" is creation-only; update requests and job responses require concrete timestamps.
 ///
 /// @param value JSON request object to decode without retaining references to it.
@@ -301,7 +302,8 @@ namespace jb::jobu {
 ///
 /// `job_id`, a representable `expected_revision`, and at least one effective change are required. Missing `name` leaves
 /// it unchanged, JSON null clears it, and a string replaces it. Unknown request and nested schedule members are
-/// rejected. Revision positivity and cron availability remain ManagementService policy.
+/// rejected. An omitted cron timezone uses the current daemon default; an omitted entire schedule stays unchanged.
+/// Revision positivity and cron availability remain ManagementService policy.
 ///
 /// @param value JSON request object to decode without retaining references to it.
 /// @param registry Attribute registry borrowed while decoding partial Job-scope changes.

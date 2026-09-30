@@ -66,8 +66,10 @@ of each month, use `0 0 1 * *`.
 ## Timezones and daylight saving time
 
 Use `UTC` or an IANA timezone name available on the daemon, such as
-`Europe/Tallinn`. `jobuctl` defaults to `UTC` when `--timezone` is omitted;
-the JSON-RPC cron schedule object requires an explicit `timezone`. A schedule
+`Europe/Tallinn`. Omitting `--timezone` or the JSON-RPC input's `timezone`
+uses the daemon's `schedule.default_timezone` (normally `UTC`). Explicit
+`UTC` always selects UTC; an empty timezone is invalid. Stored schedules and
+job responses contain the resolved timezone. A schedule
 at `09:00` in a named timezone follows local 09:00 as its UTC offset changes.
 Returned occurrence timestamps are always UTC and end in `Z`.
 

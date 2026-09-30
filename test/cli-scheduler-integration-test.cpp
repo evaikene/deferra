@@ -1079,7 +1079,11 @@ TEST_CASE("real mixed completions preserve recurring successors and suspension d
     fixture.cron.set_occurrences(schedule, {at_seconds(110), at_seconds(200), at_seconds(300)});
     fixture.channels.push_back(std::make_unique<HelperChannel>(fixture.directory.path() / "recurring"));
     auto const recurring =
-        fixture.create(queue, JobType::Cli, helper_payload({"wait", fixture.channels.back()->path()}), {}, schedule);
+        fixture.create(queue,
+                       JobType::Cli,
+                       helper_payload({"wait", fixture.channels.back()->path()}),
+                       {},
+                       CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone});
     auto const http = fixture.http_job(queue, "/draining");
     fixture.time.set_utc(at_seconds(110));
     REQUIRE(fixture.scheduler->start());

@@ -192,15 +192,22 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         rpc_options.response_limit_error_code = "jobu.response.too_large";
 
         // Recovery is complete. Establish all failure receivers before start() can dispatch synchronously.
-        scheduler  = std::make_unique<Scheduler>(database,
-                                                 attributes,
-                                                 cron,
-                                                 uuid_generator,
-                                                 time_source,
-                                                 execution,
-                                                 secret_provider,
-                                                 scheduler_options(options));
-        management = std::make_unique<ManagementService>(database, attributes, cron, uuid_generator, time_source);
+        scheduler = std::make_unique<Scheduler>(database,
+                                                attributes,
+                                                cron,
+                                                uuid_generator,
+                                                time_source,
+                                                execution,
+                                                secret_provider,
+                                                scheduler_options(options));
+        management =
+            std::make_unique<ManagementService>(database,
+                                                attributes,
+                                                cron,
+                                                uuid_generator,
+                                                time_source,
+                                                ManagementServiceOptions{.daemon_defaults  = options.daemon_defaults,
+                                                                         .default_timezone = options.default_timezone});
         secrets    = std::make_unique<SecretService>(database, time_source);
         statistics = std::make_unique<StatisticsService>(database, uuid_generator, time_source);
         history    = std::make_unique<HistoryService>(database, attributes, uuid_generator, time_source);
@@ -239,7 +246,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         };
         if (!register_system_info_method(*rpc, std::move(info)) ||
             !register_management_methods(*rpc, *management, attributes) ||
-            !register_control_methods(*rpc, *management, *scheduler, cron, attributes) ||
+            !register_control_methods(*rpc, *management, *scheduler, cron, attributes, options.default_timezone) ||
             !register_secret_methods(*rpc, *secrets) || !register_history_methods(*rpc, *history, attributes) ||
             !register_statistics_methods(*rpc, *statistics, *management)) {
             fail("rpc_registration", runtime_error("jobud.rpc.registration_failed"));

@@ -309,7 +309,7 @@ TEST_CASE("jobuctl schedule preview uses cron-only typed requests", "[jobuctl][p
     auto valid = parse({"--socket", "fixture.sock", "schedule", "validate", "0 9 * * FRI-MON"});
     REQUIRE(valid.command);
     CHECK(valid.command->method == "schedule.validate");
-    CHECK(std::get<CronSchedule>(valid.command->request).timezone == "UTC");
+    CHECK_FALSE(std::get<CronScheduleInput>(valid.command->request).timezone);
 
     auto next = parse({"--socket",
                        "fixture.sock",
@@ -459,7 +459,7 @@ TEST_CASE("jobuctl request files are bounded and strictly decoded", "[jobuctl][i
     CHECK_FALSE(*update_request.name);
     CHECK(update_request.expected_revision == 7);
     CHECK(update_request.type == JobType::Http);
-    CHECK(std::holds_alternative<CronSchedule>(*update_request.schedule));
+    CHECK(std::holds_alternative<CronScheduleInput>(*update_request.schedule));
     CHECK(update_request.attribute_changes.contains("retry.max_attempts"));
     REQUIRE(update_request.payload);
     CHECK(update_request.payload->as_object()
@@ -1117,7 +1117,7 @@ TEST_CASE("jobuctl job schedules and attribute patches use typed request semanti
 
     auto recurring = with({"--cron", "0 9 * * 1-5", "--timezone", "Europe/Tallinn"});
     REQUIRE(recurring.command);
-    auto const& cron = std::get<CronSchedule>(std::get<CreateJobRequest>(recurring.command->request).schedule);
+    auto const& cron = std::get<CronScheduleInput>(std::get<CreateJobRequest>(recurring.command->request).schedule);
     CHECK(cron.expression == "0 9 * * 1-5");
     CHECK(cron.timezone == "Europe/Tallinn");
 
@@ -1136,7 +1136,7 @@ TEST_CASE("jobuctl job schedules and attribute patches use typed request semanti
     auto const& update_request = std::get<UpdateJobRequest>(updated.command->request);
     CHECK(update_request.expected_revision == 1);
     CHECK(update_request.attribute_changes.contains("retry.max_attempts"));
-    CHECK(std::holds_alternative<CronSchedule>(*update_request.schedule));
+    CHECK(std::holds_alternative<CronScheduleInput>(*update_request.schedule));
 
     for (auto const& suffix : std::vector<std::vector<std::string>>{
              {"--now", "--at", "2030-01-01T00:00:00Z"},
@@ -1316,4 +1316,79 @@ TEST_CASE("jobuctl request files decode run and output methods with strict publi
     auto invalid = load_request_file(*runs.command, registry);
     REQUIRE_FALSE(invalid);
     CHECK(invalid.error().code == "jobuctl.input.invalid_params");
+}
+
+TEST_CASE("CLI cron flags and request files preserve timezone omission", "[jobuctl][parse][input][timezone]")
+{
+    jb::test::TemporaryDirectory directory;
+    StandardAttributeRegistry    registry;
+    auto const                   path   = directory.path() / "cron.json";
+    auto const                   job_id = std::string{"00112233-4455-6677-8899-aabbccddeeff"};
+
+    struct Case {
+        std::vector<std::string> flags;
+        std::vector<std::string> file_command;
+        std::string              params;
+    };
+
+    auto const cases = std::vector<Case>{
+        {.flags = {"job", "create", "--queue-name", "queue", "--type", "cli", "--cron", "@daily", "--command", "/true"},
+         .file_command = {"job", "create"},
+         .params       = R"({"queue_name":"queue","payload":{"command":"/true"},"schedule":SCHEDULE})"             },
+        {.flags        = {"job", "update", job_id, "--revision", "1", "--cron", "@daily"},
+         .file_command = {"job", "update"},
+         .params = R"({"job_id":"00112233-4455-6677-8899-aabbccddeeff","expected_revision":1,"schedule":SCHEDULE})"},
+        {.flags        = {"schedule", "validate", "@daily"},
+         .file_command = {"schedule", "validate"},
+         .params       = R"({"schedule":SCHEDULE})"                                                                },
+        {.flags        = {"schedule", "next", "@daily", "--after", "2030-01-01T00:00:00Z"},
+         .file_command = {"schedule", "next"},
+         .params       = R"({"after":"2030-01-01T00:00:00Z","schedule":SCHEDULE})"                                 },
+    };
+    auto timezone_of = [](Command const& command) -> std::optional<std::string> {
+        switch (command.kind) {
+            case CommandKind::JobCreate:
+                return std::get<CronScheduleInput>(std::get<CreateJobRequest>(command.request).schedule).timezone;
+            case CommandKind::JobUpdate:
+                return std::get<CronScheduleInput>(*std::get<UpdateJobRequest>(command.request).schedule).timezone;
+            case CommandKind::ScheduleValidate:
+                return std::get<CronScheduleInput>(command.request).timezone;
+            case CommandKind::ScheduleNext:
+                return std::get<ScheduleNextRequest>(command.request).schedule.timezone;
+            default:
+                FAIL("Unexpected command");
+                return {};
+        }
+    };
+    for (auto const& item : cases) {
+        for (auto explicit_utc : {false, true}) {
+            auto flags = std::vector<std::string>{"--socket", "fixture.sock"};
+            flags.insert(flags.end(), item.flags.begin(), item.flags.end());
+            if (explicit_utc) {
+                flags.insert(flags.end(), {"--timezone", "UTC"});
+            }
+            auto parsed = parse(flags);
+            REQUIRE(parsed.command);
+            auto expected = explicit_utc ? std::optional<std::string>{"UTC"} : std::nullopt;
+            CHECK(timezone_of(*parsed.command) == expected);
+
+            auto        document = item.params;
+            auto const* schedule = explicit_utc ? R"({"kind":"cron","expression":"@daily","timezone":"UTC"})"
+                                                : R"({"kind":"cron","expression":"@daily"})";
+            document.replace(document.find("SCHEDULE"), std::string{"SCHEDULE"}.size(), schedule);
+            auto file = std::ofstream{path};
+            file << document;
+            file.close();
+            REQUIRE(file);
+            auto arguments = std::vector<std::string>{"--socket", "fixture.sock"};
+            arguments.insert(arguments.end(), item.file_command.begin(), item.file_command.end());
+            arguments.insert(arguments.end(), {"--request-file", path.string()});
+            auto from_file = parse(arguments);
+            REQUIRE(from_file.command);
+            REQUIRE(load_request_file(*from_file.command, registry));
+            CHECK(timezone_of(*from_file.command) == expected);
+        }
+    }
+    auto rendered = render_help({.group = "schedule", .action = "validate"});
+    CHECK(rendered.find("daemon default") != std::string::npos);
 }

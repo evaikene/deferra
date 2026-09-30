@@ -21,13 +21,14 @@ static_assert(std::is_constructible_v<jb::jobu::ManagementService,
                                       jb::jobu::CronEngine const&,
                                       jb::core::UuidGenerator&,
                                       jb::core::TimeSource&,
-                                      jb::jobu::AttributeSet,
+                                      jb::jobu::ManagementServiceOptions,
                                       jb::core::Object*>);
 static_assert(std::is_same_v<jb::jobu::QueueSelector, std::variant<jb::core::Uuid, std::string>>);
 static_assert(std::is_same_v<decltype(jb::jobu::CreateJobRequest::schedule), jb::jobu::JobCreationSchedule>);
 static_assert(std::is_constructible_v<jb::jobu::JobCreationSchedule, jb::jobu::ImmediateSchedule>);
 static_assert(!std::is_constructible_v<jb::jobu::JobSchedule, jb::jobu::ImmediateSchedule>);
-static_assert(std::is_same_v<decltype(jb::jobu::UpdateJobRequest::schedule), std::optional<jb::jobu::JobSchedule>>);
+static_assert(
+    std::is_same_v<decltype(jb::jobu::UpdateJobRequest::schedule), std::optional<jb::jobu::JobScheduleInput>>);
 static_assert(std::is_same_v<decltype(jb::jobu::JobPage::items), std::vector<jb::jobu::JobDefinition>>);
 static_assert(std::is_same_v<decltype(jb::jobu::MoveJobRequest::job_id), jb::core::Uuid>);
 static_assert(std::is_same_v<decltype(jb::jobu::MoveJobRequest::expected_revision), jb::jobu::JobRevision>);

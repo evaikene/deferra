@@ -38,7 +38,7 @@ deleted queues; select by ID in that case.
 | `kind` | string | 1.1 | `once` or `cron` |
 | `at` | time or `"now"` | 1.1; `"now"` 1.3 | Required for `once`; `"now"` is accepted only by `job.create` |
 | `expression` | string | 1.1 | Required for `cron`; five-field expression or supported alias |
-| `timezone` | string | 1.1 | Required for `cron`; IANA timezone name or `UTC` |
+| `timezone` | string | 1.1 | Optional in cron input, required in stored/results; nonempty IANA timezone name or `UTC` |
 
 The complete forms are `{"kind":"once","at":"2030-01-01T00:00:00Z"}` and
 `{"kind":"cron","expression":"@daily","timezone":"UTC"}`. Cron uses
@@ -51,6 +51,12 @@ steps such as `*/2` are rejected; use an explicit range such as
 during a gap the intended local time shifts forward by the gap length. See
 [Cron schedules](../cron.md) for the full user-facing grammar and alias meanings,
 and [schedule preview](methods/schedule.md) for the method contract.
+
+Cron input may omit `timezone` to use `schedule.default_timezone` (normally
+`UTC`). Explicit `UTC` overrides that default; an empty string or null is
+invalid. Job responses always contain the resolved timezone. Omitting an
+entire update schedule preserves its existing value; replacing it with cron
+input without a timezone uses the current daemon default.
 
 The reusable range object has these members:
 

@@ -76,7 +76,7 @@ jobuctl --socket /run/jobu.sock job create \
     --command /bin/echo --arg=hello
 ```
 
-Use a future UTC timestamp appropriate for your job. `job create` and `job add` also accept `--now` for a once job due at the daemon's current time, or `--cron EXPRESSION` for a recurring job. Choose exactly one of `--now`, `--at UTC`, and `--cron EXPRESSION`. `--timezone ZONE` applies only to cron and defaults to UTC. `job update` accepts `--at` or `--cron` with optional timezone; symbolic `--now` is creation-only.
+Use a future UTC timestamp appropriate for your job. `job create` and `job add` also accept `--now` for a once job due at the daemon's current time, or `--cron EXPRESSION` for a recurring job. Choose exactly one of `--now`, `--at UTC`, and `--cron EXPRESSION`. `--timezone ZONE` applies only to cron; omission uses the daemon's `schedule.default_timezone` (normally UTC). Explicit UTC stays UTC. `job update` accepts `--at` or `--cron` with optional timezone; symbolic `--now` is creation-only.
 
 An idempotency key makes an identical `--now` creation replay the original job and scheduled run. Supply the same key and request when retrying after a lost response; changing the request with the same key is a conflict.
 
@@ -226,8 +226,8 @@ object for either method; see the [system](protocol/methods/system.md) and
 `schedule validate EXPRESSION` checks a five-field cron expression or supported
 alias using the daemon's cron engine. `schedule next EXPRESSION --after UTC`
 returns future occurrence timestamps strictly after the supplied RFC 3339 UTC
-instant. Both accept `--timezone ZONE` (default UTC); `schedule next` also
-accepts `--count N` (1–200, default 5). The timezone controls calendar matching;
+instant. Both accept `--timezone ZONE`; omission uses the daemon default
+(normally UTC). `schedule next` also accepts `--count N` (1–200, default 5). The timezone controls calendar matching;
 results are UTC. Invalid expressions and timezones are reported as errors.
 
 ```sh

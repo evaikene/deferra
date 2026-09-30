@@ -666,7 +666,7 @@ TEST_CASE("Management RPC creates and replays a recurring job with its first occ
     auto const request = CreateJobRequest{
         .queue           = queue_id,
         .name            = "hourly",
-        .schedule        = schedule,
+        .schedule        = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
         .payload         = cli_payload("/usr/bin/true"),
         .idempotency_key = "rpc-cron",
     };
@@ -932,7 +932,7 @@ TEST_CASE("Management RPC separates invalid params from safe application errors"
                       encode_create(
                           CreateJobRequest{
                               .queue    = queue_id,
-                              .schedule = CronSchedule{.expression = "0 * * * *", .timezone = "UTC"},
+                              .schedule = CronScheduleInput{.expression = "0 * * * *", .timezone = "UTC"},
                               .payload  = cli_payload("/usr/bin/true"),
     },
                           fixture.registry)),

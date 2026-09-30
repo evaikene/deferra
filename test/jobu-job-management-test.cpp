@@ -375,7 +375,7 @@ TEST_CASE("Job management creates durable one-time definitions and immutable run
                               fixture.cron,
                               fixture.generator,
                               fixture.time,
-                              max_attempts(2)};
+                              ManagementServiceOptions{.daemon_defaults = max_attempts(2)}};
 
     auto queue = service.create_queue({.name = "jobs", .defaults = max_attempts(3)});
     REQUIRE(queue);
@@ -987,7 +987,7 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
                               fixture.cron,
                               fixture.generator,
                               fixture.time,
-                              max_attempts(2)};
+                              ManagementServiceOptions{.daemon_defaults = max_attempts(2)}};
     REQUIRE(service.create_queue({.name = "jobs", .defaults = max_attempts(3)}));
     auto created = service.create_job({
         .queue      = queue_id,
@@ -1824,7 +1824,7 @@ TEST_CASE("Job methods report invalid daemon defaults consistently", "[jobu][job
                                       fixture.cron,
                                       fixture.generator,
                                       fixture.time,
-                                      {{"unknown", {.data = true}}}};
+                                      ManagementServiceOptions{.daemon_defaults = {{"unknown", {.data = true}}}}};
     require_error(invalid_service.create_job(
                       {.queue = queue->id, .schedule = once_at(UtcTimePoint{1s}), .payload = cli_payload("/true")}),
                   ErrorCategory::InvalidArgument,

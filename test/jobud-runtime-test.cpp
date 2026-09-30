@@ -12,6 +12,7 @@
 #include "json.hpp"
 #include "local_socket.hpp"
 #include "management.hpp"
+#include "management_json.hpp"
 #include "protocol_priv.hpp"
 #include "query.hpp"
 #include "run_repository_priv.hpp"
@@ -1248,7 +1249,7 @@ TEST_CASE("Daemon advertises and serves cron preview controls at API 1.3", "[job
                                         [name](JsonValue const& value) { return value.as_string() == name; }) == 1);
         }
 
-        auto schedule   = CronSchedule{.expression = "@daily", .timezone = "Europe/Tallinn"};
+        auto schedule   = CronScheduleInput{.expression = "@daily", .timezone = "Europe/Tallinn"};
         auto validation = schedule_validate_request_to_json(schedule);
         REQUIRE(validation);
         auto validated = endpoint.call("schedule.validate", *validation);
@@ -1539,4 +1540,100 @@ TEST_CASE("Daemon resolves recovered templates through its database provider")
         return EXIT_SUCCESS;
     });
     CHECK(result == EXIT_SUCCESS);
+}
+
+TEST_CASE("Configured timezone and daemon attributes reach management and schedule RPCs", "[jobud][defaults][rpc]")
+{
+    SystemCronEngine engine;
+    RuntimeFixture   fixture;
+    fixture.options.default_timezone = "Europe/Tallinn";
+    fixture.options.daemon_defaults  = {
+        {"retry.max_attempts", {.data = std::int64_t{2}}}
+    };
+    fixture.create_runtime({}, &engine);
+    CHECK(fixture.run([&] {
+        RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
+        auto const         after    = fixture.time.utc_now();
+        auto const         expected = engine.next_after({.expression = "@daily", .timezone = "Europe/Tallinn"}, after);
+        REQUIRE(expected);
+        auto omitted     = ScheduleNextRequest{.schedule = {.expression = "@daily"}, .after = after, .count = 1};
+        auto preview     = endpoint.call("schedule.next", schedule_next_request_to_json(omitted).value());
+        auto occurrences = schedule_next_result_from_json(rpc_result(preview));
+        REQUIRE(occurrences);
+        CHECK(occurrences->front() == *expected);
+        auto validation =
+            endpoint.call("schedule.validate", schedule_validate_request_to_json({.expression = "@daily"}).value());
+        CHECK(rpc_result(validation).as_object().at("valid").as_bool());
+
+        auto request = CreateJobRequest{
+            .queue    = recovery_id(1),
+            .schedule = CronScheduleInput{.expression = "@daily"},
+            .payload  = JsonValue{.data = JsonValue::Object{{"command", JsonValue{.data = std::string{"/true"}}}}}};
+        auto created = job_from_json(
+            rpc_result(
+                endpoint.call("job.create", create_job_request_to_json(request, fixture.storage.registry).value())),
+            fixture.storage.registry);
+        REQUIRE(created);
+        CHECK(std::get<CronSchedule>(created->schedule).timezone == "Europe/Tallinn");
+        CHECK(std::get<std::int64_t>(created->attributes.at("retry.max_attempts").data) == 2);
+        jb::jobu::detail::RunRepository runs{fixture.storage.database, fixture.storage.registry};
+        auto                            run = runs.find_schedule_owned(created->id);
+        REQUIRE(run);
+        REQUIRE(run->has_value());
+        CHECK((**run).planned_at == occurrences->front());
+        CHECK(std::get<std::int64_t>((**run).attributes.at("retry.max_attempts").data) == 2);
+
+        auto explicit_utc              = omitted;
+        explicit_utc.schedule.timezone = "UTC";
+        auto utc_preview               = schedule_next_result_from_json(
+            rpc_result(endpoint.call("schedule.next", schedule_next_request_to_json(explicit_utc).value())));
+        REQUIRE(utc_preview);
+        CHECK(utc_preview->front() == engine.next_after({.expression = "@daily", .timezone = "UTC"}, after).value());
+        CHECK(utc_preview->front() != occurrences->front());
+
+        auto updated = RuntimeTestAccess::management(*fixture.runtime)
+                           ->update_job({
+                               .job_id            = created->id,
+                               .expected_revision = 1,
+                               .schedule          = CronScheduleInput{.expression = "@daily", .timezone = "UTC"}
+        });
+        REQUIRE(updated);
+        CHECK(std::get<CronSchedule>(updated->schedule).timezone == "UTC");
+        auto replacement = UpdateJobRequest{.job_id            = created->id,
+                                            .expected_revision = 2,
+                                            .schedule          = CronScheduleInput{.expression = "@daily"}};
+        auto replaced    = job_from_json(
+            rpc_result(
+                endpoint.call("job.update", update_job_request_to_json(replacement, fixture.storage.registry).value())),
+            fixture.storage.registry);
+        REQUIRE(replaced);
+        CHECK(std::get<CronSchedule>(replaced->schedule).timezone == "Europe/Tallinn");
+        auto replaced_run = runs.find_schedule_owned(created->id);
+        REQUIRE(replaced_run);
+        REQUIRE(replaced_run->has_value());
+        CHECK((**replaced_run).planned_at == occurrences->front());
+
+        auto invalid = schedule_validate_request_to_json({.expression = "@daily", .timezone = "Missing/Zone"});
+        REQUIRE(invalid);
+        check_application_error(endpoint.call("schedule.validate", *invalid),
+                                "invalid_argument",
+                                "jobu.schedule.invalid_timezone");
+        explicit_utc.schedule.timezone = "Missing/Zone";
+        check_application_error(endpoint.call("schedule.next", schedule_next_request_to_json(explicit_utc).value()),
+                                "invalid_argument",
+                                "jobu.schedule.invalid_timezone");
+        std::get<CronScheduleInput>(request.schedule).timezone = "Missing/Zone";
+        check_application_error(
+            endpoint.call("job.create", create_job_request_to_json(request, fixture.storage.registry).value()),
+            "invalid_argument",
+            "jobu.schedule.invalid_timezone");
+        std::get<CronScheduleInput>(*replacement.schedule).timezone = "Missing/Zone";
+        replacement.expected_revision                               = 3;
+        check_application_error(
+            endpoint.call("job.update", update_job_request_to_json(replacement, fixture.storage.registry).value()),
+            "invalid_argument",
+            "jobu.schedule.invalid_timezone");
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
 }

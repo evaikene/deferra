@@ -72,7 +72,7 @@ using CommandRequest = std::variant<std::monostate,
                                     jb::jobu::SecretListRequest,
                                     jb::jobu::StatisticsListRequest,
                                     jb::jobu::QueueStatisticsListRequest,
-                                    jb::jobu::CronSchedule,
+                                    jb::jobu::CronScheduleInput,
                                     jb::jobu::ScheduleNextRequest,
                                     std::string>;
 

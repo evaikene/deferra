@@ -134,7 +134,7 @@ auto call_command(ControlClient& client, Command const& command, ControlCallOpti
         case CommandKind::QueueStats:
             return client.queue_statistics(std::get<QueueStatisticsListRequest>(command.request), options);
         case CommandKind::ScheduleValidate:
-            return client.validate_schedule(std::get<CronSchedule>(command.request), options);
+            return client.validate_schedule(std::get<CronScheduleInput>(command.request), options);
         case CommandKind::ScheduleNext:
             return client.next_schedule_occurrences(std::get<ScheduleNextRequest>(command.request), options);
         case CommandKind::SystemInfo:

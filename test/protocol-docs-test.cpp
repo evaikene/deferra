@@ -122,3 +122,28 @@ TEST_CASE("Published statistics request and result describe one empty cohort", "
     CHECK(result->groups.front().attempts.total == 0);
     CHECK_FALSE(result->next_cursor);
 }
+
+TEST_CASE("Published cron inputs preserve omission and explicit UTC", "[jobu][protocol][docs][timezone]")
+{
+    StandardAttributeRegistry attributes;
+    auto const                explicit_utc = schedule_next_request_from_json(example("schedule-next.params.json"));
+    auto const                omitted = schedule_next_request_from_json(example("schedule-next-default.params.json"));
+    REQUIRE(explicit_utc);
+    REQUIRE(omitted);
+    CHECK(explicit_utc->schedule.timezone == "UTC");
+    CHECK_FALSE(omitted->schedule.timezone);
+    CHECK(omitted->schedule.expression == explicit_utc->schedule.expression);
+    CHECK(omitted->after == explicit_utc->after);
+    CHECK(omitted->count == explicit_utc->count);
+    auto const encoded = schedule_next_request_to_json(*omitted);
+    REQUIRE(encoded);
+    CHECK(encoded->as_object().at("schedule") ==
+          example("schedule-next-default.params.json").as_object().at("schedule"));
+
+    auto const create = create_job_request_from_json(example("job-create-cron-default.params.json"), attributes);
+    REQUIRE(create);
+    auto const& schedule = std::get<CronScheduleInput>(create->schedule);
+    CHECK_FALSE(schedule.timezone);
+    CHECK(schedule.expression == omitted->schedule.expression);
+    CHECK(create->idempotency_key == "daily-42");
+}

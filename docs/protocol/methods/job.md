@@ -39,7 +39,9 @@ with revision 1. Creation also commits its first schedule-owned run. A once
 schedule uses an explicit UTC `at` time, or the creation-only symbolic
 `{"kind":"once","at":"now"}`. The daemon resolves `now` in the creation
 transaction to a concrete microsecond timestamp and returns that concrete
-schedule. A cron schedule names a timezone and computes its next occurrence.
+schedule. A cron schedule computes its next occurrence using the supplied timezone or,
+when omitted, the daemon's `schedule.default_timezone`. The result contains
+the resolved timezone.
 
 ```json
 {"queue_name":"reports","type":"cli","schedule":{"kind":"once","at":"now"},"payload":{"command":"/usr/bin/true"},"idempotency_key":"submit-42"}
@@ -49,7 +51,9 @@ A matching key and equivalent canonical request replay the original result
 while its record remains, even after the clock advances or a secret rotates.
 The key is scoped to the resolved queue. Reusing it with different input
 returns `jobu.idempotency.conflict`. The canonical request retains symbolic
-`now` and original secret references. After a lost reply, repeat the **same**
+`now`, timezone omission, and original secret references. Changing daemon
+timezone or attribute defaults leaves the replayed result unchanged; a new
+key uses the current defaults. After a lost reply, repeat the **same**
 keyed request; an unkeyed retry is a new creation.
 
 ## Get and list (`job.get`, `job.list`)

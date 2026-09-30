@@ -490,7 +490,7 @@ TEST_CASE("Create job request JSON preserves selectors, schedules, attributes, a
         .queue           = std::string{"default"},
         .name            = std::string{"nightly-export"},
         .type            = JobType::Http,
-        .schedule        = CronSchedule{.expression = "0 * * * *", .timezone = "UTC"},
+        .schedule        = CronScheduleInput{.expression = "0 * * * *", .timezone = "UTC"},
         .priority        = 9,
         .attributes      = {{"job.timeout", {.data = Duration{3s}}}},
         .payload         = make_json(JsonValue::Object{
@@ -517,7 +517,7 @@ TEST_CASE("Create job request JSON preserves selectors, schedules, attributes, a
     CHECK(std::get<std::string>(decoded->queue) == "default");
     CHECK(decoded->name == "nightly-export");
     CHECK(decoded->type == JobType::Http);
-    CHECK(std::get<CronSchedule>(decoded->schedule).expression == "0 * * * *");
+    CHECK(std::get<CronScheduleInput>(decoded->schedule).expression == "0 * * * *");
     CHECK(decoded->priority == 9);
     REQUIRE(decoded->attributes.size() == 1U);
     CHECK(decoded->payload.as_object().at("future").as_bool());
@@ -729,12 +729,12 @@ TEST_CASE("Update job request JSON preserves nested optionals and partial change
         .job_id            = id,
         .expected_revision = 7,
         .type              = JobType::Http,
-        .schedule          = CronSchedule{.expression = "0 * * * *", .timezone = "UTC"},
+        .schedule          = CronScheduleInput{.expression = "0 * * * *", .timezone = "UTC"},
         .priority          = -2,
         .attribute_changes = {{"job.timeout", {.data = Duration{4s}}}},
         .payload           = make_json(JsonValue::Object{
-                                          {"url", make_json(std::string{"https://example"})},
-                                          }
+                                               {"url", make_json(std::string{"https://example"})},
+                                               }
                    ),
     };
     request.name.emplace(std::nullopt);
@@ -751,7 +751,7 @@ TEST_CASE("Update job request JSON preserves nested optionals and partial change
     REQUIRE(decoded->name);
     CHECK_FALSE(*decoded->name);
     CHECK(decoded->type == JobType::Http);
-    CHECK(std::get<CronSchedule>(*decoded->schedule).expression == "0 * * * *");
+    CHECK(std::get<CronScheduleInput>(*decoded->schedule).expression == "0 * * * *");
     CHECK(decoded->priority == -2);
     REQUIRE(decoded->attribute_changes.size() == 1U);
     REQUIRE(decoded->payload);
@@ -953,4 +953,54 @@ TEST_CASE("Immediate schedules are symbolic creation input only", "[jobu][manage
         object(response).at("schedule") = symbolic;
         check_invalid_response(job_from_json(response, registry));
     }
+}
+
+TEST_CASE("Cron input omission round trips without relaxing stored schedule responses",
+          "[jobu][management][json][timezone]")
+{
+    StandardAttributeRegistry registry;
+    auto                      create  = CreateJobRequest{.queue    = std::string{"default"},
+                                                         .schedule = CronScheduleInput{.expression = "@daily"},
+                                                         .payload  = make_json(JsonValue::Object{})};
+    auto                      encoded = create_job_request_to_json(create, registry);
+    REQUIRE(encoded);
+    CHECK_FALSE(encoded->as_object().at("schedule").as_object().contains("timezone"));
+    auto decoded = create_job_request_from_json(*encoded, registry);
+    REQUIRE(decoded);
+    CHECK_FALSE(std::get<CronScheduleInput>(decoded->schedule).timezone);
+    CHECK(create_job_request_to_json(*decoded, registry).value() == *encoded);
+
+    auto update         = UpdateJobRequest{.job_id            = parse_uuid("10112233-4455-6677-8899-aabbccddeeff"),
+                                           .expected_revision = 1,
+                                           .schedule          = CronScheduleInput{.expression = "@daily"}};
+    auto encoded_update = update_job_request_to_json(update, registry);
+    REQUIRE(encoded_update);
+    auto decoded_update = update_job_request_from_json(*encoded_update, registry);
+    REQUIRE(decoded_update);
+    CHECK_FALSE(std::get<CronScheduleInput>(*decoded_update->schedule).timezone);
+    CHECK(update_job_request_to_json(*decoded_update, registry).value() == *encoded_update);
+
+    for (auto const& timezone : {make_json(std::string{}), make_json(JsonNull{}), make_json(true)}) {
+        auto bad_create                                       = *encoded;
+        object(object(bad_create).at("schedule"))["timezone"] = timezone;
+        CHECK_FALSE(create_job_request_from_json(bad_create, registry));
+        auto bad_update                                       = *encoded_update;
+        object(object(bad_update).at("schedule"))["timezone"] = timezone;
+        CHECK_FALSE(update_job_request_from_json(bad_update, registry));
+    }
+    std::get<CronScheduleInput>(create.schedule).timezone = "";
+    CHECK_FALSE(create_job_request_to_json(create, registry));
+    std::get<CronScheduleInput>(*update.schedule).timezone = "";
+    CHECK_FALSE(update_job_request_to_json(update, registry));
+
+    auto job      = sample_job(registry);
+    job.schedule  = CronSchedule{.expression = "@daily", .timezone = "UTC"};
+    auto response = job_to_json(job, registry);
+    REQUIRE(response);
+    object(object(*response).at("schedule")).erase("timezone");
+    CHECK_FALSE(job_from_json(*response, registry));
+    object(object(*response).at("schedule"))["timezone"] = make_json(std::string{});
+    CHECK_FALSE(job_from_json(*response, registry));
+    std::get<CronSchedule>(job.schedule).timezone.clear();
+    CHECK_FALSE(job_to_json(job, registry));
 }

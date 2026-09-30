@@ -4,6 +4,7 @@
 #include "job_validation_priv.hpp"
 #include "json.hpp"
 #include "queue_validation_priv.hpp"
+#include "schedule_input_priv.hpp"
 #include "utc_timestamp.hpp"
 
 #include <chrono>
@@ -277,6 +278,9 @@ auto encode_schedule(JobSchedule const& schedule) -> CodecResult<jb::core::JsonV
         }));
     }
     if (auto const* cron = std::get_if<CronSchedule>(&schedule)) {
+        if (cron->timezone.empty()) {
+            return CodecResult<jb::core::JsonValue>::failure(invalid_record("invalid_cron_schedule"));
+        }
         return CodecResult<jb::core::JsonValue>::success(json_object({
             {"expression", json_string(cron->expression)},
             {"kind",       json_string("cron")          },
@@ -313,7 +317,7 @@ auto decode_schedule(jb::core::JsonValue const& value) -> CodecResult<JobSchedul
         }
         auto expression = text_member(**object, "expression");
         auto timezone   = text_member(**object, "timezone");
-        if (!expression || !timezone) {
+        if (!expression || !timezone || timezone->empty()) {
             return CodecResult<JobSchedule>::failure(invalid_record("invalid_cron_schedule"));
         }
         return CodecResult<JobSchedule>::success(CronSchedule{
@@ -336,21 +340,41 @@ auto encode_creation_schedule(JobCreationSchedule const& schedule) -> CodecResul
     if (auto const* once = std::get_if<OnceSchedule>(&schedule)) {
         return encode_schedule(*once);
     }
-    return encode_schedule(std::get<CronSchedule>(schedule));
+    auto encoded = cron_schedule_input_to_json(std::get<CronScheduleInput>(schedule));
+    if (!encoded) {
+        return CodecResult<jb::core::JsonValue>::failure(invalid_record("invalid_cron_schedule"));
+    }
+    return encoded;
 }
 
 auto validate_creation_schedule(jb::core::JsonValue const& value) -> CodecResult<void>
 {
-    if (value.is_object()) {
-        auto kind = text_member(value.as_object(), "kind");
-        auto at   = text_member(value.as_object(), "at");
-        if (kind && *kind == "once" && at && *at == "now") {
-            auto object = object_with_members(value, {"at", "kind"});
-            if (!object) {
-                return CodecResult<void>::failure(std::move(object).error());
-            }
-            return CodecResult<void>::success();
+    if (!value.is_object()) {
+        return CodecResult<void>::failure(invalid_record("invalid_schedule"));
+    }
+    auto const& members = value.as_object();
+    auto        kind    = members.find("kind");
+    if (kind == members.end() || !kind->second.is_string()) {
+        return CodecResult<void>::failure(invalid_record("invalid_schedule_kind"));
+    }
+
+    // Cron requests preserve omission, while once requests alone may contain symbolic "now".
+    if (kind->second.as_string() == "cron") {
+        if (!cron_schedule_input_from_json(value)) {
+            return CodecResult<void>::failure(invalid_record("invalid_cron_schedule"));
         }
+        return CodecResult<void>::success();
+    }
+    if (kind->second.as_string() != "once") {
+        return CodecResult<void>::failure(invalid_record("invalid_schedule_kind"));
+    }
+    auto object = object_with_members(value, {"at", "kind"});
+    if (!object) {
+        return CodecResult<void>::failure(std::move(object).error());
+    }
+    auto at = text_member(**object, "at");
+    if (at && *at == "now") {
+        return CodecResult<void>::success();
     }
 
     auto concrete = decode_schedule(value);

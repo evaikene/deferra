@@ -265,13 +265,16 @@ TEST_CASE("Scheduler integrates deterministic Phase 4 behavior", "[jobu][schedul
     fixture.cron.set_occurrences(schedule, {at_seconds(200), at_seconds(300), at_seconds(400)});
     auto recurring =
         fixture.create_job(light_queue,
-                           schedule,
+                           CronScheduleInput{
+                               .expression = schedule.expression,
+                               .timezone   = schedule.timezone
+    },
                            "recurring",
                            0,
                            {
                                {"retry.initial_delay", {.data = std::chrono::duration_cast<Duration>(100s)}},
-                               {"retry.max_attempts",  {.data = std::int64_t{2}}                           },
-    });
+                               {"retry.max_attempts", {.data = std::int64_t{2}}},
+                           });
     auto manual = fixture.management->run_now({.job_id = recurring.definition.id});
     REQUIRE(manual);
     fixture.scheduler->request_rescan();
