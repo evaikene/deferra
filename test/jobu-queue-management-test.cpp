@@ -840,7 +840,7 @@ TEST_CASE("Queue management reports invalid daemon defaults from every operation
                               fixture.cron,
                               fixture.generator,
                               fixture.time,
-                              {{"unknown", {.data = true}}}};
+                              ManagementServiceOptions{.daemon_defaults = {{"unknown", {.data = true}}}}};
 
     require_error(service.create_queue({.name = "queue"}), ErrorCategory::InvalidArgument, "jobu.attribute.unknown");
     require_error(service.get_queue(std::string{"queue"}), ErrorCategory::InvalidArgument, "jobu.attribute.unknown");

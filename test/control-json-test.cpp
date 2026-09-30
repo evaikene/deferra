@@ -82,9 +82,9 @@ TEST_CASE("Run control requests require canonical IDs and strict fields", "[jobu
     invalid_request(cancel_run_request_from_json(*encoded));
 }
 
-TEST_CASE("Cron preview codecs keep UTC and count defaults while rejecting non-cron shapes", "[jobu][control][json]")
+TEST_CASE("Cron preview codecs preserve timezone input and count defaults", "[jobu][control][json]")
 {
-    auto schedule = CronSchedule{.expression = "@daily", .timezone = "Europe/Tallinn"};
+    auto schedule = CronScheduleInput{.expression = "@daily", .timezone = "Europe/Tallinn"};
     auto preview  = ScheduleNextRequest{.schedule = schedule, .after = at("2026-01-01T00:00:00Z"), .count = 7};
     auto encoded  = schedule_next_request_to_json(preview);
     REQUIRE(encoded);
@@ -94,6 +94,28 @@ TEST_CASE("Cron preview codecs keep UTC and count defaults while rejecting non-c
     CHECK(decoded->schedule.timezone == schedule.timezone);
     CHECK(decoded->after == preview.after);
     CHECK(decoded->count == 7);
+
+    auto omitted = *encoded;
+    std::get<JsonValue::Object>(std::get<JsonValue::Object>(omitted.data).at("schedule").data).erase("timezone");
+    auto omitted_request = schedule_next_request_from_json(omitted);
+    REQUIRE(omitted_request);
+    CHECK_FALSE(omitted_request->schedule.timezone);
+    CHECK(schedule_next_request_to_json(*omitted_request).value() == omitted);
+    auto omitted_validation = schedule_validate_request_to_json({.expression = "@daily"});
+    REQUIRE(omitted_validation);
+    CHECK_FALSE(schedule_validate_request_from_json(*omitted_validation)->timezone);
+
+    for (auto const& timezone : {json(std::string{}), json(JsonNull{}), json(true)}) {
+        auto malformed_zone = *encoded;
+        std::get<JsonValue::Object>(std::get<JsonValue::Object>(malformed_zone.data).at("schedule").data)["timezone"] =
+            timezone;
+        invalid_request(schedule_next_request_from_json(malformed_zone));
+    }
+    invalid_request(schedule_validate_request_to_json({.expression = "@daily", .timezone = ""}));
+    invalid_request(schedule_next_request_to_json({
+        .schedule = {.expression = "@daily", .timezone = ""},
+        .after    = preview.after
+    }));
 
     auto defaults = *encoded;
     std::get<JsonValue::Object>(defaults.data).erase("count");

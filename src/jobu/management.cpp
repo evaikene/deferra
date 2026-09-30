@@ -1,5 +1,7 @@
 #include "management.hpp"
 
+#include "schedule_input_priv.hpp"
+
 #include "management_json.hpp"
 
 #include "attempt_repository_priv.hpp"
@@ -431,13 +433,13 @@ struct ManagementService::Private : jb::core::priv::ObjectPrivate {
             CronEngine const&        cron_value,
             jb::core::UuidGenerator& uuid_generator_value,
             jb::core::TimeSource&    time_source_value,
-            AttributeSet             daemon_defaults_value)
+            ManagementServiceOptions options_value)
         : database{database_value}
         , attributes{attributes_value}
         , cron{cron_value}
         , uuid_generator{uuid_generator_value}
         , time_source{time_source_value}
-        , daemon_defaults{std::move(daemon_defaults_value)}
+        , options{std::move(options_value)}
         , queues{database_value, attributes_value}
         , jobs{database_value, attributes_value}
         , runs{database_value, attributes_value}
@@ -445,9 +447,14 @@ struct ManagementService::Private : jb::core::priv::ObjectPrivate {
         , idempotency{database_value}
         , secrets{database_value}
     {
-        auto validated = validate_attributes(attributes, daemon_defaults, AttributeScope::DaemonDefault);
+        auto validated = validate_attributes(attributes, options.daemon_defaults, AttributeScope::DaemonDefault);
         if (!validated) {
             initialization_error = std::move(validated).error();
+        }
+        else if (options.default_timezone.empty()) {
+            initialization_error = service_error(jb::core::ErrorCategory::InvalidArgument,
+                                                 "jobu.schedule.invalid_timezone",
+                                                 "Default cron timezone must be nonempty");
         }
     }
 
@@ -538,7 +545,7 @@ struct ManagementService::Private : jb::core::priv::ObjectPrivate {
     CronEngine const&              cron;
     jb::core::UuidGenerator&       uuid_generator;
     jb::core::TimeSource&          time_source;
-    AttributeSet                   daemon_defaults;
+    ManagementServiceOptions       options;
     detail::QueueRepository        queues;
     detail::JobRepository          jobs;
     detail::RunRepository          runs;
@@ -553,9 +560,9 @@ ManagementService::ManagementService(jb::db::Database&        database,
                                      CronEngine const&        cron,
                                      jb::core::UuidGenerator& uuid_generator,
                                      jb::core::TimeSource&    time_source,
-                                     AttributeSet             daemon_defaults,
+                                     ManagementServiceOptions options,
                                      jb::core::Object*        parent)
-    : Object(*new Private{database, attributes, cron, uuid_generator, time_source, std::move(daemon_defaults)}, parent)
+    : Object(*new Private{database, attributes, cron, uuid_generator, time_source, std::move(options)}, parent)
 {}
 
 ManagementService::~ManagementService() = default;
@@ -1231,6 +1238,14 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
     if (!idempotency) {
         return ServiceResult<JobDefinition>::failure(std::move(idempotency).error());
     }
+    // An explicit empty zone is invalid caller input, even when canonical replay encoding is requested.
+    // Do not resolve omission against current defaults until replay has been ruled out.
+    if (auto const* cron = std::get_if<CronScheduleInput>(&request.schedule);
+        cron && cron->timezone && cron->timezone->empty()) {
+        return ServiceResult<JobDefinition>::failure(service_error(jb::core::ErrorCategory::InvalidArgument,
+                                                                   "jobu.schedule.invalid_timezone",
+                                                                   "Cron timezone must be nonempty"));
+    }
 
     // Non-idempotent calls can reserve identities immediately. Idempotent calls
     // defer allocation until replay has been ruled out to avoid consuming IDs.
@@ -1341,7 +1356,12 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
         schedule   = *once;
     }
     else {
-        auto const& cron_schedule = std::get<CronSchedule>(request.schedule);
+        auto resolved = detail::resolve_cron_schedule(std::get<CronScheduleInput>(request.schedule),
+                                                      data->options.default_timezone);
+        if (!resolved) {
+            return ServiceResult<JobDefinition>::failure(std::move(resolved).error());
+        }
+        auto const& cron_schedule = *resolved;
         auto        valid         = data->cron.validate(cron_schedule);
         if (!valid) {
             return ServiceResult<JobDefinition>::failure(std::move(valid).error());
@@ -1355,7 +1375,7 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
     }
 
     auto materialized =
-        materialize_attributes(data->attributes, data->daemon_defaults, queue.defaults, request.attributes);
+        materialize_attributes(data->attributes, data->options.daemon_defaults, queue.defaults, request.attributes);
     if (!materialized) {
         return ServiceResult<JobDefinition>::failure(std::move(materialized).error());
     }
@@ -1634,10 +1654,23 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
             return ServiceResult<JobDefinition>::failure(std::move(name).error());
         }
     }
-    if (request.schedule && std::holds_alternative<CronSchedule>(*request.schedule)) {
-        auto valid = data->cron.validate(std::get<CronSchedule>(*request.schedule));
-        if (!valid) {
-            return ServiceResult<JobDefinition>::failure(std::move(valid).error());
+    // Resolve only an explicitly supplied replacement. Other updates retain the stored timezone.
+    auto resolved_schedule = std::optional<JobSchedule>{};
+    if (request.schedule) {
+        if (auto const* once = std::get_if<OnceSchedule>(&*request.schedule)) {
+            resolved_schedule = *once;
+        }
+        else {
+            auto resolved = detail::resolve_cron_schedule(std::get<CronScheduleInput>(*request.schedule),
+                                                          data->options.default_timezone);
+            if (!resolved) {
+                return ServiceResult<JobDefinition>::failure(std::move(resolved).error());
+            }
+            auto valid = data->cron.validate(*resolved);
+            if (!valid) {
+                return ServiceResult<JobDefinition>::failure(std::move(valid).error());
+            }
+            resolved_schedule = std::move(*resolved);
         }
     }
     auto attribute_changes = validate_attributes(data->attributes, request.attribute_changes, AttributeScope::Job);
@@ -1714,7 +1747,7 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
         replacement.type = *request.type;
     }
     if (request.schedule) {
-        replacement.schedule = std::move(*request.schedule);
+        replacement.schedule = std::move(*resolved_schedule);
     }
     if (request.priority) {
         replacement.priority = *request.priority;

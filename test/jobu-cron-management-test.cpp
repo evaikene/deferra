@@ -1,5 +1,7 @@
 #include "management.hpp"
 
+#include "management_json.hpp"
+
 #include "attempt_repository_priv.hpp"
 #include "attribute_registry.hpp"
 #include "database.hpp"
@@ -180,7 +182,7 @@ TEST_CASE("Recurring create persists one future schedule-owned snapshot", "[jobu
                               fixture.cron,
                               fixture.generator,
                               fixture.time,
-                              max_attempts(2)};
+                              ManagementServiceOptions{.daemon_defaults = max_attempts(2)}};
     auto              queue = service.create_queue({.name = "recurring", .defaults = max_attempts(3)});
     REQUIRE(queue);
 
@@ -189,7 +191,7 @@ TEST_CASE("Recurring create persists one future schedule-owned snapshot", "[jobu
         .queue           = queue_id,
         .name            = "five-minute",
         .type            = JobType::Cli,
-        .schedule        = schedule,
+        .schedule        = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
         .priority        = 7,
         .payload         = payload,
         .idempotency_key = "cron-create",
@@ -246,16 +248,22 @@ TEST_CASE("Recurring create rejects cron failures and rolls back all durable row
 
     fixture.cron.set_validation_error(
         injected_error(ErrorCategory::InvalidArgument, "jobu.schedule.invalid_expression"));
-    require_error(service.create_job({.queue = queue->id, .schedule = schedule, .payload = cli_payload("/true")}),
+    require_error(service.create_job({
+                      .queue    = queue->id,
+                      .schedule = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
+                      .payload  = cli_payload("/true")
+    }),
                   ErrorCategory::InvalidArgument,
                   "jobu.schedule.invalid_expression");
     CHECK(count_rows(fixture.database, "jobu_jobs") == 0);
     CHECK(count_rows(fixture.database, "jobu_runs") == 0);
 
     fixture.cron.set_validation_error(injected_error(ErrorCategory::InvalidArgument, "jobu.schedule.invalid_timezone"));
-    require_error(service.create_job({.queue    = queue->id,
-                                      .schedule = cron_schedule("*/5 * * * *", "Missing/Zone"),
-                                      .payload  = cli_payload("/true")}),
+    require_error(service.create_job({
+                      .queue    = queue->id,
+                      .schedule = CronScheduleInput{.expression = "*/5 * * * *", .timezone = "Missing/Zone"},
+                      .payload  = cli_payload("/true")
+    }),
                   ErrorCategory::InvalidArgument,
                   "jobu.schedule.invalid_timezone");
     CHECK(count_rows(fixture.database, "jobu_jobs") == 0);
@@ -264,7 +272,11 @@ TEST_CASE("Recurring create rejects cron failures and rolls back all durable row
     fixture.cron.set_validation_error(std::nullopt);
     fixture.cron.set_occurrences(schedule, {UtcTimePoint{60s}});
     fixture.cron.set_next_error(injected_error(ErrorCategory::InvalidArgument, "jobu.schedule.no_future_occurrence"));
-    require_error(service.create_job({.queue = queue->id, .schedule = schedule, .payload = cli_payload("/true")}),
+    require_error(service.create_job({
+                      .queue    = queue->id,
+                      .schedule = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
+                      .payload  = cli_payload("/true")
+    }),
                   ErrorCategory::InvalidArgument,
                   "jobu.schedule.no_future_occurrence");
     CHECK(count_rows(fixture.database, "jobu_jobs") == 0);
@@ -275,11 +287,11 @@ TEST_CASE("Recurring create rejects cron failures and rolls back all durable row
             "CREATE TRIGGER fail_cron_idempotency_insert BEFORE INSERT ON jobu_idempotency "
             "WHEN NEW.key = 'fail-key' BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
     require_error(service.create_job({
-                      .queue           = queue->id,
-                      .schedule        = schedule,
-                      .payload         = cli_payload("/true"),
+                      .queue    = queue->id,
+                      .schedule = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
+                      .payload  = cli_payload("/true"),
                       .idempotency_key = "fail-key",
-                  }),
+    }),
                   ErrorCategory::Conflict,
                   "db.constraint");
     CHECK(count_rows(fixture.database, "jobu_jobs") == 0);
@@ -302,7 +314,7 @@ TEST_CASE("Recurring create idempotency preserves its first occurrence across re
     auto request = CreateJobRequest{
         .queue           = queue_id,
         .name            = "replayed",
-        .schedule        = schedule,
+        .schedule        = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
         .payload         = cli_payload("/true"),
         .idempotency_key = "stable-cron",
     };
@@ -323,13 +335,13 @@ TEST_CASE("Recurring create idempotency preserves its first occurrence across re
         CHECK(fixture.cron.validation_calls().size() == 1);
         CHECK(fixture.cron.next_calls().size() == 1);
 
-        auto changed_expression                                        = request;
-        std::get<CronSchedule>(changed_expression.schedule).expression = "30 * * * *";
+        auto changed_expression                                             = request;
+        std::get<CronScheduleInput>(changed_expression.schedule).expression = "30 * * * *";
         require_error(service.create_job(std::move(changed_expression)),
                       ErrorCategory::Conflict,
                       "jobu.idempotency.conflict");
-        auto changed_timezone                                      = request;
-        std::get<CronSchedule>(changed_timezone.schedule).timezone = "UTC";
+        auto changed_timezone                                           = request;
+        std::get<CronScheduleInput>(changed_timezone.schedule).timezone = "UTC";
         require_error(service.create_job(std::move(changed_timezone)),
                       ErrorCategory::Conflict,
                       "jobu.idempotency.conflict");
@@ -367,6 +379,149 @@ TEST_CASE("Recurring create idempotency preserves its first occurrence across re
     CHECK(count_rows(fixture.database, "jobu_idempotency") == 1);
 }
 
+TEST_CASE("Omitted timezone and daemon attributes replay unchanged after configuration restart",
+          "[jobu][cron][management][idempotency][restart][sqlite]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3), sequence_id(4), sequence_id(5)}
+    };
+    auto const tallinn = cron_schedule("@daily", "Europe/Tallinn");
+    auto const utc     = cron_schedule("@daily", "UTC");
+    fixture.cron.set_occurrences(tallinn, {UtcTimePoint{60s}});
+    fixture.cron.set_occurrences(utc, {UtcTimePoint{120s}});
+    auto request = CreateJobRequest{.queue           = sequence_id(1),
+                                    .schedule        = CronScheduleInput{.expression = "@daily"},
+                                    .payload         = cli_payload("/true"),
+                                    .idempotency_key = "omitted-zone"};
+
+    JobDefinition original;
+    {
+        ManagementService service{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            ManagementServiceOptions{.daemon_defaults = max_attempts(2), .default_timezone = "Europe/Tallinn"}
+        };
+        REQUIRE(service.create_queue({.name = "defaults"}));
+        auto created = service.create_job(request);
+        REQUIRE(created);
+        original = *created;
+        check_schedule(original.schedule, tallinn);
+        CHECK(std::get<std::int64_t>(original.attributes.at("retry.max_attempts").data) == 2);
+
+        auto explicit_utc                                           = request;
+        std::get<CronScheduleInput>(explicit_utc.schedule).timezone = "UTC";
+        require_error(service.create_job(explicit_utc), ErrorCategory::Conflict, "jobu.idempotency.conflict");
+        auto empty_zone                                           = request;
+        std::get<CronScheduleInput>(empty_zone.schedule).timezone = "";
+        require_error(service.create_job(empty_zone), ErrorCategory::InvalidArgument, "jobu.schedule.invalid_timezone");
+        REQUIRE(service.resume_queue(sequence_id(1)));
+    }
+
+    REQUIRE(fixture.database.close());
+    REQUIRE(fixture.database.open());
+    REQUIRE(jb::jobu::sqlite::ensure_schema(fixture.database));
+    fixture.time.advance(20s);
+    {
+        ManagementService service{
+            fixture.database,
+            fixture.registry,
+            fixture.cron,
+            fixture.generator,
+            fixture.time,
+            ManagementServiceOptions{.daemon_defaults = max_attempts(5), .default_timezone = "UTC"}
+        };
+        auto replay = service.create_job(request);
+        REQUIRE(replay);
+        CHECK(job_to_json(*replay, fixture.registry).value() == job_to_json(original, fixture.registry).value());
+        CHECK(replay->id == original.id);
+        CHECK(replay->created_at == original.created_at);
+        CHECK(replay->updated_at == original.updated_at);
+        CHECK(attribute_set_to_json(replay->attributes, fixture.registry, AttributeScope::Job).value() ==
+              attribute_set_to_json(original.attributes, fixture.registry, AttributeScope::Job).value());
+        CHECK(replay->payload == original.payload);
+        check_schedule(replay->schedule, tallinn);
+        CHECK(fixture.cron.validation_calls().size() == 1);
+        CHECK(fixture.cron.next_calls().size() == 1);
+
+        auto existing = service.get_job(original.id);
+        REQUIRE(existing);
+        check_schedule(existing->schedule, tallinn);
+        CHECK(attribute_set_to_json(existing->attributes, fixture.registry, AttributeScope::Job).value() ==
+              attribute_set_to_json(original.attributes, fixture.registry, AttributeScope::Job).value());
+
+        request.idempotency_key = "new-key";
+        auto fresh              = service.create_job(request);
+        REQUIRE(fresh);
+        check_schedule(fresh->schedule, utc);
+        CHECK(std::get<std::int64_t>(fresh->attributes.at("retry.max_attempts").data) == 5);
+    }
+
+    jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                            stored = runs.find_schedule_owned(original.id);
+    REQUIRE(stored);
+    REQUIRE(stored->has_value());
+    CHECK((**stored).id == sequence_id(3));
+    CHECK((**stored).planned_at == UtcTimePoint{60s});
+    CHECK(attribute_set_to_json((**stored).attributes, fixture.registry, AttributeScope::Job).value() ==
+          attribute_set_to_json(original.attributes, fixture.registry, AttributeScope::Job).value());
+    CHECK(count_rows(fixture.database, "jobu_runs") == 2);
+}
+
+TEST_CASE("Cron replacement omission uses current defaults while other updates retain the stored zone",
+          "[jobu][cron][management][defaults][sqlite]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    auto const utc     = cron_schedule("@daily", "UTC");
+    auto const tallinn = cron_schedule("@daily", "Europe/Tallinn");
+    fixture.cron.set_occurrences(utc, {UtcTimePoint{60s}});
+    fixture.cron.set_occurrences(tallinn, {UtcTimePoint{120s}});
+    ManagementService service{
+        fixture.database,
+        fixture.registry,
+        fixture.cron,
+        fixture.generator,
+        fixture.time,
+        ManagementServiceOptions{.daemon_defaults = max_attempts(2), .default_timezone = "Europe/Tallinn"}
+    };
+    REQUIRE(service.create_queue({.name = "updates", .defaults = max_attempts(3)}));
+    auto created = service.create_job({
+        .queue      = sequence_id(1),
+        .schedule   = CronScheduleInput{.expression = "@daily", .timezone = "UTC"},
+        .attributes = max_attempts(4),
+        .payload    = cli_payload("/true")
+    });
+    REQUIRE(created);
+    check_schedule(created->schedule, utc);
+    CHECK(std::get<std::int64_t>(created->attributes.at("retry.max_attempts").data) == 4);
+
+    auto retained = service.update_job({.job_id = created->id, .expected_revision = 1, .priority = 2});
+    REQUIRE(retained);
+    check_schedule(retained->schedule, utc);
+    CHECK(std::get<std::int64_t>(retained->attributes.at("retry.max_attempts").data) == 4);
+
+    auto replaced = service.update_job(
+        {.job_id = created->id, .expected_revision = 2, .schedule = CronScheduleInput{.expression = "@daily"}});
+    REQUIRE(replaced);
+    check_schedule(replaced->schedule, tallinn);
+    CHECK(std::get<std::int64_t>(replaced->attributes.at("retry.max_attempts").data) == 4);
+
+    auto invalid = UpdateJobRequest{
+        .job_id            = created->id,
+        .expected_revision = 3,
+        .schedule          = CronScheduleInput{.expression = "@daily", .timezone = ""}
+    };
+    require_error(service.update_job(invalid), ErrorCategory::InvalidArgument, "jobu.schedule.invalid_timezone");
+    auto unchanged = service.get_job(created->id);
+    REQUIRE(unchanged);
+    CHECK(unchanged->revision == 3);
+    check_schedule(unchanged->schedule, tallinn);
+}
+
 TEST_CASE("Recurring update replans one unstarted run with a complete new snapshot",
           "[jobu][cron][management][update][sqlite]")
 {
@@ -384,9 +539,10 @@ TEST_CASE("Recurring update replans one unstarted run with a complete new snapsh
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "recurring", .defaults = max_attempts(3)}));
     auto created = service.create_job({
-        .queue    = queue_id,
-        .name     = "before",
-        .schedule = original_schedule,
+        .queue = queue_id,
+        .name  = "before",
+        .schedule =
+            CronScheduleInput{.expression = original_schedule.expression, .timezone = original_schedule.timezone},
         .priority = 1,
         .payload  = cli_payload("/before"),
     });
@@ -397,10 +553,10 @@ TEST_CASE("Recurring update replans one unstarted run with a complete new snapsh
     auto       updated             = service.update_job({
         .job_id            = job_id,
         .expected_revision = 1,
-        .name              = std::optional<std::optional<std::string>>{std::in_place, std::string{"after"}},
+        .name              = std::optional<std::optional<std::string>>{std::in_place,                             std::string{"after"}                 },
         .type              = JobType::Http,
-        .schedule          = updated_schedule,
-        .priority          = 9,
+        .schedule = CronScheduleInput{.expression = updated_schedule.expression, .timezone = updated_schedule.timezone},
+        .priority = 9,
         .attribute_changes = max_attempts(6),
         .payload           = replacement_payload,
     });
@@ -439,8 +595,8 @@ TEST_CASE("Recurring update replans one unstarted run with a complete new snapsh
     require_error(service.update_job({
                       .job_id            = job_id,
                       .expected_revision = 2,
-                      .schedule          = cron_schedule("invalid", "UTC"),
-                  }),
+                      .schedule          = CronScheduleInput{.expression = "invalid", .timezone = "UTC"},
+    }),
                   ErrorCategory::InvalidArgument,
                   "jobu.schedule.invalid_expression");
     auto unchanged = service.get_job(job_id);
@@ -491,7 +647,11 @@ TEST_CASE("Recurring update ignores historical attempts while refreshing the cur
 
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "recurring"}));
-    auto created = service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("/historical")});
+    auto created = service.create_job({
+        .queue    = queue_id,
+        .schedule = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
+        .payload  = cli_payload("/historical")
+    });
     REQUIRE(created);
 
     execute(fixture.database,
@@ -555,8 +715,9 @@ TEST_CASE("Running recurring updates preserve the active snapshot for the newest
     REQUIRE(service.create_queue({.name = "recurring"}));
     auto const original_payload = cli_payload("/before");
     REQUIRE(service.create_job({
-        .queue    = queue_id,
-        .schedule = original_schedule,
+        .queue = queue_id,
+        .schedule =
+            CronScheduleInput{.expression = original_schedule.expression, .timezone = original_schedule.timezone},
         .priority = 1,
         .payload  = original_payload,
     }));
@@ -594,8 +755,8 @@ TEST_CASE("Running recurring updates preserve the active snapshot for the newest
         .job_id            = job_id,
         .expected_revision = 1,
         .type              = JobType::Http,
-        .schedule          = updated_schedule,
-        .priority          = 9,
+        .schedule = CronScheduleInput{.expression = updated_schedule.expression, .timezone = updated_schedule.timezone},
+        .priority = 9,
         .attribute_changes = max_attempts(6),
         .payload           = replacement_payload,
     });
@@ -663,7 +824,7 @@ TEST_CASE("Unstarted schedule conversions preserve the run identity and reject p
         auto updated = service.update_job({
             .job_id            = job_id,
             .expected_revision = 1,
-            .schedule          = schedule,
+            .schedule          = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
         });
         REQUIRE(updated);
         check_schedule(updated->schedule, schedule);
@@ -680,7 +841,11 @@ TEST_CASE("Unstarted schedule conversions preserve the run identity and reject p
     {
         auto const schedule = cron_schedule();
         fixture.cron.set_occurrences(schedule, {UtcTimePoint{60s}});
-        REQUIRE(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("/cron")}));
+        REQUIRE(service.create_job({
+            .queue    = queue_id,
+            .schedule = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
+            .payload  = cli_payload("/cron")
+        }));
         auto updated = service.update_job({
             .job_id            = job_id,
             .expected_revision = 1,
@@ -702,7 +867,11 @@ TEST_CASE("Unstarted schedule conversions preserve the run identity and reject p
     {
         auto const schedule = cron_schedule();
         fixture.cron.set_occurrences(schedule, {UtcTimePoint{60s}});
-        REQUIRE(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("/cron")}));
+        REQUIRE(service.create_job({
+            .queue    = queue_id,
+            .schedule = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
+            .payload  = cli_payload("/cron")
+        }));
         jb::jobu::detail::AttemptRepository attempts{fixture.database};
         REQUIRE(attempts.insert_attempt({
             .run_id         = run_id,
@@ -742,7 +911,7 @@ TEST_CASE("Run Now snapshots a suspended definition and replays without consumin
         .queue      = queue_id,
         .name       = "snapshot",
         .type       = JobType::Cli,
-        .schedule   = schedule,
+        .schedule   = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
         .priority   = 17,
         .attributes = max_attempts(4),
         .payload    = cli_payload("/snapshot-command"),
@@ -902,7 +1071,11 @@ TEST_CASE("Run Now enforces every state-dependent manual-run precondition",
     fixture.cron.set_occurrences(schedule, {UtcTimePoint{60s}});
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "preconditions"}));
-    REQUIRE(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("/true")}));
+    REQUIRE(service.create_job({
+        .queue    = queue_id,
+        .schedule = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
+        .payload  = cli_payload("/true")
+    }));
 
     SECTION("unknown job")
     {
@@ -971,7 +1144,11 @@ TEST_CASE("Run Now rolls back idempotency failures and rejects corrupted replay 
     fixture.cron.set_occurrences(schedule, {UtcTimePoint{60s}});
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "rollback"}));
-    REQUIRE(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("/true")}));
+    REQUIRE(service.create_job({
+        .queue    = queue_id,
+        .schedule = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
+        .payload  = cli_payload("/true")
+    }));
     SECTION("idempotency write rollback")
     {
         execute(fixture.database,
@@ -1058,7 +1235,11 @@ TEST_CASE("Run Now signals fresh creation without signalling replay", "[jobu][ma
     fixture.cron.set_occurrences(schedule, {UtcTimePoint{60s}});
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
     REQUIRE(service.create_queue({.name = "signal-run-now"}));
-    REQUIRE(service.create_job({.queue = queue_id, .schedule = schedule, .payload = cli_payload("/signal")}));
+    REQUIRE(service.create_job({
+        .queue    = queue_id,
+        .schedule = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
+        .payload  = cli_payload("/signal")
+    }));
 
     auto emissions = std::size_t{0};
     service.mutation_committed.connect([&emissions]() -> void { ++emissions; });

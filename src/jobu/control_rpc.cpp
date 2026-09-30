@@ -6,6 +6,7 @@
 #include "json.hpp"
 #include "management.hpp"
 #include "protocol.hpp"
+#include "schedule_input_priv.hpp"
 #include "server.hpp"
 #include "utc_timestamp.hpp"
 
@@ -95,7 +96,8 @@ auto handle_value(jb::rpc::RequestContext const&            context,
 
 auto handle_schedule_validate(jb::rpc::RequestContext const&            context,
                               std::optional<jb::core::JsonValue> const& params,
-                              CronEngine const&                         cron) -> jb::rpc::MethodResult
+                              CronEngine const&                         cron,
+                              std::string_view                          default_timezone) -> jb::rpc::MethodResult
 {
     if (!params) {
         return invalid_params();
@@ -104,17 +106,26 @@ auto handle_schedule_validate(jb::rpc::RequestContext const&            context,
     if (!schedule) {
         return invalid_params();
     }
-    auto validated = cron.validate(*schedule);
+    auto resolved = detail::resolve_cron_schedule(*schedule, default_timezone);
+    if (!resolved) {
+        return jb::rpc::MethodResult::failure(jb::rpc::application_error(resolved.error()));
+    }
+    auto validated = cron.validate(*resolved);
     if (!validated) {
         return jb::rpc::MethodResult::failure(jb::rpc::application_error(validated.error()));
     }
     return bounded_success(context, schedule_validate_result_to_json());
 }
 
-auto preview_occurrences(CronEngine const& cron, ScheduleNextRequest const& request)
+auto preview_occurrences(CronEngine const& cron, ScheduleNextRequest const& request, std::string_view default_timezone)
     -> jb::core::Result<std::vector<jb::core::UtcTimePoint>, jb::core::Error>
 {
-    auto occurrences = next_cron_occurrences(cron, request.schedule, request.after, request.count);
+    auto resolved = detail::resolve_cron_schedule(request.schedule, default_timezone);
+    if (!resolved) {
+        return jb::core::Result<std::vector<jb::core::UtcTimePoint>, jb::core::Error>::failure(
+            std::move(resolved).error());
+    }
+    auto occurrences = next_cron_occurrences(cron, *resolved, request.after, request.count);
     if (!occurrences) {
         return occurrences;
     }
@@ -143,7 +154,8 @@ auto register_control_methods(jb::rpc::Server&         server,
                               ManagementService&       management,
                               Scheduler&               scheduler,
                               CronEngine const&        cron,
-                              AttributeRegistry const& attributes) -> bool
+                              AttributeRegistry const& attributes,
+                              std::string              default_timezone) -> bool
 {
     // Each handler delegates policy to its existing owner; registrations share the daemon's borrowed dependencies.
     return server.register_method(
@@ -170,20 +182,23 @@ auto register_control_methods(jb::rpc::Server&         server,
                            return cancel_run_result_to_json(result, attributes);
                        });
                }) &&
-           server.register_method(std::string{control_methods[2]},
-                                  [&cron](jb::rpc::RequestContext const&            context,
-                                          std::optional<jb::core::JsonValue> const& params) -> jb::rpc::MethodResult {
-                                      return handle_schedule_validate(context, params, cron);
-                                  }) &&
+           server.register_method(
+               std::string{control_methods[2]},
+               [&cron, default_timezone](jb::rpc::RequestContext const&            context,
+                                         std::optional<jb::core::JsonValue> const& params) -> jb::rpc::MethodResult {
+                   return handle_schedule_validate(context, params, cron, default_timezone);
+               }) &&
            server.register_method(
                std::string{control_methods[3]},
-               [&cron](jb::rpc::RequestContext const&            context,
-                       std::optional<jb::core::JsonValue> const& params) -> jb::rpc::MethodResult {
+               [&cron, default_timezone](jb::rpc::RequestContext const&            context,
+                                         std::optional<jb::core::JsonValue> const& params) -> jb::rpc::MethodResult {
                    return handle_value(
                        context,
                        params,
                        schedule_next_request_from_json,
-                       [&cron](ScheduleNextRequest const& request) { return preview_occurrences(cron, request); },
+                       [&cron, &default_timezone](ScheduleNextRequest const& request) {
+                           return preview_occurrences(cron, request, default_timezone);
+                       },
                        schedule_next_result_to_json);
                });
 }

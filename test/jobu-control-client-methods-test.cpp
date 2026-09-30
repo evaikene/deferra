@@ -155,7 +155,7 @@ TEST_CASE("Every typed method selects its capability and shared request shape", 
     payload.data        = JsonValue::Object{};
     auto const selector = QueueSelector{id.value()};
     auto const key      = AttemptKey{.run_id = id.value(), .attempt_number = 1};
-    auto const cron     = CronSchedule{.expression = "0 0 * * *"};
+    auto const cron     = CronScheduleInput{.expression = "0 0 * * *"};
 
     auto cases = std::vector<MethodCase>{
         {"system.info",       std::nullopt,     false, [](auto& client) { return client.get_system_info(); }                     },
@@ -456,4 +456,39 @@ TEST_CASE("Unknown response members are ignored and nullable output metadata sta
     CHECK_FALSE(decoded.total_bytes);
     CHECK_FALSE(decoded.omitted_bytes);
     CHECK_FALSE(decoded.next_offset);
+}
+
+TEST_CASE("Typed cron requests preserve omitted and explicit UTC timezones", "[jobu][client][timezone]")
+{
+    Fixture fixture;
+    fixture.initialize();
+    auto const after = parse_utc_timestamp("2030-01-01T00:00:00Z").value();
+    auto const queue = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff").value();
+    for (auto timezone : {std::optional<std::string>{}, std::optional<std::string>{"UTC"}}) {
+        auto const schedule = CronScheduleInput{.expression = "@daily", .timezone = timezone};
+        auto       submit   = std::vector<Submit>{
+            [&](ControlClient& client) { return client.validate_schedule(schedule); },
+            [&](ControlClient& client) {
+                return client.next_schedule_occurrences({.schedule = schedule, .after = after});
+            },
+            [&](ControlClient& client) {
+                return client.create_job(
+                    {.queue = queue, .schedule = schedule, .payload = JsonValue{.data = JsonValue::Object{}}});
+            },
+            [&](ControlClient& client) {
+                return client.update_job({.job_id = queue, .expected_revision = 1, .schedule = schedule});
+            },
+        };
+        for (auto const& call : submit) {
+            auto submitted = call(*fixture.typed);
+            REQUIRE(submitted);
+            auto        request = request_body(fixture.device.take_written_data());
+            auto const& fields  = request.as_object().at("params").as_object().at("schedule").as_object();
+            CHECK(fields.contains("timezone") == timezone.has_value());
+            if (timezone) {
+                CHECK(fields.at("timezone").as_string() == *timezone);
+            }
+            fixture.typed->cancel_call(*submitted);
+        }
+    }
 }

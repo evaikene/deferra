@@ -245,8 +245,9 @@ public:
     [[nodiscard]] auto delete_secret(std::string_view name, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
-    /// Validates a cron schedule; replies with ScheduleValidationReply only when valid.
-    [[nodiscard]] auto validate_schedule(CronSchedule const& schedule, ControlCallOptions options = {})
+    /// Validates cron input; omitted timezone uses the daemon default.
+    /// Replies with ScheduleValidationReply only when valid.
+    [[nodiscard]] auto validate_schedule(CronScheduleInput const& schedule, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
     /// Previews strictly later cron occurrences; replies with ScheduleNextReply.

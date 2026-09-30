@@ -6,9 +6,11 @@
 | `schedule.next` | Preview occurrences | 1.3 | `schedule next` | `next_schedule_occurrences()` |
 
 `schedule.validate` and `schedule.next` use the daemon's existing cron engine.
-Both require a cron-only schedule object with exactly `kind`, `expression`,
-and `timezone`; once schedules are rejected as invalid params (`-32602`).
-`timezone` is an IANA name or `UTC`. Neither method stores or changes a job.
+Both require a cron-only schedule object with `kind` and `expression`, plus
+an optional `timezone`; unknown members and once schedules are rejected as
+invalid params (`-32602`). An explicit timezone is a nonempty IANA name or
+`UTC`. Omission uses `schedule.default_timezone` (normally `UTC`), while
+explicit UTC stays UTC. Neither method stores or changes a job.
 See [Cron schedules](../../cron.md) for the expression grammar, alias meanings,
 and daylight-saving behavior.
 
@@ -18,7 +20,7 @@ The shared `schedule` object has these members:
 | --- | --- | --- | --- | --- |
 | `kind` | string | Yes | 1.3 | Fixed `cron` |
 | `expression` | string | Yes | 1.3 | Five-field cron expression or alias |
-| `timezone` | string | Yes | 1.3 | IANA timezone name or `UTC` |
+| `timezone` | string | No | 1.3 | Nonempty IANA name or `UTC`; omission uses daemon default |
 
 ## Validate (`schedule.validate`)
 

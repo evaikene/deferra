@@ -66,7 +66,8 @@ constexpr auto after    = value_option("after", "UUID", "Continue after the ID r
 constexpr auto revision = value_option("revision", "N", "Required current revision, 1..18446744073709551615.");
 constexpr auto at       = value_option("at", "UTC", "Once schedule timestamp, for example 2030-01-01T00:00:00Z.");
 constexpr auto cron     = value_option("cron", "EXPR", "Recurring cron expression; use --timezone for its zone.");
-constexpr auto timezone = value_option("timezone", "ZONE", "Cron timezone; default: UTC.");
+constexpr auto timezone =
+    value_option("timezone", "ZONE", "Cron timezone; omission uses the daemon default (normally UTC).");
 constexpr auto attribute =
     value_option("attribute", "NAME=JSON", "Job attribute value; repeat for distinct names.", true);
 constexpr auto retention =
@@ -655,7 +656,8 @@ constexpr CommandSpec schedule_validate_command{
     .operands         = "EXPRESSION",
     .maximum_operands = 1,
     .options          = schedule_validate,
-    .rules      = "EXPRESSION is required. --timezone defaults to UTC. Invalid schedules return a structured error.",
+    .rules      = "EXPRESSION is required. Omitted --timezone uses the daemon default. Invalid schedules return a "
+                  "structured error.",
     .example    = "jobuctl --socket /run/jobu.sock schedule validate '0 9 * * FRI-MON'",
     .capability = "schedule.validate",
     .build      = parse_schedule_command,
@@ -668,10 +670,10 @@ constexpr CommandSpec schedule_next_command{
     .operands         = "EXPRESSION",
     .maximum_operands = 1,
     .options          = schedule_next,
-    .rules            = "Require EXPRESSION and --after UTC. --timezone defaults to UTC; --count defaults to 5.",
-    .example          = "jobuctl --socket /run/jobu.sock schedule next '@daily' --after 2030-01-01T00:00:00Z",
-    .capability       = "schedule.next",
-    .build            = parse_schedule_command,
+    .rules   = "Require EXPRESSION and --after UTC. Omitted --timezone uses the daemon default; --count defaults to 5.",
+    .example = "jobuctl --socket /run/jobu.sock schedule next '@daily' --after 2030-01-01T00:00:00Z",
+    .capability = "schedule.next",
+    .build      = parse_schedule_command,
 };
 
 constexpr std::array commands{

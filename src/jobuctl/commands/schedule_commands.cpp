@@ -30,7 +30,6 @@ auto parse_schedule_command(std::filesystem::path                socket_path,
     auto schedule = JsonValue::Object{
         {"kind",       JsonValue{.data = std::string{"cron"}}                   },
         {"expression", JsonValue{.data = std::string{arguments.front().token()}}},
-        {"timezone",   JsonValue{.data = std::string{"UTC"}}                    },
     };
     for (auto const& argument : arguments.subspan(1)) {
         auto value = option_value(argument);

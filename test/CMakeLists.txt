@@ -604,6 +604,7 @@ foreach(JOBU_DOMAIN_HEADER IN ITEMS
         queue
         recovery
         run
+        schedule-input
         scheduler
         secret
         secret-json

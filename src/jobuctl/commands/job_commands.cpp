@@ -312,7 +312,7 @@ auto parse_job_create(std::filesystem::path                socket_path,
             if (schedule) {
                 return parse_failure("choose exactly one of --now, --at, or --cron");
             }
-            schedule = CronSchedule{.expression = std::string{*value}};
+            schedule = CronScheduleInput{.expression = std::string{*value}};
             continue;
         }
         if (argument.name() == "timezone" && !timezone) {
@@ -385,7 +385,7 @@ auto parse_job_create(std::filesystem::path                socket_path,
         return parse_failure("job create requires exactly one --now, --at, or --cron schedule");
     }
     if (timezone) {
-        auto* cron = std::get_if<CronSchedule>(&*schedule);
+        auto* cron = std::get_if<CronScheduleInput>(&*schedule);
         if (!cron) {
             return parse_failure("--timezone requires --cron");
         }
@@ -604,7 +604,7 @@ auto parse_job_update(std::filesystem::path                socket_path,
     auto revision        = std::optional<JobRevision>{};
     auto name            = std::optional<std::optional<std::string>>{};
     auto priority        = std::optional<std::int32_t>{};
-    auto schedule        = std::optional<JobSchedule>{};
+    auto schedule        = std::optional<JobScheduleInput>{};
     auto timezone        = std::optional<std::string>{};
     auto attributes_json = JsonValue::Object{};
     auto revision_seen   = false;
@@ -657,14 +657,14 @@ auto parse_job_update(std::filesystem::path                socket_path,
             if (!parsed) {
                 return parse_failure("--at must be a valid canonical UTC timestamp");
             }
-            schedule = JobSchedule{OnceSchedule{.planned_at = std::move(parsed).value()}};
+            schedule = JobScheduleInput{OnceSchedule{.planned_at = std::move(parsed).value()}};
             continue;
         }
         if (argument.name() == "cron") {
             if (schedule) {
                 return parse_failure("choose exactly one of --at or --cron");
             }
-            schedule = JobSchedule{CronSchedule{.expression = std::string{*value}}};
+            schedule = JobScheduleInput{CronScheduleInput{.expression = std::string{*value}}};
             continue;
         }
         if (argument.name() == "timezone" && !timezone) {
@@ -684,7 +684,7 @@ auto parse_job_update(std::filesystem::path                socket_path,
         return parse_failure("job update requires --revision");
     }
     if (timezone) {
-        auto* cron = schedule ? std::get_if<CronSchedule>(&*schedule) : nullptr;
+        auto* cron = schedule ? std::get_if<CronScheduleInput>(&*schedule) : nullptr;
         if (!cron) {
             return parse_failure("--timezone requires --cron");
         }

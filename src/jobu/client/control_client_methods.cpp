@@ -235,7 +235,7 @@ auto ControlClient::delete_secret(std::string_view name, ControlCallOptions opti
                                                 options);
 }
 
-auto ControlClient::validate_schedule(CronSchedule const& schedule, ControlCallOptions options) -> CallResult
+auto ControlClient::validate_schedule(CronScheduleInput const& schedule, ControlCallOptions options) -> CallResult
 {
     return d_ptr<Private>()->start_encoded_call(Private::Method::ValidateSchedule,
                                                 "schedule.validate",

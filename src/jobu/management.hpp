@@ -11,6 +11,7 @@
 #include "queue.hpp"
 #include "result.hpp"
 #include "run.hpp"
+#include "schedule_input.hpp"
 #include "signal.hpp"
 #include "time_source.hpp"
 #include "uuid.hpp"
@@ -30,6 +31,7 @@ class Database;
 namespace jb::jobu {
 
 class CronEngine;
+class ExecutionTelemetry;
 
 /// Selects a queue by stable UUID or exact user-facing name.
 using QueueSelector = std::variant<jb::core::Uuid, std::string>;
@@ -119,7 +121,7 @@ struct QueueListRequest {
 struct ImmediateSchedule {};
 
 /// Creation input; immediate schedules become concrete OnceSchedule values before persistence.
-using JobCreationSchedule = std::variant<ImmediateSchedule, OnceSchedule, CronSchedule>;
+using JobCreationSchedule = std::variant<ImmediateSchedule, OnceSchedule, CronScheduleInput>;
 
 /// Values used to create one active job and its first scheduled run.
 ///
@@ -164,8 +166,9 @@ struct UpdateJobRequest {
     std::optional<std::optional<std::string>> name;
     /// Replacement runner family, validated together with the resulting payload.
     std::optional<JobType>                    type;
-    /// Replacement one-time or recurring schedule; conversion requires a scheduled current occurrence with no attempt.
-    std::optional<JobSchedule>                schedule;
+    /// Replacement one-time or recurring input; omitted cron timezone uses the current daemon default.
+    /// Conversion requires a scheduled current occurrence with no attempt.
+    std::optional<JobScheduleInput>           schedule;
     /// Replacement scheduling priority.
     std::optional<std::int32_t>               priority;
     /// Job-scope values that replace the corresponding stored materialized values.
@@ -219,6 +222,16 @@ struct RunNowRequest {
     std::optional<std::string> idempotency_key;
 };
 
+/// Immutable management policy copied at construction.
+struct ManagementServiceOptions {
+    /// Partial daemon attribute layer, validated at construction and materialized for fresh job creation.
+    AttributeSet        daemon_defaults;
+    /// Nonempty timezone supported by the borrowed CronEngine; omission in cron input uses this value.
+    std::string         default_timezone{"UTC"};
+    /// Optional owner-thread telemetry collaborator, which must outlive the service.
+    ExecutionTelemetry* telemetry{nullptr};
+};
+
 /// Synchronous owner-thread Object for durable JobU management operations.
 ///
 /// The service borrows an already-open Database, AttributeRegistry, CronEngine, UuidGenerator, and TimeSource; each
@@ -251,7 +264,7 @@ public:
     /// @param cron Owner-thread cron validator and occurrence calculator used synchronously by recurring operations.
     /// @param uuid_generator Generator used for new durable identities.
     /// @param time_source Source used for durable UTC timestamps.
-    /// @param daemon_defaults Partial daemon-default attribute layer to validate and copy.
+    /// @param options Immutable daemon defaults and optional borrowed telemetry collaborator.
     /// @param parent Optional Object that owns this service and supplies its event-loop affinity.
     /// @warning Every argument and the constructor call itself belong to the Database owner thread.
     ///
@@ -260,8 +273,8 @@ public:
                       CronEngine const&        cron,
                       jb::core::UuidGenerator& uuid_generator,
                       jb::core::TimeSource&    time_source,
-                      AttributeSet             daemon_defaults = {},
-                      jb::core::Object*        parent          = nullptr);
+                      ManagementServiceOptions options = {},
+                      jb::core::Object*        parent  = nullptr);
 
     /// Destroys private repositories without changing the borrowed Database state.
     ~ManagementService() override;
@@ -342,6 +355,7 @@ public:
     /// result and its unchanged first occurrence. A fresh cron request is validated and evaluated strictly after the
     /// transaction's sampled current time. ImmediateSchedule resolves to that time only for a fresh creation;
     /// its canonical request remains symbolic so retrying the same key cannot move the planned instant.
+    /// Omitted cron timezone resolves only for fresh creation; replay retains the original timezone and attributes.
     /// Recognized payload references require existing secret names, checked without reading values. Reference rows
     /// commit with the definition; missing names return jobu.secret.not_found. Replay neither checks current secret
     /// existence nor recreates reference rows, so later secret rotation or deletion does not alter its result.

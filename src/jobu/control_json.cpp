@@ -1,6 +1,7 @@
 #include "control_json.hpp"
 
 #include "history_json.hpp"
+#include "schedule_input_priv.hpp"
 #include "utc_timestamp.hpp"
 
 #include <cstdint>
@@ -102,32 +103,6 @@ auto decode_count(JsonValue const& value, std::size_t& result) -> bool
     }
     result = static_cast<std::size_t>(decoded);
     return true;
-}
-
-auto cron_schedule_from_json(JsonValue const& value) -> ConversionResult<CronSchedule>
-{
-    if (!value.is_object() || !only_members(value.as_object(), {"kind", "expression", "timezone"})) {
-        return reject<CronSchedule>(true);
-    }
-    auto const& object     = value.as_object();
-    auto const* kind       = member(object, "kind");
-    auto const* expression = member(object, "expression");
-    auto const* timezone   = member(object, "timezone");
-    if (!kind || !kind->is_string() || kind->as_string() != "cron" || !expression || !expression->is_string() ||
-        !timezone || !timezone->is_string()) {
-        return reject<CronSchedule>(true);
-    }
-    return ConversionResult<CronSchedule>::success(
-        {.expression = expression->as_string(), .timezone = timezone->as_string()});
-}
-
-auto cron_schedule_to_json(CronSchedule const& schedule) -> JsonValue
-{
-    return json(JsonValue::Object{
-        {"kind",       json(std::string{"cron"})},
-        {"expression", json(schedule.expression)},
-        {"timezone",   json(schedule.timezone)  },
-    });
 }
 
 } // namespace
@@ -254,20 +229,24 @@ auto cancel_run_result_from_json(JsonValue const& value, AttributeRegistry const
     return ConversionResult<CancelRunResult>::success(std::move(result));
 }
 
-auto schedule_validate_request_to_json(CronSchedule const& schedule) -> ConversionResult<JsonValue>
+auto schedule_validate_request_to_json(CronScheduleInput const& schedule) -> ConversionResult<JsonValue>
 {
+    auto encoded = detail::cron_schedule_input_to_json(schedule);
+    if (!encoded) {
+        return reject<JsonValue>(true);
+    }
     return checked_request(json(JsonValue::Object{
-        {"schedule", cron_schedule_to_json(schedule)},
+        {"schedule", std::move(*encoded)}
     }));
 }
 
-auto schedule_validate_request_from_json(JsonValue const& value) -> ConversionResult<CronSchedule>
+auto schedule_validate_request_from_json(JsonValue const& value) -> ConversionResult<CronScheduleInput>
 {
     if (!value.is_object() || !only_members(value.as_object(), {"schedule"})) {
-        return reject<CronSchedule>(true);
+        return reject<CronScheduleInput>(true);
     }
     auto const* schedule = member(value.as_object(), "schedule");
-    return schedule ? cron_schedule_from_json(*schedule) : reject<CronSchedule>(true);
+    return schedule ? detail::cron_schedule_input_from_json(*schedule) : reject<CronScheduleInput>(true);
 }
 
 auto schedule_validate_result_to_json() -> JsonValue
@@ -295,8 +274,12 @@ auto schedule_next_request_to_json(ScheduleNextRequest const& request) -> Conver
     if (!after) {
         return reject<JsonValue>(true);
     }
+    auto schedule = detail::cron_schedule_input_to_json(request.schedule);
+    if (!schedule) {
+        return reject<JsonValue>(true);
+    }
     return checked_request(json(JsonValue::Object{
-        {"schedule", cron_schedule_to_json(request.schedule)        },
+        {"schedule", std::move(*schedule)                           },
         {"after",    json(std::move(after).value())                 },
         {"count",    json(static_cast<std::uint64_t>(request.count))},
     }));
@@ -313,7 +296,7 @@ auto schedule_next_request_from_json(JsonValue const& value) -> ConversionResult
     if (!schedule || !after || !after->is_string()) {
         return reject<ScheduleNextRequest>(true);
     }
-    auto decoded_schedule = cron_schedule_from_json(*schedule);
+    auto decoded_schedule = detail::cron_schedule_input_from_json(*schedule);
     auto decoded_after    = parse_utc_timestamp(after->as_string());
     if (!decoded_schedule || !decoded_after) {
         return reject<ScheduleNextRequest>(true);

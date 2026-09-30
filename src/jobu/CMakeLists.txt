@@ -83,6 +83,8 @@ target_sources(${TARGET}
         retention_repository_priv.hpp
         run_repository_priv.cpp
         run_repository_priv.hpp
+        schedule_input_priv.cpp
+        schedule_input_priv.hpp
         scheduler.cpp
         scheduler_core_priv.cpp
         scheduler_core_priv.hpp
@@ -131,6 +133,7 @@ target_sources(${TARGET}
         queue.hpp
         recovery.hpp
         run.hpp
+        schedule_input.hpp
         scheduler.hpp
         secret.hpp
         secret_json.hpp

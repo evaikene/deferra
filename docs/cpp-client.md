@@ -77,6 +77,19 @@ Successful queue, job, and secret deletions return `EmptyReply`; cron validation
 returns `ScheduleValidationReply` only for a valid schedule. Invalid schedules
 produce a remote error.
 
+Cron requests use `CronScheduleInput{expression, optional_timezone}`.
+Omitting timezone uses the daemon's configured default; supplying `"UTC"`
+keeps UTC explicit. `CreateJobRequest`, `UpdateJobRequest`, `validate_schedule`,
+and `ScheduleNextRequest` share this input contract. Stored job replies use
+`CronSchedule` with an explicit timezone. An omitted update schedule keeps the
+stored schedule; a supplied replacement with omitted timezone uses the current
+default. Retain omission when replaying a keyed creation after defaults change.
+
+For example, `validate_schedule(CronScheduleInput{.expression = "@daily"})`
+uses the daemon default, while
+`validate_schedule(CronScheduleInput{.expression = "@daily", .timezone = "UTC"})`
+explicitly selects UTC.
+
 The public header documents each member's result. The
 [protocol method pages](protocol/methods/system.md) and their neighboring
 family pages specify request fields, limits, and durable semantics. The client

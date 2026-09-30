@@ -4,6 +4,7 @@
 #pragma once
 
 #include <span>
+#include <string>
 #include <string_view>
 
 namespace jb::rpc {
@@ -29,6 +30,7 @@ class Scheduler;
 /// independently. Success results that exceed the configured frame body return `jobu.response.too_large`; a prior
 /// committed mutation remains durable and must be reconciled by replay or a later read.
 ///
+/// @param default_timezone Nonempty supported timezone, copied into the preview handlers for omitted input.
 /// Registration stops at the first duplicate or rejected method. Discard a partially registered server before
 /// listening.
 /// @return True only when all four handlers were registered.
@@ -36,6 +38,7 @@ auto register_control_methods(jb::rpc::Server&         server,
                               ManagementService&       management,
                               Scheduler&               scheduler,
                               CronEngine const&        cron,
-                              AttributeRegistry const& attributes) -> bool;
+                              AttributeRegistry const& attributes,
+                              std::string              default_timezone = "UTC") -> bool;
 
 } // namespace jb::jobu

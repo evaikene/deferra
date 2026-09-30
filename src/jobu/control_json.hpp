@@ -3,7 +3,6 @@
 ///
 #pragma once
 
-#include "job.hpp"
 #include "management.hpp"
 #include "scheduler.hpp"
 
@@ -14,7 +13,7 @@ namespace jb::jobu {
 
 /// Requests a bounded cron preview strictly after a UTC instant.
 struct ScheduleNextRequest {
-    CronSchedule           schedule;
+    CronScheduleInput      schedule;
     jb::core::UtcTimePoint after;
     /// Number of occurrences, from 1 through 200; omitted wire count defaults to five.
     std::size_t            count{5};
@@ -39,11 +38,11 @@ struct ScheduleNextRequest {
 [[nodiscard]] auto cancel_run_result_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry)
     -> jb::core::Result<CancelRunResult, jb::core::Error>;
 
-/// Encodes or strictly decodes a complete cron-only schedule.validate request.
-[[nodiscard]] auto schedule_validate_request_to_json(CronSchedule const& schedule)
+/// Encodes or strictly decodes a cron-only schedule.validate request, preserving timezone omission.
+[[nodiscard]] auto schedule_validate_request_to_json(CronScheduleInput const& schedule)
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 [[nodiscard]] auto schedule_validate_request_from_json(jb::core::JsonValue const& value)
-    -> jb::core::Result<CronSchedule, jb::core::Error>;
+    -> jb::core::Result<CronScheduleInput, jb::core::Error>;
 
 /// The only successful schedule.validate result is {"valid":true}.
 [[nodiscard]] auto schedule_validate_result_to_json() -> jb::core::JsonValue;
