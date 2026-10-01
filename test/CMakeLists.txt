@@ -338,6 +338,17 @@ if(TARGET jobu-sqlite)
     target_link_libraries(jobu-retention-service-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME jobu-retention-service-test COMMAND $<TARGET_FILE:jobu-retention-service-test>)
 
+    foreach(TELEMETRY_TEST IN ITEMS jobu-wait-repository-test jobu-execution-telemetry-test)
+        add_executable(${TELEMETRY_TEST}
+            ${TELEMETRY_TEST}.cpp
+            support/fault_database_driver.cpp
+            support/recovery_fixture.cpp
+            support/temporary_directory.cpp
+        )
+        target_link_libraries(${TELEMETRY_TEST} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+        add_test(NAME ${TELEMETRY_TEST} COMMAND $<TARGET_FILE:${TELEMETRY_TEST}>)
+    endforeach()
+
     add_executable(secret-service-test
         secret-service-test.cpp support/fault_database_driver.cpp
         support/recovery_fixture.cpp support/temporary_directory.cpp)
@@ -603,6 +614,7 @@ foreach(JOBU_DOMAIN_HEADER IN ITEMS
         attempt-executor-group
         attribute-registry
         cron
+        execution-telemetry
         control-json
         control-rpc
         history

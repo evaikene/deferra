@@ -33,6 +33,8 @@ target_sources(${TARGET}
         cron_timezone_priv.hpp
         domain_storage_priv.cpp
         domain_storage_priv.hpp
+        execution_telemetry.cpp
+        execution_telemetry_priv.hpp
         http_job_payload_priv.cpp
         http_job_payload_priv.hpp
         http_retry_priv.cpp
@@ -115,6 +117,8 @@ target_sources(${TARGET}
         system_info.cpp
         system_info_rpc.cpp
         utc_timestamp.cpp
+        wait_repository_priv.cpp
+        wait_repository_priv.hpp
     PUBLIC
         attempt.hpp
         attempt_executor.hpp
@@ -124,6 +128,7 @@ target_sources(${TARGET}
         control_json.hpp
         control_rpc.hpp
         cron.hpp
+        execution_telemetry.hpp
         history.hpp
         history_json.hpp
         history_rpc.hpp
