@@ -56,6 +56,18 @@ timezone or attribute defaults leaves the replayed result unchanged; a new
 key uses the current defaults. After a lost reply, repeat the **same**
 keyed request; an unkeyed retry is a new creation.
 
+Creation keys follow the resource's lifetime. A live recurring definition,
+including a suspended one, keeps its key. A one-time definition keeps its key
+while any run remains retained; after its last run is purged and the definition
+is terminal, cleanup may retire the key while keeping the definition available
+for inspection. Explicitly deleted definitions retire their creation keys
+with physical deletion after retained history is gone. Moving a definition
+preserves its original creation scope and saved response.
+
+After retirement, reusing a creation key is a new request and can create a
+different definition. A key has no fixed expiry measured from creation time.
+The daemon currently performs no automatic history cleanup.
+
 ## Get and list (`job.get`, `job.list`)
 
 `job.get` requires `job_id` (Since 1.1). `job.list` accepts:
@@ -179,7 +191,9 @@ for a `succeeded`, `failed`, or `cancelled` definition returns Conflict /
 A matching retained key is checked before current-job eligibility and replays
 the originally recorded run, even if the definition has since become terminal.
 Replay does not create work, change revisions, resolve secrets, or request a
-scheduler rescan. A fresh or expired key is a new request and follows current
+scheduler rescan. The replay record is retained with its manual run and retired
+in the same cleanup transaction that purges that terminal run. A fresh or
+retired key is a new request and follows current
 eligibility. A conflicting key returns `jobu.idempotency.conflict`;
 an ineligible manual barrier returns `jobu.run.manual_conflict`. A lost reply
 can be reconciled with `run.list` or the same keyed request.

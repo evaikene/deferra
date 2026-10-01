@@ -209,56 +209,107 @@ auto IdempotencyRepository::insert(IdempotencyRecord const& record) -> jb::core:
     return executed;
 }
 
-auto IdempotencyRepository::erase_for_resource(jb::core::Uuid const& resource_id)
-    -> jb::core::Result<std::size_t, jb::core::Error>
+auto IdempotencyRepository::list_referencing(jb::core::Uuid const&                owner,
+                                             std::size_t                          limit,
+                                             std::optional<IdempotencyKey> const& after)
+    -> jb::core::Result<std::vector<IdempotencyRecord>, jb::core::Error>
 {
+    using PageResult = RepositoryResult<std::vector<IdempotencyRecord>>;
+    if (limit == 0 || limit > kMaximumRetentionBatch) {
+        return PageResult::failure(invalid_limit());
+    }
+
+    // Page reference keys through each owner index before fetching documents.
+    // Sorting the UNION's full JSON rows would materialize an owner's entire
+    // replay history before LIMIT. UNION deduplicates the two roles by primary key.
+    auto continuation = std::string{};
+    if (after) {
+        continuation = " AND (method, scope_id, key) > (:after_method, :after_scope, :after_key)";
+    }
+    auto keys = "SELECT method, scope_id, key FROM jobu_idempotency WHERE resource_id = :owner" + continuation +
+                " UNION SELECT method, scope_id, key FROM jobu_idempotency WHERE scope_id = :owner" + continuation +
+                " ORDER BY method, scope_id, key LIMIT :limit";
+    auto sql =
+        std::string{"SELECT method AS idempotency_method, scope_id AS idempotency_scope_id, key AS idempotency_key, "
+                    "request_json AS idempotency_request_json, result_json AS idempotency_result_json, "
+                    "resource_id AS idempotency_resource_id, created_at_us AS idempotency_created_at_us, "
+                    "expires_at_us AS idempotency_expires_at_us FROM ("} +
+        keys + ") AS reference_keys JOIN jobu_idempotency USING (method, scope_id, key) ORDER BY method, scope_id, key";
+
     jb::db::Query query{_database};
-    auto          prepared = query.prepare("DELETE FROM jobu_idempotency WHERE resource_id = :resource_id");
-    if (!prepared) {
-        return RepositoryResult<std::size_t>::failure(std::move(prepared).error());
+    auto          result = query.prepare(sql);
+    if (result) {
+        result = bind_all(query,
+                          {
+                              {":owner", uuid_to_storage(owner)          },
+                              {":limit", static_cast<std::int64_t>(limit)}
+        });
     }
-    auto bound = query.bind_value(":resource_id", uuid_to_storage(resource_id));
-    if (!bound) {
-        return RepositoryResult<std::size_t>::failure(std::move(bound).error());
+    if (result && after) {
+        result = bind_all(query,
+                          {
+                              {":after_method", jb::db::make_text(after->method)},
+                              {":after_scope",  uuid_to_storage(after->scope_id)},
+                              {":after_key",    jb::db::make_text(after->key)   }
+        });
     }
-    auto executed = query.exec();
-    if (!executed) {
-        return RepositoryResult<std::size_t>::failure(std::move(executed).error());
+    if (result) {
+        result = query.exec();
     }
-    return affected_rows(query);
+    if (!result) {
+        return PageResult::failure(std::move(result).error());
+    }
+
+    auto records = std::vector<IdempotencyRecord>{};
+    records.reserve(limit);
+    for (;;) {
+        auto next = query.next();
+        if (!next) {
+            return PageResult::failure(std::move(next).error());
+        }
+        if (!*next) {
+            break;
+        }
+        auto decoded = decode_record(query.record());
+        if (!decoded) {
+            return PageResult::failure(std::move(decoded).error());
+        }
+        records.push_back(std::move(decoded).value());
+    }
+    auto finished = query.finish();
+    if (!finished) {
+        return PageResult::failure(std::move(finished).error());
+    }
+    return PageResult::success(std::move(records));
 }
 
-auto IdempotencyRepository::erase_expired(jb::core::UtcTimePoint cutoff, std::size_t limit)
+auto IdempotencyRepository::erase_matching(IdempotencyRecord const& record)
     -> jb::core::Result<std::size_t, jb::core::Error>
 {
-    if (limit == 0 || limit > kMaximumRetentionBatch || !std::in_range<std::int64_t>(limit)) {
-        return RepositoryResult<std::size_t>::failure(invalid_limit());
-    }
-    auto cutoff_value = timestamp_to_storage(cutoff);
-    if (!cutoff_value) {
-        return RepositoryResult<std::size_t>::failure(std::move(cutoff_value).error());
-    }
     jb::db::Query query{_database};
-    auto          prepared = query.prepare(
-        "DELETE FROM jobu_idempotency WHERE (method, scope_id, key) IN ("
-        "SELECT method, scope_id, key FROM jobu_idempotency WHERE expires_at_us IS NOT NULL "
-        "AND expires_at_us < :cutoff ORDER BY expires_at_us ASC, method ASC, scope_id ASC, key ASC LIMIT :limit)");
-    if (!prepared) {
-        return RepositoryResult<std::size_t>::failure(std::move(prepared).error());
-    }
-    auto bound = bind_all(query,
+    auto          result = query.prepare("DELETE FROM jobu_idempotency WHERE method = :method AND scope_id = :scope_id "
+                                         "AND key = :key AND resource_id = :resource_id");
+    if (result) {
+        result = bind_all(query,
                           {
-                              {":cutoff", std::move(cutoff_value).value() },
-                              {":limit",  static_cast<std::int64_t>(limit)},
-    });
-    if (!bound) {
-        return RepositoryResult<std::size_t>::failure(std::move(bound).error());
+                              {":method",      jb::db::make_text(record.method)   },
+                              {":scope_id",    uuid_to_storage(record.scope_id)   },
+                              {":key",         jb::db::make_text(record.key)      },
+                              {":resource_id", uuid_to_storage(record.resource_id)}
+        });
     }
-    auto executed = query.exec();
-    if (!executed) {
-        return RepositoryResult<std::size_t>::failure(std::move(executed).error());
+    if (result) {
+        result = query.exec();
     }
-    return affected_rows(query);
+    if (!result) {
+        return RepositoryResult<std::size_t>::failure(std::move(result).error());
+    }
+    auto count    = affected_rows(query);
+    auto finished = query.finish();
+    if (!finished) {
+        return RepositoryResult<std::size_t>::failure(std::move(finished).error());
+    }
+    return count;
 }
 
 } // namespace jb::jobu::detail

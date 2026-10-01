@@ -81,6 +81,8 @@ target_sources(${TARGET}
         recovery_retry_priv.hpp
         retention_repository_priv.cpp
         retention_repository_priv.hpp
+        retention_owner_repository_priv.cpp
+        retention_owner_repository_priv.hpp
         run_repository_priv.cpp
         run_repository_priv.hpp
         schedule_input_priv.cpp

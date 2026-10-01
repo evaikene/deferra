@@ -111,6 +111,13 @@ failures. After an unknown outcome, inspect the resource or replay a creation
 with the **same caller-selected idempotency key and request**. Do not retry an
 unkeyed write blindly.
 
+Replay is available only while the record remains retained. Keys follow
+[queue](protocol/methods/queue.md) and [job/run](protocol/methods/job.md)
+resource lifetimes rather than a fixed age from creation. After retirement,
+the same key is a new request subject to current eligibility; a terminal job
+still rejects a new Run Now request. Inspect the resource when reconciling an
+older unknown outcome instead of assuming an indefinitely retained key.
+
 In a source checkout, `examples/jobu-client/idempotent_creation.cpp` shows a
 once-now `create_job` request with a caller-selected key. The read-only example
 never invokes it. The key and complete request must be retained by the

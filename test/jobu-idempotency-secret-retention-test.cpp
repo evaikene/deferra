@@ -1,3 +1,4 @@
+#include "idempotency_codec_priv.hpp"
 #include "idempotency_repository_priv.hpp"
 #include "retention_repository_priv.hpp"
 #include "secret_repository_priv.hpp"
@@ -234,6 +235,54 @@ auto record(std::string                 method,
     };
 }
 
+auto cleanup_record(RepositoryFixture& fixture, std::string method, Uuid scope, std::string key, Uuid resource)
+    -> IdempotencyRecord
+{
+    auto payload = parse_json(R"({"command":"/true"})");
+    REQUIRE(payload);
+    auto attributes = materialize_attributes(fixture.registry, {}, {}, {});
+    REQUIRE(attributes);
+    auto request = Result<std::string, Error>{};
+    auto result  = Result<std::string, Error>{};
+    if (method == "job.create") {
+        auto input = CreateJobRequest{.queue = scope, .schedule = OnceSchedule{UtcTimePoint{}}, .payload = *payload};
+        request    = encode_job_create_idempotency_request(input, scope, fixture.registry);
+        auto job   = JobDefinition{.id         = resource,
+                                   .queue_id   = scope,
+                                   .schedule   = OnceSchedule{UtcTimePoint{}},
+                                   .attributes = *attributes,
+                                   .payload    = *payload};
+        result     = encode_job_idempotency_result(job, fixture.registry);
+    }
+    else {
+        request = encode_run_now_idempotency_request({.job_id = scope});
+        Query query{fixture.database};
+        REQUIRE(query.prepare("SELECT queue_id FROM jobu_runs WHERE id = :id"));
+        REQUIRE(query.bind_value(":id", uuid_to_storage(resource)));
+        REQUIRE(query.exec());
+        REQUIRE(query.next());
+        auto queue = read_uuid(query.record(), "queue_id");
+        REQUIRE(queue);
+        auto run = JobRun{.id             = resource,
+                          .job_id         = scope,
+                          .job_revision   = 1,
+                          .queue_id       = *queue,
+                          .origin         = RunOrigin::Manual,
+                          .schedule_owned = false,
+                          .attributes     = *attributes,
+                          .payload        = *payload};
+        result   = encode_run_now_idempotency_result(run, fixture.registry);
+    }
+    REQUIRE(request);
+    REQUIRE(result);
+    return {.method       = std::move(method),
+            .scope_id     = scope,
+            .key          = std::move(key),
+            .request_json = *request,
+            .result_json  = *result,
+            .resource_id  = resource};
+}
+
 void execute(Database& database, std::string_view sql)
 {
     Query query{database};
@@ -270,6 +319,19 @@ auto visit(RepositoryFixture&   fixture,
     return *result;
 }
 
+auto finish_sweep(RepositoryFixture& fixture, RetentionSweepCursor cursor = {}) -> RetentionBatchResult
+{
+    for (std::size_t visits = 0; visits < 1000; ++visits) {
+        auto result = visit(fixture, cursor);
+        if (result.sweep_complete) {
+            return result;
+        }
+        cursor = result.next;
+    }
+    FAIL("Retention sweep did not finish");
+    return {};
+}
+
 } // anonymous namespace
 
 TEST_CASE("Idempotency repository round-trips scoped records and bounded cleanup", "[jobu][idempotency][sqlite]")
@@ -300,18 +362,27 @@ TEST_CASE("Idempotency repository round-trips scoped records and bounded cleanup
     require_error(fixture.idempotency.insert(record("queue.create", Uuid{}, "shared-key", id(3), UtcTimePoint{3s})),
                   ErrorCategory::Conflict,
                   "jobu.idempotency.conflict");
-    auto expired = fixture.idempotency.erase_expired(UtcTimePoint{10s}, 1);
-    REQUIRE(expired);
-    CHECK(*expired == 1);
-    REQUIRE(fixture.idempotency.find("job.create", queue_id, "shared-key"));
-    CHECK_FALSE(fixture.idempotency.find("job.create", queue_id, "shared-key")->has_value());
-    CHECK(*fixture.idempotency.erase_for_resource(queue_id) == 1);
-    CHECK(scalar_count(fixture.database, "jobu_idempotency") == 0);
+    auto page = fixture.idempotency.list_referencing(queue_id, 1);
+    REQUIRE(page);
+    REQUIRE(page->size() == 1);
+    CHECK(page->front().method == "job.create");
+    auto const after =
+        IdempotencyKey{.method = page->front().method, .scope_id = page->front().scope_id, .key = page->front().key};
+    auto continuation = fixture.idempotency.list_referencing(queue_id, 1, after);
+    REQUIRE(continuation);
+    REQUIRE(continuation->size() == 1);
+    CHECK(continuation->front().method == "queue.create");
 
-    require_error(fixture.idempotency.erase_expired(UtcTimePoint{10s}, 0),
+    auto mismatch        = page->front();
+    mismatch.resource_id = id(99);
+    CHECK(*fixture.idempotency.erase_matching(mismatch) == 0);
+    CHECK(*fixture.idempotency.erase_matching(page->front()) == 1);
+    CHECK(*fixture.idempotency.erase_matching(continuation->front()) == 1);
+    CHECK(scalar_count(fixture.database, "jobu_idempotency") == 0);
+    require_error(fixture.idempotency.list_referencing(queue_id, 0),
                   ErrorCategory::InvalidArgument,
                   "jobu.storage.invalid_limit");
-    require_error(fixture.idempotency.erase_expired(UtcTimePoint{10s}, 1001),
+    require_error(fixture.idempotency.list_referencing(queue_id, 1001),
                   ErrorCategory::InvalidArgument,
                   "jobu.storage.invalid_limit");
 }
@@ -398,14 +469,11 @@ TEST_CASE("Retention visits inherited finite unlimited and deleted queue policie
         insert_job(fixture.database, id(number + 10), id(number), number == 4);
         insert_terminal_run(fixture.database, id(number + 20), id(number + 10), id(number), 14'000'000);
     }
-    REQUIRE(fixture.idempotency.insert(
-        record("job.create", id(4), "retained-key", id(14), UtcTimePoint{0s}, UtcTimePoint{1s})));
-    // Manual history and its replay remain a deliberately incomplete lifetime unit
-    // until Stage 9.7; this repository is not admitted to production maintenance yet.
+    REQUIRE(fixture.idempotency.insert(cleanup_record(fixture, "job.create", id(4), "retained-key", id(14))));
     execute(fixture.database,
             "UPDATE jobu_runs SET origin = 'manual', schedule_owned = 0 "
             "WHERE id = X'00000000000070008000000000000018'");
-    REQUIRE(fixture.idempotency.insert(record("job.run_now", id(14), "manual-key", id(24), UtcTimePoint{0s})));
+    REQUIRE(fixture.idempotency.insert(cleanup_record(fixture, "job.run_now", id(14), "manual-key", id(24))));
     execute(fixture.database,
             "UPDATE jobu_jobs SET state = 'succeeded' "
             "WHERE id = X'0000000000007000800000000000000c'");
@@ -417,8 +485,9 @@ TEST_CASE("Retention visits inherited finite unlimited and deleted queue policie
     auto third = visit(fixture, second.next);
     check_run_only_counts(third, 0);
     auto fourth = visit(fixture, third.next);
-    check_run_only_counts(fourth, 1);
-    auto end = visit(fixture, fourth.next);
+    CHECK(fourth.purged.runs == 1);
+    CHECK(fourth.purged.idempotency_records == 1);
+    auto end = finish_sweep(fixture, fourth.next);
     CHECK(end.sweep_complete);
     CHECK_FALSE(end.next.after_queue);
     CHECK(has_run(fixture.database, id(21)));
@@ -426,9 +495,9 @@ TEST_CASE("Retention visits inherited finite unlimited and deleted queue policie
     CHECK(has_run(fixture.database, id(23)));
     CHECK_FALSE(has_run(fixture.database, id(24)));
     CHECK(scalar_count(fixture.database, "jobu_run_timing") == 2);
-    CHECK(scalar_count(fixture.database, "jobu_jobs") == 4);
-    CHECK(scalar_count(fixture.database, "jobu_queues") == 4);
-    CHECK(scalar_count(fixture.database, "jobu_idempotency") == 2);
+    CHECK(scalar_count(fixture.database, "jobu_jobs") == 3);
+    CHECK(scalar_count(fixture.database, "jobu_queues") == 3);
+    CHECK(scalar_count(fixture.database, "jobu_idempotency") == 0);
 }
 
 TEST_CASE("Unlimited daemon retention still visits finite overrides and empty queues", "[jobu][retention]")
@@ -524,7 +593,7 @@ TEST_CASE("Retention advances full queues fairly and resets for later history", 
 
     // A queue inserted behind the current cursor is picked up by the next sweep.
     insert_queue(fixture.database, id(0), "late-queue");
-    auto end = visit(fixture, second.next);
+    auto end = finish_sweep(fixture, second.next);
     CHECK(end.sweep_complete);
     CHECK_FALSE(end.next.after_queue);
     auto next_sweep = visit(fixture, end.next);
@@ -604,9 +673,19 @@ TEST_CASE("Retention validates options without starting a transaction", "[jobu][
     require_error(fixture.retention.purge_next_batch(UtcTimePoint{20s}, -1s, 100, {}),
                   ErrorCategory::InvalidArgument,
                   "jobu.retention.invalid_options");
+    for (auto const& cursor : {
+             RetentionSweepCursor{.after_queue = id(1), .phase = RetentionSweepPhase::DeletedJobs},
+             RetentionSweepCursor{.after_owner = id(1)},
+             RetentionSweepCursor{.phase = static_cast<RetentionSweepPhase>(99)},
+    }) {
+        require_error(fixture.retention.purge_next_batch(UtcTimePoint{20s}, 10s, 100, cursor),
+                      ErrorCategory::InvalidArgument,
+                      "jobu.retention.invalid_options");
+    }
     CHECK(fixture.faults->calls.empty());
     auto result = visit(fixture);
-    CHECK(result.sweep_complete);
+    CHECK(result.next.phase == RetentionSweepPhase::OnceKeys);
+    CHECK(finish_sweep(fixture, result.next).sweep_complete);
     check_run_only_counts(result, 0);
 }
 
@@ -639,7 +718,7 @@ TEST_CASE("Retention faults roll back queue history and its cascades", "[jobu][r
     insert_job(fixture.database, id(2), id(1), true);
     insert_terminal_run(fixture.database, id(3), id(2), id(1), 1);
     insert_attempt_output(fixture.database, id(3));
-    REQUIRE(fixture.idempotency.insert(record("job.create", id(1), "key", id(2), UtcTimePoint{0s})));
+    REQUIRE(fixture.idempotency.insert(cleanup_record(fixture, "job.create", id(1), "key", id(2))));
     auto const before = storage_snapshot(fixture.database);
     fixture.faults->faults.push_back({.at = std::move(fault), .error = fault_error()});
     auto failed = fixture.retention.purge_next_batch(UtcTimePoint{20s}, 10s, 100, {});
@@ -815,5 +894,5 @@ TEST_CASE("Retention end of sweep propagates cursor cleanup failure", "[jobu][re
     REQUIRE_FALSE(failed);
     check_safe_error(failed.error(), "db.io");
     require_consumed_faults(*fixture.faults);
-    CHECK(visit(fixture).sweep_complete);
+    CHECK(finish_sweep(fixture).sweep_complete);
 }
