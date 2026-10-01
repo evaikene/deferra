@@ -163,6 +163,7 @@ auto ShutdownWork::snapshot() const -> std::vector<std::vector<std::string>>
     for (auto const* table : {"jobu_queues",
                               "jobu_jobs",
                               "jobu_runs",
+                              "jobu_run_timing",
                               "jobu_attempts",
                               "jobu_attempt_output",
                               "jobu_idempotency",

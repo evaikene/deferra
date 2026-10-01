@@ -34,6 +34,16 @@ constexpr std::array job_planned_columns{
     detail::IndexColumn{.name = "planned_at_us", .descending = true},
     detail::IndexColumn{.name = "id", .descending = true}
 };
+constexpr std::array queue_completed_columns{
+    detail::IndexColumn{.name = "queue_id"},
+    detail::IndexColumn{.name = "completed_at_us"},
+    detail::IndexColumn{.name = "id"},
+};
+constexpr std::array idempotency_owner_columns{
+    detail::IndexColumn{.name = "scope_id"},
+    detail::IndexColumn{.name = "method"},
+    detail::IndexColumn{.name = "resource_id"},
+};
 
 constexpr std::array schema_objects{
     detail::SchemaObject{
@@ -157,6 +167,30 @@ constexpr std::array schema_objects{
             "SELECT id, job_id, job_revision, queue_id, origin, schedule_owned, planned_at_us, runnable_at_us, "
             "started_at_us, completed_at_us, type, priority, attributes_json, payload_json, state, result_json "
             "FROM jobu_runs WHERE 0", },
+    detail::SchemaObject{
+                         .kind         = detail::SchemaObjectKind::Table,
+                         .name         = "jobu_run_timing",
+                         .owner        = "jobu_run_timing",
+                         .ddl          = R"sql(CREATE TABLE jobu_run_timing (
+    run_id BLOB PRIMARY KEY NOT NULL
+        CHECK (typeof(run_id) = 'blob' AND length(run_id) = 16),
+    runnable_wait_us INTEGER NOT NULL DEFAULT 0
+        CHECK (typeof(runnable_wait_us) = 'integer' AND runnable_wait_us >= 0),
+    measurement_status TEXT NOT NULL DEFAULT 'unmeasured'
+        CHECK (measurement_status IN ('unmeasured', 'complete', 'partial')),
+    open_epoch BLOB CHECK (open_epoch IS NULL OR
+        (typeof(open_epoch) = 'blob' AND length(open_epoch) = 16)),
+    open_tick_us INTEGER CHECK (open_tick_us IS NULL OR
+        (typeof(open_tick_us) = 'integer' AND open_tick_us >= 0)),
+    delay_warned INTEGER NOT NULL DEFAULT 0
+        CHECK (typeof(delay_warned) = 'integer' AND delay_warned IN (0, 1)),
+    CHECK ((open_epoch IS NULL) = (open_tick_us IS NULL)),
+    CHECK (measurement_status <> 'unmeasured' OR
+        (runnable_wait_us = 0 AND open_epoch IS NULL AND delay_warned = 0)),
+    FOREIGN KEY (run_id) REFERENCES jobu_runs(id) ON DELETE CASCADE
+))sql",
+                         .column_probe = "SELECT run_id, runnable_wait_us, measurement_status, open_epoch, open_tick_us, delay_warned "
+                        "FROM jobu_run_timing WHERE 0", },
     detail::SchemaObject{
                          .kind  = detail::SchemaObjectKind::Table,
                          .name  = "jobu_attempts",
@@ -327,6 +361,22 @@ constexpr std::array schema_objects{
                          .ddl           = "CREATE INDEX jobu_runs_job_planned_id_idx ON jobu_runs(job_id, planned_at_us DESC, id DESC)",
                          .column_probe  = {},
                          .index_columns = job_planned_columns,
+                         },
+    detail::SchemaObject{
+                         .kind          = detail::SchemaObjectKind::Index,
+                         .name          = "jobu_runs_queue_completed_id_idx",
+                         .owner         = "jobu_runs",
+                         .ddl           = "CREATE INDEX jobu_runs_queue_completed_id_idx ON jobu_runs(queue_id, completed_at_us, id)",
+                         .column_probe  = {},
+                         .index_columns = queue_completed_columns,
+                         },
+    detail::SchemaObject{
+                         .kind          = detail::SchemaObjectKind::Index,
+                         .name          = "jobu_idempotency_scope_method_resource_idx",
+                         .owner         = "jobu_idempotency",
+                         .ddl           = "CREATE INDEX jobu_idempotency_scope_method_resource_idx "
+                         "ON jobu_idempotency(scope_id, method, resource_id)", .column_probe  = {},
+                         .index_columns = idempotency_owner_columns,
                          },
 };
 
@@ -605,16 +655,23 @@ auto validate_column_probe(jb::db::Database& database, detail::SchemaObject cons
     return VoidResult::success();
 }
 
-// Columns alone cannot distinguish the current job-state CHECK constraints from the older table definition.
-auto validate_job_table_definition(jb::db::Database& database, detail::SchemaObject const& object, FailurePhase phase)
+// Column probes and foreign_key_check cannot prove CHECK constraints or a declared cascading foreign key.
+// Compare application-owned definitions for the tables whose constraints distinguish this format.
+auto validate_table_definition(jb::db::Database& database, detail::SchemaObject const& object, FailurePhase phase)
     -> VoidResult
 {
-    if (object.name != "jobu_jobs") {
+    if (object.name != "jobu_jobs" && object.name != "jobu_run_timing") {
         return VoidResult::success();
     }
 
     jb::db::Query query{database};
-    auto          executed = query.exec("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'jobu_jobs'");
+    auto          executed = query.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = :name");
+    if (executed) {
+        executed = query.bind_value(":name", jb::db::make_text(object.name));
+    }
+    if (executed) {
+        executed = query.exec();
+    }
     if (!executed) {
         return schema_failure<void>(phase, object.name, &executed.error());
     }
@@ -705,14 +762,14 @@ auto validate_foreign_keys(jb::db::Database& database, FailurePhase phase) -> Vo
 }
 
 // Inspect SQLite metadata rather than matching SQL text: spelling and whitespace are not index semantics.
-auto validate_history_index(jb::db::Database& database, detail::SchemaObject const& object, FailurePhase phase)
+auto validate_index_shape(jb::db::Database& database, detail::SchemaObject const& object, FailurePhase phase)
     -> VoidResult
 {
     if (object.index_columns.empty()) {
         return VoidResult::success();
     }
 
-    // A partial or unique index with the right columns still changes the promised history/insert behavior.
+    // A partial or unique index with the right columns still changes the promised lookup/insert behavior.
     {
         jb::db::Query query{database};
         auto          prepared =
@@ -796,11 +853,11 @@ auto validate_schema(jb::db::Database& database, std::span<detail::SchemaObject 
         if (!valid_columns) {
             return valid_columns;
         }
-        auto valid_job_table = validate_job_table_definition(database, object, phase);
-        if (!valid_job_table) {
-            return valid_job_table;
+        auto valid_table = validate_table_definition(database, object, phase);
+        if (!valid_table) {
+            return valid_table;
         }
-        auto valid_index = validate_history_index(database, object, phase);
+        auto valid_index = validate_index_shape(database, object, phase);
         if (!valid_index) {
             return valid_index;
         }
@@ -829,7 +886,7 @@ auto create_objects(jb::db::Database&                     database,
                 return schema_failure<void>(phase, object.name, &observed.error());
             }
         }
-        auto validated = validate_history_index(database, object, phase);
+        auto validated = validate_index_shape(database, object, phase);
         if (!validated) {
             return validated;
         }

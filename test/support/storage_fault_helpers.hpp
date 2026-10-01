@@ -29,6 +29,7 @@ inline auto storage_snapshot(db::Database& database) -> StorageSnapshot
     for (auto const* table : {"jobu_queues",
                               "jobu_jobs",
                               "jobu_runs",
+                              "jobu_run_timing",
                               "jobu_attempts",
                               "jobu_attempt_output",
                               "jobu_idempotency",

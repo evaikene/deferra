@@ -507,3 +507,84 @@ TEST_CASE("Recovery output pages validate metadata without loading capture", "[j
     RecoveryRepository repository{fixture.database, fixture.registry};
     require_invariant(repository.list_outputs(1));
 }
+
+TEST_CASE("Recovery run scans reject missing and malformed timing without hiding the run",
+          "[jobu][recovery][sqlite][timing]")
+{
+    auto const* corruption = GENERATE(
+        "DELETE FROM jobu_run_timing",
+        "UPDATE jobu_run_timing SET runnable_wait_us = -1",
+        "UPDATE jobu_run_timing SET runnable_wait_us = 1.5",
+        "UPDATE jobu_run_timing SET measurement_status = 'unknown'",
+        "UPDATE jobu_run_timing SET measurement_status = NULL",
+        "UPDATE jobu_run_timing SET open_tick_us = 0",
+        "UPDATE jobu_run_timing SET measurement_status = 'complete', open_epoch = zeroblob(16)",
+        "UPDATE jobu_run_timing SET measurement_status = 'partial', open_epoch = X'00', open_tick_us = 0",
+        "UPDATE jobu_run_timing SET measurement_status = 'partial', open_epoch = zeroblob(16), open_tick_us = -1",
+        "UPDATE jobu_run_timing SET measurement_status = 'partial', open_epoch = zeroblob(16), open_tick_us = 0.5",
+        "UPDATE jobu_run_timing SET runnable_wait_us = 1",
+        "UPDATE jobu_run_timing SET delay_warned = 1",
+        "UPDATE jobu_run_timing SET delay_warned = 2");
+    RecoveryFixture fixture;
+    auto            queue = recovery_queue(recovery_id(1));
+    auto            job   = fixture.make_job(recovery_id(2), queue.id);
+    fixture.insert_queue(queue);
+    fixture.insert_job(job);
+    fixture.insert_run(fixture.make_run(recovery_id(3), job));
+
+    // Bypass physical constraints only in the corruption fixture. Domain scans must still fail closed.
+    execute(fixture.database, "PRAGMA ignore_check_constraints = ON");
+    if (std::string_view{corruption}.find("measurement_status = NULL") != std::string_view::npos) {
+        execute(fixture.database, "DROP TABLE jobu_run_timing");
+        execute(fixture.database,
+                "CREATE TABLE jobu_run_timing(run_id, runnable_wait_us, measurement_status, "
+                "open_epoch, open_tick_us, delay_warned)");
+        execute(fixture.database, "INSERT INTO jobu_run_timing SELECT id, 0, NULL, NULL, NULL, 0 FROM jobu_runs");
+    }
+    else {
+        execute(fixture.database, corruption);
+    }
+    RecoveryRepository repository{fixture.database, fixture.registry};
+    require_invariant(repository.find_run(recovery_id(3)));
+    require_invariant(repository.list_runs(1));
+}
+
+TEST_CASE("Recovery preserves known timing quality and restricts open intervals to pending runs",
+          "[jobu][recovery][sqlite][timing]")
+{
+    auto            state = GENERATE(RunState::Scheduled,
+                                     RunState::RetryWait,
+                                     RunState::Running,
+                                     RunState::Succeeded,
+                                     RunState::Failed,
+                                     RunState::Interrupted,
+                                     RunState::Cancelled);
+    RecoveryFixture fixture;
+    auto            queue = recovery_queue(recovery_id(1));
+    auto            job   = fixture.make_job(recovery_id(2), queue.id);
+    fixture.insert_queue(queue);
+    fixture.insert_job(job);
+    fixture.insert_run(fixture.make_run(recovery_id(3), job, state, state == RunState::Scheduled ? 0U : 1U));
+
+    execute(fixture.database,
+            "UPDATE jobu_run_timing SET measurement_status = 'complete', runnable_wait_us = 17, "
+            "delay_warned = 1");
+    RecoveryRepository repository{fixture.database, fixture.registry};
+    REQUIRE(repository.list_runs(1));
+    execute(fixture.database,
+            "UPDATE jobu_run_timing SET measurement_status = 'partial', open_epoch = zeroblob(16), "
+            "open_tick_us = 42");
+    if (state == RunState::Scheduled || state == RunState::RetryWait) {
+        REQUIRE(repository.list_runs(1));
+    }
+    else {
+        require_invariant(repository.list_runs(1));
+    }
+    // Validation never clears a stored checkpoint or warning claim, even for an old pending epoch.
+    Query timing{fixture.database};
+    REQUIRE(timing.exec("SELECT runnable_wait_us, open_tick_us, delay_warned FROM jobu_run_timing"));
+    REQUIRE(timing.next().value());
+    CHECK(timing.value(0) == Value{std::int64_t{17}});
+    CHECK(timing.value(1) == Value{std::int64_t{42}});
+    CHECK(timing.value(2) == Value{std::int64_t{1}});
+}

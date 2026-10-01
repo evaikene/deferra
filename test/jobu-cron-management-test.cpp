@@ -15,6 +15,7 @@
 #include "support/fake_time_source.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
+#include "transaction.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -669,19 +670,24 @@ TEST_CASE("Recurring update ignores historical attempts while refreshing the cur
     }));
 
     jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
-    REQUIRE(runs.insert_schedule_owned({
-        .id           = current_id,
-        .job_id       = job_id,
-        .job_revision = 1,
-        .queue_id     = queue_id,
-        .planned_at   = UtcTimePoint{60s},
-        .runnable_at  = UtcTimePoint{60s},
-        .type         = JobType::Cli,
-        .priority     = 0,
-        .attributes   = created->attributes,
-        .payload      = created->payload,
-        .state        = RunState::Scheduled,
-    }));
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(runs.insert_schedule_owned({
+            .id           = current_id,
+            .job_id       = job_id,
+            .job_revision = 1,
+            .queue_id     = queue_id,
+            .planned_at   = UtcTimePoint{60s},
+            .runnable_at  = UtcTimePoint{60s},
+            .type         = JobType::Cli,
+            .priority     = 0,
+            .attributes   = created->attributes,
+            .payload      = created->payload,
+            .state        = RunState::Scheduled,
+        }));
+        REQUIRE(transaction->commit());
+    }
     fixture.time.advance(10s);
 
     auto updated = service.update_job({.job_id = job_id, .expected_revision = 1, .priority = 7});

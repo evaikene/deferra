@@ -14,6 +14,7 @@
 #include "support/fake_attempt_executor.hpp"
 #include "support/rejecting_secret_provider.hpp"
 #include "support/temporary_directory.hpp"
+#include "transaction.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -188,6 +189,9 @@ struct RunSpec {
 
 void insert_run(Database& database, RunSpec const& run)
 {
+    auto transaction = Transaction::begin(database);
+    REQUIRE(transaction);
+
     auto planned  = timestamp_to_storage(run.planned_at);
     auto runnable = timestamp_to_storage(run.runnable_at);
     REQUIRE(planned);
@@ -222,6 +226,12 @@ void insert_run(Database& database, RunSpec const& run)
     REQUIRE(query.bind_value(":payload_json", make_text(payload)));
     REQUIRE(query.bind_value(":state", make_text(storage_text(run.state))));
     REQUIRE(query.exec());
+
+    REQUIRE(query.prepare("INSERT INTO jobu_run_timing(run_id) VALUES(:id)"));
+    REQUIRE(query.bind_value(":id", uuid_to_storage(run.id)));
+    REQUIRE(query.exec());
+    REQUIRE(query.finish());
+    REQUIRE(transaction->commit());
 }
 
 void insert_attempt(AttemptRepository& attempts, Uuid const& run_id, AttemptNumber number, AttemptState state)

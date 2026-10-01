@@ -280,6 +280,13 @@ void RecoveryFixture::insert_run(RecoveryRunFixture const& expected)
         REQUIRE(query.exec());
     }
 
+    {
+        db::Query timing{database};
+        REQUIRE(timing.prepare("INSERT INTO jobu_run_timing(run_id) VALUES(:id)"));
+        REQUIRE(timing.bind_value(":id", uuid_to_storage(run.id)));
+        REQUIRE(timing.exec());
+    }
+
     AttemptRepository attempts{database};
     for (auto const& entry : expected.attempts) {
         REQUIRE(attempts.insert_attempt(entry.attempt));
