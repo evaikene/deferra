@@ -745,12 +745,12 @@ TEST_CASE("Run movement cancellation and terminal deletion preserve lifecycle bo
         REQUIRE(transaction.commit());
     }
 
-    auto terminal = fixture.runs.list_terminal_before(UtcTimePoint{30s}, 2);
+    auto terminal = fixture.runs.list_terminal_before(first_queue, UtcTimePoint{30s}, 2);
     REQUIRE(terminal);
     REQUIRE(terminal->size() == 2);
-    CHECK((*terminal)[0] == history.id);
-    CHECK((*terminal)[1] == retry_run.id);
-    require_error(fixture.runs.list_terminal_before(UtcTimePoint{30s}, 0),
+    CHECK((*terminal)[0].id == history.id);
+    CHECK((*terminal)[1].id == retry_run.id);
+    require_error(fixture.runs.list_terminal_before(first_queue, UtcTimePoint{30s}, 0),
                   ErrorCategory::InvalidArgument,
                   "jobu.storage.invalid_limit");
 
@@ -759,7 +759,7 @@ TEST_CASE("Run movement cancellation and terminal deletion preserve lifecycle bo
         auto begun = Transaction::begin(fixture.database);
         REQUIRE(begun);
         auto transaction = std::move(begun).value();
-        auto deleted     = fixture.runs.delete_selected_terminal(delete_ids);
+        auto deleted     = fixture.runs.delete_selected_terminal(first_queue, UtcTimePoint{30s}, delete_ids);
         REQUIRE(deleted);
         CHECK(*deleted == 1);
         REQUIRE(transaction.commit());
@@ -806,7 +806,7 @@ TEST_CASE("Run retention deletion preserves the maximum batch contract", "[jobu]
         auto begun = Transaction::begin(fixture.database);
         REQUIRE(begun);
         auto transaction = std::move(begun).value();
-        auto deleted     = fixture.runs.delete_selected_terminal(delete_ids);
+        auto deleted     = fixture.runs.delete_selected_terminal(queue_id, UtcTimePoint{30s}, delete_ids);
         REQUIRE(deleted);
         CHECK(*deleted == 2);
         REQUIRE(transaction.commit());
@@ -818,6 +818,44 @@ TEST_CASE("Run retention deletion preserves the maximum batch contract", "[jobu]
     auto persisted_second = fixture.runs.find_by_id(second.id);
     REQUIRE(persisted_second);
     CHECK_FALSE(persisted_second->has_value());
+}
+
+TEST_CASE("Run retention deletion rechecks queue and strict cutoff for stale IDs", "[jobu][run][sqlite]")
+{
+    RepositoryFixture fixture;
+    insert_queue(fixture.database, id(1), "first");
+    insert_queue(fixture.database, id(2), "second");
+    insert_job(fixture.database, id(3), id(1));
+    insert_job(fixture.database, id(4), id(2));
+
+    auto older            = make_run(fixture.registry, id(5), id(3), id(1), RunState::Succeeded);
+    auto equality         = older;
+    equality.id           = id(6);
+    equality.completed_at = UtcTimePoint{30s};
+    auto other_queue      = older;
+    other_queue.id        = id(7);
+    other_queue.job_id    = id(4);
+    other_queue.queue_id  = id(2);
+    auto begun            = Transaction::begin(fixture.database);
+    REQUIRE(begun);
+    auto transaction = std::move(*begun);
+    REQUIRE(fixture.runs.insert_schedule_owned(older));
+    REQUIRE(fixture.runs.insert_schedule_owned(equality));
+    REQUIRE(fixture.runs.insert_schedule_owned(other_queue));
+
+    // The lower-level delete must protect these rows even if the caller supplies
+    // IDs that no longer satisfy the selection's ownership/expiry predicates.
+    auto ids     = std::vector<Uuid>{older.id, equality.id, other_queue.id};
+    auto deleted = fixture.runs.delete_selected_terminal(id(1), UtcTimePoint{30s}, ids);
+    REQUIRE(deleted);
+    CHECK(*deleted == 1);
+    REQUIRE(transaction.commit());
+    auto kept_equal = fixture.runs.find_by_id(equality.id);
+    REQUIRE(kept_equal);
+    CHECK(kept_equal->has_value());
+    auto kept_other = fixture.runs.find_by_id(other_queue.id);
+    REQUIRE(kept_other);
+    CHECK(kept_other->has_value());
 }
 
 TEST_CASE("Run repository rejects malformed persisted snapshot documents", "[jobu][run][storage]")
