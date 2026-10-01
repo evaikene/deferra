@@ -79,6 +79,7 @@ target_sources(${TARGET}
         recovery_repository_priv.hpp
         recovery_retry_priv.cpp
         recovery_retry_priv.hpp
+        retention.cpp
         retention_repository_priv.cpp
         retention_repository_priv.hpp
         retention_owner_repository_priv.cpp
@@ -134,6 +135,7 @@ target_sources(${TARGET}
         management_rpc.hpp
         queue.hpp
         recovery.hpp
+        retention.hpp
         run.hpp
         schedule_input.hpp
         scheduler.hpp

@@ -15,6 +15,7 @@
 #include "management_json.hpp"
 #include "protocol_priv.hpp"
 #include "query.hpp"
+#include "retention.hpp"
 #include "run_repository_priv.hpp"
 #include "secret_json.hpp"
 #include "secret_service.hpp"
@@ -63,6 +64,8 @@ struct RuntimeTestAccess {
     static auto history(DaemonRuntime& runtime) { return runtime.history(); }
 
     static auto scheduler(DaemonRuntime& runtime) { return runtime.scheduler(); }
+
+    static auto retention(DaemonRuntime& runtime) { return runtime.retention(); }
 
     static auto rpc(DaemonRuntime& runtime) { return runtime.rpc_server(); }
 };
@@ -421,6 +424,113 @@ TEST_CASE("Daemon recovery precedes runner construction and scheduler startup")
     REQUIRE(fixture.record.destruction == std::vector<std::string>{"executor", "http"});
     fixture.require_running(runnable);
     REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
+}
+
+TEST_CASE("Daemon owns dormant retention without activating configured maintenance")
+{
+    RuntimeFixture fixture;
+    auto           terminal            = fixture.seed(1, JobType::Cli, RunState::Succeeded);
+    fixture.options.default_retention  = 0s;
+    fixture.options.history_batch_size = 1;
+    fixture.create_runtime();
+    REQUIRE(fixture.run([&] {
+        REQUIRE(fixture.runtime->state() == RuntimeState::Serving);
+        REQUIRE(RuntimeTestAccess::retention(*fixture.runtime) != nullptr);
+        CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.loop.loop) == 0);
+        auto calls = fixture.faults->calls;
+        jb::core::priv::EventLoopTestAccess::fire_timers(*fixture.loop.loop, TimePoint::max());
+        CHECK(fixture.faults->calls == calls);
+        fixture.storage.require_run(terminal);
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+    CHECK(fixture.runtime->state() == RuntimeState::Stopped);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.loop.loop) == 0);
+}
+
+TEST_CASE("Daemon retention batch receivers may synchronously request a non-SQL stop")
+{
+    RuntimeFixture fixture;
+    fixture.create_runtime();
+    bool stopped = false;
+    REQUIRE(fixture.run([&] {
+        REQUIRE(fixture.runtime->state() == RuntimeState::Serving);
+        auto* retention = RuntimeTestAccess::retention(*fixture.runtime);
+        REQUIRE(retention != nullptr);
+        retention->batch_completed.connect(fixture.runtime.get(), [&](RetentionPurgeCounts const&) {
+            auto calls = fixture.faults->calls;
+            fixture.runtime->request_stop();
+            fixture.runtime->request_stop();
+            CHECK(fixture.faults->calls == calls);
+            CHECK(fixture.runtime->state() == RuntimeState::Stopping);
+            CHECK(fixture.record.destruction.empty());
+            auto created = RuntimeTestAccess::management(*fixture.runtime)->create_queue({.name = "late"});
+            REQUIRE_FALSE(created);
+            CHECK(created.error().code == "jobu.service.stopping");
+            stopped = true;
+        });
+        // Test-only activation occurs after Serving. Production option mapping/start remains Stage 9.20.
+        REQUIRE(retention->start());
+        auto deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*fixture.loop.loop);
+        REQUIRE(deadline);
+        jb::core::priv::EventLoopTestAccess::fire_next_timer(*fixture.loop.loop);
+        REQUIRE(stopped);
+        CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.loop.loop) == 0);
+        auto calls = fixture.faults->calls;
+        jb::core::priv::EventLoopTestAccess::fire_timers(*fixture.loop.loop, TimePoint::max());
+        CHECK(fixture.faults->calls == calls);
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+    CHECK(fixture.runtime->state() == RuntimeState::Stopped);
+    CHECK(fixture.record.destruction == std::vector<std::string>{"executor", "http"});
+}
+
+TEST_CASE("Daemon retention failure closes admission after cleanup without callback destruction")
+{
+    RuntimeFixture fixture;
+    fixture.create_runtime();
+    bool failed = false;
+    REQUIRE(fixture.run([&] {
+        REQUIRE(fixture.runtime->state() == RuntimeState::Serving);
+        auto* retention = RuntimeTestAccess::retention(*fixture.runtime);
+        REQUIRE(retention != nullptr);
+        auto before = storage_snapshot(fixture.storage.database);
+        retention->failed.connect(fixture.runtime.get(), [&](Error const& error) {
+            failed = true;
+            check_safe_error(error, "db.io");
+            CHECK(fixture.runtime->state() == RuntimeState::Stopping);
+            CHECK(fixture.runtime->exit_code() == EXIT_FAILURE);
+            CHECK(fixture.record.destruction.empty());
+            REQUIRE(fixture.storage.database.close());
+            REQUIRE(fixture.storage.database.open());
+            CHECK(storage_snapshot(fixture.storage.database) == before);
+            auto created = RuntimeTestAccess::management(*fixture.runtime)->create_queue({.name = "late"});
+            REQUIRE_FALSE(created);
+            CHECK(created.error().code == "jobu.service.stopping");
+            auto secret = RuntimeTestAccess::secrets(*fixture.runtime)->set({.name = "late"});
+            REQUIRE_FALSE(secret);
+            CHECK(secret.error().code == "jobu.service.stopping");
+            CHECK(RuntimeTestAccess::scheduler(*fixture.runtime)->state() == SchedulerState::Shutdown);
+        });
+        REQUIRE(retention->start());
+        fixture.faults->faults.push_back({
+            .at    = {.boundary = "connection", .operation = DatabaseOperation::Begin},
+            .error = fault_error()
+        });
+        auto deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*fixture.loop.loop);
+        REQUIRE(deadline);
+        jb::core::priv::EventLoopTestAccess::fire_next_timer(*fixture.loop.loop);
+        REQUIRE(failed);
+        require_consumed_faults(*fixture.faults);
+        auto calls = fixture.faults->calls;
+        REQUIRE_FALSE(retention->start());
+        jb::core::priv::EventLoopTestAccess::fire_timers(*fixture.loop.loop, TimePoint::max());
+        CHECK(fixture.faults->calls == calls);
+        return EXIT_SUCCESS;
+    }) == EXIT_FAILURE);
+    CHECK(fixture.runtime->state() == RuntimeState::Stopped);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.loop.loop) == 0);
+    CHECK(fixture.record.destruction == std::vector<std::string>{"executor", "http"});
 }
 
 TEST_CASE("Daemon startup failures unwind runners without terminalizing durable attempts")

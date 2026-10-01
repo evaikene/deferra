@@ -163,7 +163,25 @@ struct EventLoopTestAccess {
 
     static auto active_timer_count(EventLoop const& loop) -> std::size_t { return loop._timers._timers.size(); }
 
+    /// Observes the next live deadline without advancing the real or injected clocks.
+    static auto next_timer_deadline(EventLoop& loop) -> std::optional<TimePoint>
+    {
+        return loop._timers.next_deadline();
+    }
+
     static void fire_timers(EventLoop& loop, TimePoint now) { loop._timers.fire_expired(now); }
+
+    /// Makes the earliest live timer due now. Newly armed positive-delay timers remain for the next turn,
+    /// even when the original deadline was much farther ahead than the next timer's delay.
+    static void fire_next_timer(EventLoop& loop)
+    {
+        if (loop._timers.next_deadline()) {
+            auto const now      = Clock::now();
+            auto&      deadline = loop._timers._heap.front().deadline;
+            deadline            = std::min(deadline, now);
+            loop._timers.fire_expired(now);
+        }
+    }
 
     static auto watch_process(EventLoop& loop, std::int64_t process_id, Task callback) -> Result<void, Error>
     {

@@ -13,6 +13,7 @@
 #include "object_priv.hpp"
 #include "protocol.hpp"
 #include "recovery_priv.hpp"
+#include "retention.hpp"
 #include "secret_provider_priv.hpp"
 #include "secret_rpc.hpp"
 #include "secret_service.hpp"
@@ -114,6 +115,9 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
             return;
         }
         state = RuntimeState::Stopping;
+        if (retention) {
+            retention->stop();
+        }
         // Admission is a predicate in the connection slot; do not close the listener or erase
         // service/executor state while one of their callbacks is still on the stack.
         if (management) {
@@ -211,6 +215,9 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         secrets    = std::make_unique<SecretService>(database, time_source);
         statistics = std::make_unique<StatisticsService>(database, uuid_generator, time_source);
         history    = std::make_unique<HistoryService>(database, attributes, uuid_generator, time_source);
+        // Stage 9.20 maps configuration and activates this service only after Serving.
+        // Establish ownership/failure/stop gates now; construction and dormant teardown perform no SQL.
+        retention  = std::make_unique<RetentionService>(database, attributes, time_source);
         listener   = std::make_unique<jb::net::LocalServer>();
         rpc        = std::make_unique<jb::rpc::Server>(std::move(rpc_options));
 
@@ -219,6 +226,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         secrets->failed.connect(owner, [this](jb::core::Error const& error) { fail("secrets", error); });
         statistics->failed.connect(owner, [this](jb::core::Error const& error) { fail("statistics", error); });
         history->failed.connect(owner, [this](jb::core::Error const& error) { fail("history", error); });
+        retention->failed.connect(owner, [this](jb::core::Error const& error) { fail("retention", error); });
         runners.http->failed.connect(owner, [this](jb::core::Error const& error) { fail("http", error); });
         management->mutation_committed.connect(scheduler.get(), [this] { scheduler->request_rescan(); });
         secrets->mutation_committed.connect(scheduler.get(), [this] { scheduler->request_rescan(); });
@@ -321,6 +329,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         runners.http.reset();
         rpc.reset();
         listener.reset();
+        retention.reset();
         statistics.reset();
         history.reset();
         secrets.reset();
@@ -350,6 +359,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
     std::unique_ptr<jb::jobu::SecretService>     secrets;
     std::unique_ptr<jb::jobu::StatisticsService> statistics;
     std::unique_ptr<jb::jobu::HistoryService>    history;
+    std::unique_ptr<jb::jobu::RetentionService>  retention;
     std::unique_ptr<jb::net::LocalServer>        listener;
     std::unique_ptr<jb::rpc::Server>             rpc;
     jb::core::Connection                         admission;
@@ -454,6 +464,11 @@ auto DaemonRuntime::scheduler() -> jb::jobu::Scheduler*
 auto DaemonRuntime::rpc_server() -> jb::rpc::Server*
 {
     return d_ptr<Private>()->rpc.get();
+}
+
+auto DaemonRuntime::retention() -> jb::jobu::RetentionService*
+{
+    return d_ptr<Private>()->retention.get();
 }
 
 } // namespace jb::jobud::detail

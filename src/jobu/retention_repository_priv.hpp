@@ -3,6 +3,7 @@
 #include "idempotency_repository_priv.hpp"
 #include "queue_repository_priv.hpp"
 #include "result.hpp"
+#include "retention.hpp"
 #include "retention_owner_repository_priv.hpp"
 #include "run_repository_priv.hpp"
 
@@ -16,13 +17,6 @@ class Database;
 }
 
 namespace jb::jobu::detail {
-
-struct RetentionPurgeCounts {
-    std::size_t runs{0};
-    std::size_t idempotency_records{0};
-    std::size_t jobs{0};
-    std::size_t queues{0};
-};
 
 enum class RetentionSweepPhase : std::uint8_t {
     History,
