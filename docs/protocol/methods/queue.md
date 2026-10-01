@@ -43,6 +43,13 @@ key and equivalent canonical request replay the original result while that
 record remains; a different request with that key conflicts. A lost reply
 can be reconciled by repeating the **same** keyed request.
 
+A creation key is retained while its queue is live or its deleted ownership
+and history still require it. Cleanup retires it with physical deletion of the
+deleted queue, after all definition, history and replay-reference guards pass.
+This includes creation records scoped to the queue by jobs that have since
+moved elsewhere. After retirement, reusing the key is a new creation request;
+there is no fixed expiry measured from queue creation time.
+
 ```json
 {"name":"reports","concurrency_limit":2,"history_retention_seconds":86400,"idempotency_key":"reports-create-1"}
 ```

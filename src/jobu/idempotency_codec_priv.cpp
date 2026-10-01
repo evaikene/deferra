@@ -687,14 +687,24 @@ auto encode_job_create_idempotency_request(CreateJobRequest const&  request,
 auto validate_job_create_idempotency_request(std::string_view request_json, AttributeRegistry const& attributes)
     -> jb::core::Result<void, jb::core::Error>
 {
+    auto scope = decode_job_create_idempotency_scope(request_json, attributes);
+    if (!scope) {
+        return CodecResult<void>::failure(std::move(scope).error());
+    }
+    return CodecResult<void>::success();
+}
+
+auto decode_job_create_idempotency_scope(std::string_view request_json, AttributeRegistry const& attributes)
+    -> jb::core::Result<jb::core::Uuid, jb::core::Error>
+{
     auto parsed = parse_document(request_json);
     if (!parsed) {
-        return CodecResult<void>::failure(std::move(parsed).error());
+        return CodecResult<jb::core::Uuid>::failure(std::move(parsed).error());
     }
     auto object =
         object_with_members(*parsed, {"attributes", "name", "payload", "priority", "queue_id", "schedule", "type"});
     if (!object) {
-        return CodecResult<void>::failure(std::move(object).error());
+        return CodecResult<jb::core::Uuid>::failure(std::move(object).error());
     }
     auto queue_id  = uuid_member(**object, "queue_id");
     auto name      = decode_optional_name((**object).at("name"));
@@ -707,9 +717,9 @@ auto validate_job_create_idempotency_request(std::string_view request_json, Attr
     if (!queue_id || !name || !type || !schedule || !priority || *priority < std::numeric_limits<std::int32_t>::min() ||
         *priority > std::numeric_limits<std::int32_t>::max() || !attributes_value ||
         !valid_payload(type ? *type : JobType::Cli, (**object).at("payload"))) {
-        return CodecResult<void>::failure(invalid_record("invalid_job_request"));
+        return CodecResult<jb::core::Uuid>::failure(invalid_record("invalid_job_request"));
     }
-    return CodecResult<void>::success();
+    return CodecResult<jb::core::Uuid>::success(*queue_id);
 }
 
 auto encode_job_idempotency_result(JobDefinition const& job, AttributeRegistry const& attributes)
@@ -818,19 +828,29 @@ auto encode_run_now_idempotency_request(RunNowRequest const& request) -> jb::cor
 
 auto validate_run_now_idempotency_request(std::string_view request_json) -> jb::core::Result<void, jb::core::Error>
 {
+    auto scope = decode_run_now_idempotency_scope(request_json);
+    if (!scope) {
+        return CodecResult<void>::failure(std::move(scope).error());
+    }
+    return CodecResult<void>::success();
+}
+
+auto decode_run_now_idempotency_scope(std::string_view request_json)
+    -> jb::core::Result<jb::core::Uuid, jb::core::Error>
+{
     auto parsed = parse_document(request_json);
     if (!parsed) {
-        return CodecResult<void>::failure(std::move(parsed).error());
+        return CodecResult<jb::core::Uuid>::failure(std::move(parsed).error());
     }
     auto object = object_with_members(*parsed, {"job_id"});
     if (!object) {
-        return CodecResult<void>::failure(std::move(object).error());
+        return CodecResult<jb::core::Uuid>::failure(std::move(object).error());
     }
     auto job_id = uuid_member(**object, "job_id");
     if (!job_id) {
-        return CodecResult<void>::failure(std::move(job_id).error());
+        return CodecResult<jb::core::Uuid>::failure(std::move(job_id).error());
     }
-    return CodecResult<void>::success();
+    return CodecResult<jb::core::Uuid>::success(*job_id);
 }
 
 auto encode_run_now_idempotency_result(JobRun const& run, AttributeRegistry const& attributes)

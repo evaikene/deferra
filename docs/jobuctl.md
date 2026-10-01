@@ -153,6 +153,13 @@ when a retry after a lost response must return the original run. A matching
 retained key replays its saved response even if the job has since finished,
 without creating new work.
 
+Manual replay records are retained with their runs and retired atomically when
+cleanup purges terminal history. After retirement, the same key is a new request
+subject to current eligibility; it cannot reopen a terminal definition. Creation
+keys also follow [resource lifetimes](protocol/methods/job.md), so an old retry
+can become a new creation after its key retires. The daemon currently performs
+no automatic history cleanup.
+
 ```sh
 jobuctl --socket /run/jobu.sock job run-now JOB_UUID --idempotency-key manual-42 --json
 jobuctl --socket /run/jobu.sock run get RUN_UUID --json

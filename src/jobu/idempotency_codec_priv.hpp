@@ -25,6 +25,11 @@ namespace jb::jobu::detail {
 [[nodiscard]] auto validate_job_create_idempotency_request(std::string_view         request_json,
                                                            AttributeRegistry const& attributes)
     -> jb::core::Result<void, jb::core::Error>;
+/// Validates the canonical request and returns its original creation queue.
+[[nodiscard]] auto decode_job_create_idempotency_scope(std::string_view         request_json,
+                                                       AttributeRegistry const& attributes)
+    -> jb::core::Result<jb::core::Uuid, jb::core::Error>;
+
 [[nodiscard]] auto encode_job_idempotency_result(JobDefinition const& job, AttributeRegistry const& attributes)
     -> jb::core::Result<std::string, jb::core::Error>;
 [[nodiscard]] auto decode_job_idempotency_result(std::string_view result_json, AttributeRegistry const& attributes)
@@ -34,6 +39,10 @@ namespace jb::jobu::detail {
     -> jb::core::Result<std::string, jb::core::Error>;
 [[nodiscard]] auto validate_run_now_idempotency_request(std::string_view request_json)
     -> jb::core::Result<void, jb::core::Error>;
+/// Validates the canonical request and returns its owning job.
+[[nodiscard]] auto decode_run_now_idempotency_scope(std::string_view request_json)
+    -> jb::core::Result<jb::core::Uuid, jb::core::Error>;
+
 [[nodiscard]] auto encode_run_now_idempotency_result(JobRun const& run, AttributeRegistry const& attributes)
     -> jb::core::Result<std::string, jb::core::Error>;
 [[nodiscard]] auto decode_run_now_idempotency_result(std::string_view result_json, AttributeRegistry const& attributes)
