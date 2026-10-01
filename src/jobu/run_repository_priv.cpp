@@ -6,6 +6,7 @@
 #include "value.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -263,11 +264,14 @@ auto count_running(jb::db::Database& database, std::string_view selector, jb::co
     return RepositoryResult<std::uint64_t>::success(static_cast<std::uint64_t>(*count));
 }
 
-auto delete_terminal_chunk(jb::db::Database& database, std::span<jb::core::Uuid const> run_ids)
-    -> RepositoryResult<std::size_t>
+auto delete_terminal_chunk(jb::db::Database&               database,
+                           jb::core::Uuid const&           queue_id,
+                           jb::core::UtcTimePoint          cutoff,
+                           std::span<jb::core::Uuid const> run_ids) -> RepositoryResult<std::size_t>
 {
-    auto sql = std::string{
-        "DELETE FROM jobu_runs WHERE state IN ('succeeded', 'failed', 'interrupted', 'cancelled') AND id IN ("};
+    auto sql = std::string{"DELETE FROM jobu_runs WHERE queue_id = :queue_id "
+                           "AND state IN ('succeeded', 'failed', 'interrupted', 'cancelled') "
+                           "AND completed_at_us < :cutoff AND id IN ("};
     for (std::size_t index = 0; index < run_ids.size(); ++index) {
         if (index != 0) {
             sql += ", ";
@@ -281,6 +285,15 @@ auto delete_terminal_chunk(jb::db::Database& database, std::span<jb::core::Uuid 
     if (!prepared) {
         return RepositoryResult<std::size_t>::failure(std::move(prepared).error());
     }
+    auto bound =
+        bind_all(query,
+                 {
+                     {":queue_id", uuid_to_storage(queue_id)                                                      },
+                     {":cutoff",   std::chrono::ceil<std::chrono::microseconds>(cutoff.time_since_epoch()).count()},
+    });
+    if (!bound) {
+        return RepositoryResult<std::size_t>::failure(std::move(bound).error());
+    }
     for (std::size_t index = 0; index < run_ids.size(); ++index) {
         auto placeholder = ":id" + std::to_string(index);
         auto bound       = query.bind_value(placeholder, uuid_to_storage(run_ids[index]));
@@ -292,7 +305,15 @@ auto delete_terminal_chunk(jb::db::Database& database, std::span<jb::core::Uuid 
     if (!executed) {
         return RepositoryResult<std::size_t>::failure(std::move(executed).error());
     }
-    return affected_rows(query);
+    auto count = affected_rows(query);
+    if (!count) {
+        return count;
+    }
+    auto finished = query.finish();
+    if (!finished) {
+        return RepositoryResult<std::size_t>::failure(std::move(finished).error());
+    }
+    return count;
 }
 
 } // anonymous namespace
@@ -848,56 +869,86 @@ auto RunRepository::count_running_for_queue(jb::core::Uuid const& queue_id)
     return count_running(_database, "queue_id", queue_id);
 }
 
-auto RunRepository::list_terminal_before(jb::core::UtcTimePoint cutoff, std::size_t limit)
-    -> jb::core::Result<std::vector<jb::core::Uuid>, jb::core::Error>
+auto RunRepository::list_terminal_before(jb::core::Uuid const&         queue_id,
+                                         jb::core::UtcTimePoint        cutoff,
+                                         std::size_t                   limit,
+                                         std::optional<TerminalRunKey> after)
+    -> jb::core::Result<std::vector<TerminalRunKey>, jb::core::Error>
 {
+    using PageResult = RepositoryResult<std::vector<TerminalRunKey>>;
     if (limit == 0 || limit > kMaximumRetentionBatch || !std::in_range<std::int64_t>(limit)) {
-        return RepositoryResult<std::vector<jb::core::Uuid>>::failure(invalid_limit());
-    }
-    auto cutoff_value = timestamp_to_storage(cutoff);
-    if (!cutoff_value) {
-        return RepositoryResult<std::vector<jb::core::Uuid>>::failure(std::move(cutoff_value).error());
+        return PageResult::failure(invalid_limit());
     }
 
+    // Stored completions are whole microseconds. Ceiling preserves the strict comparison
+    // against a cutoff between storage ticks, including negative UTC timestamps.
+    auto sql =
+        std::string{"SELECT id AS run_id, completed_at_us FROM jobu_runs WHERE queue_id = :queue_id "
+                    "AND state IN ('succeeded', 'failed', 'interrupted', 'cancelled') AND completed_at_us < :cutoff "};
+    if (after) {
+        sql += "AND (completed_at_us, id) > (:after_completed, :after_id) ";
+    }
+    sql += "ORDER BY completed_at_us ASC, id ASC LIMIT :limit";
+
     jb::db::Query query{_database};
-    auto          prepared = query.prepare(
-        "SELECT id AS run_id FROM jobu_runs WHERE state IN ('succeeded', 'failed', 'interrupted', 'cancelled') "
-        "AND completed_at_us < :cutoff ORDER BY completed_at_us ASC, id ASC LIMIT :limit");
-    if (!prepared) {
-        return RepositoryResult<std::vector<jb::core::Uuid>>::failure(std::move(prepared).error());
+    auto          result = query.prepare(sql);
+    if (result) {
+        result =
+            bind_all(query,
+                     {
+                         {":queue_id", uuid_to_storage(queue_id)                                                      },
+                         {":cutoff",   std::chrono::ceil<std::chrono::microseconds>(cutoff.time_since_epoch()).count()},
+                         {":limit",    static_cast<std::int64_t>(limit)                                               },
+        });
     }
-    auto bound = bind_all(query,
+    if (result && after) {
+        auto completed = timestamp_to_storage(after->completed_at);
+        if (!completed) {
+            return PageResult::failure(std::move(completed).error());
+        }
+        result = bind_all(query,
                           {
-                              {":cutoff", std::move(cutoff_value).value() },
-                              {":limit",  static_cast<std::int64_t>(limit)},
-    });
-    if (!bound) {
-        return RepositoryResult<std::vector<jb::core::Uuid>>::failure(std::move(bound).error());
+                              {":after_completed", std::move(completed).value()},
+                              {":after_id",        uuid_to_storage(after->id)  },
+        });
     }
-    auto executed = query.exec();
-    if (!executed) {
-        return RepositoryResult<std::vector<jb::core::Uuid>>::failure(std::move(executed).error());
+    if (result) {
+        result = query.exec();
     }
-    auto ids = std::vector<jb::core::Uuid>{};
-    ids.reserve(limit);
-    while (true) {
+    if (!result) {
+        return PageResult::failure(std::move(result).error());
+    }
+
+    auto keys = std::vector<TerminalRunKey>{};
+    keys.reserve(limit);
+    for (;;) {
         auto next = query.next();
         if (!next) {
-            return RepositoryResult<std::vector<jb::core::Uuid>>::failure(std::move(next).error());
+            return PageResult::failure(std::move(next).error());
         }
         if (!*next) {
             break;
         }
         auto id = read_uuid(query.record(), "run_id");
         if (!id) {
-            return RepositoryResult<std::vector<jb::core::Uuid>>::failure(std::move(id).error());
+            return PageResult::failure(std::move(id).error());
         }
-        ids.push_back(*id);
+        auto completed = read_timestamp(query.record(), "completed_at_us");
+        if (!completed) {
+            return PageResult::failure(std::move(completed).error());
+        }
+        keys.push_back({.completed_at = *completed, .id = *id});
     }
-    return RepositoryResult<std::vector<jb::core::Uuid>>::success(std::move(ids));
+    auto finished = query.finish();
+    if (!finished) {
+        return PageResult::failure(std::move(finished).error());
+    }
+    return PageResult::success(std::move(keys));
 }
 
-auto RunRepository::delete_selected_terminal(std::span<jb::core::Uuid const> run_ids)
+auto RunRepository::delete_selected_terminal(jb::core::Uuid const&           queue_id,
+                                             jb::core::UtcTimePoint          cutoff,
+                                             std::span<jb::core::Uuid const> run_ids)
     -> jb::core::Result<std::size_t, jb::core::Error>
 {
     if (run_ids.empty()) {
@@ -910,7 +961,7 @@ auto RunRepository::delete_selected_terminal(std::span<jb::core::Uuid const> run
     auto deleted = std::size_t{0};
     for (std::size_t offset = 0; offset < run_ids.size(); offset += kMaximumRunIdsPerDelete) {
         auto const size  = std::min(kMaximumRunIdsPerDelete, run_ids.size() - offset);
-        auto       chunk = delete_terminal_chunk(_database, run_ids.subspan(offset, size));
+        auto       chunk = delete_terminal_chunk(_database, queue_id, cutoff, run_ids.subspan(offset, size));
         if (!chunk) {
             return RepositoryResult<std::size_t>::failure(std::move(chunk).error());
         }

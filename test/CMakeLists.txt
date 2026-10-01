@@ -321,6 +321,7 @@ if(TARGET jobu-sqlite)
     set(TARGET "jobu-idempotency-secret-retention-test")
     add_executable(${TARGET}
         jobu-idempotency-secret-retention-test.cpp
+        support/fault_database_driver.cpp
         support/temporary_directory.cpp
     )
     target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)

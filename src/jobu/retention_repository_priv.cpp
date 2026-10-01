@@ -1,10 +1,15 @@
 #include "retention_repository_priv.hpp"
 
-#include "query.hpp"
+#include "storage_failure_priv.hpp"
 #include "transaction.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
+#include <limits>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace jb::jobu::detail {
 
@@ -14,87 +19,137 @@ template <typename T>
 using RepositoryResult = jb::core::Result<T, jb::core::Error>;
 
 constexpr std::size_t kMaximumRetentionBatch = 1000;
+constexpr std::size_t kRunPageSize           = 500;
 
-auto invalid_limit() -> jb::core::Error
+// This calculation never converts a potentially huge seconds duration to native
+// clock ticks. Saturation means no representable durable completion is old enough.
+auto retention_cutoff(jb::core::UtcTimePoint now, std::chrono::seconds retention) -> jb::core::UtcTimePoint
 {
-    return {
-        .category = jb::core::ErrorCategory::InvalidArgument,
-        .code     = "jobu.storage.invalid_limit",
-        .message  = "Repository limit is outside its supported range",
-    };
+    using Microseconds = std::chrono::microseconds;
+    auto const minimum = std::chrono::ceil<Microseconds>(jb::core::UtcTimePoint::min().time_since_epoch()).count();
+    auto       tick    = std::chrono::ceil<Microseconds>(now.time_since_epoch()).count();
+
+    // Unsigned subtraction gives the exact nonnegative distance even when the
+    // signed endpoints straddle zero. Check before multiplying seconds to micros.
+    auto const     available         = static_cast<std::uint64_t>(tick) - static_cast<std::uint64_t>(minimum);
+    constexpr auto micros_per_second = std::uint64_t{1'000'000};
+    auto const     seconds           = static_cast<std::uint64_t>(retention.count());
+    if (seconds > available / micros_per_second) {
+        tick = minimum;
+    }
+    else {
+        auto remaining = seconds * micros_per_second;
+        // At most three signed subtractions cover the entire uint64 range. Each
+        // intermediate stays within the checked durable range, without narrowing.
+        while (remaining != 0) {
+            auto const step = std::min(remaining, static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()));
+            tick      -= static_cast<std::int64_t>(step);
+            remaining -= step;
+        }
+    }
+    return jb::core::UtcTimePoint{std::chrono::duration_cast<jb::core::UtcClock::duration>(Microseconds{tick})};
 }
 
-auto invalid_count(std::string_view reason) -> jb::core::Error
+auto invalid_options(std::string_view reason) -> jb::core::Error
 {
-    return {
-        .category = jb::core::ErrorCategory::Internal,
-        .code     = "jobu.storage.invariant",
-        .message  = "Persisted retention data violates a JobU invariant",
-        .detail   = "reason=" + std::string{reason},
-    };
+    return {.category = jb::core::ErrorCategory::InvalidArgument,
+            .code     = "jobu.retention.invalid_options",
+            .message  = "Retention options are outside their supported range",
+            .detail   = "reason=" + std::string{reason}};
 }
 
-auto affected_rows(jb::db::Query const& query) -> RepositoryResult<std::size_t>
+auto invalid_count() -> jb::core::Error
 {
-    auto const count = query.num_rows_affected();
-    if (count < 0 || !std::in_range<std::size_t>(count)) {
-        return RepositoryResult<std::size_t>::failure(invalid_count("invalid_affected_row_count"));
-    }
-    return RepositoryResult<std::size_t>::success(static_cast<std::size_t>(count));
+    return {.category = jb::core::ErrorCategory::Internal,
+            .code     = "jobu.retention.invalid_relationship",
+            .message  = "Persisted retention data violates a JobU invariant",
+            .detail   = "reason=terminal_run_delete_count"};
 }
 
-auto purge_jobs(jb::db::Database& database, std::size_t limit) -> RepositoryResult<std::size_t>
+auto purge_queue_history(RunRepository&              runs,
+                         QueueRetentionPolicy const& policy,
+                         jb::core::UtcTimePoint      sweep_now,
+                         std::chrono::seconds        daemon_retention,
+                         std::size_t                 limit) -> RepositoryResult<std::size_t>
 {
-    jb::db::Query query{database};
-    auto          prepared = query.prepare(
-        "DELETE FROM jobu_jobs WHERE state = 'deleted' "
-        "AND NOT EXISTS (SELECT 1 FROM jobu_runs WHERE jobu_runs.job_id = jobu_jobs.id) "
-        "AND NOT EXISTS (SELECT 1 FROM jobu_idempotency WHERE jobu_idempotency.resource_id = jobu_jobs.id) "
-        "AND id IN (SELECT candidates.id FROM jobu_jobs AS candidates WHERE candidates.state = 'deleted' "
-        "AND NOT EXISTS (SELECT 1 FROM jobu_runs WHERE jobu_runs.job_id = candidates.id) "
-        "AND NOT EXISTS (SELECT 1 FROM jobu_idempotency WHERE jobu_idempotency.resource_id = candidates.id) "
-        "ORDER BY candidates.deleted_at_us ASC, candidates.id ASC LIMIT :limit)");
-    if (!prepared) {
-        return RepositoryResult<std::size_t>::failure(std::move(prepared).error());
+    auto const retention = policy.retention.value_or(daemon_retention);
+    if (retention == std::chrono::seconds::zero()) {
+        return RepositoryResult<std::size_t>::success(0);
     }
-    auto bound = query.bind_value(":limit", static_cast<std::int64_t>(limit));
-    if (!bound) {
-        return RepositoryResult<std::size_t>::failure(std::move(bound).error());
+    auto const cutoff = retention_cutoff(sweep_now, retention);
+
+    // Run pages are local to this visit, not an unbounded per-queue cursor map.
+    // The caller's one transaction makes all pages and their cascades atomic.
+    auto deleted = std::size_t{0};
+    auto after   = std::optional<TerminalRunKey>{};
+    while (deleted < limit) {
+        auto const page_limit = std::min(kRunPageSize, limit - deleted);
+        auto       page       = runs.list_terminal_before(policy.id, cutoff, page_limit, after);
+        if (!page) {
+            return RepositoryResult<std::size_t>::failure(std::move(page).error());
+        }
+        if (page->empty()) {
+            break;
+        }
+        auto ids = std::vector<jb::core::Uuid>{};
+        ids.reserve(page->size());
+        for (auto const& key : *page) {
+            ids.push_back(key.id);
+        }
+        auto count = runs.delete_selected_terminal(policy.id, cutoff, ids);
+        if (!count) {
+            return RepositoryResult<std::size_t>::failure(std::move(count).error());
+        }
+        if (*count != page->size()) {
+            return RepositoryResult<std::size_t>::failure(invalid_count());
+        }
+        deleted += *count;
+        after    = page->back();
+        if (page->size() < page_limit) {
+            break;
+        }
     }
-    auto executed = query.exec();
-    if (!executed) {
-        return RepositoryResult<std::size_t>::failure(std::move(executed).error());
-    }
-    return affected_rows(query);
+    return RepositoryResult<std::size_t>::success(deleted);
 }
 
-auto purge_queues(jb::db::Database& database, std::size_t limit) -> RepositoryResult<std::size_t>
+auto purge_visit(jb::db::Database&           database,
+                 QueueRepository&            queues,
+                 RunRepository&              runs,
+                 jb::core::UtcTimePoint      sweep_now,
+                 std::chrono::seconds        daemon_retention,
+                 std::size_t                 limit,
+                 RetentionSweepCursor const& cursor) -> RepositoryResult<RetentionBatchResult>
 {
-    jb::db::Query query{database};
-    auto          prepared = query.prepare(
-        "DELETE FROM jobu_queues WHERE state = 'deleted' "
-        "AND NOT EXISTS (SELECT 1 FROM jobu_jobs WHERE jobu_jobs.queue_id = jobu_queues.id) "
-        "AND NOT EXISTS (SELECT 1 FROM jobu_runs WHERE jobu_runs.queue_id = jobu_queues.id) "
-        "AND NOT EXISTS (SELECT 1 FROM jobu_idempotency WHERE jobu_idempotency.resource_id = jobu_queues.id "
-        "OR jobu_idempotency.scope_id = jobu_queues.id) "
-        "AND id IN (SELECT candidates.id FROM jobu_queues AS candidates WHERE candidates.state = 'deleted' "
-        "AND NOT EXISTS (SELECT 1 FROM jobu_jobs WHERE jobu_jobs.queue_id = candidates.id) "
-        "AND NOT EXISTS (SELECT 1 FROM jobu_runs WHERE jobu_runs.queue_id = candidates.id) "
-        "AND NOT EXISTS (SELECT 1 FROM jobu_idempotency WHERE jobu_idempotency.resource_id = candidates.id "
-        "OR jobu_idempotency.scope_id = candidates.id) "
-        "ORDER BY candidates.deleted_at_us ASC, candidates.id ASC LIMIT :limit)");
-    if (!prepared) {
-        return RepositoryResult<std::size_t>::failure(std::move(prepared).error());
+    auto begun = jb::db::Transaction::begin(database);
+    if (!begun) {
+        return RepositoryResult<RetentionBatchResult>::failure(std::move(begun).error());
     }
-    auto bound = query.bind_value(":limit", static_cast<std::int64_t>(limit));
-    if (!bound) {
-        return RepositoryResult<std::size_t>::failure(std::move(bound).error());
+    auto transaction = std::move(begun).value();
+
+    // Policy, historical queue ownership and deletion all share this snapshot.
+    auto policy = queues.next_retention_policy(cursor.after_queue);
+    if (!policy) {
+        return RepositoryResult<RetentionBatchResult>::failure(std::move(policy).error());
     }
-    auto executed = query.exec();
-    if (!executed) {
-        return RepositoryResult<std::size_t>::failure(std::move(executed).error());
+    auto result = RetentionBatchResult{};
+    if (*policy) {
+        auto deleted = purge_queue_history(runs, **policy, sweep_now, daemon_retention, limit);
+        if (!deleted) {
+            return RepositoryResult<RetentionBatchResult>::failure(std::move(deleted).error());
+        }
+        result.purged.runs      = *deleted;
+        result.next.after_queue = (**policy).id;
     }
-    return affected_rows(query);
+    else {
+        // Stage 9.7 will append owner/key phases before this reset boundary.
+        result.sweep_complete = true;
+    }
+
+    auto committed = transaction.commit();
+    if (!committed) {
+        return RepositoryResult<RetentionBatchResult>::failure(std::move(committed).error());
+    }
+    return RepositoryResult<RetentionBatchResult>::success(result);
 }
 
 } // anonymous namespace
@@ -102,54 +157,33 @@ auto purge_queues(jb::db::Database& database, std::size_t limit) -> RepositoryRe
 RetentionRepository::RetentionRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept
     : _database{database}
     , _runs{database, attributes}
-    , _idempotency{database}
+    , _queues{database, attributes}
 {}
 
-auto RetentionRepository::purge_batch(jb::core::UtcTimePoint cutoff, std::size_t limit)
-    -> jb::core::Result<RetentionPurgeCounts, jb::core::Error>
+auto RetentionRepository::purge_next_batch(jb::core::UtcTimePoint      sweep_now,
+                                           std::chrono::seconds        daemon_retention,
+                                           std::size_t                 limit,
+                                           RetentionSweepCursor const& cursor)
+    -> jb::core::Result<RetentionBatchResult, jb::core::Error>
 {
-    if (limit == 0 || limit > kMaximumRetentionBatch || !std::in_range<std::int64_t>(limit)) {
-        return RepositoryResult<RetentionPurgeCounts>::failure(invalid_limit());
+    if (limit == 0 || limit > kMaximumRetentionBatch) {
+        return RepositoryResult<RetentionBatchResult>::failure(invalid_options("batch_size"));
     }
-    auto begun = jb::db::Transaction::begin(_database);
-    if (!begun) {
-        return RepositoryResult<RetentionPurgeCounts>::failure(std::move(begun).error());
+    if (daemon_retention < std::chrono::seconds::zero()) {
+        return RepositoryResult<RetentionBatchResult>::failure(invalid_options("negative_retention"));
     }
-    auto transaction = std::move(begun).value();
-    auto run_ids     = _runs.list_terminal_before(cutoff, limit);
-    if (!run_ids) {
-        return RepositoryResult<RetentionPurgeCounts>::failure(std::move(run_ids).error());
+
+    auto result = purge_visit(_database, _queues, _runs, sweep_now, daemon_retention, limit, cursor);
+    if (!result) {
+        // The transaction guard has already unwound, including any rollback.
+        // Preserve driver codes, but never return SQL/backend detail to the future service.
+        auto const origin = result.error().code == "jobu.retention.invalid_relationship"
+                              ? StorageFailureOrigin::PersistedData
+                              : StorageFailureOrigin::Operation;
+        return RepositoryResult<RetentionBatchResult>::failure(
+            sanitized_storage_error(result.error(), StorageOperation::Mutation, origin));
     }
-    auto deleted_runs = _runs.delete_selected_terminal(*run_ids);
-    if (!deleted_runs) {
-        return RepositoryResult<RetentionPurgeCounts>::failure(std::move(deleted_runs).error());
-    }
-    if (*deleted_runs != run_ids->size()) {
-        return RepositoryResult<RetentionPurgeCounts>::failure(invalid_count("terminal_run_delete_count"));
-    }
-    auto deleted_idempotency = _idempotency.erase_expired(cutoff, limit);
-    if (!deleted_idempotency) {
-        return RepositoryResult<RetentionPurgeCounts>::failure(std::move(deleted_idempotency).error());
-    }
-    auto deleted_jobs = purge_jobs(_database, limit);
-    if (!deleted_jobs) {
-        return RepositoryResult<RetentionPurgeCounts>::failure(std::move(deleted_jobs).error());
-    }
-    auto deleted_queues = purge_queues(_database, limit);
-    if (!deleted_queues) {
-        return RepositoryResult<RetentionPurgeCounts>::failure(std::move(deleted_queues).error());
-    }
-    auto counts = RetentionPurgeCounts{
-        .runs                = *deleted_runs,
-        .idempotency_records = *deleted_idempotency,
-        .jobs                = *deleted_jobs,
-        .queues              = *deleted_queues,
-    };
-    auto committed = transaction.commit();
-    if (!committed) {
-        return RepositoryResult<RetentionPurgeCounts>::failure(std::move(committed).error());
-    }
-    return RepositoryResult<RetentionPurgeCounts>::success(counts);
+    return result;
 }
 
 } // namespace jb::jobu::detail

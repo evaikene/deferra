@@ -4,6 +4,7 @@
 #include "queue.hpp"
 #include "result.hpp"
 
+#include <chrono>
 #include <cstddef>
 #include <optional>
 #include <string_view>
@@ -16,6 +17,12 @@ class Database;
 namespace jb::jobu::detail {
 
 class SerializedAttributeDocument;
+
+/// Small maintenance projection; includes deleted queues without decoding their defaults.
+struct QueueRetentionPolicy {
+    jb::core::Uuid                      id;
+    std::optional<std::chrono::seconds> retention;
+};
 
 class QueueRepository final {
 public:
@@ -33,6 +40,9 @@ public:
                             std::size_t                   limit,
                             std::optional<jb::core::Uuid> after_id)
         -> jb::core::Result<std::vector<Queue>, jb::core::Error>;
+    /// Returns the next queue's current policy in UUID order, or no value at the end.
+    [[nodiscard]] auto next_retention_policy(std::optional<jb::core::Uuid> after_id)
+        -> jb::core::Result<std::optional<QueueRetentionPolicy>, jb::core::Error>;
     [[nodiscard]] auto replace_mutable_fields(Queue const& queue, SerializedAttributeDocument const* defaults)
         -> jb::core::Result<bool, jb::core::Error>;
     [[nodiscard]] auto set_state(jb::core::Uuid const&  id,

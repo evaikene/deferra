@@ -65,6 +65,12 @@ struct ScheduleOwnedRunUpdate {
     std::string_view       payload_json;
 };
 
+/// Owning continuation for terminal history, ordered by completion time then UUID.
+struct TerminalRunKey {
+    jb::core::UtcTimePoint completed_at;
+    jb::core::Uuid         id;
+};
+
 class RunRepository final {
 public:
     RunRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept;
@@ -108,9 +114,18 @@ public:
         -> jb::core::Result<std::uint64_t, jb::core::Error>;
     [[nodiscard]] auto count_running_for_queue(jb::core::Uuid const& queue_id)
         -> jb::core::Result<std::uint64_t, jb::core::Error>;
-    [[nodiscard]] auto list_terminal_before(jb::core::UtcTimePoint cutoff, std::size_t limit)
-        -> jb::core::Result<std::vector<jb::core::Uuid>, jb::core::Error>;
-    [[nodiscard]] auto delete_selected_terminal(std::span<jb::core::Uuid const> run_ids)
+    /// Reads only IDs and valid completion timestamps; equality with cutoff is retained.
+    /// The caller owns the transaction. Limit is 1..1000; after is an exclusive keyset.
+    [[nodiscard]] auto list_terminal_before(jb::core::Uuid const&         queue_id,
+                                            jb::core::UtcTimePoint        cutoff,
+                                            std::size_t                   limit,
+                                            std::optional<TerminalRunKey> after = std::nullopt)
+        -> jb::core::Result<std::vector<TerminalRunKey>, jb::core::Error>;
+    /// Deletes at most 1000 selected IDs, rechecking queue, terminal state and strict cutoff.
+    /// The caller must roll back its transaction on failure; cascades are part of that unit.
+    [[nodiscard]] auto delete_selected_terminal(jb::core::Uuid const&           queue_id,
+                                                jb::core::UtcTimePoint          cutoff,
+                                                std::span<jb::core::Uuid const> run_ids)
         -> jb::core::Result<std::size_t, jb::core::Error>;
 
 private:

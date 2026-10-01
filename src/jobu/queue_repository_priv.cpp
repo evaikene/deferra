@@ -373,6 +373,56 @@ auto QueueRepository::list(bool                          include_deleted,
     return RepositoryResult<std::vector<Queue>>::success(std::move(queues));
 }
 
+auto QueueRepository::next_retention_policy(std::optional<jb::core::Uuid> after_id)
+    -> jb::core::Result<std::optional<QueueRetentionPolicy>, jb::core::Error>
+{
+    using PolicyResult = RepositoryResult<std::optional<QueueRetentionPolicy>>;
+
+    // One policy per visit bounds work even when every queue is empty or unlimited.
+    auto sql = std::string{"SELECT id AS queue_id, retention_seconds FROM jobu_queues "};
+    if (after_id) {
+        sql += "WHERE id > :after_id ";
+    }
+    sql += "ORDER BY id ASC LIMIT 1";
+
+    jb::db::Query query{_database};
+    auto          result = query.prepare(sql);
+    if (result && after_id) {
+        result = query.bind_value(":after_id", uuid_to_storage(*after_id));
+    }
+    if (result) {
+        result = query.exec();
+    }
+    if (!result) {
+        return PolicyResult::failure(std::move(result).error());
+    }
+
+    auto next = query.next();
+    if (!next) {
+        return PolicyResult::failure(std::move(next).error());
+    }
+    if (!*next) {
+        auto finished = query.finish();
+        if (!finished) {
+            return PolicyResult::failure(std::move(finished).error());
+        }
+        return PolicyResult::success(std::nullopt);
+    }
+    auto id = read_uuid(query.record(), "queue_id");
+    if (!id) {
+        return PolicyResult::failure(std::move(id).error());
+    }
+    auto retention = read_optional_nonnegative_seconds(query.record(), "retention_seconds");
+    if (!retention) {
+        return PolicyResult::failure(std::move(retention).error());
+    }
+    auto finished = query.finish();
+    if (!finished) {
+        return PolicyResult::failure(std::move(finished).error());
+    }
+    return PolicyResult::success(QueueRetentionPolicy{.id = *id, .retention = *retention});
+}
+
 auto QueueRepository::replace_mutable_fields(Queue const& queue, SerializedAttributeDocument const* defaults)
     -> jb::core::Result<bool, jb::core::Error>
 {
