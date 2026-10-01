@@ -677,7 +677,7 @@ TEST_CASE("daemon validates the current schema before recovery and serving", "[j
 
     // start() includes a real system.info round trip after schema validation and recovery.
     fixture.start();
-    CHECK(fixture.count("SELECT version FROM jobu_schema") == 3);
+    CHECK(fixture.count("SELECT version FROM jobu_schema") == 4);
     CHECK(fixture.count("SELECT count(*) FROM sqlite_schema WHERE name IN ('jobu_runs_planned_id_idx', "
                         "'jobu_runs_queue_planned_id_idx', 'jobu_runs_job_planned_id_idx')") == 3);
     CHECK(fixture.count("SELECT count(*) FROM jobu_attempts WHERE state = 'running'") == 0);
@@ -737,7 +737,7 @@ TEST_CASE("daemon restart recovers mixed current-format work without losing refe
     auto const interrupted = fixture.read_run(*run_id);
 
     fixture.start();
-    CHECK(fixture.count("SELECT version FROM jobu_schema") == 3);
+    CHECK(fixture.count("SELECT version FROM jobu_schema") == 4);
     CHECK(fixture.count("SELECT count(*) FROM jobu_runs") == 2);
     CHECK(fixture.count("SELECT count(*) FROM jobu_attempts WHERE state='running'") == 0);
     CHECK(fixture.server.requests().size() == 1);
@@ -797,7 +797,7 @@ TEST_CASE("daemon schema rejection leaves recovery rows untouched and never list
     auto const* const corrupt = GENERATE("DROP INDEX jobu_runs_job_state_idx",
                                          "ALTER TABLE jobu_jobs ADD COLUMN incompatible INTEGER",
                                          "UPDATE jobu_schema SET version = 2",
-                                         "UPDATE jobu_schema SET version = 4");
+                                         "UPDATE jobu_schema SET version = 5");
     CAPTURE(corrupt);
     CrashFixture fixture;
     auto         queue   = recovery_queue(recovery_id(1));

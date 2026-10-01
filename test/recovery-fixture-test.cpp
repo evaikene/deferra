@@ -144,7 +144,7 @@ TEST_CASE("Recovery fixtures preserve absent empty binary and lost capture", "[j
     auto next = schema.next();
     REQUIRE(next);
     REQUIRE(*next);
-    CHECK(std::get<std::int64_t>(*schema.record().value("version")) == 3);
+    CHECK(std::get<std::int64_t>(*schema.record().value("version")) == 4);
 }
 
 TEST_CASE("Recovery fixtures support owner states and both persisted recovery policies", "[jobu][recovery][sqlite]")
@@ -367,9 +367,14 @@ TEST_CASE("Recovery fixtures expose schema guards and application-only manual un
         fixture.insert_run(manual);
         auto          duplicate = fixture.make_run(recovery_id(5), job, RunState::Scheduled, 0, RunOrigin::Manual);
         RunRepository runs{fixture.database, fixture.registry};
-        auto          rejected = runs.insert_manual(duplicate.run);
-        REQUIRE_FALSE(rejected);
-        CHECK(rejected.error().code == "jobu.run.manual_conflict");
+        {
+            auto transaction = Transaction::begin(fixture.database);
+            REQUIRE(transaction);
+            auto rejected = runs.insert_manual(duplicate.run);
+            REQUIRE_FALSE(rejected);
+            CHECK(rejected.error().code == "jobu.run.manual_conflict");
+            REQUIRE(transaction->rollback());
+        }
 
         // Bypass that application guard to demonstrate why recovery must validate duplicate barriers itself.
         fixture.insert_run(duplicate);

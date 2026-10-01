@@ -17,7 +17,7 @@
 namespace jb::jobu::sqlite {
 
 /// Current durable JobU SQLite format marker; older formats are not upgraded.
-inline constexpr std::uint32_t current_schema_version{3};
+inline constexpr std::uint32_t current_schema_version{4};
 
 /// Describes the schema accepted by ensure_schema().
 ///

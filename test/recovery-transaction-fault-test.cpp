@@ -84,6 +84,9 @@ auto boundary(std::string_view sql, Scenario scenario) -> std::string
     if (sql.starts_with("UPDATE jobu_runs SET state = 'retry_wait'")) {
         return "repair.retry";
     }
+    if (sql.starts_with("INSERT INTO jobu_run_timing")) {
+        return "repair.timing";
+    }
     if (sql.starts_with("INSERT INTO jobu_runs")) {
         return "repair.successor";
     }
@@ -270,6 +273,7 @@ auto repair_faults(Scenario scenario) -> std::vector<DatabaseCall>
     }
     if (scenario == Scenario::RecurringSuspension || scenario == Scenario::MissingSuccessor) {
         writes.emplace_back("repair.successor");
+        writes.emplace_back("repair.timing");
     }
     if (scenario == Scenario::RecurringSuspension || scenario == Scenario::JobSuspension) {
         writes.emplace_back("repair.job_suspension");

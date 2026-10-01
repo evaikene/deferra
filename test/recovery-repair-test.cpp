@@ -592,7 +592,8 @@ TEST_CASE("Recurrence failures roll back interruption and never treat a conflict
                 "runnable_at_us, type, priority, attributes_json, payload_json, state) "
                 "VALUES(zeroblob(16), NEW.job_id, NEW.job_revision, NEW.queue_id, 'scheduled', 1, "
                 "NEW.planned_at_us, NEW.runnable_at_us, NEW.type, NEW.priority, NEW.attributes_json, NEW.payload_json, "
-                "'scheduled'); END");
+                "'scheduled'); "
+                "INSERT INTO jobu_run_timing(run_id) VALUES(zeroblob(16)); END");
     }
     {
         auto transaction = Transaction::begin(fixture.storage.database);

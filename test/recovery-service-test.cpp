@@ -931,3 +931,43 @@ TEST_CASE("Recovery fails closed on malformed job or immutable run templates", "
     CHECK(recovered.error().message.find("private marker") == std::string::npos);
     CHECK(recovered.error().detail.find("private marker") == std::string::npos);
 }
+
+TEST_CASE("Recovery checks timing presence before repair and again after committed repair",
+          "[jobu][recovery][sqlite][timing]")
+{
+    auto           after_commit = GENERATE(false, true);
+    ServiceFixture fixture;
+    auto           queue = recovery_queue(recovery_id(1));
+    auto           job   = fixture.storage.make_job(recovery_id(2), queue.id);
+    fixture.storage.insert_queue(queue);
+    fixture.storage.insert_job(job);
+    auto running = fixture.storage.make_run(recovery_id(3), job, RunState::Running);
+    fixture.storage.insert_run(running);
+    bool saw_precommit = false;
+    bool corrupted     = false;
+    if (!after_commit) {
+        execute(fixture.storage.database, "DELETE FROM jobu_run_timing");
+    }
+    auto result = fixture.recover(1, [&] {
+        if (after_commit && !corrupted && fixture.run(running.run.id).state == RunState::Interrupted) {
+            if (saw_precommit) {
+                // The first poll is inside the repair transaction. Corrupt only at the post-commit poll.
+                execute(fixture.storage.database, "DELETE FROM jobu_run_timing");
+                corrupted = true;
+            }
+            else {
+                saw_precommit = true;
+            }
+        }
+        return false;
+    });
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == "jobu.recovery.invariant");
+    if (after_commit) {
+        REQUIRE(corrupted);
+        require_interrupted(fixture, running, false);
+    }
+    else {
+        fixture.storage.require_run(running);
+    }
+}

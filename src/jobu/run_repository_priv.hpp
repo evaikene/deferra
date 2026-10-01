@@ -17,6 +17,13 @@ class Database;
 
 namespace jb::jobu::detail {
 
+/// Quality assigned in the run's insertion transaction. Complete is reserved for work observed from birth.
+/// This selects only the initial closed, zero-wait row; it does not activate telemetry or recover earlier wait.
+enum class InitialRunMeasurement : std::uint8_t {
+    Unmeasured,
+    Complete,
+};
+
 /// Non-owning fields for inserting the known initial schedule-owned run.
 /// The caller must keep both JSON views alive until insert_schedule_owned() returns.
 ///
@@ -62,10 +69,18 @@ class RunRepository final {
 public:
     RunRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept;
 
-    [[nodiscard]] auto insert_schedule_owned(JobRun const& run) -> jb::core::Result<void, jb::core::Error>;
-    [[nodiscard]] auto insert_schedule_owned(ScheduleOwnedRunInsert const& run)
+    /// Insertion methods require a caller-owned transaction and insert both the run and its timing row.
+    /// Roll back the entire transaction on failure; no nested transaction or commit is performed here.
+    /// Omit measurement when no active telemetry owner covers the run from its creation.
+    [[nodiscard]] auto insert_schedule_owned(JobRun const&         run,
+                                             InitialRunMeasurement measurement = InitialRunMeasurement::Unmeasured)
         -> jb::core::Result<void, jb::core::Error>;
-    [[nodiscard]] auto insert_manual(JobRun const& run) -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto insert_schedule_owned(ScheduleOwnedRunInsert const& run,
+                                             InitialRunMeasurement measurement = InitialRunMeasurement::Unmeasured)
+        -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto insert_manual(JobRun const&         run,
+                                     InitialRunMeasurement measurement = InitialRunMeasurement::Unmeasured)
+        -> jb::core::Result<void, jb::core::Error>;
     [[nodiscard]] auto find_schedule_owned(jb::core::Uuid const& job_id)
         -> jb::core::Result<std::optional<JobRun>, jb::core::Error>;
     [[nodiscard]] auto find_by_id(jb::core::Uuid const& run_id)

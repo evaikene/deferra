@@ -106,6 +106,74 @@ auto nonterminal(RunState state) noexcept -> bool
     return state == RunState::Scheduled || state == RunState::Running || state == RunState::RetryWait;
 }
 
+auto validate_run_timing(jb::db::Database& database, JobRun const& run) -> RecoveryResult<void>
+{
+    jb::db::Query query{database};
+    auto result = query.prepare("SELECT runnable_wait_us, measurement_status, open_epoch, open_tick_us, delay_warned "
+                                "FROM jobu_run_timing WHERE run_id = :id");
+    if (result) {
+        result = query.bind_value(":id", uuid_to_storage(run.id));
+    }
+    if (result) {
+        result = query.exec();
+    }
+    if (!result) {
+        return RecoveryResult<void>::failure(storage_error(result.error()));
+    }
+    auto next = query.next();
+    if (!next) {
+        return RecoveryResult<void>::failure(storage_error(next.error()));
+    }
+    if (!*next) {
+        return RecoveryResult<void>::failure(invariant("missing_run_timing"));
+    }
+
+    // Validate durable values independently of SQLite's CHECKs. Generic recovery must also
+    // reject malformed state from a damaged database or another backend before any repair writes.
+    auto const& row        = query.record();
+    auto const* wait       = row.value("runnable_wait_us");
+    auto const* counter    = wait == nullptr ? nullptr : std::get_if<std::int64_t>(wait);
+    auto        status     = read_text(row, "measurement_status");
+    auto        epoch      = read_optional_blob(row, "open_epoch");
+    auto const* tick_value = row.value("open_tick_us");
+    auto const* tick       = tick_value == nullptr ? nullptr : std::get_if<std::int64_t>(tick_value);
+    auto        warned     = read_boolean(row, "delay_warned");
+    if (counter == nullptr || *counter < 0 || !status || !epoch || !warned || tick_value == nullptr) {
+        return RecoveryResult<void>::failure(invariant("invalid_run_timing"));
+    }
+    if (*status != "unmeasured" && *status != "complete" && *status != "partial") {
+        return RecoveryResult<void>::failure(invariant("invalid_timing_status"));
+    }
+
+    auto const open        = epoch->has_value();
+    auto const tick_absent = std::holds_alternative<jb::db::Null>(*tick_value);
+    if (open) {
+        if ((**epoch).size() != jb::core::Uuid::Storage{}.size() || tick == nullptr || *tick < 0) {
+            return RecoveryResult<void>::failure(invariant("invalid_open_timing"));
+        }
+    }
+    else if (!tick_absent) {
+        return RecoveryResult<void>::failure(invariant("invalid_open_timing"));
+    }
+    if (*status == "unmeasured" && (*counter != 0 || open || *warned)) {
+        return RecoveryResult<void>::failure(invariant("invalid_unmeasured_timing"));
+    }
+
+    // Only pending work can own a wait interval. Old pending epochs are repair inputs for
+    // the later telemetry recovery stage; do not discard their checkpointed lower bounds here.
+    if (open && run.state != RunState::Scheduled && run.state != RunState::RetryWait) {
+        return RecoveryResult<void>::failure(invariant("open_timing_on_nonpending_run"));
+    }
+    auto extra = query.next();
+    if (!extra) {
+        return RecoveryResult<void>::failure(storage_error(extra.error()));
+    }
+    if (*extra) {
+        return RecoveryResult<void>::failure(invariant("duplicate_run_timing"));
+    }
+    return RecoveryResult<void>::success();
+}
+
 // Repository lookups mix driver failures and durable decoding failures. Translate only the
 // latter to recovery invariants; driver codes remain available to the shared storage policy.
 template <typename T>
@@ -769,7 +837,11 @@ auto RecoveryRepository::find_run(jb::core::Uuid const& id) -> RecoveryResult<Jo
     if (!*found) {
         return RecoveryResult<JobRun>::failure(invariant("missing_run"));
     }
-    auto            run = std::move(**found);
+    auto run    = std::move(**found);
+    auto timing = validate_run_timing(_database, run);
+    if (!timing) {
+        return RecoveryResult<JobRun>::failure(std::move(timing).error());
+    }
     JobRepository   jobs{_database, _attributes};
     QueueRepository queues{_database, _attributes};
     auto            job   = jobs.find_by_id(run.job_id, true);

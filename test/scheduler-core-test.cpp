@@ -261,6 +261,9 @@ struct RunSpec {
 
 void insert_run(Database& database, RunSpec const& run)
 {
+    auto transaction = Transaction::begin(database);
+    REQUIRE(transaction);
+
     auto planned  = timestamp_to_storage(run.planned_at);
     auto runnable = timestamp_to_storage(run.runnable_at);
     REQUIRE(planned);
@@ -299,6 +302,12 @@ void insert_run(Database& database, RunSpec const& run)
     REQUIRE(query.bind_value(":payload_json", make_text(payload)));
     REQUIRE(query.bind_value(":state", make_text(storage_text(run.state))));
     REQUIRE(query.exec());
+
+    REQUIRE(query.prepare("INSERT INTO jobu_run_timing(run_id) VALUES(:id)"));
+    REQUIRE(query.bind_value(":id", uuid_to_storage(run.id)));
+    REQUIRE(query.exec());
+    REQUIRE(query.finish());
+    REQUIRE(transaction->commit());
 }
 
 auto default_run(CoreFixture const& fixture, Uuid run_id, Uuid job_id, Uuid queue_id, JobType type) -> RunSpec
@@ -1768,7 +1777,8 @@ TEST_CASE("Scheduler core rolls recurring successor failures back and fails clos
                 "runnable_at_us, started_at_us, completed_at_us, type, priority, attributes_json, payload_json, "
                 "state, result_json) VALUES(zeroblob(16), NEW.job_id, NEW.job_revision, NEW.queue_id, 'scheduled', "
                 "1, NEW.completed_at_us + 1, NEW.completed_at_us + 1, NULL, NULL, NEW.type, NEW.priority, "
-                "NEW.attributes_json, NEW.payload_json, 'scheduled', NULL); END"));
+                "NEW.attributes_json, NEW.payload_json, 'scheduled', NULL); "
+                "INSERT INTO jobu_run_timing(run_id) VALUES(zeroblob(16)); END"));
         }
 
         fixture.time.set_utc(at(150));
@@ -3705,7 +3715,8 @@ TEST_CASE("Scheduler core rolls immediate recurring cancellation failures back",
                 "runnable_at_us, started_at_us, completed_at_us, type, priority, attributes_json, payload_json, "
                 "state, result_json) VALUES(zeroblob(16), NEW.job_id, NEW.job_revision, NEW.queue_id, 'scheduled', "
                 "1, NEW.completed_at_us + 1, NEW.completed_at_us + 1, NULL, NULL, NEW.type, NEW.priority, "
-                "NEW.attributes_json, NEW.payload_json, 'scheduled', NULL); END"));
+                "NEW.attributes_json, NEW.payload_json, 'scheduled', NULL); "
+                "INSERT INTO jobu_run_timing(run_id) VALUES(zeroblob(16)); END"));
         }
 
         fixture.time.set_utc(at(150));

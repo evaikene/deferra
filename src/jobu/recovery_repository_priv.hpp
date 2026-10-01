@@ -34,12 +34,11 @@ struct RecoveryAttemptKey {
 /// Pages own their values and retain no query. Limits are 1..4096; cursors are exclusive.
 /// UUID ordering follows the stored UUID bytes, not display strings or insertion order.
 ///
-/// A run page checks ownership and aggregate history; attempt pages decode individual history
-/// rows, and output pages check capture relationships without reading captured bytes. Callers
-/// must exhaust all five scans for complete row and relationship validation, including
-/// owners with no runs. A filtered
-/// Running page is a repair candidate scan, not proof that the remaining database is valid.
-/// Missing recurring work and drained suspensions are repair candidates, not scan failures.
+/// A run page checks timing-row presence/values, ownership and aggregate history; attempt pages decode individual
+/// history rows, and output pages check capture relationships without reading captured bytes. Callers must exhaust all
+/// five scans for complete row and relationship validation, including owners with no runs. A filtered Running page is a
+/// repair candidate scan, not proof that the remaining database is valid. Missing recurring work and drained
+/// suspensions are repair candidates, not scan failures.
 class RecoveryRepository final {
 public:
     RecoveryRepository(jb::db::Database& database, AttributeRegistry const& attributes) noexcept;

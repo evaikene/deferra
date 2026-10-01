@@ -36,10 +36,11 @@ using Phase     = DatabaseFaultPhase;
 // Classify by the operation's table, so multi-table mutations get independent write boundaries.
 auto boundary(std::string_view sql) -> std::string
 {
-    for (auto const& [table, name] : std::array<std::pair<std::string_view, std::string_view>, 5>{
+    for (auto const& [table, name] : std::array<std::pair<std::string_view, std::string_view>, 6>{
              {{"jobu_queues", "queue"},
               {"jobu_jobs", "job"},
               {"jobu_runs", "run"},
+              {"jobu_run_timing", "timing"},
               {"jobu_idempotency", "idempotency"},
               {"jobu_secret_refs", "references"}}
     }) {
@@ -271,7 +272,12 @@ auto mutation_writes(Mutation mutation) -> std::vector<std::string>
             return {"references.delete", "job.update", "run.update", "queue.update"};
         case Mutation::CreateJob:
         case Mutation::CreateImmediateJob:
-            return {"job.insert", "references.delete", "references.insert", "run.insert", "idempotency.insert"};
+            return {"job.insert",
+                    "references.delete",
+                    "references.insert",
+                    "run.insert",
+                    "timing.insert",
+                    "idempotency.insert"};
         case Mutation::UpdateJob:
             return {"job.update", "references.delete", "references.insert", "run.update"};
         case Mutation::SuspendJob:
@@ -282,7 +288,7 @@ auto mutation_writes(Mutation mutation) -> std::vector<std::string>
         case Mutation::DeleteJob:
             return {"job.update", "run.update", "references.delete"};
         case Mutation::RunNow:
-            return {"run.insert", "idempotency.insert"};
+            return {"run.insert", "timing.insert", "idempotency.insert"};
     }
     FAIL("unhandled mutation");
     return {};

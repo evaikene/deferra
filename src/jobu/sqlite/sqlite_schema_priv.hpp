@@ -24,7 +24,7 @@ struct SchemaObject {
     std::string_view             owner;
     std::string_view             ddl;
     std::string_view             column_probe;
-    // Nonempty only for the full, nonunique history indexes.
+    // Nonempty for full, nonunique indexes whose exact key shape is part of the contract.
     std::span<IndexColumn const> index_columns;
 };
 

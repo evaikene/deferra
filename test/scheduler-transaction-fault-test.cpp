@@ -116,6 +116,9 @@ auto boundary(std::string_view sql) -> std::string
     if (sql.starts_with("UPDATE jobu_jobs SET state = :next_state")) {
         return "lifecycle.job_state";
     }
+    if (sql.starts_with("INSERT INTO jobu_run_timing")) {
+        return "completion.timing";
+    }
     if (sql.starts_with("INSERT INTO jobu_runs")) {
         return "completion.successor";
     }
@@ -135,11 +138,17 @@ auto snapshot(Database& database) -> Snapshot
 {
     // Compare every persisted column, including owner revisions and output bytes, rather than just terminal states.
     Snapshot result;
-    for (auto const* table : {"jobu_queues", "jobu_jobs", "jobu_runs", "jobu_attempts", "jobu_attempt_output"}) {
+    for (auto const* table :
+         {"jobu_queues", "jobu_jobs", "jobu_runs", "jobu_run_timing", "jobu_attempts", "jobu_attempt_output"}) {
         Query query{database};
-        auto  sql =
-            std::string{"SELECT * FROM "} + table +
-            (std::string_view{table}.starts_with("jobu_attempt") ? " ORDER BY run_id, attempt_number" : " ORDER BY id");
+        auto  order = std::string_view{" ORDER BY id"};
+        if (std::string_view{table}.starts_with("jobu_attempt")) {
+            order = " ORDER BY run_id, attempt_number";
+        }
+        else if (std::string_view{table} == "jobu_run_timing") {
+            order = " ORDER BY run_id";
+        }
+        auto sql = std::string{"SELECT * FROM "} + table + std::string{order};
         REQUIRE(query.exec(sql));
         auto& rows = result[table];
         while (true) {
@@ -399,6 +408,7 @@ auto completion_faults(Scenario scenario) -> std::vector<DatabaseCall>
                                            retries(scenario) ? "completion.retry" : "completion.run"};
     if (scenario == Scenario::Recurring) {
         writes.emplace_back("completion.successor");
+        writes.emplace_back("completion.timing");
     }
     if (!retries(scenario) && scenario != Scenario::Recurring) {
         writes.emplace_back("lifecycle.job_state");

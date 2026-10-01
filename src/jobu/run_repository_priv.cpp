@@ -157,6 +157,25 @@ auto affected_rows(jb::db::Query const& query) -> RepositoryResult<std::size_t>
     return RepositoryResult<std::size_t>::success(static_cast<std::size_t>(count));
 }
 
+auto insert_initial_timing(jb::db::Database& database, jb::core::Uuid const& run_id, InitialRunMeasurement measurement)
+    -> RepositoryResult<void>
+{
+    // The caller owns the run/timing transaction. A timing failure must roll back the run too.
+    jb::db::Query query{database};
+    auto result = query.prepare("INSERT INTO jobu_run_timing(run_id, measurement_status) VALUES(:id, :status)");
+    if (result) {
+        result = query.bind_value(":id", uuid_to_storage(run_id));
+    }
+    if (result) {
+        auto const* const status = measurement == InitialRunMeasurement::Complete ? "complete" : "unmeasured";
+        result                   = query.bind_value(":status", jb::db::make_text(status));
+    }
+    if (result) {
+        result = query.exec();
+    }
+    return result;
+}
+
 auto cancellation_result(std::string_view reason) -> jb::core::JsonValue
 {
     auto reason_value = jb::core::JsonValue{};
@@ -283,7 +302,8 @@ RunRepository::RunRepository(jb::db::Database& database, AttributeRegistry const
     , _attributes{attributes}
 {}
 
-auto RunRepository::insert_schedule_owned(JobRun const& run) -> jb::core::Result<void, jb::core::Error>
+auto RunRepository::insert_schedule_owned(JobRun const& run, InitialRunMeasurement measurement)
+    -> jb::core::Result<void, jb::core::Error>
 {
     if (!run.schedule_owned || run.origin != RunOrigin::Scheduled) {
         return RepositoryResult<void>::failure(invalid_run("insert_not_schedule_owned"));
@@ -308,18 +328,20 @@ auto RunRepository::insert_schedule_owned(JobRun const& run) -> jb::core::Result
     }
 
     if (run.state == RunState::Scheduled) {
-        return insert_schedule_owned({
-            .id              = run.id,
-            .job_id          = run.job_id,
-            .job_revision    = run.job_revision,
-            .queue_id        = run.queue_id,
-            .planned_at      = run.planned_at,
-            .runnable_at     = run.runnable_at,
-            .type            = run.type,
-            .priority        = run.priority,
-            .attributes_json = attributes->serialized(),
-            .payload_json    = std::get<std::string>(*payload),
-        });
+        return insert_schedule_owned(
+            {
+                .id              = run.id,
+                .job_id          = run.job_id,
+                .job_revision    = run.job_revision,
+                .queue_id        = run.queue_id,
+                .planned_at      = run.planned_at,
+                .runnable_at     = run.runnable_at,
+                .type            = run.type,
+                .priority        = run.priority,
+                .attributes_json = attributes->serialized(),
+                .payload_json    = std::get<std::string>(*payload),
+            },
+            measurement);
     }
 
     if (!is_terminal(run.state)) {
@@ -399,10 +421,14 @@ auto RunRepository::insert_schedule_owned(JobRun const& run) -> jb::core::Result
             return RepositoryResult<void>::failure(schedule_conflict(executed.error()));
         }
     }
-    return executed;
+    if (!executed) {
+        return executed;
+    }
+    return insert_initial_timing(_database, run.id, measurement);
 }
 
-auto RunRepository::insert_schedule_owned(ScheduleOwnedRunInsert const& run) -> jb::core::Result<void, jb::core::Error>
+auto RunRepository::insert_schedule_owned(ScheduleOwnedRunInsert const& run, InitialRunMeasurement measurement)
+    -> jb::core::Result<void, jb::core::Error>
 {
     if (run.attributes_json.size() > kMaximumJsonDocumentBytes || run.payload_json.size() > kMaximumJsonDocumentBytes) {
         return RepositoryResult<void>::failure(invalid_json("too_large"));
@@ -465,10 +491,14 @@ auto RunRepository::insert_schedule_owned(ScheduleOwnedRunInsert const& run) -> 
             return RepositoryResult<void>::failure(schedule_conflict(executed.error()));
         }
     }
-    return executed;
+    if (!executed) {
+        return executed;
+    }
+    return insert_initial_timing(_database, run.id, measurement);
 }
 
-auto RunRepository::insert_manual(JobRun const& run) -> jb::core::Result<void, jb::core::Error>
+auto RunRepository::insert_manual(JobRun const& run, InitialRunMeasurement measurement)
+    -> jb::core::Result<void, jb::core::Error>
 {
     if (run.origin != RunOrigin::Manual || run.schedule_owned) {
         return RepositoryResult<void>::failure(invalid_run("insert_not_manual"));
@@ -534,7 +564,11 @@ auto RunRepository::insert_manual(JobRun const& run) -> jb::core::Result<void, j
     if (!bound) {
         return bound;
     }
-    return query.exec();
+    auto executed = query.exec();
+    if (!executed) {
+        return executed;
+    }
+    return insert_initial_timing(_database, run.id, measurement);
 }
 
 auto RunRepository::find_schedule_owned(jb::core::Uuid const& job_id)

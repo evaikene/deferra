@@ -145,6 +145,9 @@ void insert_terminal_run(Database&    database,
                          Uuid const&  queue_id,
                          std::int64_t completed_at)
 {
+    auto transaction = Transaction::begin(database);
+    REQUIRE(transaction);
+
     Query query{database};
     REQUIRE(query.prepare(
         "INSERT INTO jobu_runs(id, job_id, job_revision, queue_id, origin, schedule_owned, planned_at_us, "
@@ -156,6 +159,12 @@ void insert_terminal_run(Database&    database,
     REQUIRE(query.bind_value(":queue_id", uuid_to_storage(queue_id)));
     REQUIRE(query.bind_value(":completed_at", completed_at));
     REQUIRE(query.exec());
+
+    REQUIRE(query.prepare("INSERT INTO jobu_run_timing(run_id) VALUES(:id)"));
+    REQUIRE(query.bind_value(":id", uuid_to_storage(run_id)));
+    REQUIRE(query.exec());
+    REQUIRE(query.finish());
+    REQUIRE(transaction->commit());
 }
 
 void insert_attempt_output(Database& database, Uuid const& run_id)

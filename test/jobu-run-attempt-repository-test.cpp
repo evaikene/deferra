@@ -13,6 +13,7 @@
 #include "transaction.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -188,7 +189,12 @@ TEST_CASE("Run repository round-trips schedule-owned snapshots and enforces uniq
     run.priority     = -7;
     run.attributes   = materialized_attributes(fixture.registry, 3);
     run.payload      = json_object("url", "https://example.test/");
-    REQUIRE(fixture.runs.insert_schedule_owned(run));
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(run));
+        REQUIRE(transaction->commit());
+    }
 
     auto found = fixture.runs.find_by_id(run_id);
     REQUIRE(found);
@@ -215,13 +221,27 @@ TEST_CASE("Run repository round-trips schedule-owned snapshots and enforces uniq
 
     auto duplicate = run;
     duplicate.id   = id(4);
-    require_error(fixture.runs.insert_schedule_owned(duplicate), ErrorCategory::Conflict, "jobu.run.schedule_conflict");
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        require_error(fixture.runs.insert_schedule_owned(duplicate),
+                      ErrorCategory::Conflict,
+                      "jobu.run.schedule_conflict");
+        REQUIRE(transaction->rollback());
+    }
 
     auto const second_job_id = id(5);
     insert_job(fixture.database, second_job_id, queue_id);
     auto duplicate_id   = run;
     duplicate_id.job_id = second_job_id;
-    require_error(fixture.runs.insert_schedule_owned(duplicate_id), ErrorCategory::Conflict, "db.constraint.unique");
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        require_error(fixture.runs.insert_schedule_owned(duplicate_id),
+                      ErrorCategory::Conflict,
+                      "db.constraint.unique");
+        REQUIRE(transaction->rollback());
+    }
 
     auto missing = fixture.runs.find_by_id(id(99));
     REQUIRE(missing);
@@ -239,7 +259,12 @@ TEST_CASE("Run repository inserts one manual snapshot and exposes Run Now precon
     auto const        duplicate_id = id(13);
     insert_queue(fixture.database, queue_id, "manual");
     insert_job(fixture.database, job_id, queue_id);
-    REQUIRE(fixture.runs.insert_schedule_owned(make_run(fixture.registry, scheduled_id, job_id, queue_id)));
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(make_run(fixture.registry, scheduled_id, job_id, queue_id)));
+        REQUIRE(transaction->commit());
+    }
 
     auto manual           = make_run(fixture.registry, manual_id, job_id, queue_id);
     manual.origin         = RunOrigin::Manual;
@@ -248,7 +273,12 @@ TEST_CASE("Run repository inserts one manual snapshot and exposes Run Now precon
     manual.priority       = 7;
     manual.planned_at     = UtcTimePoint{5s};
     manual.runnable_at    = manual.planned_at;
-    REQUIRE(fixture.runs.insert_manual(manual));
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_manual(manual));
+        REQUIRE(transaction->commit());
+    }
 
     auto found = fixture.runs.find_by_id(manual_id);
     REQUIRE(found);
@@ -264,16 +294,27 @@ TEST_CASE("Run repository inserts one manual snapshot and exposes Run Now precon
 
     auto duplicate = manual;
     duplicate.id   = duplicate_id;
-    require_error(fixture.runs.insert_manual(duplicate), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        require_error(fixture.runs.insert_manual(duplicate), ErrorCategory::Conflict, "jobu.run.manual_conflict");
+        REQUIRE(transaction->rollback());
+    }
 
     execute(fixture.database,
             "UPDATE jobu_runs SET state = 'running', started_at_us = 6 WHERE id = "
             "X'0000000000007000800000000000000C'");
     CHECK(fixture.runs.has_running_or_retrying_run(job_id).value());
-    execute(fixture.database,
-            "INSERT INTO jobu_runs SELECT X'0000000000007000800000000000000D', job_id, job_revision, queue_id, "
-            "origin, schedule_owned, planned_at_us, runnable_at_us, NULL, NULL, type, priority, attributes_json, "
-            "payload_json, 'scheduled', NULL FROM jobu_runs WHERE id = X'0000000000007000800000000000000C'");
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        execute(fixture.database,
+                "INSERT INTO jobu_runs SELECT X'0000000000007000800000000000000D', job_id, job_revision, queue_id, "
+                "origin, schedule_owned, planned_at_us, runnable_at_us, NULL, NULL, type, priority, attributes_json, "
+                "payload_json, 'scheduled', NULL FROM jobu_runs WHERE id = X'0000000000007000800000000000000C'");
+        execute(fixture.database, "INSERT INTO jobu_run_timing(run_id) VALUES(X'0000000000007000800000000000000D')");
+        REQUIRE(transaction->commit());
+    }
     auto duplicate_probe = fixture.runs.has_non_terminal_manual_run(job_id);
     auto error           = require_error(duplicate_probe, ErrorCategory::Internal, "jobu.storage.invariant");
     CHECK(error.detail == "reason=manual_run_relationship");
@@ -290,7 +331,12 @@ TEST_CASE("Run repository upgrades Phase 3 snapshots with later defaults", "[job
 
     auto run       = make_run(fixture.registry, run_id, job_id, queue_id);
     run.attributes = materialized_attributes(fixture.registry, 4);
-    REQUIRE(fixture.runs.insert_schedule_owned(run));
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(run));
+        REQUIRE(transaction->commit());
+    }
 
     auto legacy_attributes = run.attributes;
     REQUIRE(legacy_attributes.erase("retry.jitter") == 1U);
@@ -355,12 +401,23 @@ TEST_CASE("Run repository enforces execution start lifecycle invariants", "[jobu
 
         auto run = make_run(fixture.registry, run_id, job_id, queue_id, state);
         run.started_at.reset();
-        auto insertion_error =
-            require_error(fixture.runs.insert_schedule_owned(run), ErrorCategory::Internal, "jobu.storage.invariant");
-        CHECK(insertion_error.detail == "reason=insert_state_mismatch");
+        {
+            auto transaction = Transaction::begin(fixture.database);
+            REQUIRE(transaction);
+            auto insertion_error = require_error(fixture.runs.insert_schedule_owned(run),
+                                                 ErrorCategory::Internal,
+                                                 "jobu.storage.invariant");
+            REQUIRE(transaction->rollback());
+            CHECK(insertion_error.detail == "reason=insert_state_mismatch");
+        }
 
         run.started_at = run.planned_at + 1s;
-        REQUIRE(fixture.runs.insert_schedule_owned(run));
+        {
+            auto transaction = Transaction::begin(fixture.database);
+            REQUIRE(transaction);
+            REQUIRE(fixture.runs.insert_schedule_owned(run));
+            REQUIRE(transaction->commit());
+        }
         {
             Query query{fixture.database};
             REQUIRE(query.prepare("UPDATE jobu_runs SET started_at_us = NULL WHERE id = :id"));
@@ -377,7 +434,12 @@ TEST_CASE("Run repository enforces execution start lifecycle invariants", "[jobu
     insert_job(fixture.database, cancelled_job_id, queue_id);
     auto cancelled = make_run(fixture.registry, cancelled_run_id, cancelled_job_id, queue_id, RunState::Cancelled);
     REQUIRE_FALSE(cancelled.started_at);
-    REQUIRE(fixture.runs.insert_schedule_owned(cancelled));
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(cancelled));
+        REQUIRE(transaction->commit());
+    }
     auto persisted_cancelled = fixture.runs.find_by_id(cancelled_run_id);
     REQUIRE(persisted_cancelled);
     REQUIRE(persisted_cancelled->has_value());
@@ -392,7 +454,12 @@ TEST_CASE("Attempt repository enforces execution start outcome invariants", "[jo
     auto const        run_id   = id(64);
     insert_queue(fixture.database, queue_id, "primary");
     insert_job(fixture.database, job_id, queue_id);
-    REQUIRE(fixture.runs.insert_schedule_owned(make_run(fixture.registry, run_id, job_id, queue_id)));
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(make_run(fixture.registry, run_id, job_id, queue_id)));
+        REQUIRE(transaction->commit());
+    }
 
     constexpr AttemptOutcome requires_started_at[] = {
         AttemptOutcome::Succeeded,
@@ -451,7 +518,12 @@ TEST_CASE("Run refresh and attempt persistence preserve guarded snapshots and bi
     insert_queue(fixture.database, first_queue, "first");
     insert_queue(fixture.database, second_queue, "second");
     insert_job(fixture.database, job_id, first_queue);
-    REQUIRE(fixture.runs.insert_schedule_owned(make_run(fixture.registry, run_id, job_id, first_queue)));
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(make_run(fixture.registry, run_id, job_id, first_queue)));
+        REQUIRE(transaction->commit());
+    }
 
     auto snapshot = RunSnapshot{
         .job_revision = 2,
@@ -583,8 +655,18 @@ TEST_CASE("Run movement cancellation and terminal deletion preserve lifecycle bo
 
     auto history = make_run(fixture.registry, id(30), move_job, first_queue, RunState::Succeeded, UtcTimePoint{1s});
     auto current = make_run(fixture.registry, id(31), move_job, first_queue);
-    REQUIRE(fixture.runs.insert_schedule_owned(history));
-    REQUIRE(fixture.runs.insert_schedule_owned(current));
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(history));
+        REQUIRE(transaction->commit());
+    }
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(current));
+        REQUIRE(transaction->commit());
+    }
     auto moved = fixture.runs.move_non_terminal(move_job, second_queue, 5);
     REQUIRE(moved);
     CHECK(*moved == 1);
@@ -602,9 +684,24 @@ TEST_CASE("Run movement cancellation and terminal deletion preserve lifecycle bo
     auto retry_run = make_run(fixture.registry, id(32), retry_job, first_queue, RunState::RetryWait);
     auto running   = make_run(fixture.registry, id(33), running_job, first_queue, RunState::Running);
     auto pending   = make_run(fixture.registry, id(34), pending_job, first_queue);
-    REQUIRE(fixture.runs.insert_schedule_owned(retry_run));
-    REQUIRE(fixture.runs.insert_schedule_owned(running));
-    REQUIRE(fixture.runs.insert_schedule_owned(pending));
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(retry_run));
+        REQUIRE(transaction->commit());
+    }
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(running));
+        REQUIRE(transaction->commit());
+    }
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(pending));
+        REQUIRE(transaction->commit());
+    }
 
     CHECK(*fixture.runs.count_running_for_job(running_job) == 1);
     CHECK(*fixture.runs.count_running_for_queue(first_queue) == 1);
@@ -689,8 +786,18 @@ TEST_CASE("Run retention deletion preserves the maximum batch contract", "[jobu]
 
     auto first  = make_run(fixture.registry, id(72), job_id, queue_id, RunState::Succeeded);
     auto second = make_run(fixture.registry, id(73), job_id, queue_id, RunState::Failed);
-    REQUIRE(fixture.runs.insert_schedule_owned(first));
-    REQUIRE(fixture.runs.insert_schedule_owned(second));
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(first));
+        REQUIRE(transaction->commit());
+    }
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(second));
+        REQUIRE(transaction->commit());
+    }
 
     auto delete_ids    = std::vector<Uuid>(1000U, id(99));
     delete_ids.front() = first.id;
@@ -721,11 +828,101 @@ TEST_CASE("Run repository rejects malformed persisted snapshot documents", "[job
     auto const        run_id   = id(42);
     insert_queue(fixture.database, queue_id, "primary");
     insert_job(fixture.database, job_id, queue_id);
-    REQUIRE(fixture.runs.insert_schedule_owned(make_run(fixture.registry, run_id, job_id, queue_id)));
+    {
+        auto transaction = Transaction::begin(fixture.database);
+        REQUIRE(transaction);
+        REQUIRE(fixture.runs.insert_schedule_owned(make_run(fixture.registry, run_id, job_id, queue_id)));
+        REQUIRE(transaction->commit());
+    }
 
     execute(fixture.database, "UPDATE jobu_runs SET payload_json = '[]'");
     require_error(fixture.runs.find_by_id(run_id), ErrorCategory::Internal, "jobu.storage.invalid_json");
 
     execute(fixture.database, "UPDATE jobu_runs SET payload_json = '{}', attributes_json = '{}'");
     require_error(fixture.runs.find_by_id(run_id), ErrorCategory::Internal, "jobu.attribute.invalid_document");
+}
+
+TEST_CASE("Run insertion initializes quality at birth and rolls back failed timing insertion",
+          "[jobu][run][sqlite][timing]")
+{
+    auto const*       path        = GENERATE("serialized", "scheduled", "terminal", "manual");
+    auto              measurement = GENERATE(InitialRunMeasurement::Unmeasured, InitialRunMeasurement::Complete);
+    auto              fail_timing = GENERATE(false, true);
+    RepositoryFixture fixture;
+    insert_queue(fixture.database, id(1), "timing");
+    insert_job(fixture.database, id(2), id(1));
+    auto run = make_run(fixture.registry,
+                        id(3),
+                        id(2),
+                        id(1),
+                        std::string_view{path} == "terminal" ? RunState::Cancelled : RunState::Scheduled);
+    if (std::string_view{path} == "manual") {
+        run.origin         = RunOrigin::Manual;
+        run.schedule_owned = false;
+    }
+    if (fail_timing) {
+        execute(fixture.database,
+                "CREATE TRIGGER fail_timing BEFORE INSERT ON jobu_run_timing "
+                "BEGIN SELECT RAISE(ABORT, 'private-timing-failure'); END");
+    }
+
+    auto transaction = Transaction::begin(fixture.database);
+    REQUIRE(transaction);
+    auto inserted = Result<void, Error>::success();
+    if (std::string_view{path} == "serialized") {
+        auto attributes = encode_and_serialize_attribute_document(fixture.registry,
+                                                                  run.attributes,
+                                                                  AttributeScope::Job,
+                                                                  AttributeDocumentMode::Materialized);
+        auto payload    = serialize_json(run.payload);
+        REQUIRE(attributes);
+        REQUIRE(payload);
+        inserted = fixture.runs.insert_schedule_owned(
+            ScheduleOwnedRunInsert{
+                .id              = run.id,
+                .job_id          = run.job_id,
+                .job_revision    = run.job_revision,
+                .queue_id        = run.queue_id,
+                .planned_at      = run.planned_at,
+                .runnable_at     = run.runnable_at,
+                .type            = run.type,
+                .priority        = run.priority,
+                .attributes_json = attributes->serialized(),
+                .payload_json    = *payload,
+            },
+            measurement);
+    }
+    else if (std::string_view{path} == "manual") {
+        inserted = fixture.runs.insert_manual(run, measurement);
+    }
+    else {
+        inserted = fixture.runs.insert_schedule_owned(run, measurement);
+    }
+    if (fail_timing) {
+        REQUIRE_FALSE(inserted);
+        CHECK(inserted.error().code == "db.constraint");
+        REQUIRE(transaction->rollback());
+        auto found = fixture.runs.find_by_id(run.id);
+        REQUIRE(found);
+        CHECK_FALSE(found->has_value());
+    }
+    else {
+        REQUIRE(inserted);
+        REQUIRE(transaction->commit());
+    }
+
+    Query timing{fixture.database};
+    REQUIRE(timing.exec("SELECT runnable_wait_us, measurement_status, open_epoch, open_tick_us, delay_warned "
+                        "FROM jobu_run_timing"));
+    auto next = timing.next();
+    REQUIRE(next);
+    REQUIRE(*next == !fail_timing);
+    if (!fail_timing) {
+        CHECK(timing.value(0) == Value{std::int64_t{0}});
+        CHECK(timing.value(1) == make_text(measurement == InitialRunMeasurement::Complete ? "complete" : "unmeasured"));
+        CHECK(timing.value(2) == Value{Null{}});
+        CHECK(timing.value(3) == Value{Null{}});
+        CHECK(timing.value(4) == Value{std::int64_t{0}});
+        REQUIRE_FALSE(timing.next().value());
+    }
 }

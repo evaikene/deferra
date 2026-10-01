@@ -9,6 +9,7 @@
 #include "support/fault_database_driver.hpp"
 #include "support/storage_fault_helpers.hpp"
 #include "support/temporary_directory.hpp"
+#include "transaction.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -127,6 +128,9 @@ INSERT INTO jobu_jobs(
 
 void insert_run(Database& database)
 {
+    auto transaction = Transaction::begin(database);
+    REQUIRE(transaction);
+
     execute(database, R"sql(
 INSERT INTO jobu_runs(
     id, job_id, job_revision, queue_id, origin, schedule_owned, planned_at_us, runnable_at_us,
@@ -136,6 +140,8 @@ INSERT INTO jobu_runs(
     X'000102030405060708090A0B0C0D0E0F', 'scheduled', 1, 10, 10, NULL, NULL, 'cli', 0,
     '{"version":1,"values":{}}', '{"command":"/true"}', 'scheduled', NULL
 ))sql");
+    execute(database, "INSERT INTO jobu_run_timing(run_id) VALUES(X'303132333435363738393A3B3C3D3E3F')");
+    REQUIRE(transaction->commit());
 }
 
 auto fail_after_first_creation(std::size_t completed_statements, std::string_view /*statement*/) -> Result<void, Error>
@@ -185,7 +191,7 @@ TEST_CASE("JobU SQLite schema rejects invalid database preconditions", "[jobu][s
     REQUIRE(open.close());
 }
 
-TEST_CASE("JobU SQLite schema creates validates and reopens version three", "[jobu][sqlite][schema]")
+TEST_CASE("JobU SQLite schema creates validates and reopens version four", "[jobu][sqlite][schema]")
 {
     OpenDatabase fixture;
 
@@ -195,13 +201,13 @@ TEST_CASE("JobU SQLite schema creates validates and reopens version three", "[jo
     CHECK(created->created);
 
     auto const manifest = jobu_sqlite::detail::schema_object_manifest();
-    CHECK(manifest.size() == 21);
+    CHECK(manifest.size() == 24);
     CHECK(std::ranges::count_if(manifest, [](auto const& object) {
               return object.kind == jobu_sqlite::detail::SchemaObjectKind::Table;
-          }) == 9);
+          }) == 10);
     CHECK(std::ranges::count_if(manifest, [](auto const& object) {
               return object.kind == jobu_sqlite::detail::SchemaObjectKind::Index;
-          }) == 12);
+          }) == 14);
 
     for (auto const& object : manifest) {
         Query query{fixture.database};
@@ -232,12 +238,12 @@ TEST_CASE("JobU SQLite schema creates validates and reopens version three", "[jo
     }
 
     CHECK(scalar_integer(fixture.database, "SELECT singleton FROM jobu_schema") == 1);
-    CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 3);
+    CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 4);
     CHECK(scalar_integer(fixture.database, "PRAGMA foreign_keys") == 1);
 
     auto repeated = jobu_sqlite::ensure_schema(fixture.database);
     REQUIRE(repeated);
-    CHECK(repeated->version == 3);
+    CHECK(repeated->version == 4);
     CHECK_FALSE(repeated->created);
 
     REQUIRE(fixture.database.close());
@@ -245,7 +251,7 @@ TEST_CASE("JobU SQLite schema creates validates and reopens version three", "[jo
     REQUIRE(reopened.open());
     auto validated = jobu_sqlite::ensure_schema(reopened);
     REQUIRE(validated);
-    CHECK(validated->version == 3);
+    CHECK(validated->version == 4);
     CHECK_FALSE(validated->created);
     CHECK(scalar_integer(reopened, "PRAGMA foreign_keys") == 1);
     REQUIRE(reopened.close());
@@ -306,6 +312,7 @@ INSERT INTO jobu_runs VALUES (
     X'000102030405060708090A0B0C0D0E0F', 'scheduled', 1, 20, 20, 20, 20, 'cli', 0, '{}', '{}',
     'succeeded', '{}'
 ))sql");
+    execute(fixture.database, "INSERT INTO jobu_run_timing(run_id) VALUES(X'404142434445464748494A4B4C4D4E4F')");
     execute(fixture.database, "DELETE FROM jobu_runs WHERE id = X'404142434445464748494A4B4C4D4E4F'");
 
     execute(fixture.database, R"sql(
@@ -352,6 +359,7 @@ INSERT INTO jobu_idempotency VALUES (
               .code == "db.constraint");
 
     execute(fixture.database, "DELETE FROM jobu_runs WHERE id = X'303132333435363738393A3B3C3D3E3F'");
+    CHECK(scalar_integer(fixture.database, "SELECT count(*) FROM jobu_run_timing") == 0);
     CHECK(scalar_integer(fixture.database, "SELECT count(*) FROM jobu_attempts") == 0);
     CHECK(scalar_integer(fixture.database, "SELECT count(*) FROM jobu_attempt_output") == 0);
     execute(fixture.database, "DELETE FROM jobu_jobs WHERE id = X'202122232425262728292A2B2C2D2E2F'");
@@ -470,7 +478,7 @@ TEST_CASE("JobU SQLite schema rejects malformed and newer markers", "[jobu][sqli
 
 TEST_CASE("JobU SQLite schema rejects older markers without changing data", "[jobu][sqlite][schema]")
 {
-    auto const   version = GENERATE(1, 2);
+    auto const   version = GENERATE(1, 2, 3);
     OpenDatabase fixture;
     REQUIRE(jobu_sqlite::ensure_schema(fixture.database));
     insert_queue(fixture.database);
@@ -493,11 +501,11 @@ TEST_CASE("JobU SQLite schema rejects a newer marker", "[jobu][sqlite][schema]")
     REQUIRE(jobu_sqlite::ensure_schema(fixture.database));
     insert_queue(fixture.database);
     auto const before = storage_snapshot(fixture.database);
-    execute(fixture.database, "UPDATE jobu_schema SET version = 4");
+    execute(fixture.database, "UPDATE jobu_schema SET version = 5");
     require_schema_error(jobu_sqlite::ensure_schema(fixture.database),
                          ErrorCategory::Unsupported,
                          "jobu.schema.newer_database");
-    CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 4);
+    CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 5);
     CHECK(storage_snapshot(fixture.database) == before);
 }
 
@@ -516,13 +524,13 @@ TEST_CASE("JobU SQLite schema rejects a current marker over incompatible job con
         }
         execute(fixture.database, definition);
     }
-    execute(fixture.database, "INSERT INTO jobu_schema(singleton, version) VALUES (1, 3)");
+    execute(fixture.database, "INSERT INTO jobu_schema(singleton, version) VALUES (1, 4)");
     insert_queue(fixture.database);
     insert_job(fixture.database);
     auto const before = storage_snapshot(fixture.database);
 
     require_schema_error(jobu_sqlite::ensure_schema(fixture.database), ErrorCategory::Internal, "jobu.schema.invalid");
-    CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 3);
+    CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 4);
     CHECK(storage_snapshot(fixture.database) == before);
 }
 
@@ -551,21 +559,26 @@ TEST_CASE("JobU SQLite schema detects missing required objects and columns", "[j
     CHECK(error.detail.find("CREATE") == std::string::npos);
 }
 
-TEST_CASE("JobU SQLite schema rejects missing or incompatible history indexes", "[jobu][sqlite][schema]")
+TEST_CASE("JobU SQLite schema rejects missing or incompatible lookup indexes", "[jobu][sqlite][schema]")
 {
-    auto const* const index =
-        GENERATE("jobu_runs_planned_id_idx", "jobu_runs_queue_planned_id_idx", "jobu_runs_job_planned_id_idx");
-    auto const wrong_definition = GENERATE(false, true);
+    auto const* const index            = GENERATE("jobu_runs_planned_id_idx",
+                                                  "jobu_runs_queue_planned_id_idx",
+                                                  "jobu_runs_job_planned_id_idx",
+                                                  "jobu_runs_queue_completed_id_idx",
+                                                  "jobu_idempotency_scope_method_resource_idx");
+    auto const        wrong_definition = GENERATE(false, true);
     CAPTURE(index, wrong_definition);
     OpenDatabase fixture;
     REQUIRE(jobu_sqlite::ensure_schema(fixture.database));
     execute(fixture.database, std::string{"DROP INDEX "} + index);
     if (wrong_definition) {
-        execute(fixture.database, std::string{"CREATE INDEX "} + index + " ON jobu_runs(id)");
+        auto const* const owner =
+            std::string_view{index}.starts_with("jobu_idempotency") ? "jobu_idempotency(resource_id)" : "jobu_runs(id)";
+        execute(fixture.database, std::string{"CREATE INDEX "} + index + " ON " + owner);
     }
 
     require_schema_error(jobu_sqlite::ensure_schema(fixture.database), ErrorCategory::Internal, "jobu.schema.invalid");
-    CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 3);
+    CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 4);
     CHECK(scalar_integer(fixture.database,
                          std::string{"SELECT count(*) FROM sqlite_schema WHERE name = '"} + index + "'") ==
           (wrong_definition ? 1 : 0));
@@ -591,7 +604,7 @@ TEST_CASE("JobU SQLite schema rejects incompatible history index shapes", "[jobu
     execute(fixture.database, definition);
 
     require_schema_error(jobu_sqlite::ensure_schema(fixture.database), ErrorCategory::Internal, "jobu.schema.invalid");
-    CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 3);
+    CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 4);
     CHECK(scalar_integer(fixture.database,
                          "SELECT count(*) FROM sqlite_schema WHERE name = 'jobu_runs_planned_id_idx'") == 1);
 }
@@ -681,7 +694,7 @@ TEST_CASE("JobU SQLite creation rolls back failed table validation", "[jobu][sql
 {
     FaultOpenDatabase fixture;
     fixture.faults->classify = [](std::string_view sql) -> std::string {
-        return sql.starts_with("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'jobu_jobs'")
+        return sql.starts_with("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = :name")
                  ? "jobs.definition"
                  : "other";
     };
@@ -706,7 +719,7 @@ TEST_CASE("JobU SQLite current-format validation does not repair or mutate on re
     insert_queue(fixture.database);
     auto const before        = storage_snapshot(fixture.database);
     fixture.faults->classify = [](std::string_view sql) -> std::string {
-        return sql.starts_with("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'jobu_jobs'")
+        return sql.starts_with("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = :name")
                  ? "jobs.definition"
                  : "other";
     };
@@ -720,7 +733,7 @@ TEST_CASE("JobU SQLite current-format validation does not repair or mutate on re
     check_safe_error(failed.error(), "jobu.schema.invalid");
     require_consumed_faults(*fixture.faults);
     CHECK(storage_snapshot(fixture.database) == before);
-    CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 3);
+    CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 4);
 }
 
 TEST_CASE("JobU SQLite creation preserves uncertain commit and rollback poisoning", "[jobu][sqlite][schema][fault]")
@@ -762,7 +775,7 @@ TEST_CASE("JobU SQLite creation preserves uncertain commit and rollback poisonin
     REQUIRE(fixture.database.close());
     REQUIRE(fixture.database.open());
     if (committed) {
-        CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 3);
+        CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 4);
         auto reopened = jobu_sqlite::ensure_schema(fixture.database);
         REQUIRE(reopened);
         CHECK_FALSE(reopened->created);
@@ -774,4 +787,143 @@ TEST_CASE("JobU SQLite creation preserves uncertain commit and rollback poisonin
         CHECK(created->created);
     }
     CHECK(scalar_integer(fixture.database, "PRAGMA foreign_keys") == 1);
+}
+
+TEST_CASE("JobU timing rows enforce quality counters and paired open intervals", "[jobu][sqlite][schema][timing]")
+{
+    OpenDatabase fixture;
+    REQUIRE(jobu_sqlite::ensure_schema(fixture.database));
+    insert_queue(fixture.database);
+    insert_job(fixture.database);
+    insert_run(fixture.database);
+
+    CHECK(scalar_integer(fixture.database, "SELECT runnable_wait_us FROM jobu_run_timing") == 0);
+    CHECK(scalar_integer(fixture.database,
+                         "SELECT count(*) FROM jobu_run_timing WHERE measurement_status = 'unmeasured' "
+                         "AND open_epoch IS NULL AND open_tick_us IS NULL AND delay_warned = 0") == 1);
+
+    for (auto const* assignment : {"runnable_wait_us = -1",
+                                   "runnable_wait_us = 1.5",
+                                   "runnable_wait_us = 'private-value'",
+                                   "runnable_wait_us = 1",
+                                   "measurement_status = 'unknown'",
+                                   "delay_warned = 1",
+                                   "delay_warned = 2",
+                                   "delay_warned = 0.5",
+                                   "open_tick_us = 0",
+                                   "measurement_status = 'complete', open_epoch = zeroblob(16)",
+                                   "measurement_status = 'complete', open_epoch = X'00', open_tick_us = 0",
+                                   "measurement_status = 'complete', open_epoch = '0123456789012345', open_tick_us = 0",
+                                   "measurement_status = 'complete', open_epoch = zeroblob(16), open_tick_us = -1",
+                                   "measurement_status = 'complete', open_epoch = zeroblob(16), open_tick_us = 0.5",
+                                   "open_epoch = zeroblob(16), open_tick_us = 0"}) {
+        CAPTURE(assignment);
+        CHECK(execute_error(fixture.database, std::string{"UPDATE jobu_run_timing SET "} + assignment).code ==
+              "db.constraint");
+    }
+    CHECK(execute_error(fixture.database, "UPDATE jobu_run_timing SET run_id = X'00'").code == "db.constraint");
+    CHECK(execute_error(fixture.database,
+                        "INSERT INTO jobu_run_timing(run_id) VALUES(X'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF')")
+              .code == "db.constraint.foreign_key");
+    CHECK(execute_error(fixture.database, "INSERT INTO jobu_run_timing(run_id) SELECT run_id FROM jobu_run_timing")
+              .code == "db.constraint.unique");
+
+    execute(fixture.database, "UPDATE jobu_run_timing SET measurement_status = 'complete'");
+    execute(fixture.database,
+            "UPDATE jobu_run_timing SET measurement_status = 'partial', runnable_wait_us = 7, "
+            "open_epoch = zeroblob(16), open_tick_us = 9, delay_warned = 1");
+    REQUIRE(jobu_sqlite::ensure_schema(fixture.database));
+
+    // Cascaded timing deletion participates in rollback, just like attempts and captured output.
+    auto before      = storage_snapshot(fixture.database);
+    auto transaction = Transaction::begin(fixture.database);
+    REQUIRE(transaction);
+    execute(fixture.database, "DELETE FROM jobu_runs");
+    CHECK(scalar_integer(fixture.database, "SELECT count(*) FROM jobu_run_timing") == 0);
+    REQUIRE(transaction->rollback());
+    CHECK(storage_snapshot(fixture.database) == before);
+}
+
+TEST_CASE("JobU format four rejects weakened timing constraints and foreign keys", "[jobu][sqlite][schema][timing]")
+{
+    auto const*  weakened = GENERATE("counter", "pair", "quality", "foreign_key");
+    OpenDatabase fixture;
+    for (auto const& object : jobu_sqlite::detail::schema_object_manifest()) {
+        auto definition = std::string{object.ddl};
+        if (object.name == "jobu_run_timing") {
+            auto original    = std::string_view{"runnable_wait_us >= 0"};
+            auto replacement = std::string_view{"runnable_wait_us >= -1"};
+            if (std::string_view{weakened} == "pair") {
+                original    = "CHECK ((open_epoch IS NULL) = (open_tick_us IS NULL))";
+                replacement = "CHECK (1)";
+            }
+            else if (std::string_view{weakened} == "quality") {
+                original    = "'unmeasured', 'complete', 'partial'";
+                replacement = "'unmeasured', 'complete', 'partial', 'unknown'";
+            }
+            else if (std::string_view{weakened} == "foreign_key") {
+                original    = "FOREIGN KEY (run_id) REFERENCES jobu_runs(id) ON DELETE CASCADE";
+                replacement = "CHECK (run_id IS NOT NULL)";
+            }
+            auto offset = definition.find(original);
+            REQUIRE(offset != std::string::npos);
+            definition.replace(offset, original.size(), replacement);
+        }
+        execute(fixture.database, definition);
+    }
+    execute(fixture.database, "INSERT INTO jobu_schema VALUES(1, 4)");
+    require_schema_error(jobu_sqlite::ensure_schema(fixture.database), ErrorCategory::Internal, "jobu.schema.invalid");
+    CHECK(scalar_integer(fixture.database, "SELECT version FROM jobu_schema") == 4);
+}
+
+TEST_CASE("JobU format four creation rolls back each new object", "[jobu][sqlite][schema][fault][timing]")
+{
+    auto const*       object = GENERATE("CREATE TABLE jobu_run_timing",
+                                        "CREATE INDEX jobu_runs_queue_completed_id_idx",
+                                        "CREATE INDEX jobu_idempotency_scope_method_resource_idx");
+    FaultOpenDatabase fixture;
+    fixture.faults->classify = [object](std::string_view sql) {
+        return sql.starts_with(object) ? "new.object" : "other";
+    };
+    fixture.faults->faults.push_back({
+        .at    = {.boundary  = "new.object",
+                  .operation = DatabaseOperation::Execute,
+                  .phase     = DatabaseFaultPhase::AfterSuccess},
+        .error = fault_error(),
+    });
+    auto failed = jobu_sqlite::ensure_schema(fixture.database);
+    REQUIRE_FALSE(failed);
+    check_safe_error(failed.error(), "jobu.schema.create_failed");
+    require_consumed_faults(*fixture.faults);
+    CHECK(scalar_integer(fixture.database, "SELECT count(*) FROM sqlite_schema WHERE name GLOB 'jobu_*'") == 0);
+    REQUIRE(jobu_sqlite::ensure_schema(fixture.database));
+}
+
+TEST_CASE("JobU ownership and retention lookups use the format four indexes", "[jobu][sqlite][schema][timing]")
+{
+    OpenDatabase fixture;
+    REQUIRE(jobu_sqlite::ensure_schema(fixture.database));
+    for (auto const& [sql, index] : {
+             std::pair{"EXPLAIN QUERY PLAN SELECT id FROM jobu_runs WHERE queue_id = zeroblob(16) "
+                       "AND state IN ('succeeded', 'failed', 'interrupted', 'cancelled') "
+                       "AND completed_at_us < 100 ORDER BY completed_at_us, id LIMIT 100", "jobu_runs_queue_completed_id_idx"          },
+             std::pair{"EXPLAIN QUERY PLAN SELECT key FROM jobu_idempotency WHERE scope_id = zeroblob(16) "
+                       "AND method = 'job.create' AND resource_id = zeroblob(16)",         "jobu_idempotency_scope_method_resource_idx"}
+    }) {
+        Query query{fixture.database};
+        REQUIRE(query.exec(sql));
+        bool used_index = false;
+        while (true) {
+            auto next = query.next();
+            REQUIRE(next);
+            if (!*next) {
+                break;
+            }
+            auto const* detail = std::get_if<std::string>(query.record().value("detail"));
+            REQUIRE(detail);
+            CHECK(detail->find("TEMP B-TREE") == std::string::npos);
+            used_index = used_index || detail->find(index) != std::string::npos;
+        }
+        CHECK(used_index);
+    }
 }
