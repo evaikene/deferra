@@ -29,10 +29,12 @@ using RecoveryResult = jb::core::Result<T, jb::core::Error>;
 
 auto invariant(std::string_view reason) -> jb::core::Error
 {
-    return {.category = jb::core::ErrorCategory::Internal,
-            .code     = "jobu.recovery.invariant",
-            .message  = "Persisted recovery data violates a JobU invariant",
-            .detail   = "reason=" + std::string{reason}};
+    return {
+        .category = jb::core::ErrorCategory::Internal,
+        .code     = "jobu.recovery.invariant",
+        .message  = "Persisted recovery data violates a JobU invariant",
+        .detail   = "reason=" + std::string{reason},
+    };
 }
 
 auto storage_error(jb::core::Error const& error) -> jb::core::Error
@@ -58,10 +60,11 @@ auto interruption_result() -> RecoveryResult<std::string>
 {
     // Interruption records an unknown external outcome, never a fabricated runner failure.
     return jb::core::serialize_json({
-        .data = jb::core::JsonValue::Object{
-                                            {"reason", {.data = std::string{"daemon_interrupted"}}},
-                                            {"outcome_unknown", {.data = true}},
-                                            }
+        .data =
+            jb::core::JsonValue::Object{
+                                        {"reason", {.data = std::string{"daemon_interrupted"}}},
+                                        {"outcome_unknown", {.data = true}},
+                                        },
     });
 }
 
@@ -91,9 +94,11 @@ auto expect_one_affected(jb::db::Query const& query, std::string_view reason) ->
 
 auto invalid_limit() -> jb::core::Error
 {
-    return {.category = jb::core::ErrorCategory::InvalidArgument,
-            .code     = "jobu.storage.invalid_limit",
-            .message  = "Recovery scan limit must be in 1..4096"};
+    return {
+        .category = jb::core::ErrorCategory::InvalidArgument,
+        .code     = "jobu.storage.invalid_limit",
+        .message  = "Recovery scan limit must be in 1..4096",
+    };
 }
 
 auto valid_limit(std::size_t limit) noexcept -> bool
@@ -148,7 +153,8 @@ auto validate_run_timing(jb::db::Database& database, JobRun const& run) -> Recov
     auto const open        = epoch->has_value();
     auto const tick_absent = std::holds_alternative<jb::db::Null>(*tick_value);
     if (open) {
-        if ((**epoch).size() != jb::core::Uuid::Storage{}.size() || tick == nullptr || *tick < 0) {
+        auto parsed_epoch = read_uuid(row, "open_epoch");
+        if (!parsed_epoch || parsed_epoch->is_nil() || tick == nullptr || *tick < 0) {
             return RecoveryResult<void>::failure(invariant("invalid_open_timing"));
         }
     }
@@ -159,8 +165,8 @@ auto validate_run_timing(jb::db::Database& database, JobRun const& run) -> Recov
         return RecoveryResult<void>::failure(invariant("invalid_unmeasured_timing"));
     }
 
-    // Only pending work can own a wait interval. Old pending epochs are repair inputs for
-    // the later telemetry recovery stage; do not discard their checkpointed lower bounds here.
+    // Only pending work can own a wait interval. Initial validation accepts old pending
+    // epochs for repair; recovery separately proves no open interval survives final validation.
     if (open && run.state != RunState::Scheduled && run.state != RunState::RetryWait) {
         return RecoveryResult<void>::failure(invariant("open_timing_on_nonpending_run"));
     }
@@ -291,11 +297,13 @@ auto history(jb::db::Database& database, jb::core::Uuid const& id) -> RecoveryRe
     if (!total || !latest || !running || !unfinished || !invalid_prior) {
         return RecoveryResult<History>::failure(invariant("history_count"));
     }
-    return RecoveryResult<History>::success({.count         = *total,
-                                             .latest        = *latest,
-                                             .running       = *running,
-                                             .unfinished    = *unfinished,
-                                             .invalid_prior = *invalid_prior});
+    return RecoveryResult<History>::success({
+        .count         = *total,
+        .latest        = *latest,
+        .running       = *running,
+        .unfinished    = *unfinished,
+        .invalid_prior = *invalid_prior,
+    });
 }
 
 auto validate_barriers(jb::db::Database& database, JobDefinition const& job) -> RecoveryResult<void>
@@ -529,12 +537,14 @@ auto RecoveryRepository::find_retry_decision(RecoveryAttemptKey const& key, jb::
         return RecoveryResult<RetryDecision>::failure(invariant("run_ownership"));
     }
     auto decision = recovery_retry_decision(run->attributes,
-                                            {.run_id         = run->id,
-                                             .attempt_number = key.attempt_number,
-                                             .policy         = (*queue)->recovery_policy,
-                                             .job_state      = (*job)->state,
-                                             .queue_state    = (*queue)->state,
-                                             .recovery_time  = recovery_time});
+                                            {
+                                                .run_id         = run->id,
+                                                .attempt_number = key.attempt_number,
+                                                .policy         = (*queue)->recovery_policy,
+                                                .job_state      = (*job)->state,
+                                                .queue_state    = (*queue)->state,
+                                                .recovery_time  = recovery_time,
+                                            });
     if (!decision) {
         return RecoveryResult<RetryDecision>::failure(storage_error(decision.error()));
     }
@@ -729,7 +739,8 @@ auto RecoveryRepository::set_run_retry_wait(RecoveryAttemptKey const& key,
 auto RecoveryRepository::insert_interrupted_successor(jb::core::Uuid const&    run_id,
                                                       jb::core::UtcTimePoint   lower_bound,
                                                       CronEngine const&        cron,
-                                                      jb::core::UuidGenerator& uuid_generator) -> RecoveryResult<bool>
+                                                      jb::core::UuidGenerator& uuid_generator,
+                                                      InitialRunMeasurement    measurement) -> RecoveryResult<bool>
 {
     auto valid_time = validate_recovery_timestamp(lower_bound);
     if (!valid_time) {
@@ -753,13 +764,14 @@ auto RecoveryRepository::insert_interrupted_successor(jb::core::Uuid const&    r
         return RecoveryResult<bool>::failure(std::move(job).error());
     }
     return repair_result(
-        insert_recurring_run(_database, _attributes, cron, uuid_generator, std::move(*job), lower_bound));
+        insert_recurring_run(_database, _attributes, cron, uuid_generator, std::move(*job), lower_bound, measurement));
 }
 
 auto RecoveryRepository::repair_missing_successor(jb::core::Uuid const&    job_id,
                                                   jb::core::UtcTimePoint   lower_bound,
                                                   CronEngine const&        cron,
-                                                  jb::core::UuidGenerator& uuid_generator) -> RecoveryResult<bool>
+                                                  jb::core::UuidGenerator& uuid_generator,
+                                                  InitialRunMeasurement    measurement) -> RecoveryResult<bool>
 {
     auto valid_time = validate_recovery_timestamp(lower_bound);
     if (!valid_time) {
@@ -792,7 +804,7 @@ auto RecoveryRepository::repair_missing_successor(jb::core::Uuid const&    job_i
         return RecoveryResult<bool>::failure(std::move(barriers).error());
     }
     return repair_result(
-        insert_recurring_run(_database, _attributes, cron, uuid_generator, std::move(*job), lower_bound));
+        insert_recurring_run(_database, _attributes, cron, uuid_generator, std::move(*job), lower_bound, measurement));
 }
 
 auto RecoveryRepository::complete_drained_job_suspension(jb::core::Uuid const&  job_id,

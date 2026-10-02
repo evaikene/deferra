@@ -21,7 +21,8 @@ namespace jb::jobu::detail {
 /// The caller owns the transaction and must establish that no nonterminal schedule-owned run exists;
 /// an insertion conflict is an error, never an already-done result. Returns true on insertion.
 /// Roll back the whole unit on failure.
-/// Complete measurement is selected only by a caller covering creation with active telemetry.
+/// Complete measurement requires uninterrupted telemetry coverage from creation, including
+/// successors created in recovery before pre-admission telemetry activation.
 [[nodiscard]] auto insert_recurring_run(jb::db::Database&        database,
                                         AttributeRegistry const& attributes,
                                         CronEngine const&        cron,

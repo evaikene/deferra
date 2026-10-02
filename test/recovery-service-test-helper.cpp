@@ -7,10 +7,12 @@
 #include "database.hpp"
 #include "run_repository_priv.hpp"
 #include "sqlite/sqlite_driver.hpp"
+#include "wait_repository_priv.hpp"
 
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <string_view>
 #include <utility>
 
 #include <unistd.h>
@@ -24,9 +26,10 @@ using namespace std::chrono_literals;
 
 int main(int argc, char* argv[])
 {
-    if (argc != 6) {
+    if (argc != 6 && (argc != 7 || std::string_view{argv[6]} != "timing")) {
         return 2;
     }
+    auto const timing_repair = argc == 7;
 
     auto first_run       = Uuid::parse(argv[2]);
     auto successor_one   = Uuid::parse(argv[3]);
@@ -37,10 +40,11 @@ int main(int argc, char* argv[])
     }
 
     // This process starts with no inherited SQLite or test-runner state.
-    auto driver = std::make_unique<jb::db::sqlite::Driver>(
-        jb::db::sqlite::Options{.database_file = std::filesystem::path{argv[1]},
-                                .busy_timeout  = 1000ms,
-                                .durability    = jb::db::sqlite::Durability::Normal});
+    auto     driver = std::make_unique<jb::db::sqlite::Driver>(jb::db::sqlite::Options{
+        .database_file = std::filesystem::path{argv[1]},
+        .busy_timeout  = 1000ms,
+        .durability    = jb::db::sqlite::Durability::Normal,
+    });
     Database database{std::move(driver)};
     if (!database.open()) {
         return 10;
@@ -56,10 +60,22 @@ int main(int argc, char* argv[])
     SequenceUuidGenerator generator{
         {*successor_one, *successor_two, *successor_three}
     };
-    RunRepository runs{database, registry};
+    RunRepository  runs{database, registry};
+    WaitRepository timing{database};
 
     bool observed_precommit = false;
     auto result             = recover_startup(database, registry, cron, generator, time, {.scan_batch_size = 1}, [&] {
+        if (timing_repair) {
+            auto row = timing.read(*first_run);
+            if (!row) {
+                ::_exit(11);
+            }
+            if (!row->open_epoch && std::exchange(observed_precommit, true)) {
+                // Acknowledged timing repair survives death without any destructor cleanup.
+                ::_exit(77);
+            }
+            return false;
+        }
         auto row = runs.find_by_id(*first_run);
         if (!row || !*row) {
             ::_exit(11);

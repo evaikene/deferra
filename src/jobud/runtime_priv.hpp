@@ -23,6 +23,7 @@ class Database;
 namespace jb::jobu {
 class AttributeRegistry;
 class CronEngine;
+class ExecutionTelemetry;
 class HistoryService;
 class ManagementService;
 class RetentionService;
@@ -54,7 +55,9 @@ struct RuntimeTestAccess;
 
 /// Owner-thread daemon composition. Borrowed dependencies and the signal predicate's captures must outlive it.
 /// Recovery precedes runner construction, synchronous dispatch, and listening. Terminal requests only latch
-/// admission/persistence gates and request loop exit; run() performs destructive cleanup after stack unwinding.
+/// admission/persistence gates, capture telemetry stop and request loop exit; run() performs healthy
+/// timing settlement and destructive cleanup after stack unwinding. Telemetry outlives its borrowers;
+/// cleanup writes are skipped after any fatal runtime failure, including late HTTP teardown failure.
 /// The signal predicate is polled synchronously and must not throw, mutate storage, or reenter the runtime.
 /// No Object parent is assigned to uniquely owned services. Destruction is an idempotent cleanup fallback and
 /// must not occur inside a service, executor, or signal callback.
@@ -97,6 +100,7 @@ private:
     auto statistics() -> jb::jobu::StatisticsService*;
     auto scheduler() -> jb::jobu::Scheduler*;
     auto retention() -> jb::jobu::RetentionService*;
+    auto telemetry() -> jb::jobu::ExecutionTelemetry*;
     auto rpc_server() -> jb::rpc::Server*;
 };
 

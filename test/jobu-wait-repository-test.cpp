@@ -259,6 +259,58 @@ TEST_CASE("Wait decoding rejects missing and malformed durable rows", "[jobu][te
     f.storage.reopen();
 }
 
+TEST_CASE("Open timing pages use exclusive keys and never load execution snapshots", "[jobu][telemetry][checkpoint]")
+{
+    TelemetryStorageFixture f;
+    f.seed("complete");
+    f.seed_open(f.epoch, 10);
+    // Corrupt opaque snapshots deliberately: timing maintenance must not deserialize them.
+    {
+        jb::db::Query query{f.storage.database};
+        REQUIRE(query.exec("UPDATE jobu_runs SET payload_json = 'not json', attributes_json = 'not json'"));
+    }
+    auto page = f.repository.list_open(1);
+    REQUIRE(page);
+    REQUIRE(page->size() == 1);
+    CHECK(page->front() == f.run_id);
+    auto next = f.repository.list_open(1, page->back());
+    REQUIRE(next);
+    CHECK(next->empty());
+    REQUIRE_FALSE(f.repository.list_open(0));
+    REQUIRE_FALSE(f.repository.list_open(4097));
+    f.storage.reopen();
+}
+
+TEST_CASE("Abandoned repair preserves its lower bound and warning without epoch arithmetic",
+          "[jobu][telemetry][recovery]")
+{
+    auto const*             quality = GENERATE("complete", "partial");
+    TelemetryStorageFixture f;
+    f.seed(quality, 123456, true);
+    f.seed_open(recovery_id(999), std::numeric_limits<std::int64_t>::max());
+    auto before = storage_snapshot(f.storage.database);
+    {
+        auto transaction = jb::db::Transaction::begin(f.storage.database);
+        REQUIRE(transaction);
+        f.faults->calls.clear();
+        auto repaired = f.repository.repair_abandoned(f.run_id);
+        REQUIRE(repaired);
+        CHECK(*repaired);
+        auto row = f.repository.read(f.run_id);
+        REQUIRE(row);
+        CHECK(row->runnable_wait_us == 123456);
+        CHECK(row->quality == WaitQuality::Partial);
+        CHECK(row->delay_warned);
+        CHECK_FALSE(row->open_epoch);
+        auto again = f.repository.repair_abandoned(f.run_id);
+        REQUIRE(again);
+        CHECK_FALSE(*again);
+        require_no_transaction_calls(*f.faults);
+        REQUIRE(transaction->rollback());
+    }
+    CHECK(storage_snapshot(f.storage.database) == before);
+}
+
 TEST_CASE("Timing projection never decodes payloads or attributes", "[jobu][telemetry]")
 {
     TelemetryStorageFixture f;

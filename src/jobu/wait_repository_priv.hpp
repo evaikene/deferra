@@ -7,8 +7,10 @@
 #include "time_source.hpp"
 #include "uuid.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace jb::db {
 class Database;
@@ -67,6 +69,16 @@ public:
 
     /// Reads and validates one required timing row and its run state; usable outside a transaction.
     [[nodiscard]] auto read(jb::core::Uuid const& run_id) -> TelemetryResult<WaitTiming>;
+
+    /// Exclusive UUID-keyset page of open rows, with limits 1..4096. Includes either open
+    /// field so malformed pairs cannot evade validation. Owns IDs and releases its query.
+    [[nodiscard]] auto list_open(std::size_t limit, std::optional<jb::core::Uuid> after = {})
+        -> TelemetryResult<std::vector<jb::core::Uuid>>;
+
+    /// Pre-activation recovery only: discard an abandoned tail without interpreting its tick.
+    /// Retains the checkpointed lower bound and warning flag, marks Partial and clears the pair.
+    /// Requires the caller's repair transaction; returns false for an already closed row.
+    [[nodiscard]] auto repair_abandoned(jb::core::Uuid const& run_id) -> TelemetryResult<bool>;
 
     /// Opens pending work if closed; an already-open current-epoch interval keeps its original tick.
     /// First observation changes Unmeasured to Partial; Complete and Partial retain their quality.

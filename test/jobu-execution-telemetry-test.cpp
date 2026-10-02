@@ -2,7 +2,9 @@
 
 #include "execution_telemetry_priv.hpp"
 #include "object.hpp"
+#include "recovery.hpp"
 #include "run_repository_priv.hpp"
+#include "support/fake_cron_engine.hpp"
 #include "support/fake_event_loop_backend.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/sequence_uuid_generator.hpp"
@@ -13,11 +15,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -50,6 +55,25 @@ struct TelemetryFixture : TelemetryStorageFixture {
         return *value;
     }
 
+    auto pending(std::uint32_t suffix) -> Uuid
+    {
+        auto job = storage.make_job(recovery_id(200 + suffix), queue_id);
+        auto run = storage.make_run(recovery_id(300 + suffix), job);
+        storage.insert_job(job);
+        storage.insert_run(run);
+        return run.run.id;
+    }
+
+    void open(Uuid id)
+    {
+        auto transaction = jb::db::Transaction::begin(storage.database);
+        REQUIRE(transaction);
+        REQUIRE(TelemetryAccess::open_interval(*service, id, sample()));
+        REQUIRE(transaction->commit());
+    }
+
+    void fire_next() const { LoopAccess::fire_next_timer(*loop.loop); }
+
     jb::core::priv::FakeEventLoop          loop{jb::core::priv::make_fake_event_loop()};
     jb::core::priv::ScopedCurrentEventLoop current{loop.loop.get()};
     FakeTimeSource                         time;
@@ -62,10 +86,13 @@ struct TelemetryFixture : TelemetryStorageFixture {
 auto clock_failure() -> TelemetryFailure
 {
     return {
-        .error = {.category = ErrorCategory::Internal,
-                  .code     = "jobu.telemetry.clock_regression",
-                  .message  = "private-backend-marker",
-                  .detail   = "private-backend-marker"}
+        .error =
+            {
+                    .category = ErrorCategory::Internal,
+                    .code     = "jobu.telemetry.clock_regression",
+                    .message  = "private-backend-marker",
+                    .detail   = "private-backend-marker",
+                    },
     };
 }
 
@@ -124,7 +151,7 @@ TEST_CASE("Telemetry activation is idempotent and samples without observing rows
     CHECK(sample->utc_now == UtcTimePoint{10s});
     CHECK(f.faults->calls.empty());
     CHECK(f.failures.empty());
-    CHECK(LoopAccess::active_timer_count(*f.loop.loop) == 0);
+    CHECK(LoopAccess::active_timer_count(*f.loop.loop) == 1);
     CHECK(storage_snapshot(f.storage.database) == before);
 }
 
@@ -351,10 +378,14 @@ TEST_CASE("Accounting errors remain silent until rollback and the explicit failu
     REQUIRE(f.service->start());
     auto before      = storage_snapshot(f.storage.database);
     f.faults->faults = {
-        {.at    = {.boundary  = "timing.write",
-                   .operation = DatabaseOperation::Execute,
-                   .phase     = DatabaseFaultPhase::AfterSuccess},
-         .error = fault_error()}
+        {
+         .at =
+                {
+                    .boundary  = "timing.write",
+                    .operation = DatabaseOperation::Execute,
+                    .phase     = DatabaseFaultPhase::AfterSuccess,
+                }, .error = fault_error(),
+         },
     };
     std::optional<TelemetryFailure> failure;
     {
@@ -435,8 +466,10 @@ TEST_CASE("Original accounting failure retains origin when rollback poisons the 
     f.create();
     REQUIRE(f.service->start());
     f.faults->faults = {
-        {.at    = {.boundary = "connection", .operation = DatabaseOperation::Rollback},
-         .error = fault_error("db.rollback_failed")}
+        {
+         .at    = {.boundary = "connection", .operation = DatabaseOperation::Rollback},
+         .error = fault_error("db.rollback_failed"),
+         },
     };
     std::optional<TelemetryFailure> failure;
     {
@@ -464,10 +497,14 @@ TEST_CASE("Uncertain caller commit is fatal and never causes accounting retry", 
     f.create();
     REQUIRE(f.service->start());
     f.faults->faults = {
-        {.at    = {.boundary  = "connection",
-                   .operation = DatabaseOperation::Commit,
-                   .phase     = DatabaseFaultPhase::AfterSuccess},
-         .error = fault_error()}
+        {
+         .at =
+                {
+                    .boundary  = "connection",
+                    .operation = DatabaseOperation::Commit,
+                    .phase     = DatabaseFaultPhase::AfterSuccess,
+                }, .error = fault_error(),
+         },
     };
     std::optional<TelemetryFailure> failure;
     {
@@ -551,8 +588,10 @@ TEST_CASE("Poisoned connections reject accounting before any SQL or signal", "[j
         auto transaction = jb::db::Transaction::begin(f.storage.database);
         REQUIRE(transaction);
         f.faults->faults = {
-            {.at    = {.boundary = "connection", .operation = DatabaseOperation::Rollback},
-             .error = fault_error("db.rollback_failed")}
+            {
+             .at    = {.boundary = "connection", .operation = DatabaseOperation::Rollback},
+             .error = fault_error("db.rollback_failed"),
+             },
         };
         REQUIRE_FALSE(transaction->rollback());
     }
@@ -571,4 +610,369 @@ TEST_CASE("Poisoned connections reject accounting before any SQL or signal", "[j
     TelemetryAccess::report_failure(*f.service, rejected.error(), StorageOperation::Completion);
     REQUIRE(f.failures.size() == 1);
     check_safe_error(f.failures.front(), "db.rollback_failed");
+}
+
+TEST_CASE("Crash loses only the open tail while clean stop preserves complete quality", "[jobu][telemetry][recovery]")
+{
+    auto             clean = GENERATE(false, true);
+    TelemetryFixture f;
+    f.seed("complete", 0, true);
+    f.create();
+    REQUIRE(f.service->start());
+    f.open(f.run_id);
+    f.time.advance(30s);
+    f.fire_next();
+    f.time.advance(3s);
+    if (clean) {
+        f.service->request_stop();
+        REQUIRE(f.service->finish_stop());
+    }
+    // Destruction does no SQL. Without finish_stop this leaves the same persisted open
+    // tail as abrupt death between checkpoints; recovery cannot recover those last three seconds.
+    f.service.reset();
+    f.storage.reopen();
+    f.time.advance(100h);
+    FakeCronEngine cron;
+    auto           report = recover_startup(f.storage.database, f.storage.registry, cron, f.generator, f.time);
+    REQUIRE(report);
+    CHECK(report->repaired_timing_rows == (clean ? 0U : 1U));
+    auto before = f.repository.read(f.run_id);
+    REQUIRE(before);
+    CHECK(before->quality == (clean ? WaitQuality::Complete : WaitQuality::Partial));
+    CHECK(before->runnable_wait_us == (clean ? 33'000'000 : 30'000'000));
+    CHECK(before->delay_warned);
+
+    f.generator = SequenceUuidGenerator{{recovery_id(2000)}};
+    f.create();
+    REQUIRE(f.service->start());
+    f.open(f.run_id);
+    f.time.advance(7s);
+    f.service->request_stop();
+    REQUIRE(f.service->finish_stop());
+    auto resumed = f.repository.read(f.run_id);
+    REQUIRE(resumed);
+    CHECK(resumed->quality == before->quality);
+    CHECK(resumed->runnable_wait_us == before->runnable_wait_us + 7'000'000);
+    CHECK(resumed->delay_warned);
+}
+
+TEST_CASE("Checkpoint pages yield and use fresh boundaries for intervening mutations", "[jobu][telemetry][checkpoint]")
+{
+    TelemetryFixture f;
+    auto             second = f.pending(1);
+    f.seed("complete", 7, true);
+    f.create({.checkpoint_interval = 30s, .batch_size = 1});
+    REQUIRE(f.service->start());
+    auto deadline = LoopAccess::next_timer_deadline(*f.loop.loop);
+    REQUIRE(f.service->start());
+    CHECK(LoopAccess::next_timer_deadline(*f.loop.loop) == deadline);
+    f.open(f.run_id);
+    f.open(second);
+
+    f.time.advance(30s);
+    f.fire_next();
+    CHECK(f.repository.read(f.run_id)->runnable_wait_us == 30'000'007);
+    CHECK(f.repository.read(f.run_id)->quality == WaitQuality::Complete);
+    CHECK(f.repository.read(f.run_id)->delay_warned);
+    CHECK(f.repository.read(second)->runnable_wait_us == 0);
+    CHECK(LoopAccess::active_timer_count(*f.loop.loop) == 1);
+
+    // This new tail is newer than the first page's sample. Reusing that sample would
+    // regress its tick, while later pages must still reach it through the UUID keyset.
+    f.time.advance(4s);
+    auto third = f.pending(2);
+    f.open(third);
+    f.time.advance(1s);
+    f.fire_next();
+    f.fire_next();
+    CHECK(f.repository.read(second)->runnable_wait_us == 35'000'000);
+    CHECK(f.repository.read(third)->runnable_wait_us == 1'000'000);
+    CHECK(f.repository.read(third)->quality == WaitQuality::Partial);
+    CHECK(f.failures.empty());
+    f.fire_next(); // Empty final page completes the sweep without holding SQL resources.
+    f.storage.reopen();
+    CHECK(LoopAccess::active_timer_count(*f.loop.loop) == 1);
+}
+
+TEST_CASE("Checkpoint transactions enforce the row bound without touching closed timing",
+          "[jobu][telemetry][checkpoint]")
+{
+    TelemetryFixture  f;
+    std::vector<Uuid> ids{f.run_id};
+    for (std::uint32_t i = 1; i < 5; ++i) {
+        ids.push_back(f.pending(i));
+    }
+    auto closed = f.pending(10);
+    f.create({.batch_size = 2});
+    REQUIRE(f.service->start());
+    for (auto id : ids) {
+        f.open(id);
+    }
+    f.time.advance(30s);
+    for (auto expected : {2, 2, 1}) {
+        f.faults->calls.clear();
+        f.fire_next();
+        auto writes =
+            std::ranges::count(f.faults->calls,
+                               DatabaseCall{.boundary = "timing.write", .operation = DatabaseOperation::Execute});
+        CHECK(writes == expected);
+        CHECK(LoopAccess::active_timer_count(*f.loop.loop) == 1);
+    }
+    CHECK(f.repository.read(closed)->quality == WaitQuality::Unmeasured);
+    CHECK(f.repository.read(closed)->runnable_wait_us == 0);
+    CHECK(f.failures.empty());
+}
+
+TEST_CASE("Healthy stop settles only at its first captured boundary after mutation unwind", "[jobu][telemetry][stop]")
+{
+    auto             commit = GENERATE(false, true);
+    TelemetryFixture f;
+    f.seed("complete", 10, true);
+    f.create({.batch_size = 1});
+    REQUIRE(f.service->start());
+    f.open(f.run_id);
+    f.time.advance(3s);
+    {
+        auto transaction = jb::db::Transaction::begin(f.storage.database);
+        REQUIRE(transaction);
+        REQUIRE(TelemetryAccess::rebase(*f.service, f.run_id, f.sample()));
+        f.time.advance(2s);
+        auto calls = f.faults->calls;
+        f.service->request_stop();
+        CHECK(f.faults->calls == calls);
+        CHECK(f.failures.empty());
+        auto completed = commit ? transaction->commit() : transaction->rollback();
+        REQUIRE(completed);
+    }
+    f.time.advance(1h);
+    f.service->request_stop();
+    REQUIRE(f.service->finish_stop());
+    auto row = f.repository.read(f.run_id);
+    REQUIRE(row);
+    CHECK(row->runnable_wait_us == 5'000'010);
+    CHECK(row->quality == WaitQuality::Complete);
+    CHECK(row->delay_warned);
+    CHECK_FALSE(row->open_epoch);
+    f.faults->calls.clear();
+    REQUIRE(f.service->finish_stop());
+    CHECK(f.faults->calls.empty());
+    CHECK(LoopAccess::active_timer_count(*f.loop.loop) == 0);
+}
+
+TEST_CASE("Stop capture failures remain silent until healthy finish after unwind", "[jobu][telemetry][stop]")
+{
+    TelemetryFixture f;
+    f.create();
+    REQUIRE(f.service->start());
+    f.open(f.run_id);
+    auto before = storage_snapshot(f.storage.database);
+    f.time.set_monotonic(TimePoint{99s});
+    f.faults->calls.clear();
+    f.service->request_stop();
+    CHECK(f.failures.empty());
+    CHECK(f.faults->calls.empty());
+    f.service->failed.connect(&f.receiver, [&](Error const&) { f.storage.reopen(); });
+    auto finished = f.service->finish_stop();
+    REQUIRE_FALSE(finished);
+    CHECK(finished.error().code == "jobu.telemetry.clock_regression");
+    REQUIRE(f.failures.size() == 1);
+    CHECK(storage_snapshot(f.storage.database) == before);
+}
+
+TEST_CASE("Dormant and failed stop cleanup never starts SQL", "[jobu][telemetry][stop]")
+{
+    auto             failed = GENERATE(false, true);
+    TelemetryFixture f;
+    f.create();
+    if (failed) {
+        REQUIRE(f.service->start());
+        TelemetryAccess::report_failure(*f.service, clock_failure(), StorageOperation::Mutation);
+    }
+    f.faults->calls.clear();
+    f.service->request_stop();
+    auto finished = f.service->finish_stop();
+    CHECK(static_cast<bool>(finished) == !failed);
+    CHECK(f.faults->calls.empty());
+    CHECK(LoopAccess::active_timer_count(*f.loop.loop) == 0);
+}
+
+TEST_CASE("Checkpoint failures roll back before notification and prevent later maintenance",
+          "[jobu][telemetry][checkpoint][fault]")
+{
+    auto             phase = GENERATE(DatabaseFaultPhase::Before, DatabaseFaultPhase::AfterSuccess);
+    TelemetryFixture f;
+    f.create();
+    REQUIRE(f.service->start());
+    f.open(f.run_id);
+    auto before = storage_snapshot(f.storage.database);
+    f.time.advance(30s);
+    f.faults->faults.push_back({
+        .at    = {.boundary = "timing.write", .operation = DatabaseOperation::Execute, .phase = phase},
+        .error = fault_error(),
+    });
+    f.service->failed.connect(&f.receiver, [&](Error const&) { f.storage.reopen(); });
+    f.fire_next();
+    REQUIRE(f.failures.size() == 1);
+    check_safe_error(f.failures.front(), "db.io");
+    CHECK(storage_snapshot(f.storage.database) == before);
+    auto calls = f.faults->calls;
+    REQUIRE_FALSE(f.service->finish_stop());
+    LoopAccess::fire_timers(*f.loop.loop, TimePoint::max());
+    CHECK(f.faults->calls == calls);
+    require_consumed_faults(*f.faults);
+}
+
+TEST_CASE("Maintenance commit failures stop accounting without retrying an uncertain outcome",
+          "[jobu][telemetry][checkpoint][stop][fault]")
+{
+    auto             stop  = GENERATE(false, true);
+    auto             phase = GENERATE(DatabaseFaultPhase::Before, DatabaseFaultPhase::AfterSuccess);
+    TelemetryFixture f;
+    f.create();
+    REQUIRE(f.service->start());
+    f.open(f.run_id);
+    f.time.advance(30s);
+    f.faults->faults.push_back({
+        .at =
+            {
+                 .boundary  = "connection",
+                 .operation = DatabaseOperation::Commit,
+                 .phase     = phase,
+                 },
+        .error = fault_error(),
+    });
+    f.service->failed.connect(&f.receiver, [&](Error const&) {
+        CHECK(f.storage.database.is_poisoned() == (phase == DatabaseFaultPhase::AfterSuccess));
+        // Reopening in the receiver proves both transaction and query scopes have unwound.
+        f.storage.reopen();
+    });
+    if (stop) {
+        f.service->request_stop();
+        auto finished = f.service->finish_stop();
+        REQUIRE_FALSE(finished);
+        check_safe_error(finished.error(), "db.io");
+    }
+    else {
+        f.fire_next();
+    }
+    REQUIRE(f.failures.size() == 1);
+    check_safe_error(f.failures.front(), "db.io");
+    require_consumed_faults(*f.faults);
+
+    auto calls = f.faults->calls;
+    REQUIRE_FALSE(f.service->finish_stop());
+    LoopAccess::fire_timers(*f.loop.loop, TimePoint::max());
+    CHECK(f.faults->calls == calls);
+    auto durable = f.repository.read(f.run_id);
+    REQUIRE(durable);
+    auto committed = phase == DatabaseFaultPhase::AfterSuccess;
+    CHECK(durable->runnable_wait_us == (committed ? 30'000'000 : 0));
+    CHECK(durable->open_epoch.has_value() == !(committed && stop));
+    if (durable->open_tick_us) {
+        CHECK(*durable->open_tick_us == (committed ? 30'000'000 : 0));
+    }
+}
+
+TEST_CASE("Checkpoint stop rolls back its page and a poisoned rollback is fatal", "[jobu][telemetry][checkpoint][stop]")
+{
+    auto             poison = GENERATE(false, true);
+    TelemetryFixture f;
+    f.create();
+    REQUIRE(f.service->start());
+    f.open(f.run_id);
+    f.time.advance(30s);
+    bool stopped       = false;
+    f.faults->classify = [&](std::string_view sql) {
+        if (!stopped && sql.starts_with("UPDATE jobu_run_timing")) {
+            stopped = true;
+            f.time.advance(2s);
+            f.service->request_stop();
+        }
+        return sql.starts_with("UPDATE jobu_run_timing") ? std::string{"timing.write"} : std::string{"timing.read"};
+    };
+    if (poison) {
+        f.faults->faults.push_back({
+            .at    = {.boundary = "connection", .operation = DatabaseOperation::Rollback},
+            .error = fault_error("db.rollback_failed"),
+        });
+    }
+    f.fire_next();
+    REQUIRE(stopped);
+    if (poison) {
+        REQUIRE(f.failures.size() == 1);
+        CHECK(f.failures.front().code == "db.rollback_failed");
+        auto calls = f.faults->calls;
+        REQUIRE_FALSE(f.service->finish_stop());
+        CHECK(f.faults->calls == calls);
+    }
+    else {
+        CHECK(f.repository.read(f.run_id)->runnable_wait_us == 0);
+        REQUIRE(f.service->finish_stop());
+        CHECK(f.repository.read(f.run_id)->runnable_wait_us == 32'000'000);
+        CHECK(f.failures.empty());
+    }
+}
+
+TEST_CASE("Healthy cleanup failure retains earlier batches and owning failure delivery",
+          "[jobu][telemetry][stop][fault]")
+{
+    TelemetryFixture f;
+    auto             second = f.pending(1);
+    f.seed("complete", 0, true);
+    f.create({.batch_size = 1});
+    REQUIRE(f.service->start());
+    f.open(f.run_id);
+    f.open(second);
+    f.time.advance(5s);
+    f.service->request_stop();
+    f.faults->calls.clear();
+    bool armed         = false;
+    f.faults->classify = [&](std::string_view sql) {
+        if (!armed && sql.starts_with("UPDATE jobu_run_timing") &&
+            std::ranges::count(f.faults->calls,
+                               DatabaseCall{
+                                   .boundary  = "connection",
+                                   .operation = DatabaseOperation::Commit,
+                                   .phase     = DatabaseFaultPhase::AfterSuccess,
+                               }) == 1) {
+            // One acknowledged cleanup batch has committed before faulting the next.
+            armed = true;
+            f.faults->faults.push_back({
+                .at    = {.boundary = "timing.write", .operation = DatabaseOperation::Execute},
+                .error = fault_error(),
+            });
+        }
+        return sql.starts_with("UPDATE jobu_run_timing") ? std::string{"timing.write"} : std::string{"timing.read"};
+    };
+    f.service->failed.connect(&f.receiver, [&](Error const& error) {
+        f.storage.reopen();
+        f.service.reset();
+        check_safe_error(error, "db.io");
+    });
+    auto finished = f.service->finish_stop();
+    REQUIRE(armed);
+    REQUIRE_FALSE(finished);
+    check_safe_error(finished.error(), "db.io");
+    CHECK_FALSE(f.repository.read(f.run_id)->open_epoch);
+    CHECK(f.repository.read(f.run_id)->runnable_wait_us == 5'000'000);
+    CHECK(f.repository.read(second)->open_epoch);
+    CHECK(f.repository.read(second)->runnable_wait_us == 0);
+
+    // Restart repairs only the unfinished row. It neither downgrades a settled complete
+    // measurement nor adds downtime to the checkpointed lower bound of the abandoned tail.
+    f.time.advance(100h);
+    FakeCronEngine cron;
+    auto           report = recover_startup(f.storage.database, f.storage.registry, cron, f.generator, f.time);
+    REQUIRE(report);
+    CHECK(report->repaired_timing_rows == 1);
+    auto settled = f.repository.read(f.run_id);
+    REQUIRE(settled);
+    CHECK(settled->quality == WaitQuality::Complete);
+    CHECK(settled->runnable_wait_us == 5'000'000);
+    CHECK(settled->delay_warned);
+    auto repaired = f.repository.read(second);
+    REQUIRE(repaired);
+    CHECK(repaired->quality == WaitQuality::Partial);
+    CHECK(repaired->runnable_wait_us == 0);
+    CHECK_FALSE(repaired->open_epoch);
 }

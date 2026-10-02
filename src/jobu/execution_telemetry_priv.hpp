@@ -63,6 +63,8 @@ struct TelemetryAccess {
                                                 AttributeRegistry const& attributes,
                                                 jb::core::TimeSource&    clock,
                                                 AttemptExecutor const&   executor) -> TelemetryResult<void>;
+    /// Returns the registered snapshot for a fresh or active owner. Dormant runtime wiring
+    /// does not activate measurement; stopped/failed owners remain rejected.
     [[nodiscard]] static auto available_types(ExecutionTelemetry& owner) -> TelemetryResult<AvailableJobTypes>;
 
     /// Null/fresh/stopped owners permit unmeasured operation only over closed timing rows.

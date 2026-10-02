@@ -12,6 +12,7 @@
 
 #include "attempt_repository_priv.hpp"
 #include "byte_buffer.hpp"
+#include "domain_storage_priv.hpp"
 #include "job_repository_priv.hpp"
 #include "json.hpp"
 #include "query.hpp"
@@ -20,6 +21,8 @@
 #include "scheduler.hpp"
 #include "scheduler_repository_priv.hpp"
 #include "secret_provider_priv.hpp"
+#include "value.hpp"
+#include "wait_repository_priv.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -37,7 +40,7 @@
 #include <utility>
 #include <vector>
 
-#if defined(__APPLE__)
+#ifdef __APPLE__
 #  include <crt_externs.h>
 #endif
 #include <csignal> // IWYU pragma: keep - SIGKILL for the child-process recovery fixture
@@ -57,7 +60,7 @@ namespace {
 
 auto process_environment() noexcept -> char**
 {
-#if defined(__APPLE__)
+#ifdef __APPLE__
     return *_NSGetEnviron();
 #else
     return environ;
@@ -133,12 +136,24 @@ void require_report(RecoveryReport const& actual, RecoveryReport const& expected
     CHECK(actual.inserted_successors == expected.inserted_successors);
     CHECK(actual.suspended_jobs == expected.suspended_jobs);
     CHECK(actual.suspended_queues == expected.suspended_queues);
+    CHECK(actual.repaired_timing_rows == expected.repaired_timing_rows);
 }
 
 void execute(Database& database, std::string_view sql)
 {
     Query query{database};
     REQUIRE(query.exec(sql));
+}
+
+void seed_timing(Database& database, Uuid run_id, bool open = true)
+{
+    Query query{database};
+    REQUIRE(query.prepare("UPDATE jobu_run_timing SET runnable_wait_us = 123456, measurement_status = 'complete', "
+                          "delay_warned = 1, open_epoch = :epoch, open_tick_us = :tick WHERE run_id = :id"));
+    REQUIRE(query.bind_value(":epoch", open ? uuid_to_storage(recovery_id(999)) : Null{}));
+    REQUIRE(query.bind_value(":tick", open ? Value{std::int64_t{9'000'000}} : Null{}));
+    REQUIRE(query.bind_value(":id", uuid_to_storage(run_id)));
+    REQUIRE(query.exec());
 }
 
 void require_interrupted(ServiceFixture& fixture, RecoveryRunFixture expected, bool retry)
@@ -150,10 +165,12 @@ void require_interrupted(ServiceFixture& fixture, RecoveryRunFixture expected, b
     last.attempt.outcome      = AttemptOutcome::Interrupted;
     last.attempt.completed_at = UtcTimePoint{120s};
     last.attempt.result       = *document;
-    last.output               = jb::jobu::detail::AttemptOutput{.stdout_bytes = ByteBuffer{},
-                                                                .stderr_bytes = ByteBuffer{},
-                                                                .capture_lost = true};
-    expected.run.state        = retry ? RunState::RetryWait : RunState::Interrupted;
+    last.output               = jb::jobu::detail::AttemptOutput{
+        .stdout_bytes = ByteBuffer{},
+        .stderr_bytes = ByteBuffer{},
+        .capture_lost = true,
+    };
+    expected.run.state = retry ? RunState::RetryWait : RunState::Interrupted;
     if (retry) {
         // This scenario explicitly configures a fixed five-second recovery retry delay.
         expected.run.runnable_at = UtcTimePoint{125s};
@@ -166,6 +183,145 @@ void require_interrupted(ServiceFixture& fixture, RecoveryRunFixture expected, b
 }
 
 } // namespace
+
+TEST_CASE("Recovery discards abandoned tails and preserves closed complete timing", "[jobu][recovery][timing]")
+{
+    ServiceFixture f;
+    auto           queue = recovery_queue(recovery_id(1));
+    f.storage.insert_queue(queue);
+    for (auto i : {2U, 3U, 4U}) {
+        auto job = f.storage.make_job(recovery_id(i), queue.id);
+        auto run = f.storage.make_run(recovery_id(10 + i), job, i == 4 ? RunState::Running : RunState::Scheduled);
+        f.storage.insert_job(job);
+        f.storage.insert_run(run);
+        seed_timing(f.storage.database, run.run.id, i != 4);
+    }
+    execute(f.storage.database,
+            "UPDATE jobu_run_timing SET measurement_status = 'partial' "
+            "WHERE run_id = (SELECT MAX(run_id) FROM jobu_run_timing WHERE open_epoch IS NOT NULL)");
+    f.time.advance(100h); // Downtime and wall-clock movement cannot reconstruct an old tail.
+    auto report = f.recover();
+    REQUIRE(report);
+    CHECK(report->repaired_timing_rows == 2);
+    CHECK(report->interrupted_attempts == 1);
+    WaitRepository timing{f.storage.database};
+    for (auto i : {2U, 3U, 4U}) {
+        auto row = timing.read(recovery_id(10 + i));
+        REQUIRE(row);
+        CHECK(row->runnable_wait_us == 123456);
+        CHECK(row->delay_warned);
+        CHECK_FALSE(row->open_epoch);
+        CHECK(row->quality == (i == 4 ? WaitQuality::Complete : WaitQuality::Partial));
+    }
+    auto again = f.recover();
+    REQUIRE(again);
+    require_report(*again);
+}
+
+TEST_CASE("Recovery cancellation retains committed timing repairs and resumes only open tails",
+          "[jobu][recovery][timing]")
+{
+    ServiceFixture f;
+    auto           queue = recovery_queue(recovery_id(1));
+    f.storage.insert_queue(queue);
+    for (auto i : {2U, 3U}) {
+        auto job = f.storage.make_job(recovery_id(i), queue.id);
+        auto run = f.storage.make_run(recovery_id(10 + i), job);
+        f.storage.insert_job(job);
+        f.storage.insert_run(run);
+        seed_timing(f.storage.database, run.run.id);
+    }
+    WaitRepository timing{f.storage.database};
+    bool           saw_precommit = false;
+    auto           stopped       = f.recover(1, [&] {
+        if (!timing.read(recovery_id(12))->open_epoch) {
+            if (saw_precommit) {
+                return true;
+            }
+            saw_precommit = true;
+        }
+        return false;
+    });
+    REQUIRE_FALSE(stopped);
+    CHECK(stopped.error().code == "jobu.recovery.cancelled");
+    f.storage.reopen();
+    CHECK_FALSE(timing.read(recovery_id(12))->open_epoch);
+    CHECK(timing.read(recovery_id(13))->open_epoch);
+    auto resumed = f.recover();
+    REQUIRE(resumed);
+    CHECK(resumed->repaired_timing_rows == 1);
+    for (auto i : {12U, 13U}) {
+        auto row = timing.read(recovery_id(i));
+        REQUIRE(row);
+        CHECK(row->quality == WaitQuality::Partial);
+        CHECK(row->runnable_wait_us == 123456);
+        CHECK(row->delay_warned);
+    }
+}
+
+TEST_CASE("Recovery creates complete successors only with explicit upcoming telemetry coverage",
+          "[jobu][recovery][timing]")
+{
+    auto           covered     = GENERATE(false, true);
+    auto           interrupted = GENERATE(false, true);
+    ServiceFixture f;
+    auto           queue = recovery_queue(recovery_id(1));
+    f.storage.insert_queue(queue);
+    auto job = f.recurring(recovery_id(2), queue.id);
+    if (interrupted) {
+        auto run = f.storage.make_run(recovery_id(3), job, RunState::Running);
+        f.storage.insert_run(run);
+        seed_timing(f.storage.database, run.run.id, false);
+    }
+    auto report = jb::jobu::recover_startup(f.storage.database,
+                                            f.storage.registry,
+                                            f.cron,
+                                            f.generator,
+                                            f.time,
+                                            {.scan_batch_size = 1, .telemetry_covers_creation = covered});
+    REQUIRE(report);
+    CHECK(report->inserted_successors == 1);
+    WaitRepository timing{f.storage.database};
+    auto           successor = timing.read(recovery_id(1000));
+    REQUIRE(successor);
+    CHECK(successor->quality == (covered ? WaitQuality::Complete : WaitQuality::Unmeasured));
+    CHECK(successor->runnable_wait_us == 0);
+    CHECK_FALSE(successor->open_epoch);
+    if (interrupted) {
+        CHECK(timing.read(recovery_id(3))->quality == WaitQuality::Complete);
+    }
+}
+
+TEST_CASE("Final recovery rejects an abandoned tail introduced after repair", "[jobu][recovery][timing]")
+{
+    ServiceFixture f;
+    auto           queue = recovery_queue(recovery_id(1));
+    f.storage.insert_queue(queue);
+    auto job = f.storage.make_job(recovery_id(2), queue.id);
+    auto run = f.storage.make_run(recovery_id(3), job);
+    f.storage.insert_job(job);
+    f.storage.insert_run(run);
+    seed_timing(f.storage.database, run.run.id);
+    WaitRepository timing{f.storage.database};
+    bool           saw_precommit = false;
+    bool           corrupted     = false;
+    auto           result        = f.recover(1, [&] {
+        if (!corrupted && !timing.read(run.run.id)->open_epoch) {
+            if (saw_precommit) {
+                // Deliberately corrupt a committed repair at the next page boundary.
+                seed_timing(f.storage.database, run.run.id);
+                corrupted = true;
+            }
+            else {
+                saw_precommit = true;
+            }
+        }
+        return false;
+    });
+    REQUIRE(corrupted);
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == "jobu.recovery.invariant");
+}
 
 TEST_CASE("Recovery validates options and an empty database", "[jobu][recovery][sqlite]")
 {
@@ -209,10 +365,12 @@ TEST_CASE("Recovery pages interruption units and preserves complete snapshots", 
     REQUIRE(result);
     auto retries = policy == RecoveryPolicy::RetryInterrupted ? 2U : 0U;
     require_report(*result,
-                   {.interrupted_attempts = 3,
-                    .retrying_runs        = retries,
-                    .terminal_runs        = 3 - retries,
-                    .finished_jobs        = 3 - retries});
+                   {
+                       .interrupted_attempts = 3,
+                       .retrying_runs        = retries,
+                       .terminal_runs        = 3 - retries,
+                       .finished_jobs        = 3 - retries,
+                   });
     for (auto const& original : originals) {
         auto const retry = policy == RecoveryPolicy::RetryInterrupted && original.attempts.size() < 3;
         require_interrupted(fixture, original, retry);
@@ -251,10 +409,12 @@ TEST_CASE("Recovery finishes the last accepted one-time manual run after origina
     auto report = fixture.recover();
     REQUIRE(report);
     require_report(*report,
-                   {.interrupted_attempts = 1,
-                    .retrying_runs        = retry ? 1U : 0U,
-                    .terminal_runs        = retry ? 0U : 1U,
-                    .finished_jobs        = retry ? 0U : 1U});
+                   {
+                       .interrupted_attempts = 1,
+                       .retrying_runs        = retry ? 1U : 0U,
+                       .terminal_runs        = retry ? 0U : 1U,
+                       .finished_jobs        = retry ? 0U : 1U,
+                   });
     fixture.storage.require_run(original);
     require_interrupted(fixture, manual, retry);
     auto current = fixture.job(job.id);
@@ -423,11 +583,13 @@ TEST_CASE("Recovery repairs recurring work and all drained owner shapes", "[jobu
     auto report = fixture.recover();
     REQUIRE(report);
     require_report(*report,
-                   {.interrupted_attempts = 1,
-                    .terminal_runs        = 1,
-                    .inserted_successors  = 3,
-                    .suspended_jobs       = 3,
-                    .suspended_queues     = 2});
+                   {
+                       .interrupted_attempts = 1,
+                       .terminal_runs        = 1,
+                       .inserted_successors  = 3,
+                       .suspended_jobs       = 3,
+                       .suspended_queues     = 2,
+                   });
     require_interrupted(fixture, original, false);
     RunRepository runs{fixture.storage.database, fixture.storage.registry};
     for (auto const& job : {running_job, missing_job, suspended}) {
@@ -558,11 +720,13 @@ TEST_CASE("Recovery cancellation rolls back the complete current repair unit", "
     auto resumed = fixture.recover();
     REQUIRE(resumed);
     require_report(*resumed,
-                   {.interrupted_attempts = 1,
-                    .terminal_runs        = 1,
-                    .inserted_successors  = 1,
-                    .suspended_jobs       = 1,
-                    .suspended_queues     = 1});
+                   {
+                       .interrupted_attempts = 1,
+                       .terminal_runs        = 1,
+                       .inserted_successors  = 1,
+                       .suspended_jobs       = 1,
+                       .suspended_queues     = 1,
+                   });
 }
 
 TEST_CASE("Recovery cancellation rolls back the terminal run and one-time definition together",
@@ -783,15 +947,21 @@ TEST_CASE("Successful recovery satisfies scheduler startup and recovered retry d
 
 TEST_CASE("Recovery converges after abrupt process exit between committed units", "[jobu][recovery][sqlite]")
 {
+    auto const     timing_repair = GENERATE(false, true);
     ServiceFixture fixture;
     auto           queue = recovery_queue(recovery_id(1));
     fixture.storage.insert_queue(queue);
     auto first_job  = fixture.recurring(recovery_id(2), queue.id);
     auto second_job = fixture.recurring(recovery_id(3), queue.id);
-    auto first      = fixture.storage.make_run(recovery_id(4), first_job, RunState::Running);
-    auto second     = fixture.storage.make_run(recovery_id(5), second_job, RunState::Running);
+    auto state      = timing_repair ? RunState::Scheduled : RunState::Running;
+    auto first      = fixture.storage.make_run(recovery_id(4), first_job, state);
+    auto second     = fixture.storage.make_run(recovery_id(5), second_job, state);
     fixture.storage.insert_run(first);
     fixture.storage.insert_run(second);
+    if (timing_repair) {
+        seed_timing(fixture.storage.database, first.run.id);
+        seed_timing(fixture.storage.database, second.run.id);
+    }
     REQUIRE(fixture.storage.database.close());
 
     // The helper starts as a new process so its SQLite connection and runtime state are
@@ -806,13 +976,17 @@ TEST_CASE("Recovery converges after abrupt process exit between committed units"
     auto successor_one   = recovery_id(1000).to_string();
     auto successor_two   = recovery_id(1001).to_string();
     auto successor_three = recovery_id(1002).to_string();
-    auto arguments       = std::array<char*, 7>{executable.data(),
-                                                database_file.data(),
-                                                first_run.data(),
-                                                successor_one.data(),
-                                                successor_two.data(),
-                                                successor_three.data(),
-                                                nullptr};
+    auto mode            = std::string{"timing"};
+    auto arguments       = std::array<char*, 8>{
+        executable.data(),
+        database_file.data(),
+        first_run.data(),
+        successor_one.data(),
+        successor_two.data(),
+        successor_three.data(),
+        timing_repair ? mode.data() : nullptr,
+        nullptr,
+    };
 
     pid_t pid{};
     auto  spawn_error =
@@ -843,6 +1017,30 @@ TEST_CASE("Recovery converges after abrupt process exit between committed units"
     REQUIRE(WEXITSTATUS(status) == 77);
 
     REQUIRE(fixture.storage.database.open());
+    if (timing_repair) {
+        WaitRepository timing{fixture.storage.database};
+        CHECK_FALSE(timing.read(first.run.id)->open_epoch);
+        CHECK(timing.read(first.run.id)->quality == WaitQuality::Partial);
+        CHECK(timing.read(second.run.id)->open_epoch);
+        fixture.time.advance(100h);
+        auto resumed = fixture.recover();
+        REQUIRE(resumed);
+        require_report(*resumed, {.repaired_timing_rows = 1});
+        for (auto id : {first.run.id, second.run.id}) {
+            auto row = timing.read(id);
+            REQUIRE(row);
+            CHECK(row->quality == WaitQuality::Partial);
+            CHECK(row->runnable_wait_us == 123456);
+            CHECK(row->delay_warned);
+            CHECK_FALSE(row->open_epoch);
+        }
+        fixture.storage.require_run(first);
+        fixture.storage.require_run(second);
+        auto again = fixture.recover();
+        REQUIRE(again);
+        CHECK(again->repaired_timing_rows == 0);
+        return;
+    }
     require_interrupted(fixture, first, false);
     fixture.storage.require_run(second);
     // The restarted UUID source must not replay the child's already committed successor ID.
