@@ -138,14 +138,27 @@ void configure_dispatch_plans(FakeDatabaseDriverState& state, StandardAttributeR
         select_plan({":id"}, {queue_record()}),
         select_plan({":queue_id", ":limit"}, {}),
         select_plan({":run_id"}, {Record{{Field{"maximum_attempt_number", Null{}}}}}),
-        mutation_plan({":run_id",
-                       ":attempt_number",
-                       ":due_at_us",
-                       ":started_at_us",
-                       ":completed_at_us",
-                       ":state",
-                       ":outcome",
-                       ":result_json"}),
+        select_plan({":id"},
+                    {
+                        Record{{
+                            Field{"state", make_text("scheduled")},
+                            Field{"measurement_status", make_text("unmeasured")},
+                            Field{"runnable_wait_us", std::int64_t{0}},
+                            Field{"open_epoch", Null{}},
+                            Field{"open_tick_us", Null{}},
+                            Field{"delay_warned", std::int64_t{0}},
+                        }},
+                    }),
+        mutation_plan({
+            ":run_id",
+            ":attempt_number",
+            ":due_at_us",
+            ":started_at_us",
+            ":completed_at_us",
+            ":state",
+            ":outcome",
+            ":result_json",
+        }),
         mutation_plan({":started_at_us", ":run_id", ":expected_state"}),
     };
 }
@@ -343,7 +356,7 @@ TEST_CASE("Atomic dispatch never starts after transaction or storage failure", "
     SECTION("attempt insert")
     {
         DispatchFixture fixture;
-        fixture.state->query_plans[4].exec_error = test_error("db.fake.insert");
+        fixture.state->query_plans[5].exec_error = test_error("db.fake.insert");
         auto result                              = dispatch(fixture);
         REQUIRE_FALSE(result);
         CHECK(result.error().code == "db.fake.insert");
@@ -391,7 +404,7 @@ TEST_CASE("Atomic dispatch never starts after transaction or storage failure", "
     SECTION("run update")
     {
         DispatchFixture fixture;
-        fixture.state->query_plans[5].exec_error = test_error("db.fake.update");
+        fixture.state->query_plans[6].exec_error = test_error("db.fake.update");
         auto result                              = dispatch(fixture);
         REQUIRE_FALSE(result);
         CHECK(result.error().code == "db.fake.update");
@@ -486,10 +499,10 @@ TEST_CASE("Prepared dispatch never launches or completes after failed durable st
                 }
                 auto expected = std::string{"db.io"};
                 if (std::string_view{boundary} == "insert") {
-                    fixture.state->query_plans[4].exec_error = test_error(expected);
+                    fixture.state->query_plans[5].exec_error = test_error(expected);
                 }
                 else if (std::string_view{boundary} == "transition") {
-                    fixture.state->query_plans[5].exec_error = test_error(expected);
+                    fixture.state->query_plans[6].exec_error = test_error(expected);
                 }
                 else if (std::string_view{boundary} == "commit") {
                     fixture.state->commit_error = test_error(expected);
@@ -497,7 +510,7 @@ TEST_CASE("Prepared dispatch never launches or completes after failed durable st
                 else {
                     // Revalidation loss after preparation must still detect failed rollback. A non-storage
                     // cleanup code witnesses promotion rather than reliance on the normal db.* classifier.
-                    fixture.state->query_plans[5].execution_info.rows_affected = 0;
+                    fixture.state->query_plans[6].execution_info.rows_affected = 0;
                     fixture.state->rollback_error                              = test_error("test.cleanup.failed");
                     expected                                                   = "db.connection_failed";
                 }

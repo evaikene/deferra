@@ -2,6 +2,7 @@
 
 #include "attempt_repository_priv.hpp"
 #include "database.hpp"
+#include "execution_telemetry_priv.hpp"
 #include "payload_template_priv.hpp"
 #include "scheduler_repository_priv.hpp"
 #include "storage_failure_priv.hpp"
@@ -44,18 +45,20 @@ auto terminal_start_failure(AttemptKey key, jb::core::Error const& error) -> Att
     };
 }
 
-auto dispatch_selected_impl(jb::db::Database&        database,
-                            AttributeRegistry const& attributes,
-                            AttemptExecutor&         executor,
-                            SecretProvider&          secrets,
-                            jb::core::Uuid const&    run_id,
-                            jb::core::UtcTimePoint   started_at,
-                            AttemptCompletionHandler completion)
+auto dispatch_selected_impl(jb::db::Database&                database,
+                            AttributeRegistry const&         attributes,
+                            AttemptExecutor&                 executor,
+                            SecretProvider&                  secrets,
+                            jb::core::Uuid const&            run_id,
+                            MutationTiming const&            timing,
+                            std::optional<TelemetryFailure>& accounting_failure,
+                            AttemptCompletionHandler         completion)
     -> jb::core::Result<std::optional<DispatchStart>, jb::core::Error>
 {
+    auto const started_at  = timing.utc_now;
     // Revalidate the optimistic candidate under an immediate transaction and make the attempt plus run transition one
     // durable start boundary. Expected eligibility loss rolls back as a normal skip.
-    auto transaction = jb::db::Transaction::begin(database);
+    auto       transaction = jb::db::Transaction::begin(database);
     if (!transaction) {
         return DispatchResult<std::optional<DispatchStart>>::failure(std::move(transaction).error());
     }
@@ -76,6 +79,14 @@ auto dispatch_selected_impl(jb::db::Database&        database,
         // Only Ordinary becomes an attempt outcome. Storage/PersistedData retain their sanitized identities;
         // Provider failures also abort the cycle, whose error boundary unconditionally closes acceptance.
         return DispatchResult<std::optional<DispatchStart>>::failure(std::move(prepared).error().error);
+    }
+
+    // Close accounting while the durable row is still pending. A Running row with an
+    // open interval is corruption, so this cannot be deferred until after the transition.
+    auto claimed = timing.claim_run(selected.run.id);
+    if (!claimed) {
+        accounting_failure = std::move(claimed).error();
+        return DispatchResult<std::optional<DispatchStart>>::failure(accounting_failure->error);
     }
 
     // Persist the running attempt before transitioning its run so every committed running run has a concrete owner.
@@ -145,29 +156,62 @@ auto dispatch_selected(jb::db::Database&        database,
                        AttemptCompletionHandler completion)
     -> jb::core::Result<std::optional<DispatchStart>, jb::core::Error>
 {
-    auto dispatched =
-        dispatch_selected_impl(database, attributes, executor, secrets, run_id, started_at, std::move(completion));
+    MutationTiming const timing{.database = &database, .utc_now = started_at};
+    auto dispatched = dispatch_selected(database, attributes, executor, secrets, run_id, timing, std::move(completion));
+    if (!dispatched) {
+        return DispatchResult<std::optional<DispatchStart>>::failure(std::move(dispatched).error().error);
+    }
+    return DispatchResult<std::optional<DispatchStart>>::success(std::move(*dispatched));
+}
+
+auto dispatch_selected(jb::db::Database&        database,
+                       AttributeRegistry const& attributes,
+                       AttemptExecutor&         executor,
+                       SecretProvider&          secrets,
+                       jb::core::Uuid const&    run_id,
+                       MutationTiming const&    timing,
+                       AttemptCompletionHandler completion) -> TelemetryResult<std::optional<DispatchStart>>
+{
+    std::optional<TelemetryFailure> accounting_failure;
+    auto                            dispatched = dispatch_selected_impl(database,
+                                                                        attributes,
+                                                                        executor,
+                                                                        secrets,
+                                                                        run_id,
+                                                                        timing,
+                                                                        accounting_failure,
+                                                                        std::move(completion));
 
     // Inspect cleanup only after the transaction guard has unwound. Preserve a first fatal storage/provider error;
     // an otherwise ordinary result cannot hide a rollback failure that made the connection unusable.
     if (database.is_poisoned()) {
         auto const already_fatal =
-            !dispatched && (classify_storage_failure(dispatched.error(), StorageOperation::Dispatch) ==
+            !dispatched && (dispatched.error().code.starts_with("jobu.telemetry.") ||
+                            classify_storage_failure(dispatched.error(),
+                                                     StorageOperation::Dispatch,
+                                                     accounting_failure ? accounting_failure->origin
+                                                                        : StorageFailureOrigin::Operation) ==
                                 StorageFailureDisposition::Fatal ||
                             dispatched.error().code == "jobu.secret.provider_failed");
         if (!already_fatal) {
             auto error = database.last_error();
             if (!error ||
                 classify_storage_failure(*error, StorageOperation::Dispatch) != StorageFailureDisposition::Fatal) {
-                error = jb::core::Error{.category = jb::core::ErrorCategory::Internal,
-                                        .code     = "db.connection_failed",
-                                        .message  = "The database connection is unusable after transaction cleanup"};
+                error = jb::core::Error{
+                    .category = jb::core::ErrorCategory::Internal,
+                    .code     = "db.connection_failed",
+                    .message  = "The database connection is unusable after transaction cleanup",
+                };
             }
-            return DispatchResult<std::optional<DispatchStart>>::failure(
-                sanitized_storage_error(*error, StorageOperation::Dispatch));
+            return TelemetryResult<std::optional<DispatchStart>>::failure(
+                {.error = sanitized_storage_error(*error, StorageOperation::Dispatch)});
         }
     }
-    return dispatched;
+    if (!dispatched) {
+        return TelemetryResult<std::optional<DispatchStart>>::failure(
+            accounting_failure.value_or(TelemetryFailure{.error = std::move(dispatched).error()}));
+    }
+    return TelemetryResult<std::optional<DispatchStart>>::success(std::move(*dispatched));
 }
 
 } // namespace jb::jobu::detail

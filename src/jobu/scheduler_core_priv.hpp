@@ -69,6 +69,11 @@ public:
     void               reset() noexcept;
     void               shutdown() noexcept;
 
+    /// Explicit context of the first latched failure, for the public sanitizer.
+    [[nodiscard]] auto failure_operation() const noexcept -> StorageOperation { return _failure_operation; }
+
+    [[nodiscard]] auto failure_origin() const noexcept -> StorageFailureOrigin { return _failure_origin; }
+
 private:
     struct CompletionToken {
         SchedulerCore* owner{nullptr};
@@ -78,7 +83,10 @@ private:
     [[nodiscard]] auto process_cycle_impl() -> jb::core::Result<SchedulerCycleResult, jb::core::Error>;
     [[nodiscard]] auto cancel_run_impl(jb::core::Uuid const& run_id)
         -> jb::core::Result<CancelRunResult, jb::core::Error>;
-    void fail(jb::core::Error const& error, bool notify = true);
+    void               fail(jb::core::Error const& error, bool notify = true);
+    /// Post-unwind failure boundary; gates retained completions before user notifications.
+    [[nodiscard]] auto fail_operation(jb::core::Error error, StorageOperation operation, bool notify)
+        -> jb::core::Error;
 
     jb::db::Database&                       _database;
     AttributeRegistry const&                _attributes;
@@ -97,6 +105,8 @@ private:
     std::set<jb::core::Uuid>                _cancellation_requests;
     std::optional<jb::core::Error>          _failure;
     std::optional<TelemetryFailure>         _telemetry_failure;
+    StorageOperation                        _failure_operation{StorageOperation::Dispatch};
+    StorageFailureOrigin                    _failure_origin{StorageFailureOrigin::Operation};
     bool                                    _cli_first{true};
 };
 

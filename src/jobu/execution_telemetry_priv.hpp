@@ -30,6 +30,14 @@ struct MutationTiming {
     [[nodiscard]] auto measurement() const noexcept -> InitialRunMeasurement;
     [[nodiscard]] auto settle_scope(EligibilityScope scope) const -> TelemetryResult<void>;
     [[nodiscard]] auto reconcile_scope(EligibilityScope scope) const -> TelemetryResult<void>;
+
+    /// The caller has revalidated selection. First observation establishes Partial for old
+    /// unmeasured work, then closes its tail before the run becomes Running. No external calls.
+    [[nodiscard]] auto claim_run(jb::core::Uuid const& run_id) const -> TelemetryResult<void>;
+
+    /// Validates the required timing row, including closed Running state. Inactive borrowers
+    /// reject abandoned intervals rather than comparing ticks from an unknown owner.
+    [[nodiscard]] auto validate_closed_run(jb::core::Uuid const& run_id) const -> TelemetryResult<void>;
 };
 
 /// The sole private access seam for enclosing management/scheduler transactions.

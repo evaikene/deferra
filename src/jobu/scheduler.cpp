@@ -104,9 +104,7 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
                },
                {
                    .rescan_requested = [this]() -> void { request_rescan(); },
-                   .failure_reported = [this](jb::core::Error const& error) -> void {
-                       fail(error, detail::StorageOperation::Completion);
-                   },
+                   .failure_reported = [this](jb::core::Error const& error) -> void { fail(error); },
                }}
     {
         if (!valid_options(options)) {
@@ -271,14 +269,14 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
         return SchedulerResult<>::success();
     }
 
-    void fail(jb::core::Error const& error, detail::StorageOperation operation = detail::StorageOperation::Dispatch)
+    void fail(jb::core::Error const& error)
     {
         if (state == SchedulerState::Failed) {
             return;
         }
         state          = SchedulerState::Failed;
         // Preserve the stable identity while keeping backend details out of the public failure signal/result.
-        stored_failure = detail::sanitized_storage_error(error, operation);
+        stored_failure = detail::sanitized_storage_error(error, core.failure_operation(), core.failure_origin());
         shutdown();
         owner->emit(owner->failed, *stored_failure);
     }
@@ -339,7 +337,7 @@ auto Scheduler::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result<Can
     if (!cancelled && (cancelled.error().code.starts_with("jobu.telemetry.") ||
                        detail::classify_storage_failure(cancelled.error(), detail::StorageOperation::Mutation) ==
                            detail::StorageFailureDisposition::Fatal)) {
-        data->fail(cancelled.error(), detail::StorageOperation::Mutation);
+        data->fail(cancelled.error());
         return SchedulerResult<CancelRunResult>::failure(*data->stored_failure);
     }
     if (cancelled && cancelled->disposition == CancelDisposition::Completed) {

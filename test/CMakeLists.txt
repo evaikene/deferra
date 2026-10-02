@@ -355,6 +355,12 @@ if(TARGET jobu-sqlite)
     target_link_libraries(jobu-management-telemetry-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME jobu-management-telemetry-test COMMAND $<TARGET_FILE:jobu-management-telemetry-test>)
 
+    add_executable(jobu-scheduler-telemetry-test
+        jobu-scheduler-telemetry-test.cpp support/fake_attempt_executor.cpp
+        support/fault_database_driver.cpp support/recovery_fixture.cpp support/temporary_directory.cpp)
+    target_link_libraries(jobu-scheduler-telemetry-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME jobu-scheduler-telemetry-test COMMAND $<TARGET_FILE:jobu-scheduler-telemetry-test>)
+
     add_executable(secret-service-test
         secret-service-test.cpp support/fault_database_driver.cpp
         support/recovery_fixture.cpp support/temporary_directory.cpp)
