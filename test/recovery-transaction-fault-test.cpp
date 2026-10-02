@@ -1,8 +1,10 @@
 #include "recovery.hpp"
 
 #include "byte_buffer.hpp"
+#include "domain_storage_priv.hpp"
 #include "job_repository_priv.hpp"
 #include "json.hpp"
+#include "query.hpp"
 #include "queue_repository_priv.hpp"
 #include "recovery_priv.hpp"
 #include "run_repository_priv.hpp"
@@ -13,8 +15,10 @@
 #include "support/recovery_fixture.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/storage_fault_helpers.hpp"
+#include "wait_repository_priv.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -47,7 +51,7 @@ enum class Scenario : std::uint8_t {
     RecurringSuspension,
     MissingSuccessor,
     JobSuspension,
-    QueueSuspension
+    QueueSuspension,
 };
 
 auto has_run(Scenario scenario) -> bool
@@ -55,8 +59,11 @@ auto has_run(Scenario scenario) -> bool
     return scenario <= Scenario::RecurringSuspension;
 }
 
-auto boundary(std::string_view sql, Scenario scenario) -> std::string
+auto boundary(std::string_view sql, Scenario scenario) -> std::string_view
 {
+    if (sql.starts_with("UPDATE jobu_run_timing")) {
+        return "repair.abandoned_timing";
+    }
     if (sql.starts_with("SELECT id FROM jobu_runs WHERE 1 = 1")) {
         return sql.find("AND state = :state") == std::string_view::npos ? "scan.runs" : "scan.running";
     }
@@ -113,6 +120,7 @@ void check_report(RecoveryReport const& actual, RecoveryReport const& expected =
     CHECK(actual.inserted_successors == expected.inserted_successors);
     CHECK(actual.suspended_jobs == expected.suspended_jobs);
     CHECK(actual.suspended_queues == expected.suspended_queues);
+    CHECK(actual.repaired_timing_rows == expected.repaired_timing_rows);
 }
 
 struct Fixture {
@@ -131,7 +139,7 @@ struct Fixture {
 
     explicit Fixture(Scenario scenario = Scenario::Terminal)
     {
-        faults->classify = [scenario](std::string_view sql) { return boundary(sql, scenario); };
+        faults->classify = [scenario](std::string_view sql) { return std::string{boundary(sql, scenario)}; };
         time.set_utc(UtcTimePoint{120s});
         if (scenario == Scenario::Retry || scenario == Scenario::Exhausted) {
             queue.recovery_policy = RecoveryPolicy::RetryInterrupted;
@@ -182,6 +190,17 @@ struct Fixture {
         faults->faults.push_back({.at = std::move(call), .error = fault_error(std::move(code))});
     }
 
+    void seed_timing()
+    {
+        Query query{storage.database};
+        REQUIRE(query.prepare("UPDATE jobu_run_timing SET runnable_wait_us = 123456, measurement_status = 'complete', "
+                              "delay_warned = 1, open_epoch = :epoch, open_tick_us = 9000000 WHERE run_id = :id"));
+        REQUIRE(query.bind_value(":epoch", uuid_to_storage(recovery_id(999))));
+        REQUIRE(query.bind_value(":id", uuid_to_storage(recovery_id(3))));
+        REQUIRE(query.exec());
+        faults->calls.clear();
+    }
+
     auto commits() const -> std::size_t
     {
         return static_cast<std::size_t>(std::ranges::count(
@@ -198,10 +217,12 @@ struct Fixture {
         last.attempt.outcome      = AttemptOutcome::Interrupted;
         last.attempt.completed_at = UtcTimePoint{120s};
         last.attempt.result       = *result;
-        last.output               = jb::jobu::detail::AttemptOutput{.stdout_bytes = ByteBuffer{},
-                                                                    .stderr_bytes = ByteBuffer{},
-                                                                    .capture_lost = true};
-        expected.run.state        = retry ? RunState::RetryWait : RunState::Interrupted;
+        last.output               = jb::jobu::detail::AttemptOutput{
+            .stdout_bytes = ByteBuffer{},
+            .stderr_bytes = ByteBuffer{},
+            .capture_lost = true,
+        };
+        expected.run.state = retry ? RunState::RetryWait : RunState::Interrupted;
         if (retry) {
             expected.run.runnable_at = UtcTimePoint{125s};
         }
@@ -262,7 +283,7 @@ auto repair_faults(Scenario scenario) -> std::vector<DatabaseCall>
 {
     std::vector<DatabaseCall> result{
         {.boundary = "connection", .operation = Operation::Begin },
-        {.boundary = "connection", .operation = Operation::Commit}
+        {.boundary = "connection", .operation = Operation::Commit},
     };
     std::vector<std::string> writes;
     if (has_run(scenario)) {
@@ -290,13 +311,15 @@ auto repair_faults(Scenario scenario) -> std::vector<DatabaseCall>
     return result;
 }
 
-constexpr auto scenarios = {Scenario::Terminal,
-                            Scenario::Retry,
-                            Scenario::Exhausted,
-                            Scenario::RecurringSuspension,
-                            Scenario::MissingSuccessor,
-                            Scenario::JobSuspension,
-                            Scenario::QueueSuspension};
+constexpr auto scenarios = {
+    Scenario::Terminal,
+    Scenario::Retry,
+    Scenario::Exhausted,
+    Scenario::RecurringSuspension,
+    Scenario::MissingSuccessor,
+    Scenario::JobSuspension,
+    Scenario::QueueSuspension,
+};
 
 } // namespace
 
@@ -383,10 +406,12 @@ TEST_CASE("Recovery failures after a committed unit retain progress under both p
                 auto resumed = fixture.recover();
                 REQUIRE(resumed);
                 check_report(*resumed,
-                             {.interrupted_attempts = 1,
-                              .retrying_runs        = scenario == Scenario::Retry ? 1U : 0U,
-                              .terminal_runs        = scenario == Scenario::Terminal ? 1U : 0U,
-                              .finished_jobs        = scenario == Scenario::Terminal ? 1U : 0U});
+                             {
+                                 .interrupted_attempts = 1,
+                                 .retrying_runs        = scenario == Scenario::Retry ? 1U : 0U,
+                                 .terminal_runs        = scenario == Scenario::Terminal ? 1U : 0U,
+                                 .finished_jobs        = scenario == Scenario::Terminal ? 1U : 0U,
+                             });
                 fixture.check_interrupted(*fixture.original, scenario == Scenario::Retry);
                 fixture.check_interrupted(second, scenario == Scenario::Retry);
                 fixture.check_idempotent();
@@ -432,6 +457,81 @@ TEST_CASE("Recovery lost commit acknowledgement preserves the committed repair",
     }
 }
 
+TEST_CASE("Timing recovery faults roll back the whole repair and converge after reopen",
+          "[jobu][recovery][timing][fault]")
+{
+    auto    operation = GENERATE(Operation::Prepare, Operation::Bind, Operation::Execute, Operation::Finish);
+    auto    phase     = GENERATE(Phase::Before, Phase::AfterSuccess);
+    Fixture f{Scenario::JobSuspension};
+    f.seed_timing();
+    auto before = storage_snapshot(f.storage.database);
+    f.arm({.boundary = "repair.abandoned_timing", .operation = operation, .phase = phase});
+    auto failed = f.recover();
+    REQUIRE_FALSE(failed);
+    check_safe_error(failed.error(), "db.io");
+    require_consumed_faults(*f.faults);
+    CHECK(storage_snapshot(f.storage.database) == before);
+    f.storage.reopen();
+    auto repaired = f.recover();
+    REQUIRE(repaired);
+    CHECK(repaired->repaired_timing_rows == 1);
+    WaitRepository timing{f.storage.database};
+    auto           row = timing.read(recovery_id(3));
+    REQUIRE(row);
+    CHECK(row->quality == WaitQuality::Partial);
+    CHECK(row->runnable_wait_us == 123456);
+    CHECK(row->delay_warned);
+    CHECK_FALSE(row->open_epoch);
+    f.check_idempotent();
+}
+
+TEST_CASE("Timing repair commit uncertainty is resolved from reopened state", "[jobu][recovery][timing][fault]")
+{
+    auto    phase = GENERATE(Phase::Before, Phase::AfterSuccess);
+    Fixture f{Scenario::JobSuspension};
+    f.seed_timing();
+    f.arm({.boundary = "connection", .operation = Operation::Commit, .phase = phase}, "db.commit_failed");
+    REQUIRE_FALSE(f.recover());
+    require_consumed_faults(*f.faults);
+    f.storage.reopen();
+    WaitRepository timing{f.storage.database};
+    auto           committed = phase == Phase::AfterSuccess;
+    CHECK(timing.read(recovery_id(3))->open_epoch.has_value() == !committed);
+    auto resumed = f.recover();
+    REQUIRE(resumed);
+    CHECK(resumed->repaired_timing_rows == (committed ? 0U : 1U));
+    CHECK(timing.read(recovery_id(3))->runnable_wait_us == 123456);
+    CHECK(timing.read(recovery_id(3))->delay_warned);
+}
+
+TEST_CASE("Cancelled timing repair rolls back and poisoned cleanup outranks cancellation",
+          "[jobu][recovery][timing][fault]")
+{
+    auto    poison = GENERATE(false, true);
+    Fixture f{Scenario::JobSuspension};
+    f.seed_timing();
+    auto before = storage_snapshot(f.storage.database);
+    if (poison) {
+        f.arm({.boundary = "connection", .operation = Operation::Rollback}, "db.rollback_failed");
+    }
+    auto cancelled = f.recover([&] {
+        return std::ranges::find(f.faults->calls,
+                                 DatabaseCall{
+                                     .boundary  = "repair.abandoned_timing",
+                                     .operation = Operation::Execute,
+                                     .phase     = Phase::AfterSuccess,
+                                 }) != f.faults->calls.end();
+    });
+    REQUIRE_FALSE(cancelled);
+    CHECK(cancelled.error().code == (poison ? "db.rollback_failed" : "jobu.recovery.cancelled"));
+    CHECK(f.storage.database.is_poisoned() == poison);
+    f.storage.reopen();
+    CHECK(storage_snapshot(f.storage.database) == before);
+    auto resumed = f.recover();
+    REQUIRE(resumed);
+    CHECK(resumed->repaired_timing_rows == 1);
+}
+
 TEST_CASE("Recovery rollback failure poisons the connection and outranks cancellation",
           "[jobu][recovery][fault][sqlite]")
 {
@@ -446,11 +546,12 @@ TEST_CASE("Recovery rollback failure poisons the connection and outranks cancell
             fixture.arm({.boundary = "connection", .operation = Operation::Rollback}, "db.rollback_failed");
             auto failed = fixture.recover([&] {
                 // Cancel at the precommit poll after the last repair write, leaving real changes to roll back.
-                return cancellation &&
-                       std::ranges::find(fixture.faults->calls,
-                                         DatabaseCall{.boundary  = "repair.job_suspension",
-                                                      .operation = Operation::Execute,
-                                                      .phase     = Phase::AfterSuccess}) != fixture.faults->calls.end();
+                return cancellation && std::ranges::find(fixture.faults->calls,
+                                                         DatabaseCall{
+                                                             .boundary  = "repair.job_suspension",
+                                                             .operation = Operation::Execute,
+                                                             .phase     = Phase::AfterSuccess,
+                                                         }) != fixture.faults->calls.end();
             });
             REQUIRE_FALSE(failed);
             check_safe_error(failed.error(), cancellation ? "db.rollback_failed" : "db.io");

@@ -520,6 +520,7 @@ TEST_CASE("Recovery run scans reject missing and malformed timing without hiding
         "UPDATE jobu_run_timing SET open_tick_us = 0",
         "UPDATE jobu_run_timing SET measurement_status = 'complete', open_epoch = zeroblob(16)",
         "UPDATE jobu_run_timing SET measurement_status = 'partial', open_epoch = X'00', open_tick_us = 0",
+        "UPDATE jobu_run_timing SET measurement_status = 'partial', open_epoch = zeroblob(16), open_tick_us = 0",
         "UPDATE jobu_run_timing SET measurement_status = 'partial', open_epoch = zeroblob(16), open_tick_us = -1",
         "UPDATE jobu_run_timing SET measurement_status = 'partial', open_epoch = zeroblob(16), open_tick_us = 0.5",
         "UPDATE jobu_run_timing SET runnable_wait_us = 1",
@@ -572,7 +573,8 @@ TEST_CASE("Recovery preserves known timing quality and restricts open intervals 
     RecoveryRepository repository{fixture.database, fixture.registry};
     REQUIRE(repository.list_runs(1));
     execute(fixture.database,
-            "UPDATE jobu_run_timing SET measurement_status = 'partial', open_epoch = zeroblob(16), "
+            "UPDATE jobu_run_timing SET measurement_status = 'partial', "
+            "open_epoch = X'00000000000000000000000000000001', "
             "open_tick_us = 42");
     if (state == RunState::Scheduled || state == RunState::RetryWait) {
         REQUIRE(repository.list_runs(1));

@@ -8,6 +8,7 @@
 #include "storage_failure_priv.hpp"
 #include "time_source.hpp"
 #include "transaction.hpp"
+#include "wait_repository_priv.hpp"
 
 #include <algorithm>
 #include <array>
@@ -18,6 +19,7 @@
 #include <string_view>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace jb::jobu {
 namespace {
@@ -28,10 +30,12 @@ using RecoveryResult = jb::core::Result<T, jb::core::Error>;
 
 auto invariant(std::string_view reason) -> jb::core::Error
 {
-    return {.category = jb::core::ErrorCategory::Internal,
-            .code     = "jobu.recovery.invariant",
-            .message  = "Startup recovery could not establish valid durable state",
-            .detail   = "reason=" + std::string{reason}};
+    return {
+        .category = jb::core::ErrorCategory::Internal,
+        .code     = "jobu.recovery.invariant",
+        .message  = "Startup recovery could not establish valid durable state",
+        .detail   = "reason=" + std::string{reason},
+    };
 }
 
 // One stack-owned invocation: pages never retain queries across repair transactions, and
@@ -50,10 +54,13 @@ public:
         , _lifecycle{database, attributes}
         , _runs{database, attributes}
         , _scheduler{database, attributes}
+        , _waits{database}
         , _cron{cron}
         , _generator{generator}
         , _time{time}
         , _batch_size{options.scan_batch_size}
+        , _measurement{options.telemetry_covers_creation ? InitialRunMeasurement::Complete
+                                                        : InitialRunMeasurement::Unmeasured,}
         , _should_stop{should_stop}
         , _recovery_time{time.utc_now()}
     {}
@@ -64,6 +71,13 @@ public:
         auto validated = validate(false);
         if (!validated) {
             return RecoveryResult<RecoveryReport>::failure(std::move(validated).error());
+        }
+
+        // No telemetry epoch is active during startup. Repair abandoned tails independently,
+        // retaining committed page progress if this invocation is interrupted again.
+        auto timing = repair_timing();
+        if (!timing) {
+            return RecoveryResult<RecoveryReport>::failure(std::move(timing).error());
         }
         auto interrupted = visit_pages<jb::core::Uuid>(
             [this](auto after) { return _repository.list_runs(_batch_size, after, RunState::Running); },
@@ -114,9 +128,11 @@ private:
     auto check_stop() const -> RecoveryResult<>
     {
         if (_should_stop && _should_stop()) {
-            return RecoveryResult<>::failure({.category = jb::core::ErrorCategory::Cancelled,
-                                              .code     = "jobu.recovery.cancelled",
-                                              .message  = "Startup recovery was cancelled"});
+            return RecoveryResult<>::failure({
+                .category = jb::core::ErrorCategory::Cancelled,
+                .code     = "jobu.recovery.cancelled",
+                .message  = "Startup recovery was cancelled",
+            });
         }
         return RecoveryResult<>::success();
     }
@@ -151,6 +167,15 @@ private:
 
     auto validate(bool final) -> RecoveryResult<>
     {
+        if (final) {
+            auto open = _waits.list_open(1);
+            if (!open) {
+                return RecoveryResult<>::failure(std::move(open).error().error);
+            }
+            if (!open->empty()) {
+                return RecoveryResult<>::failure(invariant("open_timing_after_recovery"));
+            }
+        }
         auto runs = visit_pages<jb::core::Uuid>(
             [this](auto after) { return _repository.list_runs(_batch_size, after); },
             [](auto const& row) { return row.id; },
@@ -220,6 +245,28 @@ private:
                                            });
     }
 
+    auto repair_timing() -> RecoveryResult<>
+    {
+        return visit_pages<jb::core::Uuid>(
+            [this](auto after) -> RecoveryResult<std::vector<jb::core::Uuid>> {
+                auto page = _waits.list_open(_batch_size, after);
+                if (!page) {
+                    return RecoveryResult<std::vector<jb::core::Uuid>>::failure(std::move(page).error().error);
+                }
+                return RecoveryResult<std::vector<jb::core::Uuid>>::success(std::move(*page));
+            },
+            [](auto const& id) { return id; },
+            [this](auto const& id) {
+                return commit_unit([&]() -> RecoveryResult<RecoveryReport> {
+                    auto repaired = _waits.repair_abandoned(id);
+                    if (!repaired) {
+                        return RecoveryResult<RecoveryReport>::failure(std::move(repaired).error().error);
+                    }
+                    return RecoveryResult<RecoveryReport>::success({.repaired_timing_rows = *repaired ? 1U : 0U});
+                });
+            });
+    }
+
     template <typename Repair>
     auto commit_unit(Repair repair) -> RecoveryResult<>
     {
@@ -258,13 +305,16 @@ private:
 
     static auto accumulate(RecoveryReport& report, RecoveryReport const& delta) -> RecoveryResult<>
     {
-        constexpr auto counters = std::array{&RecoveryReport::interrupted_attempts,
-                                             &RecoveryReport::retrying_runs,
-                                             &RecoveryReport::terminal_runs,
-                                             &RecoveryReport::finished_jobs,
-                                             &RecoveryReport::inserted_successors,
-                                             &RecoveryReport::suspended_jobs,
-                                             &RecoveryReport::suspended_queues};
+        constexpr auto counters = std::array{
+            &RecoveryReport::interrupted_attempts,
+            &RecoveryReport::retrying_runs,
+            &RecoveryReport::terminal_runs,
+            &RecoveryReport::finished_jobs,
+            &RecoveryReport::inserted_successors,
+            &RecoveryReport::suspended_jobs,
+            &RecoveryReport::suspended_queues,
+            &RecoveryReport::repaired_timing_rows,
+        };
         for (auto member : counters) {
             if (delta.*member > std::numeric_limits<std::uint64_t>::max() - report.*member) {
                 return RecoveryResult<>::failure(invariant("report_counter_overflow"));
@@ -301,9 +351,11 @@ private:
                 return RecoveryResult<RecoveryReport>::failure(std::move(transitioned).error());
             }
 
-            auto delta = RecoveryReport{.interrupted_attempts = 1,
-                                        .retrying_runs        = decision->retry ? 1U : 0U,
-                                        .terminal_runs        = decision->retry ? 0U : 1U};
+            auto delta = RecoveryReport{
+                .interrupted_attempts = 1,
+                .retrying_runs        = decision->retry ? 1U : 0U,
+                .terminal_runs        = decision->retry ? 0U : 1U,
+            };
             if (!decision->retry) {
                 // Reconcile the final one-time definition in the same unit as its terminal run.
                 // A retry remains outstanding work and cannot finish the definition.
@@ -313,7 +365,8 @@ private:
                 }
                 delta.finished_jobs = *finished ? 1U : 0U;
 
-                auto successor = _repository.insert_interrupted_successor(run.id, lower_bound, _cron, _generator);
+                auto successor =
+                    _repository.insert_interrupted_successor(run.id, lower_bound, _cron, _generator, _measurement);
                 if (!successor) {
                     return RecoveryResult<RecoveryReport>::failure(std::move(successor).error());
                 }
@@ -341,7 +394,7 @@ private:
         }
         auto const lower_bound = std::max(_recovery_time, _time.utc_now());
         return commit_unit([&]() -> RecoveryResult<RecoveryReport> {
-            auto successor = _repository.repair_missing_successor(job.id, lower_bound, _cron, _generator);
+            auto successor = _repository.repair_missing_successor(job.id, lower_bound, _cron, _generator, _measurement);
             if (!successor) {
                 return RecoveryResult<RecoveryReport>::failure(std::move(successor).error());
             }
@@ -359,10 +412,12 @@ private:
     JobLifecycleRepository       _lifecycle;
     RunRepository                _runs;
     SchedulerRepository          _scheduler;
+    WaitRepository               _waits;
     CronEngine const&            _cron;
     jb::core::UuidGenerator&     _generator;
     jb::core::TimeSource&        _time;
     std::size_t                  _batch_size;
+    InitialRunMeasurement        _measurement;
     std::function<bool()> const& _should_stop;
     jb::core::UtcTimePoint       _recovery_time;
     RecoveryReport               _report;
@@ -389,9 +444,11 @@ auto detail::recover_startup(jb::db::Database&            database,
                              std::function<bool()> const& should_stop) -> RecoveryResult<RecoveryReport>
 {
     if (options.scan_batch_size == 0 || options.scan_batch_size > 4096) {
-        return RecoveryResult<RecoveryReport>::failure({.category = jb::core::ErrorCategory::InvalidArgument,
-                                                        .code     = "jobu.recovery.invalid_options",
-                                                        .message  = "Recovery scan batch size must be in 1..4096"});
+        return RecoveryResult<RecoveryReport>::failure({
+            .category = jb::core::ErrorCategory::InvalidArgument,
+            .code     = "jobu.recovery.invalid_options",
+            .message  = "Recovery scan batch size must be in 1..4096",
+        });
     }
     auto recovery = Recovery{database, attributes, cron, uuid_generator, time_source, options, should_stop};
     auto result   = recovery.run();

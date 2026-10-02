@@ -935,7 +935,7 @@ TEST_CASE("Automatic observation reaches backlog tails despite exhausted capacit
     CHECK(f.executor.fake.start_requests().size() == 1);
 }
 
-TEST_CASE("Warning-only wakes cross equality once and remain bounded to one timer",
+TEST_CASE("Warning-only wakes cross equality once alongside one checkpoint timer",
           "[jobu][telemetry][scheduler][warning][wake]")
 {
     Fixture f;
@@ -943,7 +943,7 @@ TEST_CASE("Warning-only wakes cross equality once and remain bounded to one time
     f.job(queue);
     auto waiting = f.scheduled(f.job(queue).id);
     REQUIRE(f.registrar->start());
-    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 1);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 2);
     f.time.advance(10ms);
     jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
     CHECK(f.warnings.empty());
@@ -952,13 +952,14 @@ TEST_CASE("Warning-only wakes cross equality once and remain bounded to one time
     auto equality = f.core->process_cycle();
     REQUIRE(equality);
     CHECK(equality->next_warning == f.time.monotonic_now() + 1us);
-    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 1);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 2);
     f.time.advance(1us);
     jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
     REQUIRE(f.warnings.size() == 1);
     CHECK(f.warnings.front().run_id == waiting.id);
     CHECK(f.warnings.front().runnable_wait == 10001us);
-    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
+    // Once claimed, the warning wake disappears while periodic accounting remains armed.
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 1);
 }
 
 TEST_CASE("Disabled warnings still count wait and threshold edits use current queue policy",
@@ -1305,7 +1306,7 @@ TEST_CASE("Delayed receiver mutations invalidate old samples and preserve an imm
     jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
     REQUIRE(f.warnings.size() == 1);
     // The future UTC wake must not replace the receiver's immediate rescan.
-    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 1);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 2);
     auto rescan_deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*f.loop.loop);
     REQUIRE(rescan_deadline);
     CHECK(*rescan_deadline <= Clock::now());
@@ -1346,7 +1347,7 @@ TEST_CASE("Future UTC work and warning deadlines share one wake without charging
     REQUIRE(cycle);
     CHECK(cycle->next_wake == UtcTimePoint{100s + 5ms});
     CHECK(cycle->next_warning == f.time.monotonic_now() + 10001us);
-    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 1);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 2);
     f.time.advance(5ms);
     jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
     CHECK(f.warnings.empty());
@@ -1356,7 +1357,7 @@ TEST_CASE("Future UTC work and warning deadlines share one wake without charging
     REQUIRE(f.warnings.size() == 1);
     CHECK(f.warnings.front().run_id == waiting.id);
     CHECK_FALSE(f.timing(future.id).delay_warned);
-    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 1);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 2);
 }
 
 TEST_CASE("Unrepresentable warning deadlines cannot wrap into immediate wakes",

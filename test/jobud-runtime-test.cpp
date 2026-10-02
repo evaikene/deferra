@@ -4,6 +4,7 @@
 #include "attempt_repository_priv.hpp"
 #include "control_json.hpp"
 #include "control_rpc.hpp"
+#include "execution_telemetry.hpp"
 #include "framing.hpp"
 #include "history_json.hpp"
 #include "history_rpc.hpp"
@@ -32,10 +33,13 @@
 #include "support/memory_io_device.hpp"
 #include "support/recovery_fixture.hpp"
 #include "support/storage_fault_helpers.hpp"
+#include "transaction.hpp"
 #include "utc_timestamp.hpp"
 #include "uuid.hpp"
+#include "wait_repository_priv.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -67,6 +71,8 @@ struct RuntimeTestAccess {
 
     static auto retention(DaemonRuntime& runtime) { return runtime.retention(); }
 
+    static auto telemetry(DaemonRuntime& runtime) { return runtime.telemetry(); }
+
     static auto rpc(DaemonRuntime& runtime) { return runtime.rpc_server(); }
 };
 
@@ -88,10 +94,12 @@ auto success(AttemptKey key) -> AttemptCompletion
 
 auto failure() -> Error
 {
-    return {.category = ErrorCategory::Internal,
-            .code     = "net.http.backend_failed",
-            .message  = "sensitive message",
-            .detail   = "sensitive detail"};
+    return {
+        .category = ErrorCategory::Internal,
+        .code     = "net.http.backend_failed",
+        .message  = "sensitive message",
+        .detail   = "sensitive detail",
+    };
 }
 
 struct ExecutionRecord {
@@ -99,6 +107,7 @@ struct ExecutionRecord {
     std::vector<AttemptCompletionHandler> completions;
     std::vector<std::string>              destruction;
     std::function<void()>                 on_start;
+    std::function<void()>                 on_destroy;
 };
 
 /// Probes retained completions during final drains and child teardown while the group and runtime still exist.
@@ -111,6 +120,9 @@ public:
     ~ObservedExecutor() override
     {
         _record.destruction.emplace_back("executor");
+        if (_record.on_destroy) {
+            _record.on_destroy();
+        }
         if (!_record.completions.empty()) {
             _record.completions.front()(success(_record.starts.front().key));
         }
@@ -147,9 +159,11 @@ struct RuntimeFixture {
             if (sql.starts_with("SELECT id FROM jobu_runs WHERE 1 = 1") &&
                 sql.find("AND state = :state") == std::string_view::npos) {
                 auto committed = std::ranges::find(faults->calls,
-                                                   DatabaseCall{.boundary  = "connection",
-                                                                .operation = DatabaseOperation::Commit,
-                                                                .phase     = DatabaseFaultPhase::AfterSuccess});
+                                                   DatabaseCall{
+                                                       .boundary  = "connection",
+                                                       .operation = DatabaseOperation::Commit,
+                                                       .phase     = DatabaseFaultPhase::AfterSuccess,
+                                                   });
                 return committed == faults->calls.end() ? "recovery.scan" : "recovery.final_scan";
             }
             if (sql.starts_with("INSERT INTO jobu_attempt_output")) {
@@ -364,7 +378,7 @@ TEST_CASE("Daemon injected recovery failures never construct runners or enter se
              {.boundary = "recovery.output", .operation = Operation::Execute},
              {.boundary = "connection", .operation = Operation::Commit},
              {.boundary = "connection", .operation = Operation::Commit, .phase = Phase::AfterSuccess},
-             {.boundary = "recovery.final_scan", .operation = Operation::Fetch}
+             {.boundary = "recovery.final_scan", .operation = Operation::Fetch},
     }) {
         DYNAMIC_SECTION(fault.boundary << ' ' << static_cast<int>(fault.operation) << ' '
                                        << static_cast<int>(fault.phase))
@@ -424,6 +438,150 @@ TEST_CASE("Daemon recovery precedes runner construction and scheduler startup")
     REQUIRE(fixture.record.destruction == std::vector<std::string>{"executor", "http"});
     fixture.require_running(runnable);
     REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
+}
+
+TEST_CASE("Daemon owns dormant telemetry without activating measurement or checkpointing", "[jobud][telemetry]")
+{
+    RuntimeFixture f;
+    auto           run = f.seed();
+    f.create_runtime();
+    auto result = f.run([&] {
+        REQUIRE(RuntimeTestAccess::telemetry(*f.runtime) != nullptr);
+        detail::WaitRepository timing{f.storage.database};
+        CHECK(timing.read(run.run.id)->quality == detail::WaitQuality::Unmeasured);
+        CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
+        f.faults->calls.clear();
+        f.runtime->request_stop();
+        CHECK(f.faults->calls.empty());
+        return EXIT_SUCCESS;
+    });
+    REQUIRE(result == EXIT_SUCCESS);
+    CHECK(f.faults->calls.empty());
+    f.require_running(run);
+}
+
+TEST_CASE("Daemon settles captured timing after a synchronous mutation receiver unwinds", "[jobud][telemetry][stop]")
+{
+    RuntimeFixture f;
+    auto           running = f.seed(1);
+    auto           waiting = f.seed(2);
+    f.create_runtime();
+    bool stopped = false;
+    auto result  = f.run([&] {
+        auto* telemetry = RuntimeTestAccess::telemetry(*f.runtime);
+        REQUIRE(telemetry != nullptr);
+        REQUIRE(telemetry->start()); // Explicit test activation; configured activation remains Stage 9.20.
+        RuntimeTestAccess::scheduler(*f.runtime)->request_rescan();
+        jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+        detail::WaitRepository timing{f.storage.database};
+        REQUIRE(timing.read(waiting.run.id)->open_epoch);
+        f.time.advance(5s);
+        auto* management = RuntimeTestAccess::management(*f.runtime);
+        auto  connection = management->mutation_committed.connect(f.runtime.get(), [&] {
+            auto calls = f.faults->calls;
+            f.runtime->request_stop();
+            CHECK(f.faults->calls == calls);
+            CHECK(f.record.destruction.empty());
+            CHECK(timing.read(waiting.run.id)->runnable_wait_us == 0);
+            REQUIRE_FALSE(management->create_queue({.name = "late"}));
+            stopped = true;
+        });
+        REQUIRE(management->create_queue({.name = "stop-trigger"}));
+        connection.disconnect();
+        REQUIRE(stopped);
+        f.time.advance(100h);
+        return EXIT_SUCCESS;
+    });
+    REQUIRE(result == EXIT_SUCCESS);
+    detail::WaitRepository timing{f.storage.database};
+    auto                   row = timing.read(waiting.run.id);
+    REQUIRE(row);
+    CHECK(row->runnable_wait_us == 5'000'000);
+    CHECK(row->quality == detail::WaitQuality::Partial);
+    CHECK_FALSE(row->open_epoch);
+    f.require_running(running);
+    CHECK(f.record.destruction == std::vector<std::string>{"executor", "http"});
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
+}
+
+TEST_CASE("Daemon skips healthy timing writes after fatal stop including late runner failure",
+          "[jobud][telemetry][fault]")
+{
+    auto           mode = GENERATE(0, 1, 2);
+    RuntimeFixture f;
+    f.seed(1);
+    auto waiting = f.seed(2);
+    f.create_runtime();
+    auto result = f.run([&] {
+        auto* telemetry = RuntimeTestAccess::telemetry(*f.runtime);
+        REQUIRE(telemetry->start());
+        RuntimeTestAccess::scheduler(*f.runtime)->request_rescan();
+        jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+        detail::WaitRepository timing{f.storage.database};
+        REQUIRE(timing.read(waiting.run.id)->open_epoch);
+        f.time.advance(5s);
+        f.runtime->request_stop();
+        if (mode == 1) {
+            // Shutdown of the CLI executor reveals a shared HTTP failure after the stop
+            // boundary was captured, but before runtime decides whether cleanup may write.
+            f.record.on_destroy = [&] { REQUIRE(f.http->inject_shared_failure(failure())); };
+        }
+        else {
+            if (mode == 2) {
+                auto transaction = jb::db::Transaction::begin(f.storage.database);
+                REQUIRE(transaction);
+                f.faults->faults.push_back({
+                    .at    = {.boundary = "connection", .operation = DatabaseOperation::Rollback},
+                    .error = fault_error("db.rollback_failed"),
+                });
+                REQUIRE_FALSE(transaction->rollback());
+            }
+            f.runtime->fail("test", failure());
+        }
+        f.faults->calls.clear();
+        return EXIT_SUCCESS;
+    });
+    REQUIRE(result == EXIT_FAILURE);
+    CHECK(f.faults->calls.empty());
+    if (mode == 2) {
+        f.storage.reopen();
+    }
+    detail::WaitRepository timing{f.storage.database};
+    auto                   row = timing.read(waiting.run.id);
+    REQUIRE(row);
+    CHECK(row->open_epoch);
+    CHECK(row->runnable_wait_us == 0);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
+}
+
+TEST_CASE("Daemon telemetry failure gates admission before the notifying receiver returns", "[jobud][telemetry][fault]")
+{
+    RuntimeFixture f;
+    f.create_runtime();
+    bool notified = false;
+    auto result   = f.run([&] {
+        auto* telemetry = RuntimeTestAccess::telemetry(*f.runtime);
+        REQUIRE(telemetry->start());
+        telemetry->failed.connect(f.runtime.get(), [&](Error const&) {
+            CHECK(f.runtime->exit_code() == EXIT_FAILURE);
+            CHECK(f.runtime->state() == RuntimeState::Stopping);
+            CHECK(f.record.destruction.empty());
+            auto calls = f.faults->calls;
+            REQUIRE_FALSE(RuntimeTestAccess::management(*f.runtime)->create_queue({.name = "late"}));
+            CHECK(f.faults->calls == calls);
+            f.storage.reopen();
+            notified = true;
+        });
+        f.faults->faults.push_back({
+            .at    = {.boundary = "connection", .operation = DatabaseOperation::Begin},
+            .error = fault_error(),
+        });
+        jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+        REQUIRE(notified);
+        return EXIT_SUCCESS;
+    });
+    REQUIRE(result == EXIT_FAILURE);
+    require_consumed_faults(*f.faults);
 }
 
 TEST_CASE("Daemon owns dormant retention without activating configured maintenance")
@@ -794,9 +952,11 @@ TEST_CASE("Daemon injected mutation failures gate buffered requests and retained
                 });
                 auto fault = DatabaseCall{.boundary = "management.queue", .operation = DatabaseOperation::Execute};
                 if (conflict || acknowledged) {
-                    fault = {.boundary  = "connection",
-                             .operation = conflict ? DatabaseOperation::Rollback : DatabaseOperation::Commit,
-                             .phase     = acknowledged ? DatabaseFaultPhase::AfterSuccess : DatabaseFaultPhase::Before};
+                    fault = {
+                        .boundary  = "connection",
+                        .operation = conflict ? DatabaseOperation::Rollback : DatabaseOperation::Commit,
+                        .phase     = acknowledged ? DatabaseFaultPhase::AfterSuccess : DatabaseFaultPhase::Before,
+                    };
                 }
                 fixture.faults->faults.push_back({.at = fault, .error = fault_error()});
                 // Both frames are already admitted. The second must reach the management gate after
@@ -885,14 +1045,15 @@ TEST_CASE("Daemon closes statistics reads when their storage fails fatally")
         REQUIRE(statistics != nullptr);
         fixture.faults->faults.push_back({
             .at    = {.boundary = "statistics.runs", .operation = DatabaseOperation::Execute},
-            .error = fault_error("db.corrupt")
+            .error = fault_error("db.corrupt"),
         });
 
-        auto read = statistics->read(StatisticsRequest{}, StatisticsScope::System);
+        auto const request = StatisticsRequest{};
+        auto       read    = statistics->read(request, StatisticsScope::System);
         REQUIRE_FALSE(read);
         CHECK(read.error().code == "db.corrupt");
         CHECK(fixture.runtime->state() == RuntimeState::Stopping);
-        auto stopped = statistics->read(StatisticsRequest{}, StatisticsScope::System);
+        auto stopped = statistics->read(request, StatisticsScope::System);
         REQUIRE_FALSE(stopped);
         CHECK(stopped.error().code == "jobu.service.stopping");
         return EXIT_SUCCESS;
@@ -939,11 +1100,11 @@ TEST_CASE("Daemon schema rollback poisoning prevents recovery and serving")
     fixture.create_runtime();
     fixture.faults->faults.push_back({
         .at    = {.boundary = "connection", .operation = DatabaseOperation::Commit},
-        .error = fault_error()
+        .error = fault_error(),
     });
     fixture.faults->faults.push_back({
         .at    = {.boundary = "connection", .operation = DatabaseOperation::Rollback},
-        .error = fault_error()
+        .error = fault_error(),
     });
 
     // Exercise the same schema-result/fatal gate used in main, with a real SQLite rollback failure.
@@ -1001,18 +1162,22 @@ TEST_CASE("Daemon secret failures gate management and retained completion persis
                 bool const acknowledgement = std::string_view{scenario} == "acknowledgement";
                 auto       fault = DatabaseCall{.boundary = "secrets.insert", .operation = DatabaseOperation::Execute};
                 if (missing || acknowledgement) {
-                    fault = {.boundary  = "connection",
-                             .operation = missing ? DatabaseOperation::Rollback : DatabaseOperation::Commit,
-                             .phase = acknowledgement ? DatabaseFaultPhase::AfterSuccess : DatabaseFaultPhase::Before};
+                    fault = {
+                        .boundary  = "connection",
+                        .operation = missing ? DatabaseOperation::Rollback : DatabaseOperation::Commit,
+                        .phase     = acknowledgement ? DatabaseFaultPhase::AfterSuccess : DatabaseFaultPhase::Before,
+                    };
                 }
                 bool const snapshot = std::string_view{scenario} == "snapshot_read";
                 if (snapshot) {
                     fault = {.boundary = "secrets.snapshots", .operation = DatabaseOperation::Fetch};
                 }
                 if (references) {
-                    fault = {.boundary  = "management.references",
-                             .operation = DatabaseOperation::Execute,
-                             .phase     = DatabaseFaultPhase::AfterSuccess};
+                    fault = {
+                        .boundary  = "management.references",
+                        .operation = DatabaseOperation::Execute,
+                        .phase     = DatabaseFaultPhase::AfterSuccess,
+                    };
                 }
                 fixture.faults->faults.push_back({.at = fault, .error = fault_error()});
                 if (references) {
@@ -1080,13 +1245,14 @@ TEST_CASE("Daemon capabilities follow every registered Phase 8 server method", "
         for (auto index = std::size_t{1}; index < methods.size(); ++index) {
             CHECK(methods[index - 1U].as_string() < methods[index].as_string());
         }
-        for (auto const* name :
-             {"system.info",  "system.stats",  "queue.create",  "queue.get",         "queue.list",
-              "queue.update", "queue.suspend", "queue.resume",  "queue.delete",      "queue.stats",
-              "job.create",   "job.get",       "job.list",      "job.update",        "job.suspend",
-              "job.resume",   "job.move",      "job.delete",    "job.run_now",       "run.get",
-              "run.list",     "run.cancel",    "attempt.get",   "attempt.list",      "attempt.output",
-              "secret.set",   "secret.list",   "secret.delete", "schedule.validate", "schedule.next"}) {
+        for (auto const* name : {
+                 "system.info",  "system.stats",  "queue.create",  "queue.get",         "queue.list",
+                 "queue.update", "queue.suspend", "queue.resume",  "queue.delete",      "queue.stats",
+                 "job.create",   "job.get",       "job.list",      "job.update",        "job.suspend",
+                 "job.resume",   "job.move",      "job.delete",    "job.run_now",       "run.get",
+                 "run.list",     "run.cancel",    "attempt.get",   "attempt.list",      "attempt.output",
+                 "secret.set",   "secret.list",   "secret.delete", "schedule.validate", "schedule.next",
+             }) {
             CHECK(RuntimeTestAccess::rpc(*fixture.runtime)->has_method(name));
             CHECK(std::ranges::count_if(methods,
                                         [name](JsonValue const& value) { return value.as_string() == name; }) == 1);
@@ -1095,7 +1261,7 @@ TEST_CASE("Daemon capabilities follow every registered Phase 8 server method", "
 
         auto set_request = set_secret_request_to_json({
             .name  = "rpc.token",
-            .value = {std::byte{0x00}, std::byte{0xff}}
+            .value = {std::byte{0x00}, std::byte{0xff}},
         });
         REQUIRE(set_request);
         auto set = endpoint.call("secret.set", *set_request);
@@ -1176,7 +1342,7 @@ TEST_CASE("Daemon history and statistics RPC read retained data without exposing
         CHECK(attempts->items.front().attempt_number == 1);
         auto output_request = attempt_output_request_to_json({
             .attempt = {.run_id = scheduled.run.id, .attempt_number = 1},
-            .channel = OutputChannel::Stdout
+            .channel = OutputChannel::Stdout,
         });
         REQUIRE(output_request);
         auto output = attempt_output_chunk_from_json(rpc_result(endpoint.call("attempt.output", *output_request)));
@@ -1186,7 +1352,7 @@ TEST_CASE("Daemon history and statistics RPC read retained data without exposing
         auto captured_request = attempt_output_request_to_json({
             .attempt = {.run_id = other_run.run.id, .attempt_number = 1},
             .channel = OutputChannel::Stdout,
-            .limit   = 65'536
+            .limit   = 65'536,
         });
         REQUIRE(captured_request);
         auto captured_chunk =
@@ -1199,7 +1365,7 @@ TEST_CASE("Daemon history and statistics RPC read retained data without exposing
         auto stats_request = system_statistics_request_to_json(StatisticsRequest{
             .planned  = {.from = UtcTimePoint{0s}, .to = UtcTimePoint{200s}},
             .group_by = StatisticsGroupBy::Queue,
-            .limit    = 1
+            .limit    = 1,
         });
         REQUIRE(stats_request);
         auto stats = statistics_page_from_json(rpc_result(endpoint.call("system.stats", *stats_request)));
@@ -1213,9 +1379,10 @@ TEST_CASE("Daemon history and statistics RPC read retained data without exposing
         REQUIRE(continued->groups.size() == 1);
         CHECK(continued->groups.front().key != stats->groups.front().key);
 
-        auto queue_stats = queue_statistics_request_to_json(
-            QueueStatisticsQuery{.selector   = other_queue.name,
-                                 .statistics = {.planned = {.from = UtcTimePoint{0s}, .to = UtcTimePoint{200s}}}});
+        auto queue_stats = queue_statistics_request_to_json(QueueStatisticsQuery{
+            .selector   = other_queue.name,
+            .statistics = {.planned = {.from = UtcTimePoint{0s}, .to = UtcTimePoint{200s}}},
+        });
         REQUIRE(queue_stats);
         auto scoped = statistics_page_from_json(rpc_result(endpoint.call("queue.stats", *queue_stats)));
         REQUIRE(scoped);
@@ -1259,13 +1426,19 @@ TEST_CASE("Oversized raw history requests leave daemon reads available", "[jobud
 
         auto const run_id    = scheduled.run.id.to_string();
         auto const valid_get = JsonValue{
-            .data = JsonValue::Object{{"run_id", JsonValue{.data = run_id}},
-                                      {"attempt_number", JsonValue{.data = std::uint64_t{1}}}}
+            .data =
+                JsonValue::Object{
+                                  {"run_id", JsonValue{.data = run_id}},
+                                  {"attempt_number", JsonValue{.data = std::uint64_t{1}}},
+                                  },
         };
         auto const valid_output = JsonValue{
-            .data = JsonValue::Object{{"run_id", JsonValue{.data = run_id}},
-                                      {"attempt_number", JsonValue{.data = std::uint64_t{1}}},
-                                      {"channel", JsonValue{.data = std::string{"stdout"}}}}
+            .data =
+                JsonValue::Object{
+                                  {"run_id", JsonValue{.data = run_id}},
+                                  {"attempt_number", JsonValue{.data = std::uint64_t{1}}},
+                                  {"channel", JsonValue{.data = std::string{"stdout"}}},
+                                  },
         };
 
         auto check_still_serving = [&](std::string_view method, JsonValue const& valid_params) {
@@ -1280,8 +1453,11 @@ TEST_CASE("Oversized raw history requests leave daemon reads available", "[jobud
         // These numbers bypass the typed request encoder and exercise the daemon's raw RPC boundary.
         for (auto number : {maximum_attempt_number + 1, std::numeric_limits<AttemptNumber>::max()}) {
             auto get_params = JsonValue{
-                .data = JsonValue::Object{{"run_id", JsonValue{.data = run_id}},
-                                          {"attempt_number", JsonValue{.data = number}}}
+                .data =
+                    JsonValue::Object{
+                                      {"run_id", JsonValue{.data = run_id}},
+                                      {"attempt_number", JsonValue{.data = number}},
+                                      },
             };
             auto rejected_get = endpoint.call("attempt.get", get_params);
             CHECK(rpc_error(rejected_get).code == static_cast<std::int64_t>(jb::rpc::ErrorCode::InvalidParams));
@@ -1289,9 +1465,12 @@ TEST_CASE("Oversized raw history requests leave daemon reads available", "[jobud
             check_still_serving("attempt.get", valid_get);
 
             auto output_params = JsonValue{
-                .data = JsonValue::Object{{"run_id", JsonValue{.data = run_id}},
-                                          {"attempt_number", JsonValue{.data = number}},
-                                          {"channel", JsonValue{.data = std::string{"stdout"}}}}
+                .data =
+                    JsonValue::Object{
+                                      {"run_id", JsonValue{.data = run_id}},
+                                      {"attempt_number", JsonValue{.data = number}},
+                                      {"channel", JsonValue{.data = std::string{"stdout"}}},
+                                      },
             };
             auto rejected_output = endpoint.call("attempt.output", output_params);
             CHECK(rpc_error(rejected_output).code == static_cast<std::int64_t>(jb::rpc::ErrorCode::InvalidParams));
@@ -1329,7 +1508,7 @@ TEST_CASE("Fatal history RPC read closes all daemon admission before teardown", 
         };
         fixture.faults->faults.push_back({
             .at    = {.boundary = "history.list", .operation = DatabaseOperation::Execute},
-            .error = {.category = ErrorCategory::Internal, .code = "db.corrupt", .message = "private-backend-marker"}
+            .error = {.category = ErrorCategory::Internal, .code = "db.corrupt", .message = "private-backend-marker"},
         });
         RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
         check_application_error(endpoint.call("run.list", JsonValue{.data = JsonValue::Object{}}),
@@ -1368,7 +1547,7 @@ TEST_CASE("Daemon advertises and serves cron preview controls at API 1.3", "[job
         auto next = schedule_next_request_to_json({
             .schedule = {.expression = "30 3 31 MAR *", .timezone = "Europe/Tallinn"},
             .after    = jb::jobu::parse_utc_timestamp("2024-03-30T00:00:00Z").value(),
-            .count    = 1
+            .count    = 1,
         });
         REQUIRE(next);
         auto preview     = endpoint.call("schedule.next", *next);
@@ -1391,7 +1570,7 @@ TEST_CASE("Daemon advertises and serves cron preview controls at API 1.3", "[job
         auto at_limit = schedule_next_request_to_json({
             .schedule = {.expression = "* * * * *", .timezone = "UTC"},
             .after    = last_time,
-            .count    = 1
+            .count    = 1,
         });
         REQUIRE(at_limit);
         check_application_error(endpoint.call("schedule.next", *at_limit),
@@ -1533,11 +1712,11 @@ TEST_CASE("Cancellation RPC closes daemon admission after poisoned rollback", "[
     auto result = fixture.run([&] {
         fixture.faults->faults.push_back({
             .at    = {.boundary = "cancellation.run", .operation = Operation::Execute, .phase = Phase::AfterSuccess},
-            .error = fault_error()
+            .error = fault_error(),
         });
         fixture.faults->faults.push_back({
             .at    = {.boundary = "connection", .operation = Operation::Rollback, .phase = Phase::Before},
-            .error = fault_error("db.rollback_failed")
+            .error = fault_error("db.rollback_failed"),
         });
         RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
         auto               params = cancel_run_request_to_json(pending.run.id);
@@ -1592,7 +1771,7 @@ TEST_CASE("Daemon secret lookup failure closes admission before retained complet
         });
         fixture.faults->faults.push_back({
             .at    = {.boundary = "dispatch.secret", .operation = DatabaseOperation::Fetch},
-            .error = fault_error()
+            .error = fault_error(),
         });
         static_cast<void>(fixture.loop.loop->process_events(EventFlag::All));
         REQUIRE(observed);
@@ -1658,7 +1837,7 @@ TEST_CASE("Configured timezone and daemon attributes reach management and schedu
     RuntimeFixture   fixture;
     fixture.options.default_timezone = "Europe/Tallinn";
     fixture.options.daemon_defaults  = {
-        {"retry.max_attempts", {.data = std::int64_t{2}}}
+        {"retry.max_attempts", {.data = std::int64_t{2}}},
     };
     fixture.create_runtime({}, &engine);
     CHECK(fixture.run([&] {

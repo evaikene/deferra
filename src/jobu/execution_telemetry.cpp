@@ -8,6 +8,8 @@
 #include "storage_failure_priv.hpp"
 #include "thread_context.hpp"
 #include "time_source.hpp"
+#include "timer.hpp"
+#include "transaction.hpp"
 #include "uuid.hpp"
 #include "wait_repository_priv.hpp"
 
@@ -104,11 +106,33 @@ struct ExecutionTelemetry::Private : jb::core::priv::ObjectPrivate {
         , construction_thread{jb::core::ThreadCtx::current()}
     {}
 
+    void bind_owner(ExecutionTelemetry& value)
+    {
+        owner = &value;
+        timer.timeout.connect(&value, [this] { checkpoint(); });
+    }
+
     auto valid_affinity() const noexcept -> bool
     {
         auto* loop = owner->event_loop();
         return owner->thread_ctx() == construction_thread && construction_thread == jb::core::ThreadCtx::current() &&
-               loop != nullptr && loop->is_valid() && loop->thread_ctx() == construction_thread;
+               loop != nullptr && loop->is_valid() && loop->thread_ctx() == construction_thread &&
+               timer.event_loop() == loop;
+    }
+
+    auto arm_timer(jb::core::Duration delay) -> detail::TelemetryResult<void>
+    {
+        if (!valid_affinity()) {
+            return detail::TelemetryResult<void>::failure(invalid_state("timer_affinity"));
+        }
+        if (jb::core::Clock::now() > jb::core::TimePoint::max() - delay) {
+            return detail::TelemetryResult<void>::failure(arithmetic_failure("jobu.telemetry.counter_overflow"));
+        }
+        timer.start(delay);
+        if (!timer.is_active()) {
+            return detail::TelemetryResult<void>::failure(invalid_state("timer_unavailable"));
+        }
+        return detail::TelemetryResult<void>::success();
     }
 
     auto poisoned_failure() const -> detail::TelemetryFailure
@@ -172,6 +196,11 @@ struct ExecutionTelemetry::Private : jb::core::priv::ObjectPrivate {
             return ServiceResult::failure(invalid_state("nil_activation_epoch").error);
         }
 
+        auto armed = arm_timer(std::chrono::duration_cast<jb::core::Duration>(options.checkpoint_interval));
+        if (!armed) {
+            return ServiceResult::failure(std::move(armed).error().error);
+        }
+
         epoch          = *generated;
         origin         = clock.monotonic_now();
         last_monotonic = origin;
@@ -179,29 +208,38 @@ struct ExecutionTelemetry::Private : jb::core::priv::ObjectPrivate {
         return ServiceResult::success();
     }
 
-    auto sample() -> detail::TelemetryResult<detail::TelemetrySample>
+    auto capture_sample() -> detail::TelemetryResult<detail::WaitSample>
     {
         auto ready = active();
         if (!ready) {
-            return detail::TelemetryResult<detail::TelemetrySample>::failure(std::move(ready).error());
+            return detail::TelemetryResult<detail::WaitSample>::failure(std::move(ready).error());
         }
 
-        // Invalidate even equal-tick boundaries by identity, without a wrapping generation counter.
-        latest_sample.reset();
         auto const utc_now = clock.utc_now();
         auto const now     = clock.monotonic_now();
         if (now < last_monotonic) {
-            return detail::TelemetryResult<detail::TelemetrySample>::failure(
+            return detail::TelemetryResult<detail::WaitSample>::failure(
                 arithmetic_failure("jobu.telemetry.clock_regression"));
         }
         auto tick = elapsed_microseconds(origin, now);
         if (!tick) {
-            return detail::TelemetryResult<detail::TelemetrySample>::failure(std::move(tick).error());
+            return detail::TelemetryResult<detail::WaitSample>::failure(std::move(tick).error());
         }
 
         last_monotonic = now;
-        latest_sample  = std::make_shared<detail::WaitSample const>(
-            detail::WaitSample{.utc_now = utc_now, .epoch = epoch, .tick_us = *tick, .monotonic_now = now});
+        return detail::TelemetryResult<detail::WaitSample>::success(
+            {.utc_now = utc_now, .epoch = epoch, .tick_us = *tick, .monotonic_now = now});
+    }
+
+    auto sample() -> detail::TelemetryResult<detail::TelemetrySample>
+    {
+        // Invalidate even equal-tick boundaries by identity, without a wrapping generation counter.
+        latest_sample.reset();
+        auto captured = capture_sample();
+        if (!captured) {
+            return detail::TelemetryResult<detail::TelemetrySample>::failure(std::move(captured).error());
+        }
+        latest_sample = std::make_shared<detail::WaitSample const>(*captured);
         return detail::TelemetryResult<detail::TelemetrySample>::success(latest_sample);
     }
 
@@ -217,12 +255,179 @@ struct ExecutionTelemetry::Private : jb::core::priv::ObjectPrivate {
         return detail::TelemetryResult<void>::success();
     }
 
-    void request_stop() noexcept
+    void disarm() noexcept
     {
+        timer.stop();
         if (state != State::Failed) {
             state = State::Stopped;
         }
         latest_sample.reset();
+        checkpoint_after.reset();
+    }
+
+    void request_stop() noexcept
+    {
+        if (state == State::Active) {
+            // Capture only once, even when stop is requested while a caller's transaction
+            // is active. No error is emitted on that stack; finish_stop reports it after unwind.
+            auto captured = capture_sample();
+            if (captured) {
+                stop_sample = *captured;
+            }
+            else {
+                stop_failure = std::move(captured).error();
+            }
+        }
+        disarm();
+    }
+
+    struct AccountingPage {
+        std::optional<jb::core::Uuid> after;
+        bool                          complete{false};
+    };
+
+    auto accounting_page(detail::WaitSample const& boundary, std::optional<jb::core::Uuid> after, bool close)
+        -> detail::TelemetryResult<AccountingPage>
+    {
+        using PageResult = detail::TelemetryResult<AccountingPage>;
+        auto transaction = jb::db::Transaction::begin(database);
+        if (!transaction) {
+            return PageResult::failure({.error = std::move(transaction).error()});
+        }
+        auto ids = repository.list_open(options.batch_size, after);
+        if (!ids) {
+            return PageResult::failure(std::move(ids).error());
+        }
+        for (auto const& id : *ids) {
+            auto result = close ? repository.settle(id, boundary) : repository.rebase(id, boundary);
+            if (!result) {
+                return PageResult::failure(std::move(result).error());
+            }
+        }
+
+        // A stop requested during a checkpoint must roll the page back, retaining its old
+        // tails for healthy settlement at the captured boundary. Stop settlement itself runs
+        // with ordinary accounting disabled and never reopens an interval.
+        if (!close && state != State::Active) {
+            return PageResult::failure({
+                .error =
+                    {
+                            .category = jb::core::ErrorCategory::Cancelled,
+                            .code     = "jobu.telemetry.stopping",
+                            .message  = "Telemetry checkpoint was stopped",
+                            },
+            });
+        }
+        auto committed = transaction->commit();
+        if (!committed) {
+            return PageResult::failure({.error = std::move(committed).error()});
+        }
+        return PageResult::success({
+            .after    = ids->empty() ? after : std::optional{ids->back()},
+            .complete = ids->size() < options.batch_size,
+        });
+    }
+
+    void checkpoint()
+    {
+        if (state != State::Active) {
+            return;
+        }
+
+        // Each page gets a fresh boundary. A mutation between yields may have opened an
+        // interval at a later tick than the preceding page; a sweep-wide sample would regress.
+        auto boundary = sample();
+        if (!boundary) {
+            report_failure(std::move(boundary).error(), detail::StorageOperation::Mutation);
+            return;
+        }
+        auto page = accounting_page(**boundary, checkpoint_after, false);
+        if (!page) {
+            if (page.error().error.code == "jobu.telemetry.stopping") {
+                if (database.is_poisoned()) {
+                    report_failure(poisoned_failure(), detail::StorageOperation::Mutation);
+                }
+                return;
+            }
+            report_failure(std::move(page).error(), detail::StorageOperation::Mutation);
+            return;
+        }
+        if (state != State::Active) {
+            return;
+        }
+
+        checkpoint_after = page->complete ? std::nullopt : page->after;
+        auto const delay = page->complete
+                             ? std::chrono::duration_cast<jb::core::Duration>(options.checkpoint_interval)
+                             : std::chrono::duration_cast<jb::core::Duration>(std::chrono::milliseconds{10});
+        auto       armed = arm_timer(delay);
+        if (!armed) {
+            report_failure(std::move(armed).error(), detail::StorageOperation::Mutation);
+        }
+    }
+
+    auto finish_stop() -> ServiceResult
+    {
+        if (first_failure) {
+            return ServiceResult::failure(first_failure->error);
+        }
+        if (state != State::Stopped) {
+            return ServiceResult::failure(invalid_state("finish_before_stop").error);
+        }
+
+        auto result = detail::TelemetryResult<void>::success();
+        if (stop_failure) {
+            result = detail::TelemetryResult<void>::failure(*stop_failure);
+        }
+        else if (stop_sample) {
+            result = finish_batches();
+        }
+        if (!result) {
+            // Preserve an owning return error before a direct receiver can destroy this owner.
+            auto failure = normalize_failure(std::move(result).error(), detail::StorageOperation::Mutation);
+            auto error   = failure.error;
+            report_failure(std::move(failure), detail::StorageOperation::Mutation);
+            return ServiceResult::failure(std::move(error));
+        }
+        stop_sample.reset();
+        return ServiceResult::success();
+    }
+
+    auto finish_batches() -> detail::TelemetryResult<void>
+    {
+        if (!valid_affinity()) {
+            return detail::TelemetryResult<void>::failure(invalid_state("owner_affinity"));
+        }
+        if (database.is_poisoned()) {
+            return detail::TelemetryResult<void>::failure(poisoned_failure());
+        }
+
+        std::optional<jb::core::Uuid> after;
+        for (;;) {
+            auto page = accounting_page(*stop_sample, after, true);
+            if (!page) {
+                return detail::TelemetryResult<void>::failure(std::move(page).error());
+            }
+            if (page->complete) {
+                return detail::TelemetryResult<void>::success();
+            }
+            after = page->after;
+        }
+    }
+
+    auto normalize_failure(detail::TelemetryFailure failure, detail::StorageOperation operation) const
+        -> detail::TelemetryFailure
+    {
+        // SQL scopes have unwound. Preserve an original fatal identity when failed rollback
+        // also poisoned the connection; otherwise the poisoned connection takes precedence.
+        auto const original_fatal = failure.error.code.starts_with("jobu.telemetry.") ||
+                                    detail::classify_storage_failure(failure.error, operation, failure.origin) ==
+                                        detail::StorageFailureDisposition::Fatal;
+        if (database.is_poisoned() && !original_fatal) {
+            failure = poisoned_failure();
+        }
+        failure.error = detail::sanitized_storage_error(failure.error, operation, failure.origin);
+        return failure;
     }
 
     void report_failure(detail::TelemetryFailure failure, detail::StorageOperation operation)
@@ -231,15 +436,9 @@ struct ExecutionTelemetry::Private : jb::core::priv::ObjectPrivate {
             return;
         }
 
-        // The caller has unwound its SQL scopes. Clock/accounting errors explicitly fail
-        // this owner; SQL classification alone does not make those errors fatal.
-        auto const original_fatal = failure.error.code.starts_with("jobu.telemetry.") ||
-                                    detail::classify_storage_failure(failure.error, operation, failure.origin) ==
-                                        detail::StorageFailureDisposition::Fatal;
-        if (database.is_poisoned() && !original_fatal) {
-            failure = poisoned_failure();
-        }
-        failure.error = detail::sanitized_storage_error(failure.error, operation, failure.origin);
+        // Clock/accounting errors explicitly fail this owner even when SQL classification
+        // alone would call them an ordinary operation error.
+        failure       = normalize_failure(std::move(failure), operation);
         first_failure = failure;
         state         = State::Failed;
         request_stop();
@@ -256,12 +455,16 @@ struct ExecutionTelemetry::Private : jb::core::priv::ObjectPrivate {
     jb::core::UuidGenerator&                 generator;
     TelemetryOptions                         options;
     detail::WaitRepository                   repository;
+    jb::core::Timer                          timer;
     jb::core::ThreadCtx const*               construction_thread;
     State                                    state{State::Fresh};
     jb::core::Uuid                           epoch;
     jb::core::TimePoint                      origin;
     jb::core::TimePoint                      last_monotonic;
     detail::TelemetrySample                  latest_sample;
+    std::optional<jb::core::Uuid>            checkpoint_after;
+    std::optional<detail::WaitSample>        stop_sample;
+    std::optional<detail::TelemetryFailure>  stop_failure;
     std::optional<detail::TelemetryFailure>  first_failure;
     std::optional<detail::AvailableJobTypes> available;
     AttemptExecutor const*                   registered_executor{};
@@ -279,12 +482,12 @@ ExecutionTelemetry::ExecutionTelemetry(jb::db::Database&        database,
 }
 {
     // Bind only after Object has taken ownership of the single derived Private block.
-    d_ptr<Private>()->owner = this;
+    d_ptr<Private>()->bind_owner(*this);
 }
 
 ExecutionTelemetry::~ExecutionTelemetry()
 {
-    d_ptr<Private>()->request_stop();
+    d_ptr<Private>()->disarm();
 }
 
 auto ExecutionTelemetry::start() -> jb::core::Result<void, jb::core::Error>
@@ -295,6 +498,11 @@ auto ExecutionTelemetry::start() -> jb::core::Result<void, jb::core::Error>
 void ExecutionTelemetry::request_stop() noexcept
 {
     d_ptr<Private>()->request_stop();
+}
+
+auto ExecutionTelemetry::finish_stop() -> jb::core::Result<void, jb::core::Error>
+{
+    return d_ptr<Private>()->finish_stop();
 }
 
 namespace detail {
@@ -326,7 +534,11 @@ auto TelemetryAccess::register_executor(ExecutionTelemetry&      owner,
 auto TelemetryAccess::available_types(ExecutionTelemetry& owner) -> TelemetryResult<AvailableJobTypes>
 {
     auto* data  = owner.d_ptr<ExecutionTelemetry::Private>();
-    auto  ready = data->active();
+    // Runtime can wire a dormant owner before the activation stage. Its registered
+    // executor snapshot already applies, while mutation boundaries remain unmeasured.
+    auto  ready = data->state == ExecutionTelemetry::Private::State::Fresh && data->valid_affinity()
+                    ? TelemetryResult<void>::success()
+                    : data->active();
     if (!ready) {
         return TelemetryResult<AvailableJobTypes>::failure(std::move(ready).error());
     }

@@ -157,6 +157,57 @@ WaitRepository::WaitRepository(jb::db::Database& database) noexcept
     : _database{database}
 {}
 
+auto WaitRepository::list_open(std::size_t limit, std::optional<jb::core::Uuid> after)
+    -> TelemetryResult<std::vector<jb::core::Uuid>>
+{
+    using PageResult = TelemetryResult<std::vector<jb::core::Uuid>>;
+    if (limit < 1 || limit > 4096) {
+        return PageResult::failure(invalid_state("invalid_page_limit", StorageFailureOrigin::Operation));
+    }
+
+    jb::db::Query query{_database};
+    auto          sql = std::string{"SELECT run_id FROM jobu_run_timing WHERE "
+                                    "(open_epoch IS NOT NULL OR open_tick_us IS NOT NULL)"};
+    if (after) {
+        sql += " AND run_id > :after";
+    }
+    sql         += " ORDER BY run_id LIMIT :limit";
+    auto result  = query.prepare(sql);
+    if (result && after) {
+        result = query.bind_value(":after", uuid_to_storage(*after));
+    }
+    if (result) {
+        result = query.bind_value(":limit", static_cast<std::int64_t>(limit));
+    }
+    if (result) {
+        result = query.exec();
+    }
+    if (!result) {
+        return PageResult::failure({.error = std::move(result).error()});
+    }
+
+    std::vector<jb::core::Uuid> ids;
+    for (;;) {
+        auto next = query.next();
+        if (!next) {
+            return PageResult::failure({.error = std::move(next).error()});
+        }
+        if (!*next) {
+            break;
+        }
+        auto id = read_uuid(query.record(), "run_id");
+        if (!id || id->is_nil() || (after && *id <= *after) || (!ids.empty() && *id <= ids.back())) {
+            return PageResult::failure(invalid_state("invalid_page_key"));
+        }
+        ids.push_back(*id);
+    }
+    auto finished = query.finish();
+    if (!finished) {
+        return PageResult::failure({.error = std::move(finished).error()});
+    }
+    return PageResult::success(std::move(ids));
+}
+
 auto WaitRepository::read(jb::core::Uuid const& run_id) -> TelemetryResult<WaitTiming>
 {
     jb::db::Query query{_database};
@@ -235,6 +286,28 @@ auto WaitRepository::write(jb::core::Uuid const& run_id, WaitTiming const& timin
         return TelemetryResult<void>::failure({.error = std::move(finished).error()});
     }
     return TelemetryResult<void>::success();
+}
+
+auto WaitRepository::repair_abandoned(jb::core::Uuid const& run_id) -> TelemetryResult<bool>
+{
+    auto timing = read(run_id);
+    if (!timing) {
+        return TelemetryResult<bool>::failure(std::move(timing).error());
+    }
+    if (!timing->open_epoch) {
+        return TelemetryResult<bool>::success(false);
+    }
+
+    // There is no live epoch during startup recovery. Neither the old monotonic origin nor
+    // the uncheckpointed tail can be reconstructed from UTC or from a new activation's tick.
+    timing->quality = WaitQuality::Partial;
+    timing->open_epoch.reset();
+    timing->open_tick_us.reset();
+    auto written = write(run_id, *timing);
+    if (!written) {
+        return TelemetryResult<bool>::failure(std::move(written).error());
+    }
+    return TelemetryResult<bool>::success(true);
 }
 
 auto WaitRepository::open_interval(jb::core::Uuid const& run_id, WaitSample const& sample)

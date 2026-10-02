@@ -21,9 +21,14 @@ namespace jb::jobu {
 class AttributeRegistry;
 class CronEngine;
 
-/// Bounds memory used by each keyset scan. Accepted batch sizes are 1..4096.
+/// Startup scan bounds and explicit coverage for newly repaired recurring work.
 struct RecoveryOptions {
+    /// Bounds each keyset page; accepted sizes are 1..4096.
     std::size_t scan_batch_size{256};
+    /// Set only when telemetry will activate before admission and cover new successors from
+    /// creation. Those rows begin Complete and closed; embedded callers default to Unmeasured.
+    /// Existing rows never gain Complete status through recovery.
+    bool        telemetry_covers_creation{false};
 };
 
 /// Changes committed by this invocation, returned only after all recovery checks succeed.
@@ -44,6 +49,8 @@ struct RecoveryReport {
     std::uint64_t suspended_jobs{};
     /// Queues changed from Suspending to Suspended after their running work was gone.
     std::uint64_t suspended_queues{};
+    /// Abandoned open timing rows closed as Partial without adding their unknown tail or downtime.
+    std::uint64_t repaired_timing_rows{};
 };
 
 /// Validates and repairs durable state before admitting mutations or dispatching work.
@@ -58,7 +65,9 @@ struct RecoveryReport {
 /// mean the current unit committed but its acknowledgement was lost; inspect reopened state.
 /// Repeated recovery is safe and does not duplicate retries or recurring successors. Success proves
 /// no Running work remains, current job lifecycles and barriers are valid, required recurring
-/// work exists, and suspensions are drained.
+/// work exists, suspensions are drained, and no abandoned timing intervals remain open.
+/// Recovery preserves checkpointed wait and delay-warning ownership, marks lost open tails
+/// Partial, and leaves closed timing quality unchanged even for interrupted Running attempts.
 ///
 /// @return Committed change counts, `jobu.recovery.invalid_options` for an out-of-range batch
 /// size, `jobu.recovery.invariant` for inconsistent durable state or counter overflow, or a

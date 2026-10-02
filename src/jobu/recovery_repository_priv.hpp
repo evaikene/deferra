@@ -7,6 +7,7 @@
 #include "result.hpp"
 #include "retry_policy_priv.hpp"
 #include "run.hpp"
+#include "run_repository_priv.hpp"
 
 #include <cstddef>
 #include <optional>
@@ -98,20 +99,24 @@ public:
     /// a duplicate successor is an error. RetryWait must never use this terminal-only operation.
     /// Pass max(recovery_time, now sampled immediately before the transaction) as the exclusive bound.
     /// Returns true for one insertion; no commit is performed and failure requires whole-unit rollback.
-    [[nodiscard]] auto insert_interrupted_successor(jb::core::Uuid const&    run_id,
-                                                    jb::core::UtcTimePoint   lower_bound,
-                                                    CronEngine const&        cron,
-                                                    jb::core::UuidGenerator& uuid_generator)
+    /// Complete measurement requires upcoming telemetry coverage from creation before admission.
+    [[nodiscard]] auto
+    insert_interrupted_successor(jb::core::Uuid const&    run_id,
+                                 jb::core::UtcTimePoint   lower_bound,
+                                 CronEngine const&        cron,
+                                 jb::core::UuidGenerator& uuid_generator,
+                                 InitialRunMeasurement    measurement = InitialRunMeasurement::Unmeasured)
         -> jb::core::Result<bool, jb::core::Error>;
 
     /// Re-reads a definition, its owner and schedule-owned work inside the caller's repair transaction.
     /// Inserts missing recurring work, including suspended/suspending definitions. Existing nonterminal
     /// work is preserved exactly; Once/deleted definitions return false. Unexpected conflicts fail.
-    /// Uses the same bound/rollback contract as insert_interrupted_successor(); returns true on insertion.
+    /// Uses the same bound/rollback/creation-coverage contract as insert_interrupted_successor().
     [[nodiscard]] auto repair_missing_successor(jb::core::Uuid const&    job_id,
                                                 jb::core::UtcTimePoint   lower_bound,
                                                 CronEngine const&        cron,
-                                                jb::core::UuidGenerator& uuid_generator)
+                                                jb::core::UuidGenerator& uuid_generator,
+                                                InitialRunMeasurement measurement = InitialRunMeasurement::Unmeasured)
         -> jb::core::Result<bool, jb::core::Error>;
 
     /// Revalidates the owner and completes a drained Suspending state in the caller's transaction.

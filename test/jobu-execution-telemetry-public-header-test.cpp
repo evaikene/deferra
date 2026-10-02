@@ -17,6 +17,8 @@ static_assert(std::is_constructible_v<jb::jobu::ExecutionTelemetry,
                                       jb::core::TimeSource&,
                                       jb::core::UuidGenerator&>);
 static_assert(noexcept(std::declval<jb::jobu::ExecutionTelemetry&>().request_stop()));
+static_assert(std::is_same_v<decltype(std::declval<jb::jobu::ExecutionTelemetry&>().finish_stop()),
+                             jb::core::Result<void, jb::core::Error>>);
 
 auto main() -> int
 {
