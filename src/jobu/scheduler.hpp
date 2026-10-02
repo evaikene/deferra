@@ -97,6 +97,10 @@ struct CancelRunResult {
 /// that total through retries, excludes execution/backoff, and reconciles released manual siblings atomically.
 /// Covered recurring successors begin Complete; later-instrumented runs remain Partial. Without telemetry, closed
 /// unmeasured rows remain unmeasured and abandoned open intervals are rejected before durable state changes.
+/// Each cycle observes the whole pending backlog before capacity selection, through bounded metadata pages.
+/// Eligible queue/global capacity wait is measured even when dispatch has no free slot. Committed delay claims
+/// emit through ExecutionTelemetry; warning wakes use monotonic deadlines independently of future UTC work.
+/// Pages bound memory, while total synchronous observation work grows with the pending set.
 ///
 /// Scheduling is event-driven and uses one non-repeating timer. Executor completion handlers remain valid after stop()
 /// so their durable outcomes can commit, but they do not restart dispatch while stopped. Shutdown, fatal failure, and

@@ -6,6 +6,7 @@
 #include "run.hpp"
 #include "wait_repository_priv.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -39,6 +40,7 @@ struct EligibilityScope {
     enum class Kind : std::uint8_t {
         Job,
         Queue,
+        All,
     };
     Kind           kind{Kind::Job};
     jb::core::Uuid id;
@@ -46,17 +48,18 @@ struct EligibilityScope {
 
 /// Owning eligibility metadata only; never decodes payloads, output or attribute documents.
 struct RunEligibility {
-    jb::core::Uuid         id;
-    jb::core::Uuid         job_id;
-    jb::core::Uuid         queue_id;
-    RunState               state{RunState::Scheduled};
-    RunOrigin              origin{RunOrigin::Scheduled};
-    bool                   schedule_owned{true};
-    JobType                type{JobType::Cli};
-    jb::core::UtcTimePoint runnable_at;
-    JobState               job_state{JobState::Active};
-    QueueState             queue_state{QueueState::Active};
-    NonterminalRunCounts   siblings;
+    jb::core::Uuid            id;
+    jb::core::Uuid            job_id;
+    jb::core::Uuid            queue_id;
+    RunState                  state{RunState::Scheduled};
+    RunOrigin                 origin{RunOrigin::Scheduled};
+    bool                      schedule_owned{true};
+    JobType                   type{JobType::Cli};
+    jb::core::UtcTimePoint    runnable_at;
+    JobState                  job_state{JobState::Active};
+    QueueState                queue_state{QueueState::Active};
+    NonterminalRunCounts      siblings;
+    std::chrono::milliseconds warning_threshold{0};
 
     [[nodiscard]] auto eligible(jb::core::UtcTimePoint now, AvailableJobTypes types) const noexcept -> bool;
 };

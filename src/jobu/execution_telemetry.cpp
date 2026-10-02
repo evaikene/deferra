@@ -201,7 +201,7 @@ struct ExecutionTelemetry::Private : jb::core::priv::ObjectPrivate {
 
         last_monotonic = now;
         latest_sample  = std::make_shared<detail::WaitSample const>(
-            detail::WaitSample{.utc_now = utc_now, .epoch = epoch, .tick_us = *tick});
+            detail::WaitSample{.utc_now = utc_now, .epoch = epoch, .tick_us = *tick, .monotonic_now = now});
         return detail::TelemetryResult<detail::TelemetrySample>::success(latest_sample);
     }
 
@@ -375,6 +375,25 @@ auto TelemetryAccess::lifetime(ExecutionTelemetry& owner) -> std::weak_ptr<jb::c
     return owner.d_ptr<ExecutionTelemetry::Private>()->lifetime;
 }
 
+auto TelemetryAccess::deliver_delayed(ExecutionTelemetry& owner, DelayedRun value) -> bool
+{
+    auto* data = owner.d_ptr<ExecutionTelemetry::Private>();
+    if (data->state != ExecutionTelemetry::Private::State::Active) {
+        return false;
+    }
+    auto guard = data->lifetime;
+    owner.emit(owner.delayed, value);
+    // The owning argument survives direct destruction. Never inspect the private block until
+    // its lifetime confirms that this receiver left the owner alive.
+    return guard->alive.load() && data->state == ExecutionTelemetry::Private::State::Active;
+}
+
+auto TelemetryAccess::sample_is_current(ExecutionTelemetry& owner, TelemetrySample const& sample) -> bool
+{
+    auto* data = owner.d_ptr<ExecutionTelemetry::Private>();
+    return data->state == ExecutionTelemetry::Private::State::Active && data->latest_sample == sample;
+}
+
 auto MutationTiming::measurement() const noexcept -> InitialRunMeasurement
 {
     return sample ? InitialRunMeasurement::Complete : InitialRunMeasurement::Unmeasured;
@@ -457,23 +476,112 @@ auto MutationTiming::validate_closed_run(jb::core::Uuid const& run_id) const -> 
     return TelemetryResult<void>::success();
 }
 
-auto MutationTiming::claim_run(jb::core::Uuid const& run_id) const -> TelemetryResult<void>
+auto MutationTiming::claim_run(JobRun const& run, std::chrono::milliseconds threshold) const
+    -> TelemetryResult<std::optional<DelayedRun>>
 {
+    using ClaimResult = TelemetryResult<std::optional<DelayedRun>>;
     if (!sample) {
-        return validate_closed_run(run_id);
+        auto valid = validate_closed_run(run.id);
+        return valid ? ClaimResult::success(std::nullopt) : ClaimResult::failure(std::move(valid).error());
     }
 
     // Selection is already validated by the scheduler. Opening at this boundary preserves
     // an existing tail and marks a late first observation Partial, even with zero new wait.
-    auto opened = TelemetryAccess::open_interval(*owner, run_id, sample);
+    auto opened = TelemetryAccess::open_interval(*owner, run.id, sample);
     if (!opened) {
-        return TelemetryResult<void>::failure(std::move(opened).error());
+        return ClaimResult::failure(std::move(opened).error());
     }
-    auto closed = TelemetryAccess::settle(*owner, run_id, sample);
+    auto closed = TelemetryAccess::settle(*owner, run.id, sample);
     if (!closed) {
-        return TelemetryResult<void>::failure(std::move(closed).error());
+        return ClaimResult::failure(std::move(closed).error());
     }
-    return TelemetryResult<void>::success();
+    WaitRepository repository{*database};
+    auto           warning = repository.claim_warning(run.id, *sample, threshold);
+    if (!warning) {
+        return ClaimResult::failure(std::move(warning).error());
+    }
+    if (!warning->claimed) {
+        return ClaimResult::success(std::nullopt);
+    }
+    return ClaimResult::success(DelayedRun{
+        .run_id        = run.id,
+        .job_id        = run.job_id,
+        .queue_id      = run.queue_id,
+        .type          = run.type,
+        .runnable_wait = warning->known_wait,
+        .threshold     = threshold,
+    });
+}
+
+namespace {
+
+auto warning_deadline(WaitSample const& sample, std::chrono::microseconds delay) -> std::optional<jb::core::TimePoint>
+{
+    using Conversion = std::ratio_divide<std::chrono::microseconds::period, jb::core::Duration::period>;
+    // A valid policy need not fit into the remaining steady-clock range. Omit an unreachable
+    // deadline rather than wrapping it; an ordinary later observation still evaluates the policy.
+    if (delay.count() > jb::core::Duration::max().count() / Conversion::num) {
+        return std::nullopt;
+    }
+    auto const ticks        = delay.count() * Conversion::num;
+    auto const native_delay = jb::core::Duration{(ticks / Conversion::den) + (ticks % Conversion::den != 0 ? 1 : 0)};
+    if (sample.monotonic_now.time_since_epoch() > jb::core::Duration::max() - native_delay) {
+        return std::nullopt;
+    }
+    return sample.monotonic_now + native_delay;
+}
+
+} // namespace
+
+auto MutationTiming::observe_page(std::optional<jb::core::Uuid> after) const -> TelemetryResult<ObservationPage>
+{
+    if (!sample) {
+        return TelemetryResult<ObservationPage>::success({});
+    }
+    if (!TelemetryAccess::sample_is_current(*owner, sample)) {
+        return TelemetryResult<ObservationPage>::failure(invalid_state("foreign_or_stale_sample"));
+    }
+    auto rows = list_eligibility(*database, {.kind = EligibilityScope::Kind::All}, after);
+    if (!rows) {
+        return TelemetryResult<ObservationPage>::failure(std::move(rows).error());
+    }
+    ObservationPage effects;
+    WaitRepository  repository{*database};
+    for (auto const& row : *rows) {
+        auto const eligible = row.eligible(utc_now, available);
+        auto       timing   = eligible ? TelemetryAccess::open_interval(*owner, row.id, sample)
+                                       : TelemetryAccess::settle(*owner, row.id, sample);
+        if (!timing) {
+            return TelemetryResult<ObservationPage>::failure(std::move(timing).error());
+        }
+        if (!eligible) {
+            continue;
+        }
+        auto warning = repository.claim_warning(row.id, *sample, row.warning_threshold);
+        if (!warning) {
+            return TelemetryResult<ObservationPage>::failure(std::move(warning).error());
+        }
+        if (warning->claimed) {
+            effects.delayed.push_back({
+                .run_id        = row.id,
+                .job_id        = row.job_id,
+                .queue_id      = row.queue_id,
+                .type          = row.type,
+                .runnable_wait = warning->known_wait,
+                .threshold     = row.warning_threshold,
+            });
+        }
+        if (warning->until_warning) {
+            auto deadline = warning_deadline(*sample, *warning->until_warning);
+            if (deadline && (!effects.next_warning || *deadline < *effects.next_warning)) {
+                effects.next_warning = deadline;
+            }
+        }
+    }
+    if (!rows->empty()) {
+        effects.after = rows->back().id;
+    }
+    return TelemetryResult<ObservationPage>::success(std::move(effects));
 }
 
 auto TelemetryAccess::sample(ExecutionTelemetry& owner) -> TelemetryResult<TelemetrySample>

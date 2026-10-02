@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -44,7 +45,7 @@ namespace {
 auto identities() -> std::vector<Uuid>
 {
     std::vector<Uuid> result;
-    for (std::uint32_t i = 10000; i < 10200; ++i) {
+    for (std::uint32_t i = 10000; i < 13000; ++i) {
         result.push_back(recovery_id(i));
     }
     return result;
@@ -52,6 +53,12 @@ auto identities() -> std::vector<Uuid>
 
 auto classify(std::string_view sql) -> std::string_view
 {
+    if (sql.starts_with("UPDATE jobu_run_timing SET delay_warned")) {
+        return "warning.claim";
+    }
+    if (sql.starts_with("SELECT r.id, r.job_id")) {
+        return "eligibility.read";
+    }
     if (sql.starts_with("SELECT r.state, t.runnable_wait_us")) {
         return "timing.read";
     }
@@ -133,12 +140,12 @@ private:
 };
 
 struct Fixture {
-    explicit Fixture(bool active = true, bool supply = true, std::uint32_t concurrency = 1)
+    explicit Fixture(bool active = true, bool supply = true, std::uint32_t concurrency = 1, bool http_available = true)
     {
         time.set_utc(UtcTimePoint{100s});
         time.set_monotonic(TimePoint{1000s});
         executor.fake.set_available(JobType::Cli, true);
-        executor.fake.set_available(JobType::Http, true);
+        executor.fake.set_available(JobType::Http, http_available);
         telemetry = std::make_unique<ExecutionTelemetry>(storage.database, storage.registry, time, generator);
         // Register through public construction, while deterministic core calls keep wake delivery under test control.
         registrar = std::make_unique<Scheduler>(storage.database,
@@ -148,7 +155,11 @@ struct Fixture {
                                                 time,
                                                 executor,
                                                 secrets,
-                                                SchedulerOptions{.telemetry = telemetry.get()});
+                                                SchedulerOptions{
+                                                    .cli_concurrency  = concurrency,
+                                                    .http_concurrency = concurrency,
+                                                    .telemetry        = telemetry.get(),
+                                                });
         if (active) {
             REQUIRE(telemetry->start());
         }
@@ -174,11 +185,13 @@ struct Fixture {
             timing_failures.push_back(error);
             calls_at_failure = faults->calls.size();
         });
+        telemetry->delayed.connect(&receiver, [this](DelayedRun const& warning) { warnings.push_back(warning); });
     }
 
-    auto queue(std::uint32_t concurrency = 1) const -> Queue
+    auto queue(std::uint32_t concurrency = 1, std::chrono::milliseconds threshold = 10000ms) const -> Queue
     {
-        auto result = service->create_queue({.name = "queue", .concurrency_limit = concurrency});
+        auto result = service->create_queue(
+            {.name = "queue", .concurrency_limit = concurrency, .runnable_wait_warning = threshold});
         REQUIRE(result);
         return *result;
     }
@@ -275,6 +288,7 @@ struct Fixture {
     Object                                 receiver;
     std::vector<Error>                     failures;
     std::vector<Error>                     timing_failures;
+    std::vector<DelayedRun>                warnings;
     std::size_t                            calls_at_failure{0};
     std::unique_ptr<ExecutionTelemetry>    telemetry;
     std::unique_ptr<Scheduler>             registrar;
@@ -565,7 +579,15 @@ TEST_CASE("Lost dispatch acknowledgement commits closed timing without external 
     auto    queue = f.queue();
     auto    run   = f.scheduled(f.job(queue).id);
     f.time.advance(2s);
-    f.fault("connection", DatabaseOperation::Commit, DatabaseFaultPhase::AfterSuccess);
+    // Observation now commits its own pages before dispatch. Arm acknowledgement loss at
+    // the Running write so this still exercises the durable-start transaction specifically.
+    f.faults->classify = [&f](std::string_view sql) {
+        auto label = classify(sql);
+        if (label == "dispatch.run") {
+            f.fault("connection", DatabaseOperation::Commit, DatabaseFaultPhase::AfterSuccess);
+        }
+        return std::string{label};
+    };
     REQUIRE_FALSE(f.core->process_cycle());
     require_consumed_faults(*f.faults);
     CHECK(f.executor.fake.start_requests().empty());
@@ -870,6 +892,509 @@ TEST_CASE("Omitted telemetry rejects open wait at the claim boundary", "[jobu][t
     auto result = f.core->process_cycle();
     REQUIRE_FALSE(result);
     CHECK(result.error().code == "jobu.telemetry.invalid_state");
+    CHECK(f.executor.fake.start_requests().empty());
+    CHECK(storage_snapshot(f.storage.database) == before);
+}
+
+TEST_CASE("Automatic observation reaches backlog tails despite exhausted capacity",
+          "[jobu][telemetry][scheduler][warning][page]")
+{
+    auto    global = GENERATE(false, true);
+    Fixture f{true, true, global ? 1U : 2U};
+    auto    queue = f.queue(global ? 2U : 1U, 10ms);
+    f.job(queue);
+    REQUIRE(f.core->process_cycle());
+
+    // These rows bypass covered creation, so the scheduler must discover them itself and
+    // establish Partial. More than two pages exercise the exclusive keyset's final tail.
+    std::vector<Uuid> waiting;
+    for (std::uint32_t i = 0; i < 401; ++i) {
+        auto job = f.storage.make_job(recovery_id(20000 + (2 * i)), queue.id);
+        auto row = f.storage.make_run(recovery_id(20001 + (2 * i)), job);
+        f.storage.insert_job(job);
+        f.storage.insert_run(row);
+        waiting.push_back(row.run.id);
+    }
+    REQUIRE(f.core->process_cycle());
+    for (auto id : waiting) {
+        auto timing = f.timing(id);
+        CHECK(timing.quality == WaitQuality::Partial);
+        CHECK(timing.open_epoch);
+    }
+    f.time.advance(10001us);
+    REQUIRE(f.core->process_cycle());
+    REQUIRE(f.warnings.size() == waiting.size());
+    for (std::size_t i = 0; i < waiting.size(); ++i) {
+        CHECK(f.warnings[i].run_id == waiting[i]);
+        CHECK(f.warnings[i].runnable_wait == 10001us);
+        CHECK(f.timing(waiting[i]).delay_warned);
+        CHECK(f.timing(waiting[i]).runnable_wait_us == 0); // Observation is not a checkpoint sweep.
+    }
+    REQUIRE(f.core->process_cycle());
+    CHECK(f.warnings.size() == waiting.size());
+    CHECK(f.executor.fake.start_requests().size() == 1);
+}
+
+TEST_CASE("Warning-only wakes cross equality once and remain bounded to one timer",
+          "[jobu][telemetry][scheduler][warning][wake]")
+{
+    Fixture f;
+    auto    queue = f.queue(1, 10ms);
+    f.job(queue);
+    auto waiting = f.scheduled(f.job(queue).id);
+    REQUIRE(f.registrar->start());
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 1);
+    f.time.advance(10ms);
+    jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+    CHECK(f.warnings.empty());
+    auto deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*f.loop.loop);
+    REQUIRE(deadline);
+    auto equality = f.core->process_cycle();
+    REQUIRE(equality);
+    CHECK(equality->next_warning == f.time.monotonic_now() + 1us);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 1);
+    f.time.advance(1us);
+    jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+    REQUIRE(f.warnings.size() == 1);
+    CHECK(f.warnings.front().run_id == waiting.id);
+    CHECK(f.warnings.front().runnable_wait == 10001us);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
+}
+
+TEST_CASE("Disabled warnings still count wait and threshold edits use current queue policy",
+          "[jobu][telemetry][scheduler][warning][policy]")
+{
+    Fixture f;
+    auto    queue = f.queue(1, 0ms);
+    f.job(queue);
+    auto waiting = f.scheduled(f.job(queue).id);
+    REQUIRE(f.core->process_cycle());
+    f.time.advance(20ms);
+    auto disabled = f.core->process_cycle();
+    REQUIRE(disabled);
+    CHECK_FALSE(disabled->next_warning);
+    CHECK(f.warnings.empty());
+    REQUIRE(f.service->update_queue({.queue = queue.id, .runnable_wait_warning = 30ms}));
+    auto higher = f.core->process_cycle();
+    REQUIRE(higher);
+    CHECK(higher->next_warning == f.time.monotonic_now() + 10001us);
+    CHECK(f.warnings.empty());
+    REQUIRE(f.service->update_queue({.queue = queue.id, .runnable_wait_warning = 5ms}));
+    REQUIRE(f.core->process_cycle());
+    REQUIRE(f.warnings.size() == 1);
+    CHECK(f.warnings.front().threshold == 5ms);
+    CHECK(f.warnings.front().runnable_wait == 20ms);
+    CHECK(f.timing(waiting.id).runnable_wait_us == 20000);
+    REQUIRE(f.service->update_queue({.queue = queue.id, .runnable_wait_warning = 0ms}));
+    REQUIRE(f.service->update_queue({.queue = queue.id, .runnable_wait_warning = 1ms}));
+    REQUIRE(f.core->process_cycle());
+    CHECK(f.warnings.size() == 1);
+}
+
+TEST_CASE("UTC corrections change observed due eligibility without charging corrected wall time",
+          "[jobu][telemetry][scheduler][warning][clock]")
+{
+    Fixture f;
+    auto    queue = f.queue(1, 10ms);
+    f.job(queue);
+    auto waiting = f.scheduled(f.job(queue, {}, OnceSchedule{.planned_at = UtcTimePoint{200s}}).id);
+    REQUIRE(f.core->process_cycle());
+    f.time.set_utc(UtcTimePoint{200s});
+    REQUIRE(f.core->process_cycle());
+    f.time.advance(4ms);
+    f.time.set_utc(UtcTimePoint{150s});
+    REQUIRE(f.core->process_cycle());
+    CHECK(f.timing(waiting.id).runnable_wait_us == 4000);
+    CHECK_FALSE(f.timing(waiting.id).open_epoch);
+    f.time.advance(100s);
+    REQUIRE(f.core->process_cycle());
+    CHECK(f.warnings.empty());
+    f.time.advance(6001us);
+    REQUIRE(f.core->process_cycle());
+    REQUIRE(f.warnings.size() == 1);
+    CHECK(f.warnings.front().runnable_wait == 10001us);
+}
+
+TEST_CASE("Suspended and barrier-blocked work cannot acquire warnings",
+          "[jobu][telemetry][scheduler][warning][eligibility]")
+{
+    Fixture f;
+    auto    queue = f.queue(1, 10ms);
+    f.job(queue);
+    auto job       = f.job(queue, {}, OnceSchedule{.planned_at = UtcTimePoint{101s}});
+    auto scheduled = f.scheduled(job.id);
+    auto manual    = f.service->run_now({.job_id = job.id});
+    REQUIRE(manual);
+    REQUIRE(f.service->suspend_job(job.id));
+    REQUIRE(f.core->process_cycle());
+    f.time.advance(1s);
+    REQUIRE(f.core->process_cycle());
+    REQUIRE(f.warnings.size() == 1);
+    CHECK(f.warnings.front().run_id == manual->id); // Accepted manual work bypasses job suspension.
+    CHECK_FALSE(f.timing(scheduled.id).open_epoch);
+    auto other = f.job(queue, {}, OnceSchedule{.planned_at = UtcTimePoint{102s}});
+    REQUIRE(f.service->suspend_queue(queue.id));
+    f.time.advance(1s);
+    REQUIRE(f.core->process_cycle());
+    CHECK(f.warnings.size() == 1);
+    CHECK_FALSE(f.timing(f.scheduled(other.id).id).open_epoch);
+}
+
+TEST_CASE("Future retries are discovered automatically and warnings survive subsequent attempts",
+          "[jobu][telemetry][scheduler][warning][retry]")
+{
+    auto    mode = GENERATE(std::string{"blocking"}, std::string{"reschedule"});
+    Fixture f;
+    auto    queue = f.queue(2, 10ms);
+    auto    retry = f.scheduled(f.job(queue, retry_attributes(mode, "fixed", 1s)).id);
+    REQUIRE(f.core->process_cycle());
+    f.finish(true);
+    // A competing attempt consumes the global runner, including when the retry retains a slot.
+    f.job(queue);
+    REQUIRE(f.core->process_cycle());
+    f.time.advance(500ms);
+    REQUIRE(f.core->process_cycle());
+    CHECK_FALSE(f.timing(retry.id).open_epoch);
+    CHECK(f.warnings.empty());
+    f.time.advance(500ms);
+    REQUIRE(f.core->process_cycle());
+    CHECK(f.timing(retry.id).open_epoch);
+    CHECK(f.timing(retry.id).runnable_wait_us == 0);
+    f.time.advance(10001us);
+    REQUIRE(f.core->process_cycle());
+    REQUIRE(f.warnings.size() == 1);
+    CHECK(f.warnings.front().run_id == retry.id);
+    f.finish();
+    REQUIRE(f.core->process_cycle());
+    CHECK(f.run(retry.id).state == RunState::Running);
+    f.finish(true);
+    f.time.advance(2s);
+    REQUIRE(f.core->process_cycle());
+    f.finish();
+    CHECK(f.warnings.size() == 1);
+    CHECK(f.timing(retry.id).delay_warned);
+    CHECK(f.timing(retry.id).runnable_wait_us == 10001);
+}
+
+TEST_CASE("Moving eligible work changes threshold ownership without resetting the warning claim",
+          "[jobu][telemetry][scheduler][warning][move]")
+{
+    Fixture f;
+    auto    queue = f.queue(1, 100ms);
+    f.job(queue);
+    auto job     = f.job(queue);
+    auto waiting = f.scheduled(job.id);
+    REQUIRE(f.core->process_cycle());
+    f.time.advance(20ms);
+    auto destination = f.service->create_queue({.name = "destination", .runnable_wait_warning = 10ms});
+    REQUIRE(destination);
+    auto suspended = f.service->suspend_job(job.id);
+    REQUIRE(suspended);
+    auto moved = f.service->move_job(
+        {.job_id = job.id, .expected_revision = suspended->revision, .target_queue = destination->id});
+    REQUIRE(moved);
+    REQUIRE(f.service->resume_job(job.id));
+    REQUIRE(f.core->process_cycle());
+    REQUIRE(f.warnings.size() == 1);
+    CHECK(f.warnings.front().run_id == waiting.id);
+    CHECK(f.warnings.front().queue_id == destination->id);
+    CHECK(f.warnings.front().threshold == 10ms);
+    suspended = f.service->suspend_job(job.id);
+    REQUIRE(suspended);
+    REQUIRE(
+        f.service->move_job({.job_id = job.id, .expected_revision = suspended->revision, .target_queue = queue.id}));
+    REQUIRE(f.service->resume_job(job.id));
+    REQUIRE(f.service->update_queue({.queue = queue.id, .runnable_wait_warning = 1ms}));
+    REQUIRE(f.core->process_cycle());
+    CHECK(f.warnings.size() == 1);
+}
+
+TEST_CASE("A dispatch crossing after observation claims its warning in the Running transaction",
+          "[jobu][telemetry][scheduler][warning][dispatch]")
+{
+    Fixture f;
+    auto    queue      = f.queue(1, 10ms);
+    auto    run        = f.scheduled(f.job(queue).id);
+    bool    crossed    = false;
+    f.faults->classify = [&f, &crossed](std::string_view sql) {
+        if (!crossed && sql.find("ORDER BY jobu_runs.priority DESC") != std::string_view::npos) {
+            crossed = true;
+            f.time.advance(1us);
+        }
+        return std::string{classify(sql)};
+    };
+    f.telemetry->delayed.connect(&f.receiver, [&f, id = run.id](DelayedRun const&) {
+        CHECK(f.run(id).state == RunState::Running);
+        CHECK_FALSE(f.timing(id).open_epoch);
+        auto transaction = jb::db::Transaction::begin(f.storage.database);
+        REQUIRE(transaction);
+        REQUIRE(transaction->rollback());
+    });
+    f.time.advance(10ms);
+    REQUIRE(f.core->process_cycle());
+    REQUIRE(f.warnings.size() == 1);
+    CHECK(f.warnings.front().runnable_wait == 10001us);
+    CHECK(f.timing(run.id).runnable_wait_us == 10001);
+    CHECK(f.executor.fake.start_requests().size() == 1);
+}
+
+TEST_CASE("Observation warning failures roll back the page and emit no diagnostic",
+          "[jobu][telemetry][scheduler][warning][fault]")
+{
+    auto    operation = GENERATE(DatabaseOperation::Prepare,
+                                 DatabaseOperation::Bind,
+                                 DatabaseOperation::Execute,
+                                 DatabaseOperation::Finish,
+                                 DatabaseOperation::Commit);
+    Fixture f;
+    auto    queue = f.queue(1, 10ms);
+    f.job(queue);
+    f.job(queue);
+    REQUIRE(f.core->process_cycle());
+    f.time.advance(11ms);
+    auto before = storage_snapshot(f.storage.database);
+    f.fault(operation == DatabaseOperation::Commit ? "connection" : "warning.claim", operation);
+    REQUIRE_FALSE(f.core->process_cycle());
+    require_consumed_faults(*f.faults);
+    CHECK(f.warnings.empty());
+    CHECK(storage_snapshot(f.storage.database) == before);
+    REQUIRE(f.timing_failures.size() == 1);
+    check_safe_error(f.timing_failures.front(), "db.io");
+}
+
+TEST_CASE("Observation commit uncertainty and rollback poison gate delivery and subsequent work",
+          "[jobu][telemetry][scheduler][warning][fault]")
+{
+    auto    committed = GENERATE(false, true);
+    Fixture f;
+    auto    queue = f.queue(1, 10ms);
+    f.job(queue);
+    auto waiting = f.scheduled(f.job(queue).id);
+    REQUIRE(f.core->process_cycle());
+    f.time.advance(11ms);
+    if (committed) {
+        f.fault("connection", DatabaseOperation::Commit, DatabaseFaultPhase::AfterSuccess);
+    }
+    else {
+        f.fault("warning.claim");
+        f.fault("connection", DatabaseOperation::Rollback, DatabaseFaultPhase::Before, "db.connection_failed");
+    }
+    REQUIRE_FALSE(f.core->process_cycle());
+    require_consumed_faults(*f.faults);
+    CHECK(f.warnings.empty());
+    auto calls = f.faults->calls.size();
+    REQUIRE_FALSE(f.core->process_cycle());
+    CHECK(f.faults->calls.size() == calls);
+    f.reopen();
+    CHECK(f.timing(waiting.id).delay_warned == committed);
+    CHECK(f.run(waiting.id).state == RunState::Scheduled);
+}
+
+TEST_CASE("Delayed receivers can shut down or destroy telemetry after page commit",
+          "[jobu][telemetry][scheduler][warning][lifetime]")
+{
+    auto    destroy = GENERATE(false, true);
+    Fixture f;
+    auto    queue = f.queue(1, 10ms);
+    auto    run   = f.scheduled(f.job(queue).id);
+    f.job(queue);
+    f.telemetry->delayed.connect(&f.receiver, [&f, destroy](DelayedRun const& value) {
+        auto transaction = jb::db::Transaction::begin(f.storage.database);
+        REQUIRE(transaction);
+        REQUIRE(transaction->rollback());
+        if (destroy) {
+            f.telemetry.reset();
+        }
+        else {
+            f.registrar->shutdown();
+            f.telemetry->request_stop();
+        }
+        CHECK(value.runnable_wait == 11ms); // Owning emission survives sender destruction.
+    });
+    f.time.advance(11ms);
+    auto started = f.registrar->start();
+    REQUIRE_FALSE(started);
+    CHECK(started.error().code == "jobu.scheduler.stopping");
+    CHECK(f.registrar->state() == SchedulerState::Shutdown);
+    CHECK(f.executor.fake.start_requests().empty());
+    CHECK(f.timing(run.id).delay_warned);
+    CHECK(f.warnings.size() == 1);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
+}
+
+TEST_CASE("Closed durable warning claims survive a new activation without duplicate delivery",
+          "[jobu][telemetry][scheduler][warning][restart]")
+{
+    Fixture f;
+    auto    queue = f.queue(1, 10ms);
+    f.job(queue);
+    auto job     = f.job(queue);
+    auto waiting = f.scheduled(job.id);
+    REQUIRE(f.core->process_cycle());
+    f.time.advance(10001us);
+    REQUIRE(f.core->process_cycle());
+    REQUIRE(f.warnings.size() == 1);
+    REQUIRE(f.service->suspend_job(job.id));
+    f.finish();
+    CHECK_FALSE(f.timing(waiting.id).open_epoch);
+
+    // Restart only closed timing rows. Repair of lost old-epoch tails belongs to Stage 9.13.
+    f.reopen();
+    ExecutionTelemetry telemetry{f.storage.database, f.storage.registry, f.time, f.generator};
+    Scheduler          scheduler{f.storage.database,
+                                 f.storage.registry,
+                                 f.cron,
+                                 f.generator,
+                                 f.time,
+                                 f.executor,
+                                 f.secrets,
+                                 SchedulerOptions{.telemetry = &telemetry}};
+    REQUIRE(telemetry.start());
+    ManagementService management{f.storage.database,
+                                 f.storage.registry,
+                                 f.cron,
+                                 f.generator,
+                                 f.time,
+                                 ManagementServiceOptions{.telemetry = &telemetry}};
+    telemetry.delayed.connect(&f.receiver, [&f](DelayedRun const& value) { f.warnings.push_back(value); });
+    REQUIRE(management.resume_job(job.id));
+    REQUIRE(scheduler.start());
+    CHECK(f.warnings.size() == 1);
+    CHECK(f.timing(waiting.id).delay_warned);
+    CHECK(f.timing(waiting.id).runnable_wait_us == 10001);
+}
+
+TEST_CASE("Queued warning delivery owns committed values after telemetry stops",
+          "[jobu][telemetry][scheduler][warning][lifetime]")
+{
+    Fixture                   f;
+    auto                      queue = f.queue(1, 10ms);
+    auto                      run   = f.scheduled(f.job(queue).id);
+    Object                    receiver;
+    std::optional<DelayedRun> delivered;
+    f.telemetry->delayed.connect(
+        &receiver,
+        [&delivered](DelayedRun const& value) { delivered = value; },
+        ConnectionType::Queued);
+    f.telemetry->delayed.connect(&f.receiver, [&f](DelayedRun const&) { f.telemetry->request_stop(); });
+    f.time.advance(11ms);
+    REQUIRE(f.core->process_cycle());
+    CHECK_FALSE(delivered);
+    f.time.advance(20ms);
+    CHECK(f.loop.loop->process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
+    REQUIRE(delivered);
+    CHECK(delivered->run_id == run.id);
+    CHECK(delivered->runnable_wait == 11ms);
+    CHECK(delivered->threshold == 10ms);
+}
+
+TEST_CASE("Delayed receiver mutations invalidate old samples and preserve an immediate rescan",
+          "[jobu][telemetry][scheduler][warning][reentrancy]")
+{
+    Fixture f;
+    auto    queue = f.queue(1, 10ms);
+    f.job(queue);
+    f.job(queue);
+    f.job(queue, {}, OnceSchedule{.planned_at = UtcTimePoint{200s}});
+    f.telemetry->delayed.connect(&f.receiver, [&f, id = queue.id](DelayedRun const&) {
+        REQUIRE(f.service->update_queue({.queue = id, .runnable_wait_warning = 0ms}));
+    });
+    f.service->mutation_committed.connect(f.registrar.get(), [&f] { f.registrar->request_rescan(); });
+    REQUIRE(f.registrar->start());
+    f.time.advance(11ms);
+    jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+    REQUIRE(f.warnings.size() == 1);
+    // The future UTC wake must not replace the receiver's immediate rescan.
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 1);
+    auto rescan_deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*f.loop.loop);
+    REQUIRE(rescan_deadline);
+    CHECK(*rescan_deadline <= Clock::now());
+    auto calls = f.faults->calls.size();
+    jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+    CHECK(f.faults->calls.size() > calls);
+    CHECK(f.registrar->state() == SchedulerState::Running);
+    CHECK(f.timing_failures.empty());
+}
+
+TEST_CASE("Unavailable executor types never open wait or arm warning wakes",
+          "[jobu][telemetry][scheduler][warning][eligibility]")
+{
+    Fixture f{true, true, 1, false};
+    auto    queue = f.queue(1, 10ms);
+    auto    run   = f.scheduled(f.job(queue, {}, ImmediateSchedule{}, JobType::Http).id);
+    f.time.advance(1s);
+    auto cycle = f.core->process_cycle();
+    REQUIRE(cycle);
+    CHECK_FALSE(cycle->next_warning);
+    CHECK_FALSE(cycle->next_wake);
+    CHECK_FALSE(f.timing(run.id).open_epoch);
+    CHECK(f.timing(run.id).runnable_wait_us == 0);
+    CHECK(f.warnings.empty());
+    CHECK(f.executor.fake.start_requests().empty());
+}
+
+TEST_CASE("Future UTC work and warning deadlines share one wake without charging future wait",
+          "[jobu][telemetry][scheduler][warning][wake]")
+{
+    Fixture f;
+    auto    queue = f.queue(1, 10ms);
+    f.job(queue);
+    auto waiting = f.scheduled(f.job(queue).id);
+    auto future  = f.scheduled(f.job(queue, {}, OnceSchedule{.planned_at = UtcTimePoint{100s + 5ms}}).id);
+    REQUIRE(f.registrar->start());
+    auto cycle = f.core->process_cycle();
+    REQUIRE(cycle);
+    CHECK(cycle->next_wake == UtcTimePoint{100s + 5ms});
+    CHECK(cycle->next_warning == f.time.monotonic_now() + 10001us);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 1);
+    f.time.advance(5ms);
+    jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+    CHECK(f.warnings.empty());
+    CHECK(f.timing(future.id).open_epoch);
+    f.time.advance(5001us);
+    jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+    REQUIRE(f.warnings.size() == 1);
+    CHECK(f.warnings.front().run_id == waiting.id);
+    CHECK_FALSE(f.timing(future.id).delay_warned);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 1);
+}
+
+TEST_CASE("Unrepresentable warning deadlines cannot wrap into immediate wakes",
+          "[jobu][telemetry][scheduler][warning][clock]")
+{
+    Fixture f;
+    auto    queue = f.queue(1, std::chrono::milliseconds{std::numeric_limits<std::int64_t>::max() / 1000});
+    f.job(queue);
+    auto waiting = f.scheduled(f.job(queue).id);
+    auto cycle   = f.core->process_cycle();
+    REQUIRE(cycle);
+    CHECK_FALSE(cycle->next_warning);
+    CHECK(f.timing(waiting.id).open_epoch);
+    CHECK(f.warnings.empty());
+    CHECK(f.timing_failures.empty());
+}
+
+TEST_CASE("An earned dispatch warning rolls back with a failed Running write",
+          "[jobu][telemetry][scheduler][warning][dispatch][fault]")
+{
+    Fixture f;
+    auto    queue      = f.queue(1, 10ms);
+    auto    run        = f.scheduled(f.job(queue).id);
+    auto    before     = storage_snapshot(f.storage.database);
+    bool    crossed    = false;
+    f.faults->classify = [&f, &crossed](std::string_view sql) {
+        if (!crossed && sql.find("ORDER BY jobu_runs.priority DESC") != std::string_view::npos) {
+            crossed = true;
+            f.time.advance(1us);
+        }
+        return std::string{classify(sql)};
+    };
+    f.fault("dispatch.run");
+    f.time.advance(10ms);
+    REQUIRE_FALSE(f.core->process_cycle());
+    require_consumed_faults(*f.faults);
+    CHECK(f.warnings.empty());
+    CHECK_FALSE(f.timing(run.id).delay_warned);
     CHECK(f.executor.fake.start_requests().empty());
     CHECK(storage_snapshot(f.storage.database) == before);
 }

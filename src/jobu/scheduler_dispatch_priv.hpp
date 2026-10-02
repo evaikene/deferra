@@ -1,6 +1,7 @@
 #pragma once
 
 #include "attempt_executor.hpp"
+#include "execution_telemetry.hpp"
 #include "result.hpp"
 #include "wait_repository_priv.hpp"
 
@@ -22,6 +23,7 @@ struct MutationTiming;
 struct DispatchStart {
     AttemptKey                       key;
     std::optional<AttemptCompletion> immediate_completion;
+    std::optional<DelayedRun>        delayed;
 };
 
 [[nodiscard]] auto dispatch_selected(jb::db::Database&        database,

@@ -774,6 +774,7 @@ auto dispatch_visit(jb::db::Database&                        database,
                     std::map<jb::core::Uuid, std::uint64_t>& active_attempts,
                     std::set<jb::core::Uuid>&                attempted_blocking_retries,
                     CompletionProcessor const&               completion_processor,
+                    std::function<bool(DelayedRun)> const&   delayed_delivery,
                     bool const&                              terminal) -> CoreResult<bool>
 {
     if (terminal || running_for(capacity, type) >= global_limit_for(options, type)) {
@@ -901,6 +902,11 @@ auto dispatch_visit(jb::db::Database&                        database,
             auto recorded = record_start(capacity, type, selected.runtime->id, queue_slot_already_occupied);
             if (!recorded) {
                 return CoreResult<bool>::failure(std::move(recorded).error());
+            }
+            // Correlation and capacity are established before a warning receiver may request
+            // shutdown or complete an attempt. The claim transaction and all its queries are gone.
+            if (dispatched->value().delayed && !delayed_delivery(*dispatched->value().delayed)) {
+                return CoreResult<bool>::success(true);
             }
             if (dispatched->value().immediate_completion) {
                 // Preparation and executor start errors complete only after correlation and occupancy are recorded.
@@ -1278,6 +1284,15 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
         return CoreResult<SchedulerCycleResult>::failure(invalid_options());
     }
 
+    bool rescan       = false;
+    auto warning_wake = observe_backlog(rescan);
+    if (!warning_wake) {
+        return CoreResult<SchedulerCycleResult>::failure(std::move(warning_wake).error());
+    }
+    if (_completion_token->terminal) {
+        return CoreResult<SchedulerCycleResult>::success({.shutdown_requested = true});
+    }
+
     // Sample UTC once, then rebuild queues, barriers, and capacity before selection; reconstruction failure prevents
     // every start in this cycle.
     auto const          now   = _time_source.utc_now();
@@ -1300,6 +1315,8 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
     auto http_candidates         = CandidateCache{};
     auto attempted_cli_blocking  = std::set<jb::core::Uuid>{};
     auto attempted_http_blocking = std::set<jb::core::Uuid>{};
+    bool dispatched_any          = false;
+    auto delayed_delivery = std::function<bool(DelayedRun)>{[this](DelayedRun value) { return deliver_delay(value); }};
     // Ordinary stop leaves this token valid. Terminal shutdown and destruction invalidate it before a retained
     // closure can touch the core, including closures delivered reentrantly from the first failure notification.
     auto completion_processor =
@@ -1362,6 +1379,7 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
                                     _active_attempts,
                                     first_blocking,
                                     completion_processor,
+                                    delayed_delivery,
                                     _completion_token->terminal);
         if (!first) {
             return CoreResult<SchedulerCycleResult>::failure(std::move(first).error());
@@ -1370,7 +1388,7 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
             return CoreResult<SchedulerCycleResult>::failure(*_failure);
         }
         if (_completion_token->terminal) {
-            return CoreResult<SchedulerCycleResult>::success({.sampled_utc_now = now});
+            return CoreResult<SchedulerCycleResult>::success({.sampled_utc_now = now, .shutdown_requested = true});
         }
         auto second = dispatch_visit(_database,
                                      _attributes,
@@ -1389,6 +1407,7 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
                                      _active_attempts,
                                      second_blocking,
                                      completion_processor,
+                                     delayed_delivery,
                                      _completion_token->terminal);
         if (!second) {
             return CoreResult<SchedulerCycleResult>::failure(std::move(second).error());
@@ -1397,13 +1416,26 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
             return CoreResult<SchedulerCycleResult>::failure(*_failure);
         }
         if (_completion_token->terminal) {
-            return CoreResult<SchedulerCycleResult>::success({.sampled_utc_now = now});
+            return CoreResult<SchedulerCycleResult>::success({.sampled_utc_now = now, .shutdown_requested = true});
         }
         if (!*first && !*second) {
             break;
         }
+        dispatched_any = true;
         // Empty cycles do not consume the token; the next productive round starts with the other type.
-        _cli_first = !_cli_first;
+        _cli_first     = !_cli_first;
+    }
+
+    // Claims and synchronous completions can close or reopen waiting work. Refresh scalar
+    // deadlines with fresh page samples; no pre-dispatch sample is reusable after these boundaries.
+    if (dispatched_any) {
+        warning_wake = observe_backlog(rescan);
+        if (!warning_wake) {
+            return CoreResult<SchedulerCycleResult>::failure(std::move(warning_wake).error());
+        }
+        if (_completion_token->terminal) {
+            return CoreResult<SchedulerCycleResult>::success({.sampled_utc_now = now, .shutdown_requested = true});
+        }
     }
 
     // Recompute the wake after this cycle's transitions. Unavailable executor types cannot create useful wakes, and the
@@ -1418,7 +1450,7 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
             continue;
         }
         if (_completion_token->terminal) {
-            return CoreResult<SchedulerCycleResult>::success({.sampled_utc_now = now});
+            return CoreResult<SchedulerCycleResult>::success({.sampled_utc_now = now, .shutdown_requested = true});
         }
         auto earliest = repository.earliest_future_runnable(type, now);
         if (!earliest) {
@@ -1431,7 +1463,83 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
     return CoreResult<SchedulerCycleResult>::success({
         .sampled_utc_now = now,
         .next_wake       = next_wake,
+        .next_warning    = *warning_wake,
+        .rescan          = rescan,
     });
+}
+
+auto SchedulerCore::deliver_delay(DelayedRun value) -> bool
+{
+    auto* target = _options.telemetry;
+    if (!target || !TelemetryAccess::deliver_delayed(*target, value)) {
+        // A direct receiver may destroy or stop the telemetry owner. Close admission and
+        // detach before any later claim/completion can dereference that borrowed address.
+        _options.telemetry = nullptr;
+        shutdown();
+        return false;
+    }
+    return !_completion_token->terminal;
+}
+
+auto SchedulerCore::observe_backlog(bool& rescan)
+    -> jb::core::Result<std::optional<jb::core::TimePoint>, jb::core::Error>
+{
+    using ObservationResult = CoreResult<std::optional<jb::core::TimePoint>>;
+    if (!_options.telemetry) {
+        return ObservationResult::success(std::nullopt);
+    }
+    std::optional<jb::core::Uuid>      after;
+    std::optional<jb::core::TimePoint> next_warning;
+    for (;;) {
+        auto sampled = TelemetryAccess::mutation_boundary(_options.telemetry, _database, _attributes, _time_source);
+        if (!sampled) {
+            _telemetry_failure = std::move(sampled).error();
+            return ObservationResult::failure(_telemetry_failure->error);
+        }
+        if (!sampled->sample) {
+            return ObservationResult::success(std::nullopt);
+        }
+
+        // One caller-owned page transaction bounds both projections and owning warning effects.
+        // Its guard unwinds before delivery; helpers neither own transactions nor emit signals.
+        auto page = [&]() -> TelemetryResult<ObservationPage> {
+            auto transaction = jb::db::Transaction::begin(_database);
+            if (!transaction) {
+                return TelemetryResult<ObservationPage>::failure({.error = std::move(transaction).error()});
+            }
+            auto guard   = std::move(*transaction);
+            auto effects = sampled->observe_page(after);
+            if (!effects) {
+                return effects;
+            }
+            auto committed = guard.commit();
+            if (!committed) {
+                return TelemetryResult<ObservationPage>::failure({.error = std::move(committed).error()});
+            }
+            return effects;
+        }();
+        if (!page) {
+            _telemetry_failure = std::move(page).error();
+            return ObservationResult::failure(_telemetry_failure->error);
+        }
+        if (!page->after) {
+            return ObservationResult::success(next_warning);
+        }
+        if (page->next_warning && (!next_warning || *page->next_warning < *next_warning)) {
+            next_warning = page->next_warning;
+        }
+        after = page->after;
+        for (auto const& warning : page->delayed) {
+            if (!deliver_delay(warning)) {
+                return ObservationResult::success(std::nullopt);
+            }
+            // Mutations from a receiver may affect already visited rows. Preserve an immediate
+            // rescan instead of allowing an older scalar deadline to postpone their observation.
+            if (!TelemetryAccess::sample_is_current(*_options.telemetry, sampled->sample)) {
+                rescan = true;
+            }
+        }
+    }
 }
 
 } // namespace jb::jobu::detail

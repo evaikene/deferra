@@ -20,29 +20,38 @@ auto invalid_state(std::string_view reason, StorageFailureOrigin origin = Storag
     -> TelemetryFailure
 {
     return {
-        .error  = {.category = jb::core::ErrorCategory::Internal,
-                   .code     = "jobu.telemetry.invalid_state",
-                   .message  = "Runnable-wait accounting state is invalid",
-                   .detail   = "reason=" + std::string{reason}},
-        .origin = origin
+        .error =
+            {
+                    .category = jb::core::ErrorCategory::Internal,
+                    .code     = "jobu.telemetry.invalid_state",
+                    .message  = "Runnable-wait accounting state is invalid",
+                    .detail   = "reason=" + std::string{reason},
+                    },
+        .origin = origin,
     };
 }
 
 auto clock_regression() -> TelemetryFailure
 {
     return {
-        .error = {.category = jb::core::ErrorCategory::Internal,
-                  .code     = "jobu.telemetry.clock_regression",
-                  .message  = "Runnable-wait monotonic time regressed"}
+        .error =
+            {
+                    .category = jb::core::ErrorCategory::Internal,
+                    .code     = "jobu.telemetry.clock_regression",
+                    .message  = "Runnable-wait monotonic time regressed",
+                    },
     };
 }
 
 auto counter_overflow() -> TelemetryFailure
 {
     return {
-        .error = {.category = jb::core::ErrorCategory::Internal,
-                  .code     = "jobu.telemetry.counter_overflow",
-                  .message  = "Runnable-wait duration cannot be represented"}
+        .error =
+            {
+                    .category = jb::core::ErrorCategory::Internal,
+                    .code     = "jobu.telemetry.counter_overflow",
+                    .message  = "Runnable-wait duration cannot be represented",
+                    },
     };
 }
 
@@ -127,6 +136,19 @@ auto validate_sample(WaitTiming const& timing, WaitSample const& sample) -> Tele
         }
     }
     return TelemetryResult<void>::success();
+}
+
+auto known_wait(WaitTiming const& timing, WaitSample const& sample) -> TelemetryResult<std::int64_t>
+{
+    auto valid = validate_sample(timing, sample);
+    if (!valid) {
+        return TelemetryResult<std::int64_t>::failure(std::move(valid).error());
+    }
+    auto const delta = timing.open_tick_us ? sample.tick_us - *timing.open_tick_us : 0;
+    if (timing.runnable_wait_us > std::numeric_limits<std::int64_t>::max() - delta) {
+        return TelemetryResult<std::int64_t>::failure(counter_overflow());
+    }
+    return TelemetryResult<std::int64_t>::success(timing.runnable_wait_us + delta);
 }
 
 } // namespace
@@ -290,6 +312,60 @@ auto WaitRepository::settle(jb::core::Uuid const& run_id, WaitSample const& samp
 auto WaitRepository::rebase(jb::core::Uuid const& run_id, WaitSample const& sample) -> TelemetryResult<WaitTiming>
 {
     return accumulate(run_id, sample, false);
+}
+
+auto WaitRepository::claim_warning(jb::core::Uuid const&     run_id,
+                                   WaitSample const&         sample,
+                                   std::chrono::milliseconds threshold) -> TelemetryResult<WaitWarning>
+{
+    auto timing = read(run_id);
+    if (!timing) {
+        return TelemetryResult<WaitWarning>::failure(std::move(timing).error());
+    }
+    auto total = known_wait(*timing, sample);
+    if (!total) {
+        return TelemetryResult<WaitWarning>::failure(std::move(total).error());
+    }
+    if (!pending(timing->state) || timing->quality == WaitQuality::Unmeasured || threshold.count() < 0) {
+        return TelemetryResult<WaitWarning>::failure(invalid_state("invalid_warning_context"));
+    }
+
+    WaitWarning effect{.known_wait = std::chrono::microseconds{*total}};
+    // Comparing policy to the counter's range before conversion prevents a huge valid threshold
+    // from wrapping into an immediate warning. Such a threshold can never be exceeded.
+    if (timing->delay_warned || threshold.count() == 0 ||
+        threshold.count() > std::numeric_limits<std::int64_t>::max() / 1000) {
+        return TelemetryResult<WaitWarning>::success(effect);
+    }
+    auto const threshold_us = threshold.count() * 1000;
+    if (*total <= threshold_us) {
+        effect.until_warning = std::chrono::microseconds{threshold_us - *total + 1};
+        return TelemetryResult<WaitWarning>::success(effect);
+    }
+
+    // Only the successful compare-and-update claimant owns delivery. The enclosing transaction
+    // makes this flag atomic with observation or the Running claim; rollback emits nothing.
+    jb::db::Query query{_database};
+    auto result = query.prepare("UPDATE jobu_run_timing SET delay_warned = 1 WHERE run_id = :id AND delay_warned = 0");
+    if (result) {
+        result = query.bind_value(":id", uuid_to_storage(run_id));
+    }
+    if (result) {
+        result = query.exec();
+    }
+    if (!result) {
+        return TelemetryResult<WaitWarning>::failure({.error = std::move(result).error()});
+    }
+    auto const affected = query.num_rows_affected();
+    if (affected != 0 && affected != 1) {
+        return TelemetryResult<WaitWarning>::failure(invalid_state("warning_update_count"));
+    }
+    auto finished = query.finish();
+    if (!finished) {
+        return TelemetryResult<WaitWarning>::failure({.error = std::move(finished).error()});
+    }
+    effect.claimed = affected == 1;
+    return TelemetryResult<WaitWarning>::success(effect);
 }
 
 } // namespace jb::jobu::detail

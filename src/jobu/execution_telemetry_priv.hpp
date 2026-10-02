@@ -18,6 +18,13 @@ namespace jb::jobu::detail {
 /// Immutable owning sample. Identity fences older boundaries even when their ticks are equal.
 using TelemetrySample = std::shared_ptr<WaitSample const>;
 
+/// One bounded page's effects. No live sample/query escapes into post-commit delivery.
+struct ObservationPage {
+    std::optional<jb::core::Uuid>      after;
+    std::vector<DelayedRun>            delayed;
+    std::optional<jb::core::TimePoint> next_warning;
+};
+
 /// One mutation's shared clock/owner boundary. Its helpers borrow the caller's transaction,
 /// consume bounded pages synchronously and emit nothing. Roll back the whole mutation on failure.
 struct MutationTiming {
@@ -32,8 +39,14 @@ struct MutationTiming {
     [[nodiscard]] auto reconcile_scope(EligibilityScope scope) const -> TelemetryResult<void>;
 
     /// The caller has revalidated selection. First observation establishes Partial for old
-    /// unmeasured work, then closes its tail before the run becomes Running. No external calls.
-    [[nodiscard]] auto claim_run(jb::core::Uuid const& run_id) const -> TelemetryResult<void>;
+    /// unmeasured work, then closes its tail before the run becomes Running and claims an earned
+    /// warning against the current queue policy. The returned effect belongs to successful commit.
+    [[nodiscard]] auto claim_run(JobRun const& run, std::chrono::milliseconds threshold) const
+        -> TelemetryResult<std::optional<DelayedRun>>;
+
+    /// Reconciles global pending/open metadata and claims eligible warnings in the caller's
+    /// transaction. The caller commits and destroys SQL guards before delivering this bounded page.
+    [[nodiscard]] auto observe_page(std::optional<jb::core::Uuid> after) const -> TelemetryResult<ObservationPage>;
 
     /// Validates the required timing row, including closed Running state. Inactive borrowers
     /// reject abandoned intervals rather than comparing ticks from an unknown owner.
@@ -61,6 +74,12 @@ struct TelemetryAccess {
 
     /// Captured before notification so a preceding receiver cannot leave a dangling failure target.
     [[nodiscard]] static auto lifetime(ExecutionTelemetry& owner) -> std::weak_ptr<jb::core::priv::ObjectLifetime>;
+
+    /// Delivers one owning committed effect without SQL. Returns false if stopped/destroyed;
+    /// the caller must stop traversal and detach its borrowed target in that case.
+    [[nodiscard]] static auto deliver_delayed(ExecutionTelemetry& owner, DelayedRun value) -> bool;
+    /// Identity-only check after a receiver may have performed a new mutation. Never accounts SQL.
+    [[nodiscard]] static auto sample_is_current(ExecutionTelemetry& owner, TelemetrySample const& sample) -> bool;
 
     /// Captures UTC/monotonic once and invalidates the prior boundary, without SQL or signals.
     [[nodiscard]] static auto sample(ExecutionTelemetry& owner) -> TelemetryResult<TelemetrySample>;
