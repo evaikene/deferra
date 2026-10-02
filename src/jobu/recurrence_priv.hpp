@@ -4,6 +4,7 @@
 #include "job.hpp"
 #include "result.hpp"
 #include "run.hpp"
+#include "run_repository_priv.hpp"
 
 namespace jb::db {
 class Database;
@@ -20,12 +21,15 @@ namespace jb::jobu::detail {
 /// The caller owns the transaction and must establish that no nonterminal schedule-owned run exists;
 /// an insertion conflict is an error, never an already-done result. Returns true on insertion.
 /// Roll back the whole unit on failure.
+/// Complete measurement is selected only by a caller covering creation with active telemetry.
 [[nodiscard]] auto insert_recurring_run(jb::db::Database&        database,
                                         AttributeRegistry const& attributes,
                                         CronEngine const&        cron,
                                         jb::core::UuidGenerator& uuid_generator,
                                         JobDefinition            definition,
-                                        jb::core::UtcTimePoint lower_bound) -> jb::core::Result<bool, jb::core::Error>;
+                                        jb::core::UtcTimePoint   lower_bound,
+                                        InitialRunMeasurement    measurement = InitialRunMeasurement::Unmeasured)
+    -> jb::core::Result<bool, jb::core::Error>;
 
 /// Re-reads the latest definition after a schedule-owned run becomes terminal in the caller's transaction.
 /// Manual runs return false. Normal completion/cancellation passes max(terminal_at, old planned_at);
@@ -36,7 +40,8 @@ namespace jb::jobu::detail {
                                               CronEngine const&        cron,
                                               jb::core::UuidGenerator& uuid_generator,
                                               JobRun const&            completed_run,
-                                              jb::core::UtcTimePoint   lower_bound)
+                                              jb::core::UtcTimePoint   lower_bound,
+                                              InitialRunMeasurement    measurement = InitialRunMeasurement::Unmeasured)
     -> jb::core::Result<bool, jb::core::Error>;
 
 } // namespace jb::jobu::detail

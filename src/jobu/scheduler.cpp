@@ -2,6 +2,7 @@
 
 #include "database.hpp"
 #include "event_loop.hpp"
+#include "execution_telemetry_priv.hpp"
 #include "object_priv.hpp"
 #include "scheduler_core_priv.hpp"
 #include "scheduler_repository_priv.hpp"
@@ -84,7 +85,7 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
             SecretProvider&          secrets,
             SchedulerOptions         options_value)
         : database{
-              database_value
+              database_value,
     }
         , attributes{attributes_value}
         , options{options_value}
@@ -95,16 +96,33 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
                time_source,
                executor,
                secrets,
-               {.cli_concurrency      = options.cli_concurrency,
-                .http_concurrency     = options.http_concurrency,
-                .candidate_batch_size = options.candidate_batch_size},
-               {.rescan_requested = [this]() -> void { request_rescan(); },
-                .failure_reported = [this](jb::core::Error const& error) -> void {
-                    fail(error, detail::StorageOperation::Completion);
-                }}}
+               {
+                   .cli_concurrency      = options.cli_concurrency,
+                   .http_concurrency     = options.http_concurrency,
+                   .candidate_batch_size = options.candidate_batch_size,
+                   .telemetry            = options.telemetry,
+               },
+               {
+                   .rescan_requested = [this]() -> void { request_rescan(); },
+                   .failure_reported = [this](jb::core::Error const& error) -> void {
+                       fail(error, detail::StorageOperation::Completion);
+                   },
+               }}
     {
         if (!valid_options(options)) {
             initialization_error = invalid_options();
+        }
+        else if (options.telemetry) {
+            auto registered = detail::TelemetryAccess::register_executor(*options.telemetry,
+                                                                         database,
+                                                                         attributes,
+                                                                         time_source,
+                                                                         executor);
+            if (!registered) {
+                initialization_error = detail::sanitized_storage_error(registered.error().error,
+                                                                       detail::StorageOperation::Validation,
+                                                                       registered.error().origin);
+            }
         }
     }
 
@@ -318,8 +336,9 @@ auto Scheduler::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result<Can
     }
 
     auto cancelled = data->core.cancel_run(run_id);
-    if (!cancelled && detail::classify_storage_failure(cancelled.error(), detail::StorageOperation::Mutation) ==
-                          detail::StorageFailureDisposition::Fatal) {
+    if (!cancelled && (cancelled.error().code.starts_with("jobu.telemetry.") ||
+                       detail::classify_storage_failure(cancelled.error(), detail::StorageOperation::Mutation) ==
+                           detail::StorageFailureDisposition::Fatal)) {
         data->fail(cancelled.error(), detail::StorageOperation::Mutation);
         return SchedulerResult<CancelRunResult>::failure(*data->stored_failure);
     }

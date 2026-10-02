@@ -8,6 +8,7 @@
 #include "attribute_codec_priv.hpp"
 #include "attribute_registry.hpp"
 #include "cron.hpp"
+#include "execution_telemetry_priv.hpp"
 #include "idempotency_codec_priv.hpp"
 #include "idempotency_repository_priv.hpp"
 #include "job_lifecycle_priv.hpp"
@@ -473,9 +474,11 @@ struct ManagementService::Private : jb::core::priv::ObjectPrivate {
         }
 
         failure_origin = detail::StorageFailureOrigin::Operation;
-        auto result    = std::forward<Operation>(operation)();
-        auto fatal     = !result && detail::classify_storage_failure(result.error(), context, failure_origin) ==
-                                        detail::StorageFailureDisposition::Fatal;
+        telemetry_failure.reset();
+        auto result = std::forward<Operation>(operation)();
+        auto fatal  = !result && (result.error().code.starts_with("jobu.telemetry.") ||
+                                  detail::classify_storage_failure(result.error(), context, failure_origin) ==
+                                      detail::StorageFailureDisposition::Fatal);
 
         // An ordinary conflict can unwind through a failed rollback. Observe connection health after
         // the guard is gone, so cleanup failure closes admission before any subsequent request.
@@ -498,6 +501,17 @@ struct ManagementService::Private : jb::core::priv::ObjectPrivate {
             return result;
         }
 
+        auto* telemetry_target   = telemetry_failure ? options.telemetry : nullptr;
+        auto  telemetry_lifetime = telemetry_target ? detail::TelemetryAccess::lifetime(*telemetry_target)
+                                                    : std::weak_ptr<jb::core::priv::ObjectLifetime>{};
+        auto  timing_failure     = telemetry_failure;
+        if (timing_failure) {
+            // The accounting owner latches failure even for an ordinary backend error.
+            // Detach its borrowed address before user delivery and gate later mutations.
+            options.telemetry = nullptr;
+            mutations_stopped = true;
+        }
+
         auto& error = result.error();
         // Translated uniqueness conflicts may still carry backend detail. Keep
         // their ordinary disposition, but do not expose that diagnostic text.
@@ -514,7 +528,45 @@ struct ManagementService::Private : jb::core::priv::ObjectPrivate {
                 owner.emit(owner.failed, *first_failure);
             }
         }
+        if (timing_failure) {
+            if (auto lifetime = telemetry_lifetime.lock(); lifetime && lifetime->alive.load()) {
+                // Report last: this emission can destroy the telemetry owner. All transaction
+                // guards and queries have already unwound and no borrowed owner is used afterward.
+                detail::TelemetryAccess::report_failure(*telemetry_target, std::move(*timing_failure), context);
+            }
+        }
         return result;
+    }
+
+    auto timing_error(detail::TelemetryFailure failure) -> jb::core::Error
+    {
+        failure_origin    = failure.origin;
+        telemetry_failure = failure;
+        return std::move(failure.error);
+    }
+
+    auto begin_timing() -> ServiceResult<detail::MutationTiming>
+    {
+        auto boundary =
+            detail::TelemetryAccess::mutation_boundary(options.telemetry, database, attributes, time_source);
+        if (!boundary) {
+            return ServiceResult<detail::MutationTiming>::failure(timing_error(std::move(boundary).error()));
+        }
+        return ServiceResult<detail::MutationTiming>::success(std::move(*boundary));
+    }
+
+    auto settle_timing(detail::MutationTiming const& boundary, detail::EligibilityScope scope) -> ServiceResult<void>
+    {
+        auto result = boundary.settle_scope(scope);
+        return result ? ServiceResult<void>::success()
+                      : ServiceResult<void>::failure(timing_error(std::move(result).error()));
+    }
+
+    auto reconcile_timing(detail::MutationTiming const& boundary, detail::EligibilityScope scope) -> ServiceResult<void>
+    {
+        auto result = boundary.reconcile_scope(scope);
+        return result ? ServiceResult<void>::success()
+                      : ServiceResult<void>::failure(timing_error(std::move(result).error()));
     }
 
     auto persisted_error(jb::core::Error error) -> jb::core::Error
@@ -536,9 +588,10 @@ struct ManagementService::Private : jb::core::priv::ObjectPrivate {
     }
 
     // Owner-thread, operation-local provenance; service operations cannot reenter.
-    bool                           mutations_stopped{false};
-    std::optional<jb::core::Error> first_failure;
-    detail::StorageFailureOrigin   failure_origin{detail::StorageFailureOrigin::Operation};
+    std::optional<detail::TelemetryFailure> telemetry_failure;
+    bool                                    mutations_stopped{false};
+    std::optional<jb::core::Error>          first_failure;
+    detail::StorageFailureOrigin            failure_origin{detail::StorageFailureOrigin::Operation};
 
     jb::db::Database&              database;
     AttributeRegistry const&       attributes;
@@ -935,7 +988,11 @@ auto ManagementService::update_queue_impl(UpdateQueueRequest request) -> jb::cor
     if (request.runnable_wait_warning && request.runnable_wait_warning->count() < 0) {
         return ServiceResult<Queue>::failure(invalid_configuration("negative_runnable_wait_warning"));
     }
-    auto const now = data->time_source.utc_now();
+    auto timing = data->begin_timing();
+    if (!timing) {
+        return ServiceResult<Queue>::failure(std::move(timing).error());
+    }
+    auto const now = timing->utc_now;
 
     auto begun = jb::db::Transaction::begin(data->database);
     if (!begun) {
@@ -980,6 +1037,12 @@ auto ManagementService::update_queue_impl(UpdateQueueRequest request) -> jb::cor
     }
     replacement.updated_at = now;
 
+    // Settle the old scope before changing eligibility. The same sample reopens the new scope.
+    auto settled = data->settle_timing(*timing, {.kind = detail::EligibilityScope::Kind::Queue, .id = replacement.id});
+    if (!settled) {
+        return ServiceResult<Queue>::failure(std::move(settled).error());
+    }
+
     auto replaced =
         data->queues.replace_mutable_fields(replacement, serialized_defaults ? &*serialized_defaults : nullptr);
     if (!replaced) {
@@ -988,6 +1051,12 @@ auto ManagementService::update_queue_impl(UpdateQueueRequest request) -> jb::cor
     if (!*replaced) {
         return ServiceResult<Queue>::failure(data->persisted_error(queue_state_conflict()));
     }
+    auto reconciled =
+        data->reconcile_timing(*timing, {.kind = detail::EligibilityScope::Kind::Queue, .id = replacement.id});
+    if (!reconciled) {
+        return ServiceResult<Queue>::failure(std::move(reconciled).error());
+    }
+
     auto committed = transaction.commit();
     if (!committed) {
         return ServiceResult<Queue>::failure(std::move(committed).error());
@@ -1007,7 +1076,11 @@ auto ManagementService::suspend_queue_impl(QueueSelector const& selector) -> jb:
     if (!validated) {
         return ServiceResult<Queue>::failure(std::move(validated).error());
     }
-    auto const now = data->time_source.utc_now();
+    auto timing = data->begin_timing();
+    if (!timing) {
+        return ServiceResult<Queue>::failure(std::move(timing).error());
+    }
+    auto const now = timing->utc_now;
 
     auto begun = jb::db::Transaction::begin(data->database);
     if (!begun) {
@@ -1033,6 +1106,12 @@ auto ManagementService::suspend_queue_impl(QueueSelector const& selector) -> jb:
 
         return ServiceResult<Queue>::success(std::move(queue));
     }
+    // Settle the old scope before changing eligibility. The same sample reopens the new scope.
+    auto settled = data->settle_timing(*timing, {.kind = detail::EligibilityScope::Kind::Queue, .id = queue.id});
+    if (!settled) {
+        return ServiceResult<Queue>::failure(std::move(settled).error());
+    }
+
     if (queue.state == QueueState::Active) {
         // Establish the suspension gate before consulting durable occupancy.
         // Completion processing finishes the transition later when work remains.
@@ -1063,6 +1142,11 @@ auto ManagementService::suspend_queue_impl(QueueSelector const& selector) -> jb:
         queue.updated_at = now;
     }
 
+    auto reconciled = data->reconcile_timing(*timing, {.kind = detail::EligibilityScope::Kind::Queue, .id = queue.id});
+    if (!reconciled) {
+        return ServiceResult<Queue>::failure(std::move(reconciled).error());
+    }
+
     auto committed = transaction.commit();
     if (!committed) {
         return ServiceResult<Queue>::failure(std::move(committed).error());
@@ -1082,7 +1166,11 @@ auto ManagementService::resume_queue_impl(QueueSelector const& selector) -> jb::
     if (!validated) {
         return ServiceResult<Queue>::failure(std::move(validated).error());
     }
-    auto const now = data->time_source.utc_now();
+    auto timing = data->begin_timing();
+    if (!timing) {
+        return ServiceResult<Queue>::failure(std::move(timing).error());
+    }
+    auto const now = timing->utc_now;
 
     auto begun = jb::db::Transaction::begin(data->database);
     if (!begun) {
@@ -1100,6 +1188,20 @@ auto ManagementService::resume_queue_impl(QueueSelector const& selector) -> jb::
     if (queue.state == QueueState::Deleted) {
         return ServiceResult<Queue>::failure(queue_state_conflict());
     }
+    if (queue.state == QueueState::Active) {
+        auto committed = transaction.commit();
+        if (!committed) {
+            return ServiceResult<Queue>::failure(std::move(committed).error());
+        }
+        return ServiceResult<Queue>::success(std::move(queue));
+    }
+
+    // Settle the old scope before changing eligibility. The same sample reopens the new scope.
+    auto settled = data->settle_timing(*timing, {.kind = detail::EligibilityScope::Kind::Queue, .id = queue.id});
+    if (!settled) {
+        return ServiceResult<Queue>::failure(std::move(settled).error());
+    }
+
     if (queue.state != QueueState::Active) {
         auto const expected_state = queue.state;
         auto       transitioned   = data->queues.set_state(queue.id, expected_state, QueueState::Active, now);
@@ -1111,6 +1213,11 @@ auto ManagementService::resume_queue_impl(QueueSelector const& selector) -> jb::
         }
         queue.state      = QueueState::Active;
         queue.updated_at = now;
+    }
+
+    auto reconciled = data->reconcile_timing(*timing, {.kind = detail::EligibilityScope::Kind::Queue, .id = queue.id});
+    if (!reconciled) {
+        return ServiceResult<Queue>::failure(std::move(reconciled).error());
     }
 
     auto committed = transaction.commit();
@@ -1132,7 +1239,11 @@ auto ManagementService::delete_queue_impl(QueueSelector const& selector) -> jb::
     if (!validated) {
         return ServiceResult<void>::failure(std::move(validated).error());
     }
-    auto const now = data->time_source.utc_now();
+    auto timing = data->begin_timing();
+    if (!timing) {
+        return ServiceResult<void>::failure(std::move(timing).error());
+    }
+    auto const now = timing->utc_now;
 
     auto begun = jb::db::Transaction::begin(data->database);
     if (!begun) {
@@ -1175,6 +1286,12 @@ auto ManagementService::delete_queue_impl(QueueSelector const& selector) -> jb::
         return ServiceResult<void>::failure(job_revision_exhausted());
     }
 
+    // Settle the old scope before changing eligibility. The same sample reopens the new scope.
+    auto settled = data->settle_timing(*timing, {.kind = detail::EligibilityScope::Kind::Queue, .id = queue.id});
+    if (!settled) {
+        return ServiceResult<void>::failure(std::move(settled).error());
+    }
+
     // Reference cleanup, job tombstones, pending-run cancellation, and the
     // queue tombstone commit together to preserve all cross-table relationships.
     auto references = data->secrets.erase_references_for_queue(queue.id);
@@ -1201,6 +1318,11 @@ auto ManagementService::delete_queue_impl(QueueSelector const& selector) -> jb::
     if (!*deleted_queue) {
         return ServiceResult<void>::failure(data->persisted_error(queue_state_conflict()));
     }
+    auto reconciled = data->reconcile_timing(*timing, {.kind = detail::EligibilityScope::Kind::Queue, .id = queue.id});
+    if (!reconciled) {
+        return ServiceResult<void>::failure(std::move(reconciled).error());
+    }
+
     auto committed = transaction.commit();
     if (!committed) {
         return ServiceResult<void>::failure(std::move(committed).error());
@@ -1343,7 +1465,11 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
 
     // Resolve one planned instant and materialize the effective attributes so
     // the initial run owns an immutable snapshot of revision one.
-    auto const now        = data->time_source.utc_now();
+    auto timing = data->begin_timing();
+    if (!timing) {
+        return ServiceResult<JobDefinition>::failure(std::move(timing).error());
+    }
+    auto const now        = timing->utc_now;
     auto       planned_at = jb::core::UtcTimePoint{};
     auto       schedule   = JobSchedule{};
     if (std::holds_alternative<ImmediateSchedule>(request.schedule)) {
@@ -1425,7 +1551,7 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
     if (!referenced) {
         return ServiceResult<JobDefinition>::failure(std::move(referenced).error());
     }
-    auto inserted_run = data->runs.insert_schedule_owned(run);
+    auto inserted_run = data->runs.insert_schedule_owned(run, timing->measurement());
     if (!inserted_run) {
         return ServiceResult<JobDefinition>::failure(std::move(inserted_run).error());
     }
@@ -1448,6 +1574,11 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
             return ServiceResult<JobDefinition>::failure(std::move(recorded).error());
         }
     }
+    auto reconciled = data->reconcile_timing(*timing, {.kind = detail::EligibilityScope::Kind::Job, .id = job.id});
+    if (!reconciled) {
+        return ServiceResult<JobDefinition>::failure(std::move(reconciled).error());
+    }
+
     auto committed = transaction.commit();
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
@@ -1558,7 +1689,11 @@ auto ManagementService::run_now_impl(RunNowRequest request, bool& created_new_ru
         return ServiceResult<JobRun>::failure(storage_invariant("run_now_schedule_relationship"));
     }
 
-    auto const now = data->time_source.utc_now();
+    auto timing = data->begin_timing();
+    if (!timing) {
+        return ServiceResult<JobRun>::failure(std::move(timing).error());
+    }
+    auto const now = timing->utc_now;
     if (scheduled.state != RunState::Scheduled || scheduled.planned_at <= now) {
         return ServiceResult<JobRun>::failure(manual_run_conflict());
     }
@@ -1575,6 +1710,12 @@ auto ManagementService::run_now_impl(RunNowRequest request, bool& created_new_ru
     }
     if (*manual) {
         return ServiceResult<JobRun>::failure(manual_run_conflict());
+    }
+
+    // Settle the old scope before changing eligibility. The same sample reopens the new scope.
+    auto settled = data->settle_timing(*timing, {.kind = detail::EligibilityScope::Kind::Job, .id = job.id});
+    if (!settled) {
+        return ServiceResult<JobRun>::failure(std::move(settled).error());
     }
 
     // The manual row snapshots the current definition and itself blocks the
@@ -1603,7 +1744,7 @@ auto ManagementService::run_now_impl(RunNowRequest request, bool& created_new_ru
     };
     // Store the manual snapshot and its optional idempotent result in one
     // transaction so a replay can never name a run that was rolled back.
-    auto inserted = data->runs.insert_manual(run);
+    auto inserted = data->runs.insert_manual(run, timing->measurement());
     if (!inserted) {
         return ServiceResult<JobRun>::failure(std::move(inserted).error());
     }
@@ -1626,6 +1767,11 @@ auto ManagementService::run_now_impl(RunNowRequest request, bool& created_new_ru
             return ServiceResult<JobRun>::failure(std::move(recorded).error());
         }
     }
+    auto reconciled = data->reconcile_timing(*timing, {.kind = detail::EligibilityScope::Kind::Job, .id = job.id});
+    if (!reconciled) {
+        return ServiceResult<JobRun>::failure(std::move(reconciled).error());
+    }
+
     auto committed = transaction.commit();
     if (!committed) {
         return ServiceResult<JobRun>::failure(std::move(committed).error());
@@ -1682,9 +1828,13 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
     if (!begun) {
         return ServiceResult<JobDefinition>::failure(std::move(begun).error());
     }
-    auto       transaction = std::move(begun).value();
-    auto const now         = data->time_source.utc_now();
-    auto       found       = data->jobs.find_by_id(request.job_id, true);
+    auto transaction = std::move(begun).value();
+    auto timing      = data->begin_timing();
+    if (!timing) {
+        return ServiceResult<JobDefinition>::failure(std::move(timing).error());
+    }
+    auto const now   = timing->utc_now;
+    auto       found = data->jobs.find_by_id(request.job_id, true);
     if (!found) {
         return ServiceResult<JobDefinition>::failure(data->repository_read_error(std::move(found).error()));
     }
@@ -1785,6 +1935,12 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
     ++replacement.revision;
     replacement.updated_at = now;
 
+    // Settle the old scope before changing eligibility. The same sample reopens the new scope.
+    auto settled = data->settle_timing(*timing, {.kind = detail::EligibilityScope::Kind::Job, .id = replacement.id});
+    if (!settled) {
+        return ServiceResult<JobDefinition>::failure(std::move(settled).error());
+    }
+
     // The definition revision and any eligible successor refresh share this
     // transaction, so a lost refresh rolls back rather than leaving disagreement.
     auto replaced =
@@ -1847,6 +2003,12 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
             return ServiceResult<JobDefinition>::failure(data->persisted_error(schedule_refresh_conflict()));
         }
     }
+    auto reconciled =
+        data->reconcile_timing(*timing, {.kind = detail::EligibilityScope::Kind::Job, .id = replacement.id});
+    if (!reconciled) {
+        return ServiceResult<JobDefinition>::failure(std::move(reconciled).error());
+    }
+
     auto committed = transaction.commit();
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
@@ -1862,7 +2024,11 @@ auto ManagementService::suspend_job_impl(jb::core::Uuid const& id) -> jb::core::
     if (data->initialization_error) {
         return ServiceResult<JobDefinition>::failure(*data->initialization_error);
     }
-    auto const now = data->time_source.utc_now();
+    auto timing = data->begin_timing();
+    if (!timing) {
+        return ServiceResult<JobDefinition>::failure(std::move(timing).error());
+    }
+    auto const now = timing->utc_now;
 
     auto begun = jb::db::Transaction::begin(data->database);
     if (!begun) {
@@ -1891,6 +2057,12 @@ auto ManagementService::suspend_job_impl(jb::core::Uuid const& id) -> jb::core::
 
         return ServiceResult<JobDefinition>::success(std::move(job));
     }
+    // Settle the old scope before changing eligibility. The same sample reopens the new scope.
+    auto settled = data->settle_timing(*timing, {.kind = detail::EligibilityScope::Kind::Job, .id = job.id});
+    if (!settled) {
+        return ServiceResult<JobDefinition>::failure(std::move(settled).error());
+    }
+
     if (job.state == JobState::Active) {
         // Each durable job-state transition advances the revision. If running
         // work remains, completion processing advances it again when drained.
@@ -1939,6 +2111,11 @@ auto ManagementService::suspend_job_impl(jb::core::Uuid const& id) -> jb::core::
         job.updated_at = now;
     }
 
+    auto reconciled = data->reconcile_timing(*timing, {.kind = detail::EligibilityScope::Kind::Job, .id = job.id});
+    if (!reconciled) {
+        return ServiceResult<JobDefinition>::failure(std::move(reconciled).error());
+    }
+
     auto committed = transaction.commit();
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
@@ -1954,7 +2131,11 @@ auto ManagementService::resume_job_impl(jb::core::Uuid const& id) -> jb::core::R
     if (data->initialization_error) {
         return ServiceResult<JobDefinition>::failure(*data->initialization_error);
     }
-    auto const now = data->time_source.utc_now();
+    auto timing = data->begin_timing();
+    if (!timing) {
+        return ServiceResult<JobDefinition>::failure(std::move(timing).error());
+    }
+    auto const now = timing->utc_now;
 
     auto begun = jb::db::Transaction::begin(data->database);
     if (!begun) {
@@ -1975,6 +2156,20 @@ auto ManagementService::resume_job_impl(jb::core::Uuid const& id) -> jb::core::R
     if (is_terminal_job_state(job.state)) {
         return ServiceResult<JobDefinition>::failure(job_state_conflict());
     }
+    if (job.state == JobState::Active) {
+        auto committed = transaction.commit();
+        if (!committed) {
+            return ServiceResult<JobDefinition>::failure(std::move(committed).error());
+        }
+        return ServiceResult<JobDefinition>::success(std::move(job));
+    }
+
+    // Settle the old scope before changing eligibility. The same sample reopens the new scope.
+    auto settled = data->settle_timing(*timing, {.kind = detail::EligibilityScope::Kind::Job, .id = job.id});
+    if (!settled) {
+        return ServiceResult<JobDefinition>::failure(std::move(settled).error());
+    }
+
     if (job.state != JobState::Active) {
         if (job.revision >= kMaximumPersistedJobRevision) {
             return ServiceResult<JobDefinition>::failure(job_revision_exhausted());
@@ -1993,6 +2188,11 @@ auto ManagementService::resume_job_impl(jb::core::Uuid const& id) -> jb::core::R
         job.state      = JobState::Active;
         job.revision   = next_revision;
         job.updated_at = now;
+    }
+
+    auto reconciled = data->reconcile_timing(*timing, {.kind = detail::EligibilityScope::Kind::Job, .id = job.id});
+    if (!reconciled) {
+        return ServiceResult<JobDefinition>::failure(std::move(reconciled).error());
     }
 
     auto committed = transaction.commit();
@@ -2017,7 +2217,11 @@ auto ManagementService::move_job_impl(MoveJobRequest const& request) -> jb::core
     if (!selector) {
         return ServiceResult<JobDefinition>::failure(std::move(selector).error());
     }
-    auto const now = data->time_source.utc_now();
+    auto timing = data->begin_timing();
+    if (!timing) {
+        return ServiceResult<JobDefinition>::failure(std::move(timing).error());
+    }
+    auto const now = timing->utc_now;
 
     auto begun = jb::db::Transaction::begin(data->database);
     if (!begun) {
@@ -2057,6 +2261,12 @@ auto ManagementService::move_job_impl(MoveJobRequest const& request) -> jb::core
     if (job.revision >= kMaximumPersistedJobRevision) {
         return ServiceResult<JobDefinition>::failure(job_revision_exhausted());
     }
+    // Settle the old scope before changing eligibility. The same sample reopens the new scope.
+    auto settled = data->settle_timing(*timing, {.kind = detail::EligibilityScope::Kind::Job, .id = job.id});
+    if (!settled) {
+        return ServiceResult<JobDefinition>::failure(std::move(settled).error());
+    }
+
     // Move the definition and every non-terminal run snapshot in one transaction
     // so their queue and revision references cannot disagree.
     auto const next_revision = job.revision + 1;
@@ -2088,9 +2298,14 @@ auto ManagementService::move_job_impl(MoveJobRequest const& request) -> jb::core
         return ServiceResult<JobDefinition>::failure(std::move(moved_runs).error());
     }
 
-    job.queue_id   = target_queue.id;
-    job.revision   = next_revision;
-    job.updated_at = now;
+    job.queue_id    = target_queue.id;
+    job.revision    = next_revision;
+    job.updated_at  = now;
+    auto reconciled = data->reconcile_timing(*timing, {.kind = detail::EligibilityScope::Kind::Job, .id = job.id});
+    if (!reconciled) {
+        return ServiceResult<JobDefinition>::failure(std::move(reconciled).error());
+    }
+
     auto committed = transaction.commit();
     if (!committed) {
         return ServiceResult<JobDefinition>::failure(std::move(committed).error());
@@ -2109,7 +2324,11 @@ auto ManagementService::delete_job_impl(DeleteJobRequest const& request) -> jb::
     if (request.expected_revision == 0) {
         return ServiceResult<void>::failure(invalid_job_configuration("expected_revision_not_positive"));
     }
-    auto const now = data->time_source.utc_now();
+    auto timing = data->begin_timing();
+    if (!timing) {
+        return ServiceResult<void>::failure(std::move(timing).error());
+    }
+    auto const now = timing->utc_now;
 
     auto begun = jb::db::Transaction::begin(data->database);
     if (!begun) {
@@ -2154,6 +2373,12 @@ auto ManagementService::delete_job_impl(DeleteJobRequest const& request) -> jb::
     if (job.revision >= kMaximumPersistedJobRevision) {
         return ServiceResult<void>::failure(job_revision_exhausted());
     }
+    // Settle the old scope before changing eligibility. The same sample reopens the new scope.
+    auto settled = data->settle_timing(*timing, {.kind = detail::EligibilityScope::Kind::Job, .id = job.id});
+    if (!settled) {
+        return ServiceResult<void>::failure(std::move(settled).error());
+    }
+
     auto const next_revision = job.revision + 1;
     auto       deleted       = data->jobs.mark_deleted(job.id, job.revision, next_revision, now);
     if (!deleted) {
@@ -2186,6 +2411,11 @@ auto ManagementService::delete_job_impl(DeleteJobRequest const& request) -> jb::
     if (!references) {
         return ServiceResult<void>::failure(std::move(references).error());
     }
+    auto reconciled = data->reconcile_timing(*timing, {.kind = detail::EligibilityScope::Kind::Job, .id = job.id});
+    if (!reconciled) {
+        return ServiceResult<void>::failure(std::move(reconciled).error());
+    }
+
     auto committed = transaction.commit();
     if (!committed) {
         return ServiceResult<void>::failure(std::move(committed).error());
