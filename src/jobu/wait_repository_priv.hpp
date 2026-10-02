@@ -21,6 +21,15 @@ struct WaitSample {
     jb::core::UtcTimePoint utc_now;
     jb::core::Uuid         epoch;
     std::int64_t           tick_us{0};
+    jb::core::TimePoint    monotonic_now;
+};
+
+/// Known wait includes the open tail without checkpointing it. Only a successful durable
+/// claimant sets claimed; until_warning identifies the first microsecond strictly above policy.
+struct WaitWarning {
+    std::chrono::microseconds                known_wait{0};
+    std::optional<std::chrono::microseconds> until_warning;
+    bool                                     claimed{false};
 };
 
 enum class WaitQuality : std::uint8_t {
@@ -69,6 +78,13 @@ public:
 
     /// Adds the open delta and rebases its tick without closing. Closed rows are unchanged.
     [[nodiscard]] auto rebase(jb::core::Uuid const& run_id, WaitSample const& sample) -> TelemetryResult<WaitTiming>;
+
+    /// The caller has established current eligibility. Validates and evaluates known wait,
+    /// then conditionally claims delay_warned in the caller's transaction. Zero disables claims.
+    /// Thresholds beyond the durable counter range cannot be crossed and produce no deadline.
+    [[nodiscard]] auto claim_warning(jb::core::Uuid const&     run_id,
+                                     WaitSample const&         sample,
+                                     std::chrono::milliseconds threshold) -> TelemetryResult<WaitWarning>;
 
 private:
     [[nodiscard]] auto accumulate(jb::core::Uuid const& run_id, WaitSample const& sample, bool close)

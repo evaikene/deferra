@@ -3,9 +3,11 @@
 #pragma once
 
 #include "error.hpp"
+#include "job.hpp"
 #include "object.hpp"
 #include "result.hpp"
 #include "signal.hpp"
+#include "uuid.hpp"
 
 #include <chrono>
 #include <cstddef>
@@ -32,6 +34,17 @@ struct TelemetryAccess;
 struct TelemetryOptions {
     std::chrono::seconds checkpoint_interval{30}; ///< 1..86400 seconds between later checkpoint sweeps.
     std::size_t          batch_size{200};         ///< 1..1000 rows per later checkpoint transaction.
+};
+
+/// Owning delay diagnostic. IDs identify the observed run and its current owners; runnable_wait
+/// is a monotonic observed lower bound for Partial measurements. Contains no execution payload.
+struct DelayedRun {
+    jb::core::Uuid            run_id;
+    jb::core::Uuid            job_id;
+    jb::core::Uuid            queue_id;
+    JobType                   type{JobType::Cli};
+    std::chrono::microseconds runnable_wait{0};
+    std::chrono::milliseconds threshold{0};
 };
 
 /// Owns one monotonic accounting epoch without selecting or executing work.
@@ -76,6 +89,13 @@ public:
     /// Idempotent and safe from failed slots. The caller must arrange healthy interval settlement
     /// before database close; this method does not persist or reconstruct elapsed time.
     void request_stop() noexcept;
+
+    /// Emitted on the owner thread only after a successful durable warning claim and SQL cleanup.
+    /// At most once per run across retries, moves and restarts; a crash or stop between claim and
+    /// delivery may lose the diagnostic. Queued delivery owns its value. Direct receivers may
+    /// request_stop(), request scheduler shutdown, or destroy this owner; scheduler destruction
+    /// must wait until its active call stack unwinds. No further observation follows a stopped owner.
+    jb::core::Signal<DelayedRun> delayed;
 
     /// Emitted once by the private post-transaction failure boundary, after all SQL cleanup.
     /// Storage errors retain their enclosing operation/origin; clock/accounting failures also

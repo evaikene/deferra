@@ -88,6 +88,7 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
               database_value,
     }
         , attributes{attributes_value}
+        , clock{time_source}
         , options{options_value}
         , core{database_value,
                attributes_value,
@@ -134,9 +135,12 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
     Scheduler*                     owner{nullptr};
     jb::db::Database&              database;
     AttributeRegistry const&       attributes;
+    jb::core::TimeSource&          clock;
     SchedulerOptions               options;
     SchedulerState                 state{SchedulerState::Stopped};
     bool                           terminal{false};
+    bool                           processing_cycle{false};
+    bool                           rescan_pending{false};
     std::optional<jb::core::Error> initialization_error;
     std::optional<jb::core::Error> stored_failure;
     jb::core::Timer                wake_timer;
@@ -204,6 +208,10 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
         if (state != SchedulerState::Running) {
             return;
         }
+        if (processing_cycle) {
+            rescan_pending = true;
+            return;
+        }
         auto armed = arm_timer(jb::core::Duration::zero());
         if (!armed) {
             fail(std::move(armed).error());
@@ -216,7 +224,12 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
             return SchedulerResult<>::success();
         }
 
-        auto cycle = core.process_cycle();
+        // Post-commit delayed receivers can mutate management state synchronously. Preserve
+        // their rescan request when replacing this cycle's timer with its final wake.
+        processing_cycle = true;
+        rescan_pending   = false;
+        auto cycle       = core.process_cycle();
+        processing_cycle = false;
         if (!cycle) {
             auto error = std::move(cycle).error();
             fail(error);
@@ -229,7 +242,12 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
         if (state != SchedulerState::Running) {
             return terminal ? SchedulerResult<>::failure(stopping()) : SchedulerResult<>::success();
         }
-        auto armed = arm_next_wake(*cycle);
+        if (cycle->shutdown_requested) {
+            shutdown();
+            return SchedulerResult<>::failure(stopping());
+        }
+        cycle->rescan = cycle->rescan || rescan_pending;
+        auto armed    = arm_next_wake(*cycle);
         if (!armed) {
             auto error = std::move(armed).error();
             fail(error);
@@ -248,16 +266,34 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
     [[nodiscard]] auto arm_next_wake(detail::SchedulerCycleResult const& cycle) -> SchedulerResult<>
     {
         wake_timer.stop();
-        if (!cycle.next_wake) {
-            return SchedulerResult<>::success();
-        }
-
-        auto delay = jb::core::Duration::zero();
-        if (*cycle.next_wake > cycle.sampled_utc_now) {
-            delay = std::chrono::duration_cast<jb::core::Duration>(*cycle.next_wake - cycle.sampled_utc_now);
+        if (cycle.rescan) {
+            return arm_timer(jb::core::Duration::zero());
         }
         auto const cap = std::chrono::duration_cast<jb::core::Duration>(options.wall_clock_recheck);
-        return arm_timer(std::min(delay, cap));
+        std::optional<jb::core::Duration> delay;
+        if (cycle.next_wake) {
+            auto utc_delay = jb::core::Duration::zero();
+            if (*cycle.next_wake > cycle.sampled_utc_now) {
+                utc_delay = std::chrono::duration_cast<jb::core::Duration>(*cycle.next_wake - cycle.sampled_utc_now);
+            }
+            delay = std::min(utc_delay, cap);
+        }
+        if (cycle.next_warning) {
+            // Warning deadlines remain monotonic. Cap the checked difference before subtraction,
+            // and round upward to the poll resolution so equality never creates a zero-delay loop.
+            auto const now           = clock.monotonic_now();
+            auto       warning_delay = jb::core::Duration::zero();
+            if (*cycle.next_warning > now) {
+                warning_delay = now <= jb::core::TimePoint::max() - cap && *cycle.next_warning > now + cap
+                                  ? cap
+                                  : *cycle.next_warning - now;
+                warning_delay = std::chrono::ceil<std::chrono::milliseconds>(warning_delay);
+            }
+            if (!delay || warning_delay < *delay) {
+                delay = warning_delay;
+            }
+        }
+        return delay ? arm_timer(*delay) : SchedulerResult<>::success();
     }
 
     [[nodiscard]] auto arm_timer(jb::core::Duration delay) -> SchedulerResult<>

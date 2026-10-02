@@ -37,6 +37,51 @@ void require_no_transaction_calls(DatabaseFaultState const& faults)
 
 } // namespace
 
+TEST_CASE("Warnings claim strictly above policy without checkpointing the open tail", "[jobu][telemetry][warning]")
+{
+    TelemetryStorageFixture f;
+    f.seed("complete", 3000);
+    f.seed_open(f.epoch, 100);
+    auto transaction = jb::db::Transaction::begin(f.storage.database);
+    REQUIRE(transaction);
+    auto equality = f.repository.claim_warning(f.run_id, boundary(f, 7100), 10ms);
+    REQUIRE(equality);
+    CHECK(equality->known_wait == 10000us);
+    CHECK(equality->until_warning == 1us);
+    CHECK_FALSE(equality->claimed);
+    auto crossed = f.repository.claim_warning(f.run_id, boundary(f, 7101), 10ms);
+    REQUIRE(crossed);
+    CHECK(crossed->known_wait == 10001us);
+    CHECK(crossed->claimed);
+    auto repeat = f.repository.claim_warning(f.run_id, boundary(f, 7102), 1ms);
+    REQUIRE(repeat);
+    CHECK_FALSE(repeat->claimed);
+    CHECK_FALSE(repeat->until_warning);
+    CHECK(f.repository.read(f.run_id)->runnable_wait_us == 3000);
+    CHECK(f.repository.read(f.run_id)->open_tick_us == 100);
+    REQUIRE(transaction->rollback());
+    CHECK_FALSE(f.repository.read(f.run_id)->delay_warned);
+}
+
+TEST_CASE("Disabled or unreachable warning thresholds preserve measurement", "[jobu][telemetry][warning]")
+{
+    auto threshold = GENERATE(0ms, std::chrono::milliseconds{std::numeric_limits<std::int64_t>::max()});
+    TelemetryStorageFixture f;
+    f.seed("partial", std::numeric_limits<std::int64_t>::max() - 1);
+    f.seed_open(f.epoch, 0);
+    auto transaction = jb::db::Transaction::begin(f.storage.database);
+    REQUIRE(transaction);
+    auto result = f.repository.claim_warning(f.run_id, boundary(f, 1), threshold);
+    REQUIRE(result);
+    CHECK(result->known_wait.count() == std::numeric_limits<std::int64_t>::max());
+    CHECK_FALSE(result->claimed);
+    CHECK_FALSE(result->until_warning);
+    auto overflow = f.repository.claim_warning(f.run_id, boundary(f, 2), threshold);
+    REQUIRE_FALSE(overflow);
+    CHECK(overflow.error().error.code == "jobu.telemetry.counter_overflow");
+    REQUIRE(transaction->rollback());
+}
+
 TEST_CASE("Wait intervals add, rebase and close without changing quality or warning ownership", "[jobu][telemetry]")
 {
     auto const*             quality = GENERATE("unmeasured", "complete", "partial");
@@ -265,8 +310,10 @@ TEST_CASE("Repository faults leave transaction cleanup to the caller", "[jobu][t
     f.seed("complete");
     auto before      = storage_snapshot(f.storage.database);
     f.faults->faults = {
-        {.at    = {.boundary = "timing.write", .operation = operation, .phase = DatabaseFaultPhase::AfterSuccess},
-         .error = fault_error()}
+        {
+         .at    = {.boundary = "timing.write", .operation = operation, .phase = DatabaseFaultPhase::AfterSuccess},
+         .error = fault_error(),
+         },
     };
     auto transaction = jb::db::Transaction::begin(f.storage.database);
     REQUIRE(transaction);
@@ -292,7 +339,7 @@ TEST_CASE("Timing read errors preserve backend codes and release query state", "
     TelemetryStorageFixture f;
     auto                    before = storage_snapshot(f.storage.database);
     f.faults->faults               = {
-        {.at = {.boundary = "timing.read", .operation = operation}, .error = fault_error()}
+        {.at = {.boundary = "timing.read", .operation = operation}, .error = fault_error()},
     };
     auto failed = f.repository.read(f.run_id);
     REQUIRE_FALSE(failed);

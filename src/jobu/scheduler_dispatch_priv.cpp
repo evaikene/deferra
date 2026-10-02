@@ -83,7 +83,7 @@ auto dispatch_selected_impl(jb::db::Database&                database,
 
     // Close accounting while the durable row is still pending. A Running row with an
     // open interval is corruption, so this cannot be deferred until after the transition.
-    auto claimed = timing.claim_run(selected.run.id);
+    auto claimed = timing.claim_run(selected.run, selected.queue.runnable_wait_warning);
     if (!claimed) {
         accounting_failure = std::move(claimed).error();
         return DispatchResult<std::optional<DispatchStart>>::failure(accounting_failure->error);
@@ -122,6 +122,7 @@ auto dispatch_selected_impl(jb::db::Database&                database,
         return DispatchResult<std::optional<DispatchStart>>::success(DispatchStart{
             .key                  = key,
             .immediate_completion = terminal_start_failure(key, prepared.error().error),
+            .delayed              = *claimed,
         });
     }
 
@@ -140,9 +141,10 @@ auto dispatch_selected_impl(jb::db::Database&                database,
         return DispatchResult<std::optional<DispatchStart>>::success(DispatchStart{
             .key                  = key,
             .immediate_completion = terminal_start_failure(key, started.error()),
+            .delayed              = *claimed,
         });
     }
-    return DispatchResult<std::optional<DispatchStart>>::success(DispatchStart{.key = key});
+    return DispatchResult<std::optional<DispatchStart>>::success(DispatchStart{.key = key, .delayed = *claimed});
 }
 
 } // anonymous namespace

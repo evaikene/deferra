@@ -46,6 +46,7 @@ auto decode(jb::db::Record const& record) -> TelemetryResult<RunEligibility>
     auto job_state   = read_job_state(record, "job_state");
     auto queue_state = read_queue_state(record, "queue_state");
     auto kind        = read_text(record, "schedule_kind");
+    auto warning     = read_nonnegative_milliseconds(record, "warning_threshold_ms");
 
     auto const* scheduled     = integer(record, "scheduled_count");
     auto const* manual        = integer(record, "manual_count");
@@ -53,8 +54,9 @@ auto decode(jb::db::Record const& record) -> TelemetryResult<RunEligibility>
     auto const* attempts      = integer(record, "attempt_count");
     auto const* retry_history = integer(record, "retry_history_count");
     if (!id || !job_id || !queue_id || !job_queue || !state || !origin || !owned || !type || !runnable || !job_state ||
-        !queue_state || !kind || !scheduled || !manual || !live || !attempts || !retry_history || *attempts < 0 ||
-        *retry_history < 0 || *scheduled < 0 || *manual < 0 || *live < 0 || (*kind != "once" && *kind != "cron")) {
+        !queue_state || !kind || !warning || !scheduled || !manual || !live || !attempts || !retry_history ||
+        *attempts < 0 || *retry_history < 0 || *scheduled < 0 || *manual < 0 || *live < 0 ||
+        (*kind != "once" && *kind != "cron")) {
         return TelemetryResult<RunEligibility>::failure(invalid_relationship());
     }
 
@@ -77,17 +79,18 @@ auto decode(jb::db::Record const& record) -> TelemetryResult<RunEligibility>
     }
 
     return TelemetryResult<RunEligibility>::success({
-        .id             = *id,
-        .job_id         = *job_id,
-        .queue_id       = *queue_id,
-        .state          = *state,
-        .origin         = *origin,
-        .schedule_owned = *owned,
-        .type           = *type,
-        .runnable_at    = *runnable,
-        .job_state      = *job_state,
-        .queue_state    = *queue_state,
-        .siblings       = counts,
+        .id                = *id,
+        .job_id            = *job_id,
+        .queue_id          = *queue_id,
+        .state             = *state,
+        .origin            = *origin,
+        .schedule_owned    = *owned,
+        .type              = *type,
+        .runnable_at       = *runnable,
+        .job_state         = *job_state,
+        .queue_state       = *queue_state,
+        .siblings          = counts,
+        .warning_threshold = *warning,
     });
 }
 
@@ -140,6 +143,7 @@ auto list_eligibility(jb::db::Database& database, EligibilityScope scope, std::o
     std::string sql =
         "SELECT r.id, r.job_id, r.queue_id, r.state, r.origin, r.schedule_owned, r.type, r.runnable_at_us, "
         "j.queue_id AS job_queue_id, j.state AS job_state, j.schedule_kind, q.state AS queue_state, "
+        "q.runnable_wait_warning_ms AS warning_threshold_ms, "
         "(SELECT COUNT(*) FROM jobu_runs s WHERE s.job_id = r.job_id AND s.origin = 'scheduled' "
         "AND s.schedule_owned = 1 AND s.state IN ('scheduled', 'running', 'retry_wait')) AS scheduled_count, "
         "(SELECT COUNT(*) FROM jobu_runs m WHERE m.job_id = r.job_id AND m.origin = 'manual' "
@@ -151,8 +155,10 @@ auto list_eligibility(jb::db::Database& database, EligibilityScope scope, std::o
         "AND a.outcome IN ('failed', 'interrupted')) AS retry_history_count "
         "FROM jobu_runs r LEFT JOIN jobu_jobs j ON j.id = r.job_id "
         "LEFT JOIN jobu_queues q ON q.id = r.queue_id LEFT JOIN jobu_run_timing t ON t.run_id = r.id "
-        "WHERE (r.state IN ('scheduled', 'retry_wait') OR t.open_epoch IS NOT NULL) AND ";
-    sql += scope.kind == EligibilityScope::Kind::Job ? "r.job_id = :scope " : "r.queue_id = :scope ";
+        "WHERE (r.state IN ('scheduled', 'retry_wait') OR t.open_epoch IS NOT NULL) ";
+    if (scope.kind != EligibilityScope::Kind::All) {
+        sql += scope.kind == EligibilityScope::Kind::Job ? "AND r.job_id = :scope " : "AND r.queue_id = :scope ";
+    }
     if (after) {
         sql += "AND r.id > :after ";
     }
@@ -160,7 +166,7 @@ auto list_eligibility(jb::db::Database& database, EligibilityScope scope, std::o
 
     jb::db::Query query{database};
     auto          result = query.prepare(sql);
-    if (result) {
+    if (result && scope.kind != EligibilityScope::Kind::All) {
         result = query.bind_value(":scope", uuid_to_storage(scope.id));
     }
     if (result && after) {
@@ -199,9 +205,11 @@ auto list_eligibility(jb::db::Database& database, EligibilityScope scope, std::o
 auto list_timing_scope(jb::db::Database& database, EligibilityScope scope, std::optional<jb::core::Uuid> after)
     -> TelemetryResult<std::vector<jb::core::Uuid>>
 {
-    std::string sql  = "SELECT r.id FROM jobu_runs r LEFT JOIN jobu_run_timing t ON t.run_id = r.id "
-                       "WHERE (r.state IN ('scheduled', 'retry_wait') OR t.open_epoch IS NOT NULL) AND ";
-    sql             += scope.kind == EligibilityScope::Kind::Job ? "r.job_id = :scope " : "r.queue_id = :scope ";
+    std::string sql = "SELECT r.id FROM jobu_runs r LEFT JOIN jobu_run_timing t ON t.run_id = r.id "
+                      "WHERE (r.state IN ('scheduled', 'retry_wait') OR t.open_epoch IS NOT NULL) ";
+    if (scope.kind != EligibilityScope::Kind::All) {
+        sql += scope.kind == EligibilityScope::Kind::Job ? "AND r.job_id = :scope " : "AND r.queue_id = :scope ";
+    }
     if (after) {
         sql += "AND r.id > :after ";
     }
@@ -209,7 +217,7 @@ auto list_timing_scope(jb::db::Database& database, EligibilityScope scope, std::
 
     jb::db::Query query{database};
     auto          result = query.prepare(sql);
-    if (result) {
+    if (result && scope.kind != EligibilityScope::Kind::All) {
         result = query.bind_value(":scope", uuid_to_storage(scope.id));
     }
     if (result && after) {

@@ -25,6 +25,7 @@ class AttemptExecutor;
 class AttributeRegistry;
 class SecretProvider;
 class CronEngine;
+struct DelayedRun;
 
 namespace detail {
 
@@ -38,6 +39,12 @@ struct SchedulerCoreOptions {
 struct SchedulerCycleResult {
     jb::core::UtcTimePoint                sampled_utc_now;
     std::optional<jb::core::UtcTimePoint> next_wake;
+    /// Absolute monotonic deadline, independent of UTC policy and immutable sample identity.
+    std::optional<jb::core::TimePoint>    next_warning;
+    /// A post-commit receiver changed already-observed eligibility or warning policy.
+    bool                                  rescan{false};
+    /// Delivery stopped/destroyed telemetry; the public adapter must enter terminal shutdown.
+    bool                                  shutdown_requested{false};
 };
 
 struct SchedulerCoreCallbacks {
@@ -81,6 +88,9 @@ private:
     };
 
     [[nodiscard]] auto process_cycle_impl() -> jb::core::Result<SchedulerCycleResult, jb::core::Error>;
+    [[nodiscard]] auto observe_backlog(bool& rescan)
+        -> jb::core::Result<std::optional<jb::core::TimePoint>, jb::core::Error>;
+    [[nodiscard]] auto deliver_delay(DelayedRun value) -> bool;
     [[nodiscard]] auto cancel_run_impl(jb::core::Uuid const& run_id)
         -> jb::core::Result<CancelRunResult, jb::core::Error>;
     void               fail(jb::core::Error const& error, bool notify = true);
