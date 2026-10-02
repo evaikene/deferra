@@ -5,6 +5,7 @@
 #include "scheduler.hpp"
 #include "time_source.hpp"
 #include "uuid.hpp"
+#include "wait_repository_priv.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -28,9 +29,10 @@ class CronEngine;
 namespace detail {
 
 struct SchedulerCoreOptions {
-    std::uint32_t cli_concurrency{4};
-    std::uint32_t http_concurrency{16};
-    std::size_t   candidate_batch_size{200};
+    std::uint32_t       cli_concurrency{4};
+    std::uint32_t       http_concurrency{16};
+    std::size_t         candidate_batch_size{200};
+    ExecutionTelemetry* telemetry{nullptr};
 };
 
 struct SchedulerCycleResult {
@@ -52,7 +54,7 @@ public:
                   jb::core::TimeSource&    time_source,
                   AttemptExecutor&         executor,
                   SecretProvider&          secrets,
-                  SchedulerCoreOptions     options   = {},
+                  SchedulerCoreOptions     options   = SchedulerCoreOptions(),
                   SchedulerCoreCallbacks   callbacks = {});
     ~SchedulerCore();
 
@@ -94,6 +96,7 @@ private:
     std::map<jb::core::Uuid, std::uint64_t> _active_attempts;
     std::set<jb::core::Uuid>                _cancellation_requests;
     std::optional<jb::core::Error>          _failure;
+    std::optional<TelemetryFailure>         _telemetry_failure;
     bool                                    _cli_first{true};
 };
 

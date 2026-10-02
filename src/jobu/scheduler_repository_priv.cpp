@@ -7,6 +7,7 @@
 #include "query.hpp"
 #include "queue_repository_priv.hpp"
 #include "retry_policy_priv.hpp"
+#include "run_eligibility_priv.hpp"
 #include "run_repository_priv.hpp"
 #include "value.hpp"
 
@@ -296,14 +297,8 @@ auto candidate_where(std::string_view time_comparison) -> std::string
     auto sql  = std::string{" WHERE jobu_runs.state IN ('scheduled', 'retry_wait') "
                             "AND jobu_runs.type = :type AND jobu_runs.runnable_at_us "};
     sql      += time_comparison;
-    sql      += " :now AND jobu_queues.state = 'active' "
-                "AND ((jobu_runs.origin = 'scheduled' AND jobu_jobs.state = 'active') "
-                "OR (jobu_runs.origin = 'manual' "
-                "AND jobu_jobs.state IN ('active', 'suspending', 'suspended'))) "
-                "AND (jobu_runs.schedule_owned = 0 OR NOT EXISTS ("
-                "SELECT 1 FROM jobu_runs AS manual_runs WHERE manual_runs.job_id = jobu_runs.job_id "
-                "AND manual_runs.origin = 'manual' AND manual_runs.schedule_owned = 0 "
-                "AND manual_runs.state IN ('scheduled', 'running', 'retry_wait')))";
+    sql      += " :now ";
+    sql      += runnable_owner_predicate();
     return sql;
 }
 
@@ -900,8 +895,11 @@ auto SchedulerRepository::find_dispatch_context(jb::core::Uuid const& run_id, jb
     }
 
     // Time or owner state can change after selection; return no context so the core can try another candidate.
-    if (decoded->run.runnable_at > now || decoded->queue_state != QueueState::Active ||
-        (decoded->run.origin == RunOrigin::Scheduled && decoded->job_state != JobState::Active)) {
+    if (decoded->run.runnable_at > now || !eligible_owners(decoded->run.origin,
+                                                           decoded->run.schedule_owned,
+                                                           decoded->job_state,
+                                                           decoded->queue_state,
+                                                           summary->counts.manual != 0)) {
         return RepositoryResult<std::optional<DispatchContext>>::success(std::nullopt);
     }
     auto valid = validate_candidate(*decoded, decoded->run.type, now, false, decoded->run.queue_id);

@@ -35,6 +35,8 @@ target_sources(${TARGET}
         domain_storage_priv.hpp
         execution_telemetry.cpp
         execution_telemetry_priv.hpp
+        run_eligibility_priv.cpp
+        run_eligibility_priv.hpp
         http_job_payload_priv.cpp
         http_job_payload_priv.hpp
         http_retry_priv.cpp

@@ -1,5 +1,6 @@
 #include "execution_telemetry.hpp"
 
+#include "attempt_executor.hpp"
 #include "database.hpp"
 #include "event_loop.hpp"
 #include "execution_telemetry_priv.hpp"
@@ -29,26 +30,34 @@ using ServiceResult = jb::core::Result<void, jb::core::Error>;
 auto invalid_state(std::string_view reason) -> detail::TelemetryFailure
 {
     return {
-        .error = {.category = jb::core::ErrorCategory::Internal,
-                  .code     = "jobu.telemetry.invalid_state",
-                  .message  = "Telemetry activation or sample is invalid",
-                  .detail   = "reason=" + std::string{reason}}
+        .error =
+            {
+                    .category = jb::core::ErrorCategory::Internal,
+                    .code     = "jobu.telemetry.invalid_state",
+                    .message  = "Telemetry activation or sample is invalid",
+                    .detail   = "reason=" + std::string{reason},
+                    },
     };
 }
 
 auto invalid_options() -> jb::core::Error
 {
-    return {.category = jb::core::ErrorCategory::InvalidArgument,
-            .code     = "jobu.telemetry.invalid_options",
-            .message  = "Telemetry checkpoint interval or batch size is invalid"};
+    return {
+        .category = jb::core::ErrorCategory::InvalidArgument,
+        .code     = "jobu.telemetry.invalid_options",
+        .message  = "Telemetry checkpoint interval or batch size is invalid",
+    };
 }
 
 auto arithmetic_failure(std::string_view code) -> detail::TelemetryFailure
 {
     return {
-        .error = {.category = jb::core::ErrorCategory::Internal,
-                  .code     = std::string{code},
-                  .message  = "Telemetry monotonic elapsed time cannot be represented"}
+        .error =
+            {
+                    .category = jb::core::ErrorCategory::Internal,
+                    .code     = std::string{code},
+                    .message  = "Telemetry monotonic elapsed time cannot be represented",
+                    },
     };
 }
 
@@ -104,9 +113,13 @@ struct ExecutionTelemetry::Private : jb::core::priv::ObjectPrivate {
 
     auto poisoned_failure() const -> detail::TelemetryFailure
     {
-        return {.error = database.last_error().value_or(jb::core::Error{.category = jb::core::ErrorCategory::Internal,
-                                                                        .code     = "db.connection_failed",
-                                                                        .message = "Database connection is unusable"})};
+        return {
+            .error = database.last_error().value_or(jb::core::Error{
+                .category = jb::core::ErrorCategory::Internal,
+                .code     = "db.connection_failed",
+                .message  = "Database connection is unusable",
+            }),
+        };
     }
 
     auto active() const -> detail::TelemetryResult<void>
@@ -236,20 +249,22 @@ struct ExecutionTelemetry::Private : jb::core::priv::ObjectPrivate {
         owner->emit(owner->failed, failure.error);
     }
 
-    ExecutionTelemetry*                     owner{};
-    jb::db::Database&                       database;
-    AttributeRegistry const&                attributes;
-    jb::core::TimeSource&                   clock;
-    jb::core::UuidGenerator&                generator;
-    TelemetryOptions                        options;
-    detail::WaitRepository                  repository;
-    jb::core::ThreadCtx const*              construction_thread;
-    State                                   state{State::Fresh};
-    jb::core::Uuid                          epoch;
-    jb::core::TimePoint                     origin;
-    jb::core::TimePoint                     last_monotonic;
-    detail::TelemetrySample                 latest_sample;
-    std::optional<detail::TelemetryFailure> first_failure;
+    ExecutionTelemetry*                      owner{};
+    jb::db::Database&                        database;
+    AttributeRegistry const&                 attributes;
+    jb::core::TimeSource&                    clock;
+    jb::core::UuidGenerator&                 generator;
+    TelemetryOptions                         options;
+    detail::WaitRepository                   repository;
+    jb::core::ThreadCtx const*               construction_thread;
+    State                                    state{State::Fresh};
+    jb::core::Uuid                           epoch;
+    jb::core::TimePoint                      origin;
+    jb::core::TimePoint                      last_monotonic;
+    detail::TelemetrySample                  latest_sample;
+    std::optional<detail::TelemetryFailure>  first_failure;
+    std::optional<detail::AvailableJobTypes> available;
+    AttemptExecutor const*                   registered_executor{};
 };
 
 ExecutionTelemetry::ExecutionTelemetry(jb::db::Database&        database,
@@ -283,6 +298,149 @@ void ExecutionTelemetry::request_stop() noexcept
 }
 
 namespace detail {
+
+auto TelemetryAccess::register_executor(ExecutionTelemetry&      owner,
+                                        jb::db::Database&        database,
+                                        AttributeRegistry const& attributes,
+                                        jb::core::TimeSource&    clock,
+                                        AttemptExecutor const&   executor) -> TelemetryResult<void>
+{
+    auto* data = owner.d_ptr<ExecutionTelemetry::Private>();
+    if (!data->valid_affinity() || &data->database != &database || &data->attributes != &attributes ||
+        &data->clock != &clock || data->state != ExecutionTelemetry::Private::State::Fresh ||
+        (data->registered_executor && data->registered_executor != &executor)) {
+        return TelemetryResult<void>::failure(invalid_state("executor_registration"));
+    }
+    AvailableJobTypes const types{
+        .cli  = executor.is_available(JobType::Cli),
+        .http = executor.is_available(JobType::Http),
+    };
+    if (data->available && *data->available != types) {
+        return TelemetryResult<void>::failure(invalid_state("executor_registration_changed"));
+    }
+    data->available           = types;
+    data->registered_executor = &executor;
+    return TelemetryResult<void>::success();
+}
+
+auto TelemetryAccess::available_types(ExecutionTelemetry& owner) -> TelemetryResult<AvailableJobTypes>
+{
+    auto* data  = owner.d_ptr<ExecutionTelemetry::Private>();
+    auto  ready = data->active();
+    if (!ready) {
+        return TelemetryResult<AvailableJobTypes>::failure(std::move(ready).error());
+    }
+    if (!data->available) {
+        return TelemetryResult<AvailableJobTypes>::failure(invalid_state("missing_executor_registration"));
+    }
+    return TelemetryResult<AvailableJobTypes>::success(*data->available);
+}
+
+auto TelemetryAccess::mutation_boundary(ExecutionTelemetry*      owner,
+                                        jb::db::Database&        database,
+                                        AttributeRegistry const& attributes,
+                                        jb::core::TimeSource&    clock) -> TelemetryResult<MutationTiming>
+{
+    MutationTiming boundary{.owner = owner, .database = &database};
+    if (owner) {
+        auto* data = owner->d_ptr<ExecutionTelemetry::Private>();
+        if (!data->valid_affinity() || &data->database != &database || &data->attributes != &attributes ||
+            &data->clock != &clock) {
+            return TelemetryResult<MutationTiming>::failure(invalid_state("mixed_collaborators"));
+        }
+        if (data->first_failure) {
+            return TelemetryResult<MutationTiming>::failure(*data->first_failure);
+        }
+        if (data->state == ExecutionTelemetry::Private::State::Active) {
+            auto types = available_types(*owner);
+            if (!types) {
+                return TelemetryResult<MutationTiming>::failure(std::move(types).error());
+            }
+            auto sampled = sample(*owner);
+            if (!sampled) {
+                return TelemetryResult<MutationTiming>::failure(std::move(sampled).error());
+            }
+            boundary.sample    = std::move(*sampled);
+            boundary.utc_now   = boundary.sample->utc_now;
+            boundary.available = *types;
+            return TelemetryResult<MutationTiming>::success(std::move(boundary));
+        }
+    }
+    boundary.utc_now = clock.utc_now();
+    return TelemetryResult<MutationTiming>::success(std::move(boundary));
+}
+
+auto TelemetryAccess::lifetime(ExecutionTelemetry& owner) -> std::weak_ptr<jb::core::priv::ObjectLifetime>
+{
+    return owner.d_ptr<ExecutionTelemetry::Private>()->lifetime;
+}
+
+auto MutationTiming::measurement() const noexcept -> InitialRunMeasurement
+{
+    return sample ? InitialRunMeasurement::Complete : InitialRunMeasurement::Unmeasured;
+}
+
+namespace {
+
+auto visit_scope(MutationTiming const& boundary, EligibilityScope scope, bool reopen) -> TelemetryResult<void>
+{
+    std::optional<jb::core::Uuid> after;
+    WaitRepository                repository{*boundary.database};
+    if (!boundary.sample) {
+        for (;;) {
+            auto ids = list_timing_scope(*boundary.database, scope, after);
+            if (!ids) {
+                return TelemetryResult<void>::failure(std::move(ids).error());
+            }
+            if (ids->empty()) {
+                return TelemetryResult<void>::success();
+            }
+            for (auto const& id : *ids) {
+                auto timing = repository.read(id);
+                if (!timing) {
+                    return TelemetryResult<void>::failure(std::move(timing).error());
+                }
+                if (timing->open_epoch) {
+                    auto failure   = invalid_state("open_interval_without_owner");
+                    failure.origin = StorageFailureOrigin::PersistedData;
+                    return TelemetryResult<void>::failure(std::move(failure));
+                }
+            }
+            after = ids->back();
+        }
+    }
+
+    for (;;) {
+        auto rows = list_eligibility(*boundary.database, scope, after);
+        if (!rows) {
+            return TelemetryResult<void>::failure(std::move(rows).error());
+        }
+        if (rows->empty()) {
+            return TelemetryResult<void>::success();
+        }
+        for (auto const& row : *rows) {
+            auto accounted = reopen && row.eligible(boundary.utc_now, boundary.available)
+                               ? TelemetryAccess::open_interval(*boundary.owner, row.id, boundary.sample)
+                               : TelemetryAccess::settle(*boundary.owner, row.id, boundary.sample);
+            if (!accounted) {
+                return TelemetryResult<void>::failure(std::move(accounted).error());
+            }
+        }
+        after = rows->back().id;
+    }
+}
+
+} // namespace
+
+auto MutationTiming::settle_scope(EligibilityScope scope) const -> TelemetryResult<void>
+{
+    return visit_scope(*this, scope, false);
+}
+
+auto MutationTiming::reconcile_scope(EligibilityScope scope) const -> TelemetryResult<void>
+{
+    return visit_scope(*this, scope, true);
+}
 
 auto TelemetryAccess::sample(ExecutionTelemetry& owner) -> TelemetryResult<TelemetrySample>
 {

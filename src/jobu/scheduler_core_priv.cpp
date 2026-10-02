@@ -1,5 +1,7 @@
 #include "scheduler_core_priv.hpp"
 
+#include "execution_telemetry_priv.hpp"
+
 #include "attempt_executor.hpp"
 #include "attempt_repository_priv.hpp"
 #include "database.hpp"
@@ -709,6 +711,19 @@ auto load_candidate_batch(SchedulerRepository&   repository,
     return CoreResult<void>::success();
 }
 
+auto type_available(AttemptExecutor const& executor, SchedulerCoreOptions const& options, JobType type)
+    -> CoreResult<bool>
+{
+    if (!options.telemetry) {
+        return CoreResult<bool>::success(executor.is_available(type));
+    }
+    auto types = TelemetryAccess::available_types(*options.telemetry);
+    if (!types) {
+        return CoreResult<bool>::failure(std::move(types).error().error);
+    }
+    return CoreResult<bool>::success(types->contains(type));
+}
+
 auto dispatch_visit(jb::db::Database&                        database,
                     AttributeRegistry const&                 attributes,
                     AttemptExecutor&                         executor,
@@ -729,7 +744,11 @@ auto dispatch_visit(jb::db::Database&                        database,
     if (terminal || running_for(capacity, type) >= global_limit_for(options, type)) {
         return CoreResult<bool>::success(false);
     }
-    if (!executor.is_available(type)) {
+    auto available = type_available(executor, options, type);
+    if (!available) {
+        return CoreResult<bool>::failure(std::move(available).error());
+    }
+    if (!*available) {
         reset_credits(credits, queues);
         return CoreResult<bool>::success(false);
     }
@@ -949,9 +968,12 @@ auto SchedulerCore::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result
 
     // Cancellation is a scheduler state operation too. Only fatal storage errors close acceptance; expected run
     // conflicts and executor refusals retain their existing retryable operation contract.
-    auto cancelled = cancel_run_impl(run_id);
-    auto fatal     = !cancelled && classify_storage_failure(cancelled.error(), StorageOperation::Mutation) ==
-                                       StorageFailureDisposition::Fatal;
+    _telemetry_failure.reset();
+    auto       cancelled = cancel_run_impl(run_id);
+    auto const origin    = _telemetry_failure ? _telemetry_failure->origin : StorageFailureOrigin::Operation;
+    auto       fatal = !cancelled && (cancelled.error().code.starts_with("jobu.telemetry.") ||
+                                      classify_storage_failure(cancelled.error(), StorageOperation::Mutation, origin) ==
+                                          StorageFailureDisposition::Fatal);
 
     // A nonfatal operation error is safe only if transaction cleanup succeeds. Inspect health after the local
     // guard has unwound, preserving an earlier fatal error when rollback also fails.
@@ -969,8 +991,19 @@ auto SchedulerCore::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result
         fatal = true;
     }
 
-    if (fatal) {
+    if (_telemetry_failure) {
+        auto error = sanitized_storage_error(cancelled.error(), StorageOperation::Mutation, origin);
+        cancelled  = CancellationResult::failure(error);
+        fail(error, false);
+    }
+    else if (fatal) {
         fail(cancelled.error(), false);
+    }
+    if (_telemetry_failure && _options.telemetry) {
+        auto  failure = std::move(*_telemetry_failure);
+        auto* owner   = std::exchange(_options.telemetry, nullptr);
+        // Final post-cleanup delivery may destroy the borrowed telemetry owner.
+        TelemetryAccess::report_failure(*owner, std::move(failure), StorageOperation::Mutation);
     }
     return cancelled;
 }
@@ -1027,7 +1060,13 @@ auto SchedulerCore::cancel_run_impl(jb::core::Uuid const& run_id) -> jb::core::R
     }
 
     // Re-read pending work under an immediate transaction so cancellation never relies on the earlier classification.
-    auto const completed_at = _time_source.utc_now();
+    auto sampled = TelemetryAccess::mutation_boundary(_options.telemetry, _database, _attributes, _time_source);
+    if (!sampled) {
+        _telemetry_failure = std::move(sampled).error();
+        return CancellationResult::failure(_telemetry_failure->error);
+    }
+    auto       timing       = std::move(*sampled);
+    auto const completed_at = timing.utc_now;
     auto       result       = cancellation_result();
     auto       serialized   = jb::core::serialize_json(result);
     if (!serialized) {
@@ -1050,6 +1089,13 @@ auto SchedulerCore::cancel_run_impl(jb::core::Uuid const& run_id) -> jb::core::R
 
     // The cancelled run, a possible recurring successor, its one-time definition, and suspension drains must commit
     // or roll back together. A remaining manual or scheduled run keeps the definition unfinished.
+    EligibilityScope const scope{.kind = EligibilityScope::Kind::Job, .id = run.job_id};
+    auto                   settled = timing.settle_scope(scope);
+    if (!settled) {
+        _telemetry_failure = std::move(settled).error();
+        return CancellationResult::failure(_telemetry_failure->error);
+    }
+
     auto cancelled = repository.cancel_pending_run(run_id, run.state, completed_at, *serialized);
     if (!cancelled) {
         return CancellationResult::failure(std::move(cancelled).error());
@@ -1062,7 +1108,8 @@ auto SchedulerCore::cancel_run_impl(jb::core::Uuid const& run_id) -> jb::core::R
                                                 _cron,
                                                 _uuid_generator,
                                                 run,
-                                                std::max(completed_at, run.planned_at));
+                                                std::max(completed_at, run.planned_at),
+                                                timing.measurement());
     if (!successor) {
         return CancellationResult::failure(std::move(successor).error());
     }
@@ -1075,6 +1122,11 @@ auto SchedulerCore::cancel_run_impl(jb::core::Uuid const& run_id) -> jb::core::R
     auto drained = repository.complete_drained_suspensions(run.queue_id, run.job_id, completed_at);
     if (!drained) {
         return CancellationResult::failure(std::move(drained).error());
+    }
+    auto reconciled = timing.reconcile_scope(scope);
+    if (!reconciled) {
+        _telemetry_failure = std::move(reconciled).error();
+        return CancellationResult::failure(_telemetry_failure->error);
     }
     auto committed = guard.commit();
     if (!committed) {
@@ -1254,7 +1306,11 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
     // repository applies the same lifecycle and manual-barrier gates used for runnable selection.
     auto next_wake = std::optional<jb::core::UtcTimePoint>{};
     for (auto const type : {JobType::Cli, JobType::Http}) {
-        if (!_executor.is_available(type)) {
+        auto available = type_available(_executor, _options, type);
+        if (!available) {
+            return CoreResult<SchedulerCycleResult>::failure(std::move(available).error());
+        }
+        if (!*available) {
             continue;
         }
         if (_completion_token->terminal) {

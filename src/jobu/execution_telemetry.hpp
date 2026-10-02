@@ -22,6 +22,7 @@ class UuidGenerator;
 namespace jb::jobu {
 
 class AttributeRegistry;
+class AttemptExecutor;
 
 namespace detail {
 struct TelemetryAccess;
@@ -43,6 +44,8 @@ struct TelemetryOptions {
 /// New covered runs may start Complete; previously unmeasured work becomes Partial when observed.
 /// UTC determines observed eligibility elsewhere; only monotonic elapsed time contributes to wait.
 /// Destruction and request_stop() perform no SQL and do not settle durable open intervals.
+/// Integrated management requires the borrowing Scheduler to register its actual executor
+/// capabilities before activation. Registration is fixed for this owner's lifetime.
 class ExecutionTelemetry final : public jb::core::Object {
 public:
     /// Constructs an inactive owner without reading clocks, generating an epoch or performing SQL.
@@ -51,7 +54,7 @@ public:
                        AttributeRegistry const& attributes,
                        jb::core::TimeSource&    time_source,
                        jb::core::UuidGenerator& uuid_generator,
-                       TelemetryOptions         options = {},
+                       TelemetryOptions         options = TelemetryOptions(),
                        jb::core::Object*        parent  = nullptr);
     /// Invalidates accounting without changing durable rows or emitting a failure.
     ~ExecutionTelemetry() override;

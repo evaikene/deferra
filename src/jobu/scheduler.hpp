@@ -26,6 +26,7 @@ namespace jb::jobu {
 
 class AttributeRegistry;
 class SecretProvider;
+class ExecutionTelemetry;
 
 /// Controls scheduler capacity, candidate paging, and wall-clock reevaluation.
 ///
@@ -41,6 +42,9 @@ struct SchedulerOptions {
     std::size_t          candidate_batch_size{200};
     /// Maximum monotonic wait before persisted UTC deadlines are reevaluated.
     std::chrono::seconds wall_clock_recheck{60};
+    /// Optional shared telemetry owner, which must outlive the scheduler. Construct this scheduler
+    /// before activating telemetry so its actual executor capabilities can be registered once.
+    ExecutionTelemetry*  telemetry{nullptr};
 };
 
 /// Describes the public scheduler lifecycle.
@@ -115,7 +119,7 @@ public:
               jb::core::TimeSource&    time_source,
               AttemptExecutor&         executor,
               SecretProvider&          secrets,
-              SchedulerOptions         options = {},
+              SchedulerOptions         options = SchedulerOptions(),
               jb::core::Object*        parent  = nullptr);
 
     /// Permanently disables scheduling and retained completions before releasing adapter resources.

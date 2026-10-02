@@ -229,6 +229,9 @@ struct ManagementServiceOptions {
     /// Nonempty timezone supported by the borrowed CronEngine; omission in cron input uses this value.
     std::string         default_timezone{"UTC"};
     /// Optional owner-thread telemetry collaborator, which must outlive the service.
+    /// Active integration requires a Scheduler-registered executor snapshot and matching database,
+    /// registry and clock. Null/inactive ownership creates unmeasured rows and rejects mutations
+    /// over abandoned open intervals; it never reconstructs wait from another owner's epoch.
     ExecutionTelemetry* telemetry{nullptr};
 };
 
@@ -243,7 +246,8 @@ struct ManagementServiceOptions {
 /// Queue/job gets and lists use bounded repository reads without an explicit transaction. Creates, updates, lifecycle
 /// changes, moves, and deletions use one immediate transaction and return only after commit. Errors include stable
 /// `jobu.queue.*`, `jobu.job.*`, `jobu.run.*`, `jobu.schedule.*`, `jobu.attribute.*`, and `jobu.idempotency.*` codes
-/// plus database errors when no domain mapping applies. Storage errors retain their stable category/code, while
+/// plus database errors when no domain mapping applies. Integrated timing failures use `jobu.telemetry.*`;
+/// timing and eligibility changes share the domain transaction. Storage errors retain their stable category/code, while
 /// backend diagnostic text is sanitized. Successful mutations synchronously emit
 /// mutation_committed after commit without starting threads, external work, or event-loop processing. A fresh recurring
 /// create or an update that validates or evaluates a recurring schedule may synchronously load timezone data through
@@ -273,7 +277,7 @@ public:
                       CronEngine const&        cron,
                       jb::core::UuidGenerator& uuid_generator,
                       jb::core::TimeSource&    time_source,
-                      ManagementServiceOptions options = {},
+                      ManagementServiceOptions options = ManagementServiceOptions(),
                       jb::core::Object*        parent  = nullptr);
 
     /// Destroys private repositories without changing the borrowed Database state.

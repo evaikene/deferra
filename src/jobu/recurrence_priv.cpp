@@ -17,9 +17,11 @@ using RecurrenceResult = jb::core::Result<T, jb::core::Error>;
 
 auto recurrence_invariant(std::string reason, jb::core::Error const* cause = nullptr) -> jb::core::Error
 {
-    auto error   = jb::core::Error{.category = jb::core::ErrorCategory::Internal,
-                                   .code     = "jobu.storage.invariant",
-                                   .message  = "Persisted recurring scheduler state is inconsistent"};
+    auto error = jb::core::Error{
+        .category = jb::core::ErrorCategory::Internal,
+        .code     = "jobu.storage.invariant",
+        .message  = "Persisted recurring scheduler state is inconsistent",
+    };
     error.detail = "reason=" + std::move(reason);
     if (cause != nullptr) {
         error.detail += ";cause=" + cause->code;
@@ -34,7 +36,8 @@ auto insert_recurring_run(jb::db::Database&        database,
                           CronEngine const&        cron,
                           jb::core::UuidGenerator& uuid_generator,
                           JobDefinition            definition,
-                          jb::core::UtcTimePoint   lower_bound) -> RecurrenceResult<bool>
+                          jb::core::UtcTimePoint   lower_bound,
+                          InitialRunMeasurement    measurement) -> RecurrenceResult<bool>
 {
     // Schedule ownership survives suspension. Only deletion or a current Once schedule
     // suppresses a successor; the caller has already retired or ruled out existing work.
@@ -63,24 +66,26 @@ auto insert_recurring_run(jb::db::Database&        database,
     }
 
     RunRepository runs{database, attributes};
-    auto          inserted = runs.insert_schedule_owned(JobRun{
-        .id             = *run_id,
-        .job_id         = definition.id,
-        .job_revision   = definition.revision,
-        .queue_id       = definition.queue_id,
-        .origin         = RunOrigin::Scheduled,
-        .schedule_owned = true,
-        .planned_at     = *next,
-        .runnable_at    = *next,
-        .started_at     = std::nullopt,
-        .completed_at   = std::nullopt,
-        .type           = definition.type,
-        .priority       = definition.priority,
-        .attributes     = std::move(definition.attributes),
-        .payload        = std::move(definition.payload),
-        .state          = RunState::Scheduled,
-        .result         = std::nullopt,
-    });
+    auto          inserted = runs.insert_schedule_owned(
+        JobRun{
+            .id             = *run_id,
+            .job_id         = definition.id,
+            .job_revision   = definition.revision,
+            .queue_id       = definition.queue_id,
+            .origin         = RunOrigin::Scheduled,
+            .schedule_owned = true,
+            .planned_at     = *next,
+            .runnable_at    = *next,
+            .started_at     = std::nullopt,
+            .completed_at   = std::nullopt,
+            .type           = definition.type,
+            .priority       = definition.priority,
+            .attributes     = std::move(definition.attributes),
+            .payload        = std::move(definition.payload),
+            .state          = RunState::Scheduled,
+            .result         = std::nullopt,
+        },
+        measurement);
     if (!inserted) {
         return RecurrenceResult<bool>::failure(std::move(inserted).error());
     }
@@ -92,7 +97,8 @@ auto insert_recurring_successor(jb::db::Database&        database,
                                 CronEngine const&        cron,
                                 jb::core::UuidGenerator& uuid_generator,
                                 JobRun const&            completed_run,
-                                jb::core::UtcTimePoint   lower_bound) -> RecurrenceResult<bool>
+                                jb::core::UtcTimePoint   lower_bound,
+                                InitialRunMeasurement    measurement) -> RecurrenceResult<bool>
 {
     if (!completed_run.schedule_owned) {
         return RecurrenceResult<bool>::success(false);
@@ -112,7 +118,13 @@ auto insert_recurring_successor(jb::db::Database&        database,
     if (!found->has_value()) {
         return RecurrenceResult<bool>::failure(recurrence_invariant("missing_live_definition"));
     }
-    return insert_recurring_run(database, attributes, cron, uuid_generator, std::move(**found), lower_bound);
+    return insert_recurring_run(database,
+                                attributes,
+                                cron,
+                                uuid_generator,
+                                std::move(**found),
+                                lower_bound,
+                                measurement);
 }
 
 } // namespace jb::jobu::detail
