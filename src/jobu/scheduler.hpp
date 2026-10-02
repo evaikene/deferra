@@ -93,6 +93,11 @@ struct CancelRunResult {
 /// destination bytes, and expanded limits produce a committed terminal Failed attempt without starting the executor.
 /// Storage, persisted-data, and unexpected provider failures instead fail the scheduler before external execution.
 ///
+/// With active telemetry, Running claims close observed runnable wait in the start transaction. Completion retains
+/// that total through retries, excludes execution/backoff, and reconciles released manual siblings atomically.
+/// Covered recurring successors begin Complete; later-instrumented runs remain Partial. Without telemetry, closed
+/// unmeasured rows remain unmeasured and abandoned open intervals are rejected before durable state changes.
+///
 /// Scheduling is event-driven and uses one non-repeating timer. Executor completion handlers remain valid after stop()
 /// so their durable outcomes can commit, but they do not restart dispatch while stopped. Shutdown, fatal failure, and
 /// destruction invalidate those handlers: later owner-thread delivery is a no-op, even after Scheduler destruction.
@@ -105,7 +110,7 @@ public:
     /// @param attributes Immutable registry borrowed for decoding every persisted execution snapshot.
     /// @param cron Cron implementation borrowed for recurring successors.
     /// @param uuid_generator UUID source borrowed for recurring successors.
-    /// @param time_source Wall-clock source borrowed for durable scheduler timestamps and wake calculations.
+    /// @param time_source Clock source borrowed for durable timestamps, wakes and monotonic wait accounting.
     /// @param executor Attempt executor borrowed for availability, start, and cancellation operations.
     /// @param secrets Synchronous provider borrowed for fresh per-attempt resolution; must not invoke callbacks.
     /// @param options Copied scheduler limits and wake policy. Invalid values are retained for start() to report.

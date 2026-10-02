@@ -7,6 +7,7 @@
 #include "database.hpp"
 #include "job_lifecycle_priv.hpp"
 #include "json.hpp"
+#include "object_priv.hpp"
 #include "recurrence_priv.hpp"
 #include "retry_policy_priv.hpp"
 #include "scheduler_dispatch_priv.hpp"
@@ -486,6 +487,8 @@ auto process_completion(jb::db::Database&                        database,
                         CronEngine const&                        cron,
                         jb::core::UuidGenerator&                 uuid_generator,
                         jb::core::TimeSource&                    time_source,
+                        ExecutionTelemetry*                      telemetry,
+                        std::optional<TelemetryFailure>&         accounting_failure,
                         std::map<jb::core::Uuid, std::uint64_t>& active_attempts,
                         std::set<jb::core::Uuid>&                cancellation_requests,
                         jb::core::Uuid const&                    expected_run_id,
@@ -518,7 +521,13 @@ auto process_completion(jb::db::Database&                        database,
     }
 
     // Attempt completion, retry or terminal run state, recurrence, and suspension drain are one durable transition.
-    auto const completed_at = time_source.utc_now();
+    auto sampled = TelemetryAccess::mutation_boundary(telemetry, database, attributes, time_source);
+    if (!sampled) {
+        accounting_failure = std::move(sampled).error();
+        return CoreResult<CompletionEffect>::failure(accounting_failure->error);
+    }
+    auto       timing       = std::move(*sampled);
+    auto const completed_at = timing.utc_now;
     auto       transaction  = jb::db::Transaction::begin(database);
     if (!transaction) {
         return CoreResult<CompletionEffect>::failure(std::move(transaction).error());
@@ -548,6 +557,21 @@ auto process_completion(jb::db::Database&                        database,
     if (!decision) {
         return CoreResult<CompletionEffect>::failure(std::move(decision).error());
     }
+
+    // Running time never belongs to waiting. Validate its closed row explicitly: the
+    // pending scope projection intentionally omits closed Running rows.
+    auto closed = timing.validate_closed_run(context->run.id);
+    if (!closed) {
+        accounting_failure = std::move(closed).error();
+        return CoreResult<CompletionEffect>::failure(accounting_failure->error);
+    }
+    EligibilityScope const scope{.kind = EligibilityScope::Kind::Job, .id = context->run.job_id};
+    auto                   settled = timing.settle_scope(scope);
+    if (!settled) {
+        accounting_failure = std::move(settled).error();
+        return CoreResult<CompletionEffect>::failure(accounting_failure->error);
+    }
+
     auto attempt_completed = repository.complete_attempt(completion.key.run_id,
                                                          completion.key.attempt_number,
                                                          completed_at,
@@ -595,7 +619,8 @@ auto process_completion(jb::db::Database&                        database,
                                                     cron,
                                                     uuid_generator,
                                                     context->run,
-                                                    std::max(completed_at, context->run.planned_at));
+                                                    std::max(completed_at, context->run.planned_at),
+                                                    timing.measurement());
         if (!successor) {
             return CoreResult<CompletionEffect>::failure(std::move(successor).error());
         }
@@ -612,6 +637,14 @@ auto process_completion(jb::db::Database&                        database,
     auto drained = repository.complete_drained_suspensions(context->run.queue_id, context->run.job_id, completed_at);
     if (!drained) {
         return CoreResult<CompletionEffect>::failure(std::move(drained).error());
+    }
+
+    // A due retry or a sibling released by manual terminalization opens at this same
+    // boundary. Future backoff/successors stay closed, retaining their accumulated sum.
+    auto reconciled = timing.reconcile_scope(scope);
+    if (!reconciled) {
+        accounting_failure = std::move(reconciled).error();
+        return CoreResult<CompletionEffect>::failure(accounting_failure->error);
     }
 
     auto committed = guard.commit();
@@ -728,6 +761,8 @@ auto dispatch_visit(jb::db::Database&                        database,
                     AttributeRegistry const&                 attributes,
                     AttemptExecutor&                         executor,
                     SecretProvider&                          secrets,
+                    jb::core::TimeSource&                    clock,
+                    std::optional<TelemetryFailure>&         accounting_failure,
                     SchedulerRepository&                     repository,
                     std::vector<QueueRuntime> const&         queues,
                     JobType                                  type,
@@ -829,10 +864,23 @@ auto dispatch_visit(jb::db::Database&                        database,
                 auto handled = processor(expected_run_id, value);
                 (void)handled;
             };
+            // Each claim has its own sample. An immediate completion can invalidate that
+            // sample before this cycle reaches its next dispatch opportunity.
+            auto sampled = options.telemetry
+                             ? TelemetryAccess::mutation_boundary(options.telemetry, database, attributes, clock)
+                             : TelemetryResult<MutationTiming>::success({.database = &database, .utc_now = now});
+            if (!sampled) {
+                accounting_failure = std::move(sampled).error();
+                return CoreResult<bool>::failure(accounting_failure->error);
+            }
             auto dispatched =
-                dispatch_selected(database, attributes, executor, secrets, run_id, now, std::move(completion));
+                dispatch_selected(database, attributes, executor, secrets, run_id, *sampled, std::move(completion));
             if (!dispatched) {
-                return CoreResult<bool>::failure(std::move(dispatched).error());
+                auto failure = std::move(dispatched).error();
+                if (options.telemetry || failure.error.code.starts_with("jobu.telemetry.")) {
+                    accounting_failure = failure;
+                }
+                return CoreResult<bool>::failure(std::move(failure.error));
             }
             // An executor may report infrastructure failure during start(). The committed attempt stays Running;
             // neither synthesized completion nor further dispatch may cross the newly latched terminal boundary.
@@ -955,6 +1003,49 @@ void SchedulerCore::fail(jb::core::Error const& error, bool notify)
     }
 }
 
+auto SchedulerCore::fail_operation(jb::core::Error error, StorageOperation operation, bool notify) -> jb::core::Error
+{
+    if (_failure) {
+        return *_failure;
+    }
+
+    auto       failure        = std::exchange(_telemetry_failure, std::nullopt);
+    auto const origin         = failure ? failure->origin : StorageFailureOrigin::Operation;
+    auto const original_fatal = error.code.starts_with("jobu.telemetry.") ||
+                                error.code == "jobu.secret.provider_failed" ||
+                                classify_storage_failure(error, operation, origin) == StorageFailureDisposition::Fatal;
+    if (_database.is_poisoned() && !original_fatal) {
+        auto cleanup = _database.last_error();
+        if (!cleanup || classify_storage_failure(*cleanup, operation) != StorageFailureDisposition::Fatal) {
+            cleanup = core_error(jb::core::ErrorCategory::Internal,
+                                 "db.connection_failed",
+                                 "The database connection is unusable after transaction cleanup");
+        }
+        error = *cleanup;
+        if (failure) {
+            failure = TelemetryFailure{.error = error};
+        }
+    }
+    if (failure) {
+        error = sanitized_storage_error(error, operation, failure->origin);
+    }
+
+    _failure_operation = operation;
+    _failure_origin    = failure ? failure->origin : StorageFailureOrigin::Operation;
+
+    // Detach before the scheduler's notification: its receiver may destroy telemetry.
+    // Shutdown makes every retained completion inert before either failure signal runs.
+    auto* target   = failure ? std::exchange(_options.telemetry, nullptr) : nullptr;
+    auto  lifetime = target ? TelemetryAccess::lifetime(*target) : std::weak_ptr<jb::core::priv::ObjectLifetime>{};
+    fail(error, notify);
+    if (target) {
+        if (auto alive = lifetime.lock(); alive && alive->alive.load()) {
+            TelemetryAccess::report_failure(*target, std::move(*failure), operation);
+        }
+    }
+    return error;
+}
+
 auto SchedulerCore::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result<CancelRunResult, jb::core::Error>
 {
     using CancellationResult = CoreResult<CancelRunResult>;
@@ -992,11 +1083,15 @@ auto SchedulerCore::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result
     }
 
     if (_telemetry_failure) {
-        auto error = sanitized_storage_error(cancelled.error(), StorageOperation::Mutation, origin);
-        cancelled  = CancellationResult::failure(error);
+        auto error         = sanitized_storage_error(cancelled.error(), StorageOperation::Mutation, origin);
+        cancelled          = CancellationResult::failure(error);
+        _failure_operation = StorageOperation::Mutation;
+        _failure_origin    = origin;
         fail(error, false);
     }
     else if (fatal) {
+        _failure_operation = StorageOperation::Mutation;
+        _failure_origin    = origin;
         fail(cancelled.error(), false);
     }
     if (_telemetry_failure && _options.telemetry) {
@@ -1166,11 +1261,13 @@ auto SchedulerCore::process_cycle() -> jb::core::Result<SchedulerCycleResult, jb
 
     // Dispatch/read failures also close acceptance. The result boundary ensures local transaction guards have
     // unwound before a failure observer can request shutdown or deliver another retained completion.
+    _telemetry_failure.reset();
     auto cycle = process_cycle_impl();
     if (!cycle) {
         // Synchronous cycle errors are reported by the caller through this result; only completion failures need
         // the separate notification path.
-        fail(cycle.error(), false);
+        cycle =
+            CoreResult<SchedulerCycleResult>::failure(fail_operation(cycle.error(), StorageOperation::Dispatch, false));
     }
     return cycle;
 }
@@ -1213,19 +1310,22 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
             if (token->terminal || !token->owner) {
                 return CompletionResult::success(std::nullopt);
             }
-            auto& core      = *token->owner;
-            auto  completed = process_completion(core._database,
-                                                 core._attributes,
-                                                 core._cron,
-                                                 core._uuid_generator,
-                                                 core._time_source,
-                                                 core._active_attempts,
-                                                 core._cancellation_requests,
-                                                 expected_run_id,
-                                                 completion);
+            auto& core = *token->owner;
+            core._telemetry_failure.reset();
+            auto completed = process_completion(core._database,
+                                                core._attributes,
+                                                core._cron,
+                                                core._uuid_generator,
+                                                core._time_source,
+                                                core._options.telemetry,
+                                                core._telemetry_failure,
+                                                core._active_attempts,
+                                                core._cancellation_requests,
+                                                expected_run_id,
+                                                completion);
             if (!completed) {
-                core.fail(completed.error());
-                return CompletionResult::failure(std::move(completed).error());
+                auto error = core.fail_operation(completed.error(), StorageOperation::Completion, true);
+                return CompletionResult::failure(std::move(error));
             }
             if (core._callbacks.rescan_requested) {
                 core._callbacks.rescan_requested();
@@ -1249,6 +1349,8 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
                                     _attributes,
                                     _executor,
                                     _secrets,
+                                    _time_source,
+                                    _telemetry_failure,
                                     repository,
                                     *queues,
                                     first_type,
@@ -1274,6 +1376,8 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
                                      _attributes,
                                      _executor,
                                      _secrets,
+                                     _time_source,
+                                     _telemetry_failure,
                                      repository,
                                      *queues,
                                      second_type,

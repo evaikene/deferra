@@ -442,6 +442,40 @@ auto MutationTiming::reconcile_scope(EligibilityScope scope) const -> TelemetryR
     return visit_scope(*this, scope, true);
 }
 
+auto MutationTiming::validate_closed_run(jb::core::Uuid const& run_id) const -> TelemetryResult<void>
+{
+    WaitRepository repository{*database};
+    auto           timing = repository.read(run_id);
+    if (!timing) {
+        return TelemetryResult<void>::failure(std::move(timing).error());
+    }
+    if (timing->open_epoch) {
+        auto failure   = invalid_state("open_interval_without_owner");
+        failure.origin = StorageFailureOrigin::PersistedData;
+        return TelemetryResult<void>::failure(std::move(failure));
+    }
+    return TelemetryResult<void>::success();
+}
+
+auto MutationTiming::claim_run(jb::core::Uuid const& run_id) const -> TelemetryResult<void>
+{
+    if (!sample) {
+        return validate_closed_run(run_id);
+    }
+
+    // Selection is already validated by the scheduler. Opening at this boundary preserves
+    // an existing tail and marks a late first observation Partial, even with zero new wait.
+    auto opened = TelemetryAccess::open_interval(*owner, run_id, sample);
+    if (!opened) {
+        return TelemetryResult<void>::failure(std::move(opened).error());
+    }
+    auto closed = TelemetryAccess::settle(*owner, run_id, sample);
+    if (!closed) {
+        return TelemetryResult<void>::failure(std::move(closed).error());
+    }
+    return TelemetryResult<void>::success();
+}
+
 auto TelemetryAccess::sample(ExecutionTelemetry& owner) -> TelemetryResult<TelemetrySample>
 {
     return owner.d_ptr<ExecutionTelemetry::Private>()->sample();
