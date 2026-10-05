@@ -20,9 +20,10 @@
 /// \endcode
 ///
 /// Implement custom loggers by overriding `Logger::log()`. Implementations must
-/// be thread-safe because logging may occur concurrently from any thread. The
-/// `LogMessage::message` view is valid only for the duration of the call, so
-/// asynchronous loggers must copy it before returning:
+/// be thread-safe because logging may occur concurrently from any thread.
+/// All text views and structured fields in `LogMessage` are valid only for
+/// the duration of the call, so asynchronous loggers must copy them before
+/// returning:
 ///
 /// \code{.cpp}
 /// class CaptureLogger final : public jb::core::Logger {
@@ -48,12 +49,16 @@
 
 #include <fmt/format.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <memory>
 #include <source_location>
+#include <span>
 #include <string_view>
 #include <type_traits>
+#include <utility>
+#include <variant>
 
 namespace jb::core {
 
@@ -91,15 +96,31 @@ constexpr auto log_level_name(LogLevel level) noexcept -> std::string_view
     }
 }
 
-/// Single log record passed to `Logger::log()`. The `message` view points at a
-/// string owned by the caller for the duration of the `log()` call only -
-/// implementations that need to keep it (async sinks) must make a copy.
+/// Named scalar value borrowed by a synchronous log record.
+/// Names and string values must remain valid until `Logger::log()` returns.
+/// Sinks retaining fields must copy both names and string values into owned storage.
+/// Values are forwarded unchanged; escaping, duplicate names and nonfinite
+/// number handling belong to the sink's output format.
+struct LogField {
+    using Value = std::variant<bool, std::int64_t, std::uint64_t, double, std::string_view>;
+
+    std::string_view name;
+    Value            value;
+};
+
+/// Single log record passed to `Logger::log()`.
+/// Message/event text, the field span, field names and string field values
+/// are borrowed only for the synchronous call. Sinks retaining a record must
+/// copy all borrowed data, not merely the LogMessage or its span.
+/// Formatted logs have an empty event name and no fields.
 struct LogMessage {
     LogLevel                              level{LogLevel::Fatal};
     std::string_view                      message;
     std::source_location                  location;
     std::chrono::system_clock::time_point timestamp;
     ThreadCtx::id_t                       thread_id;
+    std::string_view                      event_name;
+    std::span<LogField const>             fields;
 };
 
 /// Abstract logger instance
@@ -120,13 +141,17 @@ public:
     /// Emit a log record.
     /// @param[in] msg Log record to emit
     ///
-    /// This method is only called when `is_enabled(msg.level)` is true.
+    /// The facade checks `is_enabled(msg.level)` before calling this method.
+    /// Direct sink calls bypass that check. Borrowed record data must be
+    /// consumed or copied before returning.
     virtual void log(LogMessage const& msg) = 0;
 
     /// Minimum log level this logger will emit. Messages strictly less severe
     /// (numerically greater) are dropped before formatting.
     auto level() const noexcept -> LogLevel { return _level; }
 
+    /// Change the admission threshold. Safe concurrently with facade logging;
+    /// a record already admitted may still be delivered after this returns.
     void set_level(LogLevel l) noexcept { _level.store(l, std::memory_order_relaxed); }
 
     auto is_enabled(LogLevel l) const noexcept
@@ -141,7 +166,7 @@ public:
 
 protected:
     std::atomic<LogLevel> _level = LogLevel::Warning;
-#if defined(NDEBUG)
+#ifdef NDEBUG
     bool _abort_on_fatal_error{false};
 #else
     bool _abort_on_fatal_error{true};
@@ -150,6 +175,7 @@ protected:
 
 /// Plain line-based logger writing to stderr. Thread-safe via an internal mutex.
 /// Write and flush errors discard output without throwing; fatal-abort behavior still applies.
+/// Prints the message text only; structured fields are available to custom sinks.
 ///
 /// This is the default logger used if no other logger is installed, so it is always
 /// available and can be used for early logging before `main()` / `Application` setup.
@@ -170,6 +196,23 @@ auto logger() -> std::shared_ptr<Logger>;
 /// Replaces the global logger. Pass nullptr to restore the default
 /// ConsoleLogger. Safe to call concurrently with log() / logger().
 void set_logger(std::shared_ptr<Logger> logger);
+
+/// Emit an enabled structured event through one snapshot of the global logger.
+/// @param level Event severity, using the same admission rule as formatted logs.
+/// @param event_name Stable event identifier; also supplied as `message` for legacy sinks.
+/// @param fields Borrowed named scalar values; an empty span is permitted.
+/// @param location Source location, captured at the call site by default.
+///
+/// The event name and all field storage must remain valid until this call
+/// returns, and must not be modified while the sink consumes them. Retaining
+/// sinks must copy all borrowed data. Disabled events skip metadata collection
+/// and field processing; caller argument evaluation still occurs.
+/// The sink is called without the global logger-slot lock. Logger replacement
+/// or threshold changes do not cancel a record already admitted to that sink.
+void log_event(LogLevel                  level,
+               std::string_view          event_name,
+               std::span<LogField const> fields   = {},
+               std::source_location      location = std::source_location::current());
 
 //--- Internals: format-string + source-location capture at the call site
 

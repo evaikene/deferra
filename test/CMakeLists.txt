@@ -996,6 +996,13 @@ set(TARGET "logging-test")
 add_executable(${TARGET} logging-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
+set_tests_properties(${TARGET} PROPERTIES TIMEOUT 30)
+
+# Logging public header must compile as the first include with only Core's usage requirements.
+set(TARGET "core-logging-public-header-test")
+add_executable(${TARGET} core-logging-public-header-test.cpp)
+target_link_libraries(${TARGET} PRIVATE core)
+add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # INI file test
 set(TARGET "ini-file-test")
