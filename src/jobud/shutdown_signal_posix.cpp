@@ -157,9 +157,10 @@ ShutdownSignalRelay::~ShutdownSignalRelay()
 {
     auto result = close();
     if (!result) {
-        jb::core::log_error("Unable to restore daemon signal ownership: {} ({})",
-                            result.error().detail,
-                            result.error().code);
+        auto const fields = std::array{
+            jb::core::LogField{.name = "code", .value = std::string_view{result.error().code}}
+        };
+        jb::core::log_event(jb::core::LogLevel::Error, "jobud.signal.cleanup_failed", fields);
     }
 }
 
@@ -323,7 +324,10 @@ ShutdownSignalWatch::~ShutdownSignalWatch()
     _state->active = false;
     _state->notify = {};
     if (!_state->loop->unwatch_fd(_state->watch)) {
-        jb::core::log_error("Unable to remove daemon shutdown signal watch (jobud.signal.cleanup)");
+        auto const fields = std::array{
+            jb::core::LogField{.name = "code", .value = std::string_view{"jobud.signal.cleanup"}}
+        };
+        jb::core::log_event(jb::core::LogLevel::Error, "jobud.signal.watch_cleanup_failed", fields);
     }
 }
 

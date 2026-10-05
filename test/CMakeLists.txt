@@ -871,6 +871,11 @@ if(TARGET jobud)
         add_executable(jobud-configuration-test jobud-configuration-test.cpp support/temporary_directory.cpp)
         target_link_libraries(jobud-configuration-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
         add_test(NAME jobud-configuration-test COMMAND $<TARGET_FILE:jobud-configuration-test>)
+
+        add_executable(jobud-logger-test jobud-logger-test.cpp)
+        target_link_libraries(jobud-logger-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
+        add_test(NAME jobud-logger-test COMMAND $<TARGET_FILE:jobud-logger-test>)
+        set_tests_properties(jobud-logger-test PROPERTIES TIMEOUT 30)
     endif()
     add_test(NAME jobud-version COMMAND $<TARGET_FILE:jobud> --version --config /missing/jobud.ini
         --run-as-user jobud-stage93-no-such-account)

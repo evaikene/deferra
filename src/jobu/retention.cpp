@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -51,6 +52,20 @@ auto failure_origin(jb::core::Error const& error) noexcept -> detail::StorageFai
     return error.code == "jobu.retention.invalid_relationship" || error.code.starts_with("jobu.storage.")
              ? detail::StorageFailureOrigin::PersistedData
              : detail::StorageFailureOrigin::Operation;
+}
+
+auto add_counts(RetentionPurgeCounts& total, RetentionPurgeCounts const& batch) noexcept -> bool
+{
+    for (auto member : {&RetentionPurgeCounts::runs,
+                        &RetentionPurgeCounts::idempotency_records,
+                        &RetentionPurgeCounts::jobs,
+                        &RetentionPurgeCounts::queues}) {
+        if (batch.*member > std::numeric_limits<std::size_t>::max() - total.*member) {
+            return false;
+        }
+        total.*member += batch.*member;
+    }
+    return true;
 }
 
 } // namespace
@@ -127,7 +142,8 @@ struct RetentionService::Private : jb::core::priv::ObjectPrivate {
         timer.stop();
         activation.reset();
         sweep_now.reset();
-        cursor = {};
+        cursor       = {};
+        sweep_counts = {};
     }
 
     void fail(jb::core::Error error)
@@ -180,10 +196,20 @@ struct RetentionService::Private : jb::core::priv::ObjectPrivate {
             return;
         }
 
-        cursor              = result->next;
-        auto const complete = result->sweep_complete;
+        if (!add_counts(sweep_counts, result->purged)) {
+            fail({.category = jb::core::ErrorCategory::Internal,
+                  .code     = "jobu.retention.counter_overflow",
+                  .message  = "Retention sweep counts exceed their representable range"});
+            return;
+        }
+
+        cursor                      = result->next;
+        auto const complete         = result->sweep_complete;
+        // Own the report outside Private: either notification can destroy the service.
+        auto const completed_counts = sweep_counts;
         if (complete) {
             sweep_now.reset();
+            sweep_counts = {};
         }
 
         auto const guard              = lifetime;
@@ -193,6 +219,13 @@ struct RetentionService::Private : jb::core::priv::ObjectPrivate {
         // invalidates this activation, so its old callback must not replace the new activation's timer.
         if (!guard->alive.load(std::memory_order_acquire) || activation != current_activation) {
             return;
+        }
+
+        if (complete) {
+            owner->emit(owner->sweep_completed, completed_counts);
+            if (!guard->alive.load(std::memory_order_acquire) || activation != current_activation) {
+                return;
+            }
         }
 
         auto const delay = complete ? std::chrono::duration_cast<jb::core::Duration>(options.sweep_interval)
@@ -212,6 +245,7 @@ struct RetentionService::Private : jb::core::priv::ObjectPrivate {
     std::shared_ptr<Activation>           activation;
     std::optional<jb::core::UtcTimePoint> sweep_now;
     detail::RetentionSweepCursor          cursor;
+    RetentionPurgeCounts                  sweep_counts;
     std::optional<jb::core::Error>        first_failure;
 };
 

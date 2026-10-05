@@ -96,7 +96,7 @@ class WarningLogger final : public Logger {
 public:
     void log(LogMessage const& message) override
     {
-        auto lock = std::lock_guard{_mutex};
+        auto lock = std::scoped_lock{_mutex};
         if (message.level == LogLevel::Warning) {
             _warnings.emplace_back(message.message);
         }
@@ -104,7 +104,7 @@ public:
 
     auto warnings() -> std::vector<std::string>
     {
-        auto lock = std::lock_guard{_mutex};
+        auto lock = std::scoped_lock{_mutex};
         return _warnings;
     }
 
@@ -452,7 +452,7 @@ TEST_CASE("daemon composition applies live identity policy and warns once only f
                 auto messages = warnings.capture->warnings();
                 REQUIRE(messages.size() == (uid == 0 && allow_root ? 1U : 0U));
                 if (!messages.empty()) {
-                    CHECK(messages.front() == "UNSAFE: --allow-root-cli enables command execution as root");
+                    CHECK(messages.front() == "jobud.unsafe.root_cli");
                 }
             }
             CHECK(identity.destructions == 1U);

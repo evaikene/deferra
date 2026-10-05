@@ -14,6 +14,7 @@
 #include "management_rpc.hpp"
 #include "object_priv.hpp"
 #include "protocol.hpp"
+#include "recovery.hpp"
 #include "recovery_priv.hpp"
 #include "retention.hpp"
 #include "secret_provider_priv.hpp"
@@ -25,8 +26,10 @@
 #include "system_info.hpp"
 #include "system_info_rpc.hpp"
 
+#include <array>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -41,6 +44,61 @@ auto runtime_error(std::string code) -> jb::core::Error
         .code     = std::move(code),
         .message  = "The daemon runtime could not continue",
     };
+}
+
+void log_failure(std::string_view event, std::string_view subsystem, std::string_view code)
+{
+    auto const fields = std::array{
+        jb::core::LogField{.name = "subsystem", .value = subsystem},
+        jb::core::LogField{.name = "code",      .value = code     }
+    };
+    jb::core::log_event(jb::core::LogLevel::Error, event, fields);
+}
+
+void log_recovery(jb::jobu::RecoveryReport const& report)
+{
+    auto const fields = std::array{
+        jb::core::LogField{.name = "interrupted_attempts", .value = report.interrupted_attempts},
+        jb::core::LogField{.name = "retrying_runs",        .value = report.retrying_runs       },
+        jb::core::LogField{.name = "terminal_runs",        .value = report.terminal_runs       },
+        jb::core::LogField{.name = "finished_jobs",        .value = report.finished_jobs       },
+        jb::core::LogField{.name = "inserted_successors",  .value = report.inserted_successors },
+        jb::core::LogField{.name = "suspended_jobs",       .value = report.suspended_jobs      },
+        jb::core::LogField{.name = "suspended_queues",     .value = report.suspended_queues    },
+        jb::core::LogField{.name = "repaired_timing_rows", .value = report.repaired_timing_rows}
+    };
+    jb::core::log_event(jb::core::LogLevel::Info, "jobud.recovery.completed", fields);
+}
+
+void log_delayed(jb::jobu::DelayedRun const& delayed)
+{
+    auto const run_id   = delayed.run_id.to_string();
+    auto const job_id   = delayed.job_id.to_string();
+    auto const queue_id = delayed.queue_id.to_string();
+    // The diagnostic intentionally makes no completeness claim: Partial wait is a known lower bound.
+    auto const fields   = std::array{
+        jb::core::LogField{.name = "run_id",           .value = std::string_view{run_id}                     },
+        jb::core::LogField{.name = "job_id",           .value = std::string_view{job_id}                     },
+        jb::core::LogField{.name = "queue_id",         .value = std::string_view{queue_id}                   },
+        jb::core::LogField{.name  = "type",
+                           .value = std::string_view{delayed.type == jb::jobu::JobType::Cli ? "cli" : "http"}},
+        jb::core::LogField{.name = "runnable_wait_us", .value = delayed.runnable_wait.count()                },
+        jb::core::LogField{.name = "threshold_ms",     .value = delayed.threshold.count()                    },
+        jb::core::LogField{.name = "measurement",      .value = std::string_view{"monotonic_observed"}       }
+    };
+    jb::core::log_event(jb::core::LogLevel::Warning, "jobud.run.delayed", fields);
+}
+
+void log_retention(jb::jobu::RetentionPurgeCounts const& counts)
+{
+    auto const fields = std::array{
+        jb::core::LogField{.name = "runs",                 .value = static_cast<std::uint64_t>(counts.runs)  },
+        jb::core::LogField{.name  = "idempotency_records",
+                           .value = static_cast<std::uint64_t>(counts.idempotency_records)                   },
+        jb::core::LogField{.name = "jobs",                 .value = static_cast<std::uint64_t>(counts.jobs)  },
+        jb::core::LogField{.name = "queues",               .value = static_cast<std::uint64_t>(counts.queues)}
+    };
+    jb::core::log_event(jb::core::LogLevel::Info, "jobud.retention.completed", fields);
 }
 
 } // namespace
@@ -151,7 +209,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         exit_code                = EXIT_FAILURE;
         request_stop();
         if (first_failure) {
-            jb::core::log_error("JobU daemon failure: subsystem={} code={}", subsystem, error.code);
+            log_failure("jobud.failed", subsystem, error.code);
         }
     }
 
@@ -196,6 +254,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
             }
             return false;
         }
+        log_recovery(*recovered);
         return !poll_stop();
     }
 
@@ -249,6 +308,9 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         history->failed.connect(owner, [this](jb::core::Error const& error) { fail("history", error); });
         retention->failed.connect(owner, [this](jb::core::Error const& error) { fail("retention", error); });
         telemetry->failed.connect(owner, [this](jb::core::Error const& error) { fail("telemetry", error); });
+        telemetry->delayed.connect(owner, [](jb::jobu::DelayedRun const& value) { log_delayed(value); });
+        retention->sweep_completed.connect(owner,
+                                           [](jb::jobu::RetentionPurgeCounts const& value) { log_retention(value); });
         runners.http->failed.connect(owner, [this](jb::core::Error const& error) { fail("http", error); });
         management->mutation_committed.connect(scheduler.get(), [this] { scheduler->request_rescan(); });
         secrets->mutation_committed.connect(scheduler.get(), [this] { scheduler->request_rescan(); });
@@ -296,14 +358,15 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
                 operation.peer.group_id   = credentials.group_id;
                 auto added                = rpc->add_connection(std::move(socket), std::move(operation));
                 if (!added) {
-                    jb::core::log_error("JobU RPC admission failed: code={}", added.error().code);
+                    log_failure("jobud.rpc.admission_failed", "rpc", added.error().code);
                 }
             }
         });
-        listener->accept_error.connect(
-            [](jb::core::IOError, std::string const&) { jb::core::log_error("JobU local listener accept failed"); });
-        rpc->connection_error.connect([](jb::rpc::ConnectionId, jb::core::Error const& error) {
-            jb::core::log_error("JobU RPC connection failed: code={}", error.code);
+        listener->accept_error.connect(owner, [](jb::core::IOError, std::string const&) {
+            log_failure("jobud.listener.accept_failed", "listener", "jobud.listen.accept_failed");
+        });
+        rpc->connection_error.connect(owner, [](jb::rpc::ConnectionId, jb::core::Error const& error) {
+            log_failure("jobud.rpc.connection_failed", "rpc", error.code);
         });
 
         // Readiness requires successful scheduler startup; listening must not expose a partially started runtime.
@@ -325,7 +388,11 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
             return false;
         }
         state = RuntimeState::Serving;
-        return !poll_stop();
+        if (poll_stop()) {
+            return false;
+        }
+        jb::core::log_event(jb::core::LogLevel::Info, "jobud.ready");
+        return true;
     }
 
     void finish()

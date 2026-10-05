@@ -77,6 +77,8 @@ struct ServiceFixture {
         service->batch_completed.connect(&receiver,
                                          [this](RetentionPurgeCounts const& counts) { batches.push_back(counts); });
         service->failed.connect(&receiver, [this](Error const& error) { failures.push_back(error); });
+        service->sweep_completed.connect(&receiver,
+                                         [this](RetentionPurgeCounts const& counts) { sweeps.push_back(counts); });
     }
 
     void fire_next() const
@@ -121,6 +123,7 @@ struct ServiceFixture {
     RetentionOptions                       options{.default_retention = 10s};
     Object                                 receiver;
     std::vector<RetentionPurgeCounts>      batches;
+    std::vector<RetentionPurgeCounts>      sweeps;
     std::vector<Error>                     failures;
     std::unique_ptr<RetentionService>      service;
 };
@@ -178,6 +181,7 @@ TEST_CASE("Retention rejects invalid options without SQL or signals", "[jobu][re
     CHECK(f.faults->calls.empty());
     CHECK(f.failures.empty());
     CHECK(f.batches.empty());
+    CHECK(f.sweeps.empty());
     CHECK(LoopAccess::active_timer_count(*f.loop.loop) == 0);
 }
 
@@ -646,4 +650,128 @@ TEST_CASE("Retention observes an already poisoned database without starting SQL"
     REQUIRE(f.failures.size() == 1);
     check_safe_error(f.failures.front(), "db.rollback_failed");
     CHECK(LoopAccess::active_timer_count(*f.loop.loop) == 0);
+}
+
+TEST_CASE("Retention summaries aggregate committed batches and reset for the next sweep", "[jobu][retention][service]")
+{
+    ServiceFixture f;
+    f.options.batch_size = 1;
+    auto first           = f.queue(1);
+    auto second          = f.queue(2);
+    f.terminal(first, 1);
+    f.terminal(first, 2);
+    f.terminal(second, 3);
+    f.terminal(second, 4);
+    f.create_service();
+    f.observe();
+    f.service->sweep_completed.connect(&f.receiver, [&](RetentionPurgeCounts const&) {
+        // A completed report, like a batch report, owns no live query or transaction.
+        REQUIRE(f.storage.database.close());
+        REQUIRE(f.storage.database.open());
+    });
+    REQUIRE(f.service->start());
+    for (std::size_t expected = 1; expected <= 3; ++expected) {
+        for (int step = 0; f.sweeps.size() < expected && step < 20; ++step) {
+            f.fire_next();
+        }
+        REQUIRE(f.sweeps.size() == expected);
+        CHECK(f.sweeps.back().runs == (expected < 3 ? 2U : 0U));
+        CHECK(f.sweeps.back().idempotency_records == 0);
+        CHECK(f.sweeps.back().jobs == 0);
+        CHECK(f.sweeps.back().queues == 0);
+    }
+    CHECK(f.count("jobu_runs") == 0);
+}
+
+TEST_CASE("Stopping a partial sweep discards its diagnostic totals", "[jobu][retention][service]")
+{
+    ServiceFixture f;
+    f.terminal(f.queue(1), 1);
+    f.terminal(f.queue(2), 2);
+    f.create_service();
+    f.observe();
+    REQUIRE(f.service->start());
+    f.fire_next();
+    REQUIRE(f.batches.back().runs == 1);
+    f.service->stop();
+    CHECK(f.sweeps.empty());
+    REQUIRE(f.service->start());
+    for (int step = 0; f.sweeps.empty() && step < 20; ++step) {
+        f.fire_next();
+    }
+    REQUIRE(f.sweeps.size() == 1);
+    CHECK(f.sweeps.front().runs == 1);
+}
+
+TEST_CASE("Sweep summary receivers can stop destroy or restart retention", "[jobu][retention][service]")
+{
+    ServiceFixture f;
+    f.terminal(f.queue(1), 1);
+    f.create_service();
+    f.observe();
+    bool notified = false;
+    bool restart  = false;
+    f.service->sweep_completed.connect(&f.receiver, [&](RetentionPurgeCounts const& counts) {
+        CHECK(counts.runs == 1);
+        notified = true;
+    });
+    SECTION("stop")
+    {
+        f.service->sweep_completed.connect(&f.receiver, [&](RetentionPurgeCounts const&) { f.service->stop(); });
+    }
+    SECTION("destroy")
+    {
+        f.service->sweep_completed.connect(&f.receiver, [&](RetentionPurgeCounts const&) { f.service.reset(); });
+    }
+    SECTION("restart")
+    {
+        restart = true;
+        f.service->sweep_completed.connect(&f.receiver, [&](RetentionPurgeCounts const&) {
+            f.service->stop();
+            REQUIRE(f.service->start());
+        });
+    }
+    REQUIRE(f.service->start());
+    for (int step = 0; !notified && step < 20; ++step) {
+        f.fire_next();
+    }
+    REQUIRE(notified);
+    CHECK(LoopAccess::active_timer_count(*f.loop.loop) == (restart ? 1 : 0));
+    if (restart) {
+        auto deadline = LoopAccess::next_timer_deadline(*f.loop.loop);
+        REQUIRE(deadline);
+        CHECK(*deadline < Clock::now() + f.options.sweep_interval);
+    }
+}
+
+TEST_CASE("Queued sweep summaries own totals and respect receiver destruction", "[jobu][retention][service]")
+{
+    ServiceFixture f;
+    f.terminal(f.queue(1), 1);
+    f.create_service();
+    f.observe();
+    auto                              receiver = std::make_unique<Object>();
+    std::vector<RetentionPurgeCounts> delivered;
+    f.service->sweep_completed.connect(
+        receiver.get(),
+        [&](RetentionPurgeCounts const& counts) { delivered.push_back(counts); },
+        ConnectionType::Queued);
+    REQUIRE(f.service->start());
+    for (int step = 0; f.sweeps.empty() && step < 20; ++step) {
+        f.fire_next();
+    }
+    REQUIRE(f.sweeps.size() == 1);
+    CHECK(delivered.empty());
+    f.service->stop();
+    SECTION("retained report")
+    {}
+    SECTION("destroyed receiver")
+    {
+        receiver.reset();
+    }
+    REQUIRE(f.loop.loop->process_events(EventFlag::Events) != ProcessEventsResult::Failed);
+    REQUIRE(delivered.size() == (receiver ? 1 : 0));
+    if (receiver) {
+        CHECK(delivered.front().runs == 1);
+    }
 }

@@ -38,7 +38,7 @@ auto register_attempt_executors(jb::jobu::AttemptExecutorGroup&                 
 
     // Warn once at startup, not on each availability query or attempt. Never include job-supplied data.
     if (warn_root_override) {
-        jb::core::log_warning("UNSAFE: --allow-root-cli enables command execution as root");
+        jb::core::log_event(jb::core::LogLevel::Warning, "jobud.unsafe.root_cli");
     }
     return registered;
 }

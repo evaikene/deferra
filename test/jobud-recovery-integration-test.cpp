@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -158,6 +159,15 @@ public:
                                                   "2",
                                                   "--http-concurrency",
                                                   "2"};
+        if (!configuration.empty()) {
+            auto const    path = storage.directory.path() / "logging.ini";
+            std::ofstream file{path};
+            file << configuration;
+            file.close();
+            REQUIRE(file);
+            arguments[0] = "--config";
+            arguments.insert(arguments.begin() + 1, path.string());
+        }
         if (allow_root_cli && ::geteuid() == 0) {
             arguments.emplace_back("--allow-root-cli");
         }
@@ -194,6 +204,21 @@ public:
         CHECK(exit->exit_code == EXIT_FAILURE);
         CHECK(log.find(expected_code) != std::string::npos);
         CHECK_FALSE(std::filesystem::exists(socket_path));
+        // The installed sink survives failed resource startup and reports the final exit status.
+        auto      lines = std::string_view{log};
+        JsonValue last;
+        while (!lines.empty()) {
+            auto const end = lines.find('\n');
+            REQUIRE(end != std::string_view::npos);
+            auto value = parse_json(lines.substr(0, end));
+            REQUIRE(value);
+            CHECK(value->as_object().at("event").as_string() != "jobud.ready");
+            last = std::move(*value);
+            lines.remove_prefix(end + 1);
+        }
+        REQUIRE(last.is_object());
+        CHECK(last.as_object().at("event").as_string() == "jobud.stopped");
+        CHECK(last.as_object().at("fields").as_object().at("exit_status").as_uint() == EXIT_FAILURE);
         daemon.reset();
         REQUIRE(storage.database.open());
     }
@@ -225,6 +250,33 @@ public:
         targets.clear();
         observer.reset();
         REQUIRE(storage.database.open());
+    }
+
+    auto stop_and_logs() -> std::string
+    {
+        auto const pid = daemon->process_id();
+        REQUIRE(pid);
+        REQUIRE(::kill(static_cast<pid_t>(*pid), SIGTERM) == 0);
+        until([&] { return exit.has_value(); }, true);
+        REQUIRE(exit->kind == ProcessExitKind::Exited);
+        REQUIRE(exit->exit_code == EXIT_SUCCESS);
+        daemon.reset();
+        observer.reset();
+        REQUIRE(storage.database.open());
+        return log;
+    }
+
+    auto rejected_configuration(std::string_view text) -> std::string
+    {
+        configuration = text;
+        launch(false);
+        until([&] { return exit.has_value(); }, true);
+        REQUIRE(exit->kind == ProcessExitKind::Exited);
+        REQUIRE(exit->exit_code == 2);
+        CHECK_FALSE(std::filesystem::exists(socket_path));
+        daemon.reset();
+        REQUIRE(storage.database.open());
+        return log;
     }
 
     void control_info()
@@ -358,6 +410,7 @@ public:
     HttpTestServer  server;
     UtcTimePoint    started_after;
     UtcTimePoint    ready_before;
+    std::string     configuration;
 
 private:
     std::filesystem::path                              socket_path;
@@ -814,4 +867,110 @@ TEST_CASE("daemon schema rejection leaves recovery rows untouched and never list
     fixture.require_startup_failure("jobu.schema.");
     CHECK(storage_snapshot(fixture.storage.database) == before);
     fixture.storage.require_run(running);
+}
+
+TEST_CASE("Configured daemon logs readiness and final graceful exit in JSON and text", "[jobud][logging][integration]")
+{
+    auto const   format = GENERATE(std::string{"json"}, std::string{"text"});
+    CrashFixture fixture;
+    fixture.configuration = "logging.format = " + format + "\nlogging.level = info\n";
+    fixture.start();
+    auto const               output    = fixture.stop_and_logs();
+    auto                     remaining = std::string_view{output};
+    std::vector<std::string> events;
+    while (!remaining.empty()) {
+        auto const end = remaining.find('\n');
+        REQUIRE(end != std::string_view::npos);
+        auto const line = remaining.substr(0, end);
+        if (format == "json") {
+            auto value = parse_json(line);
+            REQUIRE(value);
+            auto const& fields = value->as_object();
+            events.push_back(fields.at("event").as_string());
+            if (events.back() == "jobud.stopped") {
+                CHECK(fields.at("fields").as_object().at("exit_status").as_uint() == 0);
+            }
+        }
+        else {
+            auto const start = line.find("event=\"");
+            REQUIRE(start != std::string_view::npos);
+            auto const event = line.substr(start + 7);
+            events.emplace_back(event.substr(0, event.find('"')));
+        }
+        remaining.remove_prefix(end + 1);
+    }
+    REQUIRE(events ==
+            std::vector<std::string>{"jobud.starting", "jobud.recovery.completed", "jobud.ready", "jobud.stopped"});
+}
+
+TEST_CASE("Configured daemon filters lifecycle output without changing readiness", "[jobud][logging][integration]")
+{
+    CrashFixture fixture;
+    fixture.configuration = "logging.level = error\n";
+    fixture.start();
+    CHECK(fixture.stop_and_logs().empty());
+}
+
+TEST_CASE("Rejected daemon configuration does not print sentinel values", "[jobud][logging][configuration]")
+{
+    auto const   text = GENERATE(std::string{"cli.concurrency = stage916-private-command\n"},
+                                 std::string{"http.proxy = stage916-private-url-credentials\n"},
+                                 std::string{"defaults.retry.mode = stage916-private-payload\n"});
+    CrashFixture fixture;
+    auto const   output = fixture.rejected_configuration(text);
+    CHECK(output.find("stage916-private-") == std::string::npos);
+    CHECK(output.find("jobud.config.") != std::string::npos);
+}
+
+TEST_CASE("Rendered daemon CLI and HTTP failure logs omit execution sentinels", "[jobud][logging][integration]")
+{
+    auto const type = GENERATE(JobType::Cli, JobType::Http);
+    require_execution_environment(type);
+    CrashFixture fixture;
+    fixture.configuration                        = "logging.level = debug3\n";
+    auto queue                                   = recovery_queue(recovery_id(1));
+    auto job                                     = fixture.job(type);
+    job.name                                     = "stage916-private-job-name";
+    job.attributes.at("retry.max_attempts").data = std::int64_t{1};
+    if (type == JobType::Cli) {
+        job.payload.data = JsonValue::Object{
+            {"command",     text("/stage916-private-command-missing")                                   },
+            {"arguments",   {.data = JsonValue::Array{text("stage916-private-argument")}}               },
+            {"environment", {.data = JsonValue::Object{{"TOKEN", text("stage916-private-environment")}}}},
+        };
+    }
+    else {
+        job.payload.data = JsonValue::Object{
+            {"url",     text(fixture.server.url("/stage916-private-url-credentials"))                              },
+            {"method",  text("POST")                                                                               },
+            {"headers",
+             {.data =
+                  JsonValue::Array{{.data = JsonValue::Object{{"name", text("Authorization")},
+                                                              {"value", text("Bearer stage916-private-header")}}}}}},
+            {"body",
+             {.data = JsonValue::Object{{"encoding", text("utf8")}, {"data", text("stage916-private-payload")}}}   },
+        };
+        fixture.server.enqueue_response({
+            .status_code = 503,
+            .reason      = "Unavailable",
+            .body        = ByteBuffer{as_bytes("stage916-private-response").begin(),
+                                      as_bytes("stage916-private-response").end()}
+        });
+        fixture.server.release_responses();
+    }
+    auto run = fixture.storage.make_run(recovery_id(3), job);
+    fixture.storage.insert_queue(queue);
+    fixture.storage.insert_job(job);
+    fixture.storage.insert_run(run);
+    fixture.start(type == JobType::Cli);
+    fixture.until([&] { return fixture.count("SELECT count(*) FROM jobu_runs WHERE state='failed'") == 1; });
+    auto const output = fixture.stop_and_logs();
+    CHECK(output.find("stage916-private-") == std::string::npos);
+    auto remaining = std::string_view{output};
+    while (!remaining.empty()) {
+        auto const end = remaining.find('\n');
+        REQUIRE(end != std::string_view::npos);
+        REQUIRE(parse_json(remaining.substr(0, end)));
+        remaining.remove_prefix(end + 1);
+    }
 }

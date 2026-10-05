@@ -381,7 +381,7 @@ public:
         : _pid{pid}
     {
         REQUIRE(pid > 0);
-#if defined(__APPLE__)
+#ifdef __APPLE__
         // The helper waits for cancellation, so registration precedes exit and the owner's eventual reap.
         _fd = ::kqueue();
         REQUIRE(_fd >= 0);
@@ -417,7 +417,7 @@ public:
             return true;
         }
 
-#if defined(__APPLE__)
+#ifdef __APPLE__
         struct kevent   event;
         struct timespec timeout{};
         int             ready;

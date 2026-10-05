@@ -35,15 +35,14 @@ Database::~Database()
             auto rolled_back = _data->driver->rollback();
             if (!rolled_back) {
                 auto const& error = rolled_back.error();
-                jb::core::log_fatal("Failed to roll back database during destruction: {} ({})",
-                                    error.message,
-                                    error.code);
+                // Backend diagnostics can contain SQL or bound values; only the stable code is safe to emit.
+                jb::core::log_fatal("Failed to roll back database during destruction: code={}", error.code);
             }
         }
         auto closed = _data->driver->close();
         if (!closed) {
             auto const& error = closed.error();
-            jb::core::log_fatal("Failed to close database during destruction: {} ({})", error.message, error.code);
+            jb::core::log_fatal("Failed to close database during destruction: code={}", error.code);
         }
     }
 }
