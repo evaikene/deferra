@@ -72,7 +72,7 @@ void ConsoleLogger::log(LogMessage const& msg)
 
     // Diagnostics must not turn an unavailable stderr into an exception during noexcept cleanup. Format separately
     // so allocation failures retain their normal behavior, then make the serialized output attempt best-effort.
-    std::lock_guard lock{console_mutex()};
+    std::scoped_lock lock{console_mutex()};
     static_cast<void>(std::fwrite(line.data(), 1, line.size(), stderr));
     static_cast<void>(std::fflush(stderr));
 
@@ -83,7 +83,7 @@ void ConsoleLogger::log(LogMessage const& msg)
 
 auto logger() -> std::shared_ptr<Logger>
 {
-    std::lock_guard lock{slot_mutex()};
+    std::scoped_lock lock{slot_mutex()};
     if (!slot()) {
         slot() = default_logger();
     }
@@ -96,8 +96,30 @@ void set_logger(std::shared_ptr<Logger> logger)
     if (!logger) {
         logger = default_logger();
     }
-    std::lock_guard lock{slot_mutex()};
+    std::scoped_lock lock{slot_mutex()};
     slot() = std::move(logger);
+}
+
+void log_event(LogLevel                  level,
+               std::string_view          event_name,
+               std::span<LogField const> fields,
+               std::source_location      location)
+{
+    // Keep the admitted sink alive across replacement, and collect no metadata for disabled events.
+    auto sink = logger();
+    if (!sink->is_enabled(level)) {
+        return;
+    }
+
+    // Legacy sinks see the identifier as text. Structured sinks borrow the caller's fields until return.
+    LogMessage const message{.level      = level,
+                             .message    = event_name,
+                             .location   = location,
+                             .timestamp  = std::chrono::system_clock::now(),
+                             .thread_id  = ThreadCtx::current()->id(),
+                             .event_name = event_name,
+                             .fields     = fields};
+    sink->log(message);
 }
 
 } // namespace jb::core
