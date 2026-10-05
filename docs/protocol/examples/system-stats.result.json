@@ -18,12 +18,13 @@
     "capture": {"truncated_attempts":0,"lost_attempts":0},
     "schedule_lateness_ms": {"samples":0,"average":null,"maximum":null},
     "execution_wall_duration_ms": {"samples":0,"average":null,"maximum":null},
-    "runnable_wait_ms": null
+    "runnable_wait_ms": {"samples":0,"average":null,"maximum":null},
+    "runnable_wait_coverage": {"complete":0,"partial":0,"unmeasured":0,"unfinished":0}
   }],
   "next_cursor": null,
   "measurement": {
     "timing": "wall_clock_derived",
-    "runnable_wait": "unavailable",
+    "runnable_wait": "monotonic_observed",
     "capture": "persisted_output_flags"
   }
 }

@@ -1,6 +1,13 @@
 #include "command_registry_priv.hpp"
+#include "domain_storage_priv.hpp"
 #include "json.hpp"
+#include "query.hpp"
+#include "statistics_json.hpp"
+#include "statistics_service.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
+#include "support/fake_time_source.hpp"
+#include "support/recovery_fixture.hpp"
+#include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
 #include "utc_timestamp.hpp"
 
@@ -11,11 +18,13 @@
 #include <chrono>
 #include <csignal>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -161,6 +170,77 @@ auto json_reply(std::filesystem::path const& socket, std::vector<std::string> ar
 
 } // namespace
 
+TEST_CASE("jobuctl renders the same persisted measured statistics as the service and wire codec",
+          "[jobuctl][integration][statistics]")
+{
+    using namespace jb::jobu;
+    using namespace jb::test;
+    RecoveryFixture storage;
+    auto            queue = recovery_queue(recovery_id(1));
+    storage.insert_queue(queue);
+    auto const qualities = std::array<std::string_view, 4>{"complete", "complete", "partial", "unmeasured"};
+    auto const waits     = std::array<std::int64_t, 4>{0, 1'500, 9'000'000, 0};
+    for (std::size_t index = 0; index < qualities.size(); ++index) {
+        auto job  = storage.make_job(recovery_id(10 + static_cast<std::uint32_t>(index)), queue.id);
+        job.state = JobState::Succeeded;
+        storage.insert_job(job);
+        auto run = storage.make_run(recovery_id(20 + static_cast<std::uint32_t>(index)),
+                                    job,
+                                    RunState::Succeeded,
+                                    index == 0 ? 2 : 0);
+        storage.insert_run(run);
+        jb::db::Query timing{storage.database};
+        REQUIRE(timing.prepare("UPDATE jobu_run_timing SET measurement_status = :quality, runnable_wait_us = :wait "
+                               "WHERE run_id = :id"));
+        REQUIRE(timing.bind_value(":quality", jb::db::make_text(qualities[index])));
+        REQUIRE(timing.bind_value(":wait", waits[index]));
+        REQUIRE(timing.bind_value(":id", jb::jobu::detail::uuid_to_storage(run.run.id)));
+        REQUIRE(timing.exec());
+    }
+
+    auto const            from = std::string{"1970-01-01T00:00:09Z"};
+    auto const            to   = std::string{"1970-01-01T00:00:11Z"};
+    FakeTimeSource        clock;
+    SequenceUuidGenerator tokens{{}};
+    JsonValue             expected;
+    {
+        auto              options = StatisticsServiceOptions{.runnable_wait_available = true};
+        StatisticsService service{storage.database, tokens, clock, options};
+        options.runnable_wait_available = false;
+        auto page                       = service.read(
+            StatisticsRequest{
+                .planned = {.from = *parse_utc_timestamp(from), .to = *parse_utc_timestamp(to)}
+        },
+            StatisticsScope::System);
+        REQUIRE(page);
+        auto encoded = statistics_page_to_json(*page);
+        REQUIRE(encoded);
+        expected = std::move(*encoded);
+    }
+
+    // Native jobud reads a closed, valid format-4 fixture. Recovery preserves these finalized measurements.
+    REQUIRE(storage.database.close());
+    auto socket = storage.directory.path() / "jobud.sock";
+    auto daemon = start_daemon(socket, storage.database_file);
+    auto raw    = json_reply(socket, {"system", "stats", "--planned-from", from, "--planned-to", to});
+    CHECK(raw == expected);
+    auto scoped =
+        json_reply(socket, {"queue", "stats", "--name", queue.name, "--planned-from", from, "--planned-to", to});
+    CHECK(scoped == expected);
+    auto decoded = statistics_page_from_json(raw);
+    REQUIRE(decoded);
+    CHECK(decoded->groups.front().runnable_wait_ms->samples == 2);
+    CHECK(decoded->groups.front().runnable_wait_ms->average == 0.75);
+    CHECK(decoded->groups.front().runnable_wait_coverage.partial == 1);
+    CHECK(decoded->groups.front().runnable_wait_coverage.unmeasured == 1);
+    auto human = run_cli(socket, {"system", "stats", "--planned-from", from, "--planned-to", to});
+    CHECK(human.code == 0);
+    CHECK(human.out.find("runnable_wait=monotonic_observed") != std::string::npos);
+    CHECK(human.out.find("Runnable wait (ms): samples=2, average=0.75, maximum=1.5") != std::string::npos);
+    CHECK(human.out.find("Runnable wait coverage: complete=2, partial=1, unmeasured=1, unfinished=0") !=
+          std::string::npos);
+}
+
 TEST_CASE("jobuctl exposes every advertised daemon method", "[jobuctl][integration]")
 {
     jb::test::TemporaryDirectory directory;
@@ -207,8 +287,12 @@ TEST_CASE("jobuctl statistics pages and cron previews use real daemon methods", 
               .as_object()
               .at("average")
               .is_null());
-    CHECK(empty_fields.at("groups").as_array().front().as_object().at("runnable_wait_ms").is_null());
-    CHECK(empty_fields.at("measurement").as_object().at("runnable_wait").as_string() == "unavailable");
+    auto const& empty_wait =
+        empty_fields.at("groups").as_array().front().as_object().at("runnable_wait_ms").as_object();
+    CHECK(empty_wait.at("samples").as_uint() == 0);
+    CHECK(empty_wait.at("average").is_null());
+    CHECK(empty_wait.at("maximum").is_null());
+    CHECK(empty_fields.at("measurement").as_object().at("runnable_wait").as_string() == "monotonic_observed");
     auto wide_window = run_cli(socket,
                                {"system",
                                 "stats",
@@ -312,7 +396,9 @@ TEST_CASE("jobuctl statistics pages and cron previews use real daemon methods", 
 
     auto human = run_cli(socket, {"system", "stats"});
     CHECK(human.code == 0);
-    CHECK(human.out.find("Runnable wait (ms): unavailable") != std::string::npos);
+    CHECK(human.out.find("Runnable wait (ms): samples=0, average=null, maximum=null") != std::string::npos);
+    CHECK(human.out.find("Runnable wait coverage: complete=0, partial=0, unmeasured=0, unfinished=0") !=
+          std::string::npos);
     CHECK(human.out.find("average=null") != std::string::npos);
 
     auto valid = json_reply(socket, {"schedule", "validate", "0 9 * * FRI-MON"});

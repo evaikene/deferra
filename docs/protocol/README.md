@@ -3,7 +3,7 @@
 `jobud` serves JSON-RPC 2.0 over a local Unix-domain socket. A client first
 calls [`system.info`](methods/system.md#daemon-information-systeminfo) and uses
 its `capabilities` array to learn which methods that daemon accepts. The
-current daemon advertises API version 1.3 and 30 methods. A compatible 1.x
+current daemon advertises API version 1.4 and 30 methods. A compatible 1.x
 client should check the major version and the individual capability it needs.
 
 ## Start here

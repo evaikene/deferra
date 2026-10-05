@@ -210,7 +210,12 @@ struct DurationAccumulator {
         }
         // Unsigned subtraction represents the full positive difference even across the signed epoch boundary.
         auto const elapsed_us = static_cast<std::uint64_t>(end_us) - static_cast<std::uint64_t>(start_us);
-        auto const sample_ms  = static_cast<long double>(elapsed_us) / 1000.0L;
+        return observe(elapsed_us);
+    }
+
+    auto observe(std::uint64_t elapsed_us) -> RepositoryResult<void>
+    {
+        auto const sample_ms = static_cast<long double>(elapsed_us) / 1000.0L;
         if (!std::isfinite(sample_ms)) {
             return RepositoryResult<void>::success();
         }
@@ -234,8 +239,58 @@ struct DurationAccumulator {
     }
 };
 
-auto count_run(jb::db::Record const& record, StatisticsGroup& group, DurationAccumulator& lateness)
+auto count_wait(jb::db::Record const& record, RunState state, StatisticsGroup& group, DurationAccumulator& wait)
     -> RepositoryResult<void>
+{
+    auto        quality = read_text(record, "measurement_status");
+    auto        warned  = read_boolean(record, "delay_warned");
+    auto const* value   = record.value("runnable_wait_us");
+    auto const* counter = value ? std::get_if<std::int64_t>(value) : nullptr;
+    auto const* epoch   = record.value("open_epoch");
+    auto const* tick    = record.value("open_tick_us");
+    if (!quality || !warned || !counter || *counter < 0 || !epoch || !tick ||
+        (*quality != "complete" && *quality != "partial" && *quality != "unmeasured")) {
+        return RepositoryResult<void>::failure(invariant("timing_projection"));
+    }
+
+    // Validate the joined row even for unfinished/unavailable measurements. A missing row must not hide a run.
+    auto const pending = state == RunState::Scheduled || state == RunState::RetryWait;
+    auto const open    = !std::holds_alternative<jb::db::Null>(*epoch);
+    if (open) {
+        auto        id        = read_uuid(record, "open_epoch");
+        auto const* open_tick = std::get_if<std::int64_t>(tick);
+        if (!id || id->is_nil() || !open_tick || *open_tick < 0 || !pending) {
+            return RepositoryResult<void>::failure(invariant("timing_open_interval"));
+        }
+    }
+    else if (!std::holds_alternative<jb::db::Null>(*tick)) {
+        return RepositoryResult<void>::failure(invariant("timing_open_interval"));
+    }
+    if (*quality == "unmeasured" && (*counter != 0 || open || *warned)) {
+        return RepositoryResult<void>::failure(invariant("timing_unmeasured"));
+    }
+
+    // In-progress totals are never finalized samples, even when observed completely so far.
+    auto& coverage = group.runnable_wait_coverage;
+    if (pending || state == RunState::Running) {
+        return increment(coverage.unfinished);
+    }
+    if (*quality == "partial") {
+        return increment(coverage.partial);
+    }
+    if (*quality == "unmeasured") {
+        return increment(coverage.unmeasured);
+    }
+    if (auto counted = increment(coverage.complete); !counted) {
+        return counted;
+    }
+    return wait.observe(static_cast<std::uint64_t>(*counter));
+}
+
+auto count_run(jb::db::Record const& record,
+               StatisticsGroup&      group,
+               DurationAccumulator&  lateness,
+               DurationAccumulator&  wait) -> RepositoryResult<void>
 {
     auto state     = read_run_state(record, "run_state");
     auto type      = read_job_type(record, "run_type");
@@ -288,6 +343,9 @@ auto count_run(jb::db::Record const& record, StatisticsGroup& group, DurationAcc
     }
     if (auto counted = increment(*origin == RunOrigin::Scheduled ? counts.scheduled_origin : counts.manual_origin);
         !counted) {
+        return counted;
+    }
+    if (auto counted = count_wait(record, *state, group, wait); !counted) {
         return counted;
     }
     if (started->has_value()) {
@@ -460,12 +518,15 @@ auto StatisticsRepository::aggregate(StatisticsRequest const& request, Statistic
     auto group     = StatisticsGroup{.key = key};
     auto lateness  = DurationAccumulator{};
     auto execution = DurationAccumulator{};
+    auto wait      = DurationAccumulator{};
 
     // Keep the run scan separate from attempts so retries cannot multiply run counts or first-start samples.
-    auto run_sql      = std::string{"SELECT r.state AS run_state, r.type AS run_type, r.origin AS run_origin, "
-                                    "r.planned_at_us AS planned_at_us, r.started_at_us AS started_at_us, "
-                                    "r.completed_at_us AS completed_at_us "
-                                    "FROM jobu_runs AS r WHERE 1 = 1"};
+    auto run_sql = std::string{"SELECT r.state AS run_state, r.type AS run_type, r.origin AS run_origin, "
+                               "r.planned_at_us AS planned_at_us, r.started_at_us AS started_at_us, "
+                               "r.completed_at_us AS completed_at_us, t.runnable_wait_us AS runnable_wait_us, "
+                               "t.measurement_status AS measurement_status, t.open_epoch AS open_epoch, "
+                               "t.open_tick_us AS open_tick_us, t.delay_warned AS delay_warned "
+                               "FROM jobu_runs AS r LEFT JOIN jobu_run_timing AS t ON t.run_id = r.id WHERE 1 = 1"};
     auto run_bindings = Bindings{};
     if (auto filters = add_filters(run_sql, run_bindings, request); !filters) {
         return RepositoryResult<StatisticsGroup>::failure(std::move(filters).error());
@@ -474,7 +535,7 @@ auto StatisticsRepository::aggregate(StatisticsRequest const& request, Statistic
         return RepositoryResult<StatisticsGroup>::failure(std::move(filtered).error());
     }
     auto runs = scan(_database, run_sql, run_bindings, [&](jb::db::Record const& record) {
-        return count_run(record, group, lateness);
+        return count_run(record, group, lateness, wait);
     });
     if (!runs) {
         return RepositoryResult<StatisticsGroup>::failure(std::move(runs).error());
@@ -505,6 +566,7 @@ auto StatisticsRepository::aggregate(StatisticsRequest const& request, Statistic
 
     group.schedule_lateness_ms       = lateness.finish();
     group.execution_wall_duration_ms = execution.finish();
+    group.runnable_wait_ms           = wait.finish();
     return RepositoryResult<StatisticsGroup>::success(group);
 }
 

@@ -93,11 +93,13 @@ auto resolve_request(StatisticsRequest& request, StatisticsScope scope, jb::core
 struct StatisticsService::Private : jb::core::priv::ObjectPrivate {
     Private(jb::db::Database&        database_value,
             jb::core::UuidGenerator& uuid_generator,
-            jb::core::TimeSource&    time_source)
+            jb::core::TimeSource&    time_source,
+            StatisticsServiceOptions options_value)
         : database{database_value}
         , clock{time_source}
         , repository{database_value}
         , cursors{uuid_generator, time_source}
+        , options{options_value}
     {}
 
     template <typename Operation>
@@ -148,6 +150,7 @@ struct StatisticsService::Private : jb::core::priv::ObjectPrivate {
     jb::core::TimeSource&          clock;
     detail::StatisticsRepository   repository;
     detail::StatisticsCursorStore  cursors;
+    StatisticsServiceOptions const options;
     bool                           accepting{true};
     std::optional<jb::core::Error> first_failure;
 };
@@ -155,8 +158,9 @@ struct StatisticsService::Private : jb::core::priv::ObjectPrivate {
 StatisticsService::StatisticsService(jb::db::Database&        database,
                                      jb::core::UuidGenerator& uuid_generator,
                                      jb::core::TimeSource&    time_source,
+                                     StatisticsServiceOptions options,
                                      jb::core::Object*        parent)
-    : Object(*new Private{database, uuid_generator, time_source}, parent)
+    : Object(*new Private{database, uuid_generator, time_source, options}, parent)
 {}
 
 StatisticsService::~StatisticsService() = default;
@@ -190,10 +194,16 @@ auto StatisticsService::read(StatisticsListRequest const& request, StatisticsSco
             return ServiceResult<StatisticsPage>::failure(std::move(keys).error());
         }
         auto page = StatisticsPage{.window = query.planned, .group_by = query.group_by};
+        if (data->options.runnable_wait_available) {
+            page.measurement.runnable_wait = "monotonic_observed";
+        }
         for (auto index = std::size_t{0}; index < keys->size() && index < query.limit; ++index) {
             auto aggregate = data->repository.aggregate(query, (*keys)[index]);
             if (!aggregate) {
                 return ServiceResult<StatisticsPage>::failure(std::move(aggregate).error());
+            }
+            if (!data->options.runnable_wait_available) {
+                aggregate->runnable_wait_ms.reset();
             }
             page.groups.push_back(std::move(aggregate).value());
         }

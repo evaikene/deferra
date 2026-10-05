@@ -113,13 +113,47 @@ constexpr std::array capture_counts{
                                         .field = &StatisticsCaptureCounts::truncated_attempts                          },
     NamedCount<StatisticsCaptureCounts>{.name = "lost_attempts",       .field = &StatisticsCaptureCounts::lost_attempts},
 };
+constexpr std::array wait_coverage_counts{
+    NamedCount<StatisticsRunnableWaitCoverage>{.name = "complete",    .field = &StatisticsRunnableWaitCoverage::complete},
+    NamedCount<StatisticsRunnableWaitCoverage>{.name = "partial",     .field = &StatisticsRunnableWaitCoverage::partial },
+    NamedCount<StatisticsRunnableWaitCoverage>{.name  = "unmeasured",
+                                               .field = &StatisticsRunnableWaitCoverage::unmeasured                     },
+    NamedCount<StatisticsRunnableWaitCoverage>{.name  = "unfinished",
+                                               .field = &StatisticsRunnableWaitCoverage::unfinished                     },
+};
+
+auto valid_wait_coverage(StatisticsGroup const& group) -> bool
+{
+    // Subtract from the known total so hostile counters cannot make an overflowing sum appear valid.
+    auto remaining = group.runs.total;
+    for (auto const& field : wait_coverage_counts) {
+        auto const count = group.runnable_wait_coverage.*field.field;
+        if (count > remaining) {
+            return false;
+        }
+        remaining -= count;
+    }
+    if (remaining != 0) {
+        return false;
+    }
+
+    remaining = group.runnable_wait_coverage.unfinished;
+    for (auto count : {group.runs.scheduled, group.runs.running, group.runs.retry_wait}) {
+        if (count > remaining) {
+            return false;
+        }
+        remaining -= count;
+    }
+    return remaining == 0 &&
+           (!group.runnable_wait_ms || group.runnable_wait_ms->samples == group.runnable_wait_coverage.complete);
+}
 
 template <typename Counts, std::size_t N>
 auto encode_counts(Counts const& counts, std::array<NamedCount<Counts>, N> const& fields) -> JsonValue
 {
     auto object = JsonValue::Object{};
     for (auto const& field : fields) {
-        object.emplace(std::string{field.name}, json(counts.*(field.field)));
+        object.emplace(std::string{field.name}, json(counts.*field.field));
     }
     return json(std::move(object));
 }
@@ -132,7 +166,7 @@ auto decode_counts(JsonValue const& value, Counts& counts, std::array<NamedCount
     }
     for (auto const& field : fields) {
         auto const* number = member(value.as_object(), field.name);
-        if (!number || !unsigned_value(*number, counts.*(field.field))) {
+        if (!number || !unsigned_value(*number, counts.*field.field)) {
             return false;
         }
     }
@@ -362,7 +396,7 @@ auto encode_group(StatisticsGroup const& group, StatisticsGroupBy group_by) -> s
     auto execution = encode_duration(group.execution_wall_duration_ms);
     auto wait      = group.runnable_wait_ms ? encode_duration(*group.runnable_wait_ms)
                                             : std::optional<JsonValue>{json(jb::core::JsonNull{})};
-    if (!key || !lateness || !execution || !wait) {
+    if (!key || !lateness || !execution || !wait || !valid_wait_coverage(group)) {
         return std::nullopt;
     }
     return json(JsonValue::Object{
@@ -373,6 +407,7 @@ auto encode_group(StatisticsGroup const& group, StatisticsGroupBy group_by) -> s
         {"schedule_lateness_ms", std::move(*lateness)},
         {"execution_wall_duration_ms", std::move(*execution)},
         {"runnable_wait_ms", std::move(*wait)},
+        {"runnable_wait_coverage", encode_counts(group.runnable_wait_coverage, wait_coverage_counts)},
     });
 }
 
@@ -389,13 +424,15 @@ auto decode_group(JsonValue const& value, StatisticsGroupBy group_by) -> std::op
     auto const* lateness  = member(fields, "schedule_lateness_ms");
     auto const* execution = member(fields, "execution_wall_duration_ms");
     auto const* wait      = member(fields, "runnable_wait_ms");
-    if (!key || !runs || !attempts || !capture || !lateness || !execution || !wait) {
+    auto const* coverage  = member(fields, "runnable_wait_coverage");
+    if (!key || !runs || !attempts || !capture || !lateness || !execution || !wait || !coverage) {
         return std::nullopt;
     }
 
     auto group = StatisticsGroup{};
     if (!decode_key(*key, group_by, group.key) || !decode_run_counts(*runs, group.runs) ||
-        !decode_attempt_counts(*attempts, group.attempts) || !decode_counts(*capture, group.capture, capture_counts)) {
+        !decode_attempt_counts(*attempts, group.attempts) || !decode_counts(*capture, group.capture, capture_counts) ||
+        !decode_counts(*coverage, group.runnable_wait_coverage, wait_coverage_counts)) {
         return std::nullopt;
     }
 
@@ -409,7 +446,7 @@ auto decode_group(JsonValue const& value, StatisticsGroupBy group_by) -> std::op
             return std::nullopt;
         }
     }
-    return group;
+    return valid_wait_coverage(group) ? std::optional{group} : std::nullopt;
 }
 
 auto encode_window(UtcRange const& window) -> std::optional<JsonValue>

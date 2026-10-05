@@ -6,6 +6,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -115,20 +116,21 @@ TEST_CASE("Statistics request codecs distinguish system filters from queue selec
 
 TEST_CASE("Statistics page codec preserves counts, duration nulls, and provenance", "[jobu][statistics][json]")
 {
-    auto const queue            = id("00112233-4455-6677-8899-aabbccddeeff");
-    auto       group            = StatisticsGroup{};
-    group.key                   = queue;
-    group.runs.total            = 2;
-    group.runs.running          = 1;
-    group.runs.succeeded        = 1;
-    group.runs.cli              = 2;
-    group.runs.scheduled_origin = 2;
-    group.attempts.total        = 3;
-    group.attempts.running      = 1;
-    group.attempts.completed    = 2;
-    group.attempts.retries      = 1;
-    group.capture.lost_attempts = 1;
-    group.schedule_lateness_ms  = {.samples = 2, .average = 1.5, .maximum = 2.0};
+    auto const queue             = id("00112233-4455-6677-8899-aabbccddeeff");
+    auto       group             = StatisticsGroup{};
+    group.key                    = queue;
+    group.runs.total             = 2;
+    group.runs.running           = 1;
+    group.runs.succeeded         = 1;
+    group.runs.cli               = 2;
+    group.runs.scheduled_origin  = 2;
+    group.runnable_wait_coverage = {.unmeasured = 1, .unfinished = 1};
+    group.attempts.total         = 3;
+    group.attempts.running       = 1;
+    group.attempts.completed     = 2;
+    group.attempts.retries       = 1;
+    group.capture.lost_attempts  = 1;
+    group.schedule_lateness_ms   = {.samples = 2, .average = 1.5, .maximum = 2.0};
 
     auto page = StatisticsPage{
         .window      = {.from = at("2026-01-01T00:00:00Z"), .to = at("2026-01-02T00:00:00Z")},
@@ -164,4 +166,65 @@ TEST_CASE("Statistics page codec preserves counts, duration nulls, and provenanc
         std::get<JsonValue::Array>(std::get<JsonValue::Object>(invalid.data).at("groups").data).front().data);
     invalid_group["key"] = json(std::string{"not-a-uuid"});
     invalid_response(statistics_page_from_json(invalid));
+}
+
+TEST_CASE("Statistics codec preserves measured wait and rejects inconsistent coverage", "[jobu][statistics][json]")
+{
+    auto group                   = StatisticsGroup{};
+    group.runs.total             = 5;
+    group.runs.scheduled         = 1;
+    group.runs.succeeded         = 4;
+    group.runnable_wait_ms       = StatisticsDuration{.samples = 2, .average = 0.75, .maximum = 1.5};
+    group.runnable_wait_coverage = {.complete = 2, .partial = 1, .unmeasured = 1, .unfinished = 1};
+    auto page                    = StatisticsPage{
+        .window      = {.from = at("2026-01-01T00:00:00Z"), .to = at("2026-01-02T00:00:00Z")},
+        .groups      = {group},
+        .measurement = {.runnable_wait = "monotonic_observed"},
+    };
+    auto encoded = statistics_page_to_json(page);
+    REQUIRE(encoded);
+    auto decoded = statistics_page_from_json(*encoded);
+    REQUIRE(decoded);
+    CHECK(decoded->measurement.runnable_wait == "monotonic_observed");
+    REQUIRE(decoded->groups.front().runnable_wait_ms);
+    CHECK(decoded->groups.front().runnable_wait_ms->average == 0.75);
+    CHECK(decoded->groups.front().runnable_wait_coverage.complete == 2);
+    CHECK(decoded->groups.front().runnable_wait_coverage.partial == 1);
+    CHECK(decoded->groups.front().runnable_wait_coverage.unmeasured == 1);
+    CHECK(decoded->groups.front().runnable_wait_coverage.unfinished == 1);
+
+    auto with_group = [&](auto&& mutate) {
+        auto  value  = *encoded;
+        auto& fields = std::get<JsonValue::Object>(
+            std::get<JsonValue::Array>(std::get<JsonValue::Object>(value.data).at("groups").data).front().data);
+        mutate(fields);
+        return statistics_page_from_json(value);
+    };
+    invalid_response(with_group([](auto& fields) { fields.erase("runnable_wait_coverage"); }));
+    invalid_response(with_group([](auto& fields) { fields["runnable_wait_coverage"] = json(JsonNull{}); }));
+    invalid_response(with_group(
+        [](auto& fields) { std::get<JsonValue::Object>(fields.at("runnable_wait_coverage").data).erase("partial"); }));
+    for (auto invalid :
+         {json(std::int64_t{-1}), json(1.5), json(true), json(std::numeric_limits<std::uint64_t>::max())}) {
+        invalid_response(with_group([&](auto& fields) {
+            std::get<JsonValue::Object>(fields.at("runnable_wait_coverage").data)["partial"] = invalid;
+        }));
+    }
+    invalid_response(with_group([](auto& fields) {
+        auto& coverage         = std::get<JsonValue::Object>(fields.at("runnable_wait_coverage").data);
+        coverage["unfinished"] = json(std::uint64_t{0});
+        coverage["unmeasured"] = json(std::uint64_t{2});
+    }));
+    invalid_response(with_group([](auto& fields) {
+        std::get<JsonValue::Object>(fields.at("runnable_wait_ms").data)["samples"] = json(std::uint64_t{3});
+    }));
+    REQUIRE(with_group([](auto& fields) {
+        std::get<JsonValue::Object>(fields.at("runnable_wait_coverage").data)["future"] = json(true);
+    }));
+
+    page.groups.front().runnable_wait_coverage.partial = 2;
+    invalid_response(statistics_page_to_json(page));
+    page.groups.front().runnable_wait_coverage.partial = 1;
+    page.groups.front().runnable_wait_ms->samples      = 3;
+    invalid_response(statistics_page_to_json(page));
 }

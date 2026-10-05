@@ -1177,9 +1177,10 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
     set(TARGET "jobuctl-statistics-schedule-test")
     add_executable(${TARGET}
         jobuctl-statistics-schedule-test.cpp
+        support/recovery_fixture.cpp
         support/temporary_directory.cpp
     )
-    target_link_libraries(${TARGET} PRIVATE jobuctl-private Catch2::Catch2WithMain)
+    target_link_libraries(${TARGET} PRIVATE jobuctl-private jobu-sqlite Catch2::Catch2WithMain)
     target_compile_definitions(${TARGET} PRIVATE
         JOBUD_EXECUTABLE="$<TARGET_FILE:jobud>"
         JOBUCTL_EXECUTABLE="$<TARGET_FILE:jobuctl>")

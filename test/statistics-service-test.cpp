@@ -2,6 +2,7 @@
 
 #include "domain_storage_priv.hpp"
 #include "query.hpp"
+#include "retention_repository_priv.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_time_source.hpp"
 #include "support/fault_database_driver.hpp"
@@ -9,12 +10,14 @@
 #include "support/sequence_uuid_generator.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -36,11 +39,13 @@ struct Fixture {
     SequenceUuidGenerator tokens{
         {recovery_id(101), recovery_id(102), recovery_id(103), recovery_id(104)}
     };
-    StatisticsService  statistics{storage.database, tokens, time};
+    StatisticsService  statistics;
     std::vector<Error> failures;
 
-    explicit Fixture(std::function<std::unique_ptr<Driver>(std::unique_ptr<Driver>)> wrap_driver = {})
+    explicit Fixture(std::function<std::unique_ptr<Driver>(std::unique_ptr<Driver>)> wrap_driver = {},
+                     StatisticsServiceOptions options = {.runnable_wait_available = true})
         : storage{std::move(wrap_driver)}
+        , statistics{storage.database, tokens, time, options}
     {
         time.set_utc(UtcTimePoint{100s});
         statistics.failed.connect(&statistics, [this](Error const& error) { failures.push_back(error); });
@@ -59,6 +64,17 @@ struct Fixture {
     {
         Query query{storage.database};
         REQUIRE(query.prepare(sql));
+        REQUIRE(query.bind_value(":id", jb::jobu::detail::uuid_to_storage(id)));
+        REQUIRE(query.exec());
+    }
+
+    void timing(Uuid const& id, std::string_view quality, std::int64_t wait_us)
+    {
+        Query query{storage.database};
+        REQUIRE(query.prepare("UPDATE jobu_run_timing SET measurement_status = :quality, runnable_wait_us = :wait "
+                              "WHERE run_id = :id"));
+        REQUIRE(query.bind_value(":quality", make_text(quality)));
+        REQUIRE(query.bind_value(":wait", wait_us));
         REQUIRE(query.bind_value(":id", jb::jobu::detail::uuid_to_storage(id)));
         REQUIRE(query.exec());
     }
@@ -182,9 +198,12 @@ TEST_CASE("Statistics count a planned-run cohort and its retries once", "[jobu][
     CHECK(group.schedule_lateness_ms.average == 1000.0);
     CHECK(group.execution_wall_duration_ms.samples == 3);
     CHECK(group.execution_wall_duration_ms.maximum == 1000.0);
-    CHECK_FALSE(group.runnable_wait_ms);
+    REQUIRE(group.runnable_wait_ms);
+    CHECK(group.runnable_wait_ms->samples == 0);
+    CHECK_FALSE(group.runnable_wait_ms->average);
+    CHECK(group.runnable_wait_coverage.unmeasured == 1);
     CHECK(page->measurement.timing == "wall_clock_derived");
-    CHECK(page->measurement.runnable_wait == "unavailable");
+    CHECK(page->measurement.runnable_wait == "monotonic_observed");
     CHECK(page->measurement.capture == "persisted_output_flags");
 }
 
@@ -267,9 +286,275 @@ TEST_CASE("Statistics projections use populated v2 schema indexes", "[jobu][stat
     CHECK(attempts.rows == 40);
     CHECK(includes_step(groups, "jobu_runs_"));
     CHECK(includes_step(runs, "jobu_runs_queue_planned_id_idx"));
+    CHECK(includes_step(runs, "jobu_run_timing"));
     CHECK(includes_step(attempts, "jobu_runs_queue_planned_id_idx"));
     CHECK(includes_step(attempts, "jobu_attempts"));
     CHECK(includes_step(attempts, "jobu_attempt_output"));
+}
+
+TEST_CASE("Runnable wait uses complete terminal runs and disjoint coverage in every dimension",
+          "[jobu][statistics][sqlite][timing]")
+{
+    Fixture fixture;
+    auto    cli  = fixture.job(1, 2);
+    auto    http = fixture.job(3, 4, JobType::Http);
+
+    struct Sample {
+        RunState         state;
+        std::string_view quality;
+        std::int64_t     wait_us;
+    };
+
+    auto const samples = std::vector<Sample>{
+        {.state = RunState::Succeeded,   .quality = "complete",   .wait_us = 0        },
+        {.state = RunState::Failed,      .quality = "complete",   .wait_us = 1'500    },
+        {.state = RunState::Interrupted, .quality = "complete",   .wait_us = 2'000    },
+        {.state = RunState::Cancelled,   .quality = "complete",   .wait_us = 0        },
+        {.state = RunState::Cancelled,   .quality = "partial",    .wait_us = 9'000'000},
+        {.state = RunState::Succeeded,   .quality = "unmeasured", .wait_us = 0        },
+        {.state = RunState::Scheduled,   .quality = "complete",   .wait_us = 1'000'000},
+        {.state = RunState::Running,     .quality = "partial",    .wait_us = 2'000'000},
+        {.state = RunState::RetryWait,   .quality = "unmeasured", .wait_us = 0        },
+        {.state = RunState::Scheduled,   .quality = "unmeasured", .wait_us = 0        },
+    };
+
+    // The first run has three attempts and capture rows. It must still contribute one zero-wait sample.
+    for (std::size_t index = 0; index < samples.size(); ++index) {
+        auto const& sample  = samples[index];
+        auto const& job     = index % 2 == 0 ? cli : http;
+        auto        retries = AttemptNumber{0};
+        if (index == 0) {
+            retries = 2;
+        }
+        else if (sample.state == RunState::RetryWait) {
+            retries = 1;
+        }
+        auto run = fixture.storage.make_run(recovery_id(10 + static_cast<std::uint32_t>(index)),
+                                            job,
+                                            sample.state,
+                                            retries,
+                                            index == 0 ? RunOrigin::Scheduled : RunOrigin::Manual);
+        for (auto& attempt : run.attempts) {
+            attempt.output = jb::jobu::detail::AttemptOutput{.stdout_truncated = true};
+        }
+        fixture.storage.insert_run(run);
+        fixture.timing(run.run.id, sample.quality, sample.wait_us);
+    }
+
+    for (auto dimension : {StatisticsGroupBy::None,
+                           StatisticsGroupBy::Queue,
+                           StatisticsGroupBy::Job,
+                           StatisticsGroupBy::Type,
+                           StatisticsGroupBy::Origin,
+                           StatisticsGroupBy::State}) {
+        auto page = fixture.statistics.read(StatisticsRequest{.planned = window(), .group_by = dimension},
+                                            StatisticsScope::System);
+        REQUIRE(page);
+        CHECK(page->measurement.runnable_wait == "monotonic_observed");
+        auto total    = std::uint64_t{0};
+        auto coverage = StatisticsRunnableWaitCoverage{};
+        auto sum_ms   = 0.0;
+        for (auto const& group : page->groups) {
+            auto const& measured = group.runnable_wait_coverage;
+            CHECK(measured.complete + measured.partial + measured.unmeasured + measured.unfinished == group.runs.total);
+            REQUIRE(group.runnable_wait_ms);
+            CHECK(group.runnable_wait_ms->samples == measured.complete);
+            if (measured.complete == 0) {
+                CHECK_FALSE(group.runnable_wait_ms->average);
+                CHECK_FALSE(group.runnable_wait_ms->maximum);
+            }
+            else {
+                REQUIRE(group.runnable_wait_ms->average);
+                REQUIRE(group.runnable_wait_ms->maximum);
+                sum_ms += *group.runnable_wait_ms->average * static_cast<double>(measured.complete);
+                CHECK(*group.runnable_wait_ms->maximum <= 2.0);
+            }
+            total               += group.runs.total;
+            coverage.complete   += measured.complete;
+            coverage.partial    += measured.partial;
+            coverage.unmeasured += measured.unmeasured;
+            coverage.unfinished += measured.unfinished;
+        }
+        CHECK(total == 10);
+        CHECK(coverage.complete == 4);
+        CHECK(coverage.partial == 1);
+        CHECK(coverage.unmeasured == 1);
+        CHECK(coverage.unfinished == 4);
+        CHECK(sum_ms == 3.5);
+        if (dimension == StatisticsGroupBy::None) {
+            CHECK(page->groups.front().runnable_wait_ms->average == 0.875);
+            CHECK(page->groups.front().runnable_wait_ms->maximum == 2.0);
+            CHECK(page->groups.front().capture.truncated_attempts == page->groups.front().attempts.total);
+        }
+    }
+}
+
+TEST_CASE("Runnable wait distinguishes no samples, measured zero, and embedded unavailability",
+          "[jobu][statistics][sqlite][timing]")
+{
+    Fixture fixture;
+    auto    empty = fixture.statistics.read(StatisticsRequest{.planned = window()}, StatisticsScope::System);
+    REQUIRE(empty);
+    REQUIRE(empty->groups.front().runnable_wait_ms);
+    CHECK(empty->groups.front().runnable_wait_ms->samples == 0);
+    CHECK_FALSE(empty->groups.front().runnable_wait_ms->average);
+    CHECK_FALSE(empty->groups.front().runnable_wait_ms->maximum);
+
+    auto job = fixture.job(1, 2);
+    auto run = fixture.storage.make_run(recovery_id(10), job, RunState::Cancelled);
+    fixture.storage.insert_run(run);
+    fixture.timing(run.run.id, "complete", 0);
+    auto zero = fixture.statistics.read(StatisticsRequest{.planned = window()}, StatisticsScope::System);
+    REQUIRE(zero);
+    CHECK(zero->groups.front().runnable_wait_ms->samples == 1);
+    CHECK(zero->groups.front().runnable_wait_ms->average == 0.0);
+    CHECK(zero->groups.front().runnable_wait_ms->maximum == 0.0);
+
+    fixture.timing(run.run.id, "unmeasured", 0);
+    StatisticsService embedded{fixture.storage.database, fixture.tokens, fixture.time};
+    auto              unavailable = embedded.read(StatisticsRequest{.planned = window()}, StatisticsScope::System);
+    REQUIRE(unavailable);
+    CHECK(unavailable->measurement.runnable_wait == "unavailable");
+    CHECK_FALSE(unavailable->groups.front().runnable_wait_ms);
+    CHECK(unavailable->groups.front().runnable_wait_coverage.unmeasured == 1);
+}
+
+TEST_CASE("Statistics preserve large persisted wait counters without integer summation overflow",
+          "[jobu][statistics][sqlite][timing]")
+{
+    Fixture fixture;
+    auto    job = fixture.job(1, 2);
+    for (auto suffix : {10U, 11U}) {
+        auto run = fixture.storage.make_run(recovery_id(suffix), job, RunState::Succeeded);
+        fixture.storage.insert_run(run);
+        fixture.timing(run.run.id, "complete", std::numeric_limits<std::int64_t>::max());
+    }
+    auto page = fixture.statistics.read(StatisticsRequest{.planned = window()}, StatisticsScope::System);
+    REQUIRE(page);
+    auto const& duration = *page->groups.front().runnable_wait_ms;
+    CHECK(duration.samples == 2);
+    CHECK(duration.average == duration.maximum);
+    REQUIRE(duration.average);
+    CHECK(std::isfinite(*duration.average));
+    CHECK(*duration.average > 9.0e15);
+}
+
+TEST_CASE("Statistics reads leave open timing rows unchanged and execute only selects",
+          "[jobu][statistics][sqlite][timing]")
+{
+    auto faults      = std::make_shared<DatabaseFaultState>();
+    auto statements  = std::vector<std::string>{};
+    faults->classify = [&](std::string_view sql) {
+        statements.emplace_back(sql);
+        return "statistics.read";
+    };
+    Fixture fixture{[faults](std::unique_ptr<Driver> driver) {
+        return std::make_unique<FaultDatabaseDriver>(std::move(driver), faults);
+    }};
+    auto    job = fixture.job(1, 2);
+    auto    run = fixture.storage.make_run(recovery_id(10), job);
+    fixture.storage.insert_run(run);
+    fixture.execute("UPDATE jobu_run_timing SET measurement_status = 'complete', runnable_wait_us = 1000, "
+                    "open_epoch = run_id, open_tick_us = 5 WHERE run_id = :id",
+                    run.run.id);
+
+    statements.clear();
+    faults->calls.clear();
+    fixture.time.set_monotonic(TimePoint{} + 1h);
+    auto page = fixture.statistics.read(StatisticsRequest{.planned = window()}, StatisticsScope::System);
+    REQUIRE(page);
+    CHECK(page->groups.front().runnable_wait_ms->samples == 0);
+    CHECK(page->groups.front().runnable_wait_coverage.unfinished == 1);
+    REQUIRE_FALSE(statements.empty());
+    for (auto const& statement : statements) {
+        CHECK(statement.starts_with("SELECT "));
+    }
+    for (auto const& call : faults->calls) {
+        CHECK(call.operation != DatabaseOperation::Begin);
+        CHECK(call.operation != DatabaseOperation::Commit);
+        CHECK(call.operation != DatabaseOperation::Rollback);
+    }
+
+    Query check{fixture.storage.database};
+    REQUIRE(check.exec("SELECT runnable_wait_us, open_epoch, open_tick_us FROM jobu_run_timing"));
+    REQUIRE(check.next());
+    CHECK(*std::get_if<std::int64_t>(check.record().value("runnable_wait_us")) == 1'000);
+    CHECK(*std::get_if<std::int64_t>(check.record().value("open_tick_us")) == 5);
+    CHECK(jb::jobu::detail::read_uuid(check.record(), "open_epoch").value() == run.run.id);
+}
+
+TEST_CASE("Retention removes timing samples between live statistics pages without moving the window",
+          "[jobu][statistics][sqlite][timing][retention]")
+{
+    Fixture fixture;
+    auto    first  = fixture.job(1, 2);
+    auto    second = fixture.job(3, 4);
+    auto    third  = fixture.job(5, 6);
+    for (auto const& job : {first, second, third}) {
+        auto run = fixture.storage.make_run(job.id, job, RunState::Succeeded);
+        fixture.storage.insert_run(run);
+        fixture.timing(run.run.id, "complete", 1'500);
+    }
+    auto page = fixture.statistics.read(
+        StatisticsRequest{.planned = window(), .group_by = StatisticsGroupBy::Queue, .limit = 1},
+        StatisticsScope::System);
+    REQUIRE(page);
+    REQUIRE(page->next_cursor);
+
+    // Purge the next group through the production retention path between two reads of the live view.
+    jb::jobu::detail::RetentionRepository retention{fixture.storage.database, fixture.storage.registry};
+    auto purged = retention.purge_next_batch(UtcTimePoint{100s}, 1s, 1, {.after_queue = first.queue_id});
+    REQUIRE(purged);
+    CHECK(purged->purged.runs == 1);
+    fixture.time.set_utc(UtcTimePoint{200s});
+    auto next = fixture.statistics.read(CursorRequest{*page->next_cursor}, StatisticsScope::System);
+    REQUIRE(next);
+    REQUIRE(next->groups.size() == 1);
+    CHECK(std::get<Uuid>(next->groups.front().key) == third.queue_id);
+    CHECK(next->window.from == page->window.from);
+    CHECK(next->window.to == page->window.to);
+    CHECK(next->groups.front().runnable_wait_coverage.complete == 1);
+    CHECK(next->groups.front().runnable_wait_ms->average == 1.5);
+    CHECK_FALSE(next->next_cursor);
+}
+
+TEST_CASE("Missing and malformed timing rows fail statistics after query cleanup",
+          "[jobu][statistics][sqlite][timing][fault]")
+{
+    auto const* const damage =
+        GENERATE("DELETE FROM jobu_run_timing WHERE run_id = :id",
+                 "UPDATE jobu_run_timing SET runnable_wait_us = -1 WHERE run_id = :id",
+                 "UPDATE jobu_run_timing SET measurement_status = 'unknown' WHERE run_id = :id",
+                 "UPDATE jobu_run_timing SET open_tick_us = 5 WHERE run_id = :id",
+                 "UPDATE jobu_run_timing SET measurement_status = 'complete', open_epoch = run_id, "
+                 "open_tick_us = 5 WHERE run_id = :id",
+                 "UPDATE jobu_run_timing SET runnable_wait_us = 1 WHERE run_id = :id");
+    Fixture fixture;
+    auto    job = fixture.job(1, 2);
+    fixture.storage.insert_run(fixture.storage.make_run(recovery_id(10), job, RunState::Succeeded));
+    {
+        Query pragma{fixture.storage.database};
+        REQUIRE(pragma.exec("PRAGMA ignore_check_constraints = ON"));
+    }
+    fixture.execute(damage, recovery_id(10));
+
+    auto observed = false;
+    fixture.statistics.failed.connect(&fixture.statistics, [&](Error const&) {
+        // A receiver can use and stop the service once all statistics queries have been released.
+        Query probe{fixture.storage.database};
+        REQUIRE(probe.exec("SELECT 1"));
+        REQUIRE(probe.next());
+        fixture.statistics.shutdown();
+        observed = true;
+    });
+    auto result = fixture.statistics.read(StatisticsRequest{.planned = window()}, StatisticsScope::System);
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == "jobu.storage.invariant");
+    CHECK(result.error().detail == "operation=read reason=durable_invariant");
+    CHECK(observed);
+    CHECK(fixture.failures.size() == 1);
+    CHECK_FALSE(fixture.statistics.read(StatisticsRequest{}, StatisticsScope::System));
+    CHECK(fixture.failures.size() == 1);
 }
 
 TEST_CASE("Statistics group pages preserve snapshot owners and the resolved window", "[jobu][statistics][sqlite]")

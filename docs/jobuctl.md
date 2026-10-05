@@ -216,9 +216,15 @@ The result includes the resolved window, groups, a nullable `next_cursor`, and
 measurement provenance. Run and attempt counts cover the planned-run cohort and
 all its retained attempts. Lateness and execution duration are derived from
 wall-clock timestamps; averages and maxima are null when there are no samples.
-`runnable_wait_ms` is null and marked unavailable. Human output prints these
-null and unavailable values explicitly. With `--json`, the CLI prints the
-protocol result unchanged.
+Runnable wait uses Complete terminal runs once per run across all attempts,
+with `monotonic_observed` provenance and milliseconds. Human output also
+prints `complete`, `partial`, `unmeasured`, and `unfinished` coverage counts.
+No Complete samples means zero samples and null average/maximum; a measured
+zero wait is a real zero-valued sample. Partial lower bounds and unfinished
+runs do not enter the wait average. Uninstrumented embedded services may
+return null/unavailable duration. See the [statistics contract](protocol/types.md#statistics-page)
+for quality, eligibility and retention limits. With `--json`, the CLI prints
+the protocol result unchanged.
 
 Continue a page with `system stats --cursor TOKEN` or
 `queue stats --cursor TOKEN`. A continuation must contain only the cursor: omit

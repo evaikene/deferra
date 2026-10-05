@@ -211,7 +211,7 @@ public:
 
         // Old target effects must not overlap the restarted attempt. Daemon SIGKILL cannot clean these up.
         for (auto const& target : targets) {
-#if defined(__APPLE__)
+#ifdef __APPLE__
             // kqueue observes identity but cannot signal it safely. Release the controlled orphan
             // over its private channel, and observe exit before starting another incarnation.
             if (!target->exited()) {
@@ -245,7 +245,7 @@ public:
         INFO(output);
         REQUIRE(result->kind == ProcessExitKind::Exited);
         REQUIRE(result->exit_code == 0);
-        REQUIRE(output.find("API version: 1.3") != std::string::npos);
+        REQUIRE(output.find("API version: 1.4") != std::string::npos);
     }
 
     auto rpc(std::string_view method, JsonValue parameters) -> JsonValue

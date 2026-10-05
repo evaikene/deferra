@@ -174,7 +174,16 @@ auto print_statistics_result(ControlReply const& reply) -> bool
                    group.capture.lost_attempts);
         fmt::print(stdout, "  Schedule lateness (ms): {}\n", duration_text(group.schedule_lateness_ms));
         fmt::print(stdout, "  Execution wall duration (ms): {}\n", duration_text(group.execution_wall_duration_ms));
-        fmt::print(stdout, "  Runnable wait (ms): unavailable\n");
+        fmt::print(stdout,
+                   "  Runnable wait (ms): {}\n",
+                   group.runnable_wait_ms ? duration_text(*group.runnable_wait_ms) : "unavailable");
+        auto const& coverage = group.runnable_wait_coverage;
+        fmt::print(stdout,
+                   "  Runnable wait coverage: complete={}, partial={}, unmeasured={}, unfinished={}\n",
+                   coverage.complete,
+                   coverage.partial,
+                   coverage.unmeasured,
+                   coverage.unfinished);
     }
     fmt::print(stdout, "Next cursor: {}\n", page->next_cursor ? escape_human(*page->next_cursor) : std::string{"null"});
     return true;

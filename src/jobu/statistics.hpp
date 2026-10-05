@@ -82,12 +82,22 @@ struct StatisticsCaptureCounts {
     std::uint64_t lost_attempts{0};
 };
 
-/// Wall-clock-derived duration in milliseconds. Empty populations have null average and maximum.
-/// Fractional milliseconds are retained in the floating-point values.
+/// Duration in milliseconds. Empty populations have null average and maximum.
+/// Fractional milliseconds are retained; page provenance distinguishes wall-clock and monotonic inputs.
 struct StatisticsDuration {
     std::uint64_t         samples{0};
     std::optional<double> average;
     std::optional<double> maximum;
+};
+
+/// Mutually exclusive retained-run coverage, summing to the group's run total.
+/// Nonterminal runs are unfinished regardless of quality. Terminal runs use their persisted quality;
+/// Partial counters are lower bounds and Unmeasured runs have no observed wait. Neither supplies duration samples.
+struct StatisticsRunnableWaitCoverage {
+    std::uint64_t complete{0};
+    std::uint64_t partial{0};
+    std::uint64_t unmeasured{0};
+    std::uint64_t unfinished{0};
 };
 
 /// The key is null for None, a UUID for Queue/Job, or the corresponding enum otherwise.
@@ -101,7 +111,10 @@ struct StatisticsGroup {
     StatisticsCaptureCounts           capture;
     StatisticsDuration                schedule_lateness_ms;
     StatisticsDuration                execution_wall_duration_ms;
+    /// Complete terminal runs only, once per run across all attempts. Null means measurement is unavailable;
+    /// an available measurement with no finalized samples has zero samples and null average/maximum.
     std::optional<StatisticsDuration> runnable_wait_ms;
+    StatisticsRunnableWaitCoverage    runnable_wait_coverage;
 };
 
 /// Provenance attached to every page, including an empty page.
@@ -109,7 +122,8 @@ struct StatisticsGroup {
 struct StatisticsMeasurement {
     /// First run start and attempt start/end are wall-clock timestamps, not monotonic measurements.
     std::string timing{"wall_clock_derived"};
-    /// No eligible-capacity wait is measured in Phase 8.
+    /// "monotonic_observed" for persisted eligible-wait accounting, or "unavailable" for uninstrumented callers.
+    /// Provenance describes the measurement method; coverage describes whether this cohort was measured.
     std::string runnable_wait{"unavailable"};
     /// Truncation and loss are counted from persisted output rows only.
     std::string capture{"persisted_output_flags"};
