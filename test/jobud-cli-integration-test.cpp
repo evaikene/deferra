@@ -555,7 +555,7 @@ public:
         CHECK(log.find("daemon-ambient-marker") == std::string::npos);
         CHECK(log.find("literal $x = value") == std::string::npos);
         if (::geteuid() == 0 && _allow_root_cli) {
-            CHECK(log.find("UNSAFE: --allow-root-cli enables command execution as root") != std::string::npos);
+            CHECK(log.find("jobud.unsafe.root_cli") != std::string::npos);
         }
     }
 
