@@ -231,7 +231,10 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
                                                              .telemetry        = telemetry.get(),
                                                          });
         secrets    = std::make_unique<SecretService>(database, time_source);
-        statistics = std::make_unique<StatisticsService>(database, uuid_generator, time_source);
+        statistics = std::make_unique<StatisticsService>(database,
+                                                         uuid_generator,
+                                                         time_source,
+                                                         StatisticsServiceOptions{.runnable_wait_available = true});
         history    = std::make_unique<HistoryService>(database, attributes, uuid_generator, time_source);
         // Stage 9.20 maps configuration and activates this service only after Serving.
         // Establish ownership/failure/stop gates now; construction and dormant teardown perform no SQL.
@@ -268,7 +271,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         }
         auto info = SystemInfo{
             .daemon_version = std::string{jb::jobu::detail::project_version},
-            .api_version    = {.major = 1, .minor = 3},
+            .api_version    = {.major = 1, .minor = 4},
             .capabilities   = std::move(capabilities),
         };
         if (!register_system_info_method(*rpc, std::move(info)) ||

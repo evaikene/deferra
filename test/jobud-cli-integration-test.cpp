@@ -134,7 +134,7 @@ public:
     explicit TargetWatch(pid_t pid)
         : _pid{pid}
     {
-#if defined(__APPLE__)
+#ifdef __APPLE__
         _fd = ::kqueue();
         REQUIRE(_fd >= 0);
         // Register before releasing the helper. The one-shot exit remains observable after the daemon reaps it.
@@ -158,7 +158,7 @@ public:
 
     ~TargetWatch()
     {
-#if defined(__linux__)
+#ifdef __linux__
         // Numeric PIDs may have been reused. A pidfd signal can only affect the original helper.
         static_cast<void>(::syscall(SYS_pidfd_send_signal, _fd, SIGKILL, nullptr, 0));
 #endif
@@ -176,7 +176,7 @@ public:
         if (_terminated) {
             return true;
         }
-#if defined(__APPLE__)
+#ifdef __APPLE__
         struct kevent   event;
         struct timespec timeout{};
         int             ready;
@@ -532,7 +532,7 @@ public:
     {
         auto const pid = daemon.process_id();
         REQUIRE(pid);
-#if defined(__APPLE__)
+#ifdef __APPLE__
         // Query the owned, still-running daemon directly; no debugger/task-port entitlement is needed.
         struct proc_taskinfo info{};
         auto const           size = ::proc_pidinfo(static_cast<int>(*pid), PROC_PIDTASKINFO, 0, &info, sizeof(info));
@@ -551,7 +551,7 @@ public:
 
     void responsive()
     {
-        CHECK(control({"system", "info"}).find("API version: 1.3") != std::string::npos);
+        CHECK(control({"system", "info"}).find("API version: 1.4") != std::string::npos);
         CHECK(log.find("daemon-ambient-marker") == std::string::npos);
         CHECK(log.find("literal $x = value") == std::string::npos);
         if (::geteuid() == 0 && _allow_root_cli) {
@@ -750,7 +750,7 @@ TEST_CASE("daemon preserves binary first and last capture and discarded-capture 
                   "stderr":{"captured_bytes":8,"total_bytes":131079,"truncated":true}})");
         CHECK(value.result == expected);
     }
-#if defined(__linux__)
+#ifdef __linux__
     fixture.cli("hardening", "capture", {"no-new-privileges"});
     auto const hardened = fixture.complete("hardening");
     check_capture(hardened, "NoNewPrivs: 1\n", "", 14, 0);
@@ -766,7 +766,7 @@ TEST_CASE("daemon overlaps CLI targets and HTTP with independent global slots", 
     server.enqueue_response({});
     fixture.queue("overlap");
     auto const idle_threads = fixture.thread_count();
-#if defined(__linux__)
+#ifdef __linux__
     REQUIRE(idle_threads == 1);
 #endif
     // macOS runtime initialization can create background threads. CLI overlap must not add per-attempt waiters.
@@ -896,7 +896,7 @@ TEST_CASE("root daemon denies CLI targets without the unsafe override", "[jobud]
     CHECK(fixture.state("denied").attempt_state.empty());
     CHECK_FALSE(std::filesystem::exists(sentinel));
     CHECK(fixture.log.find("UNSAFE:") == std::string::npos);
-    CHECK(fixture.control({"system", "info"}).find("API version: 1.3") != std::string::npos);
+    CHECK(fixture.control({"system", "info"}).find("API version: 1.4") != std::string::npos);
 }
 
 TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls, and restart",
@@ -972,7 +972,20 @@ TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls
     auto const& counts = stats.as_object().at("groups").as_array().front().as_object();
     CHECK(counts.at("runs").as_object().at("total").as_uint() >= 1);
     CHECK(counts.at("attempts").as_object().at("total").as_uint() >= 2);
-    CHECK(counts.at("runnable_wait_ms").is_null());
+
+    // Dormant telemetry leaves the completed run Unmeasured; API availability still requires an empty duration.
+    REQUIRE(counts.at("runnable_wait_ms").is_object());
+    auto const& wait = counts.at("runnable_wait_ms").as_object();
+    CHECK(wait.at("samples").as_uint() == 0);
+    CHECK(wait.at("average").is_null());
+    CHECK(wait.at("maximum").is_null());
+
+    auto const& coverage = counts.at("runnable_wait_coverage").as_object();
+    CHECK(coverage.at("complete").as_uint() == 0);
+    CHECK(coverage.at("partial").as_uint() == 0);
+    CHECK(coverage.at("unmeasured").as_uint() == counts.at("runs").as_object().at("total").as_uint());
+    CHECK(coverage.at("unfinished").as_uint() == 0);
+    CHECK(stats.as_object().at("measurement").as_object().at("runnable_wait").as_string() == "monotonic_observed");
 
     // Completion changes the one-time definition, while its symbolic secret reference remains owned by that
     // definition until an explicit deletion.

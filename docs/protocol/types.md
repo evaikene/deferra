@@ -38,7 +38,7 @@ deleted queues; select by ID in that case.
 | `kind` | string | 1.1 | `once` or `cron` |
 | `at` | time or `"now"` | 1.1; `"now"` 1.3 | Required for `once`; `"now"` is accepted only by `job.create` |
 | `expression` | string | 1.1 | Required for `cron`; five-field expression or supported alias |
-| `timezone` | string | 1.1 | Optional in cron input, required in stored/results; nonempty IANA timezone name or `UTC` |
+| `timezone` | string | 1.1; omission 1.4 | Optional in cron input, required in stored/results; nonempty IANA timezone name or `UTC` |
 
 The complete forms are `{"kind":"once","at":"2030-01-01T00:00:00Z"}` and
 `{"kind":"cron","expression":"@daily","timezone":"UTC"}`. Cron uses
@@ -205,7 +205,8 @@ it with another: a UTF-8 character can cross a chunk boundary.
 
 Both [`system.stats`](methods/system.md#retained-statistics-systemstats) and
 [`queue.stats`](methods/queue.md#retained-statistics-queuestats) return this
-shape. All members below were introduced in API 1.3.
+shape. API 1.4 adds measured runnable wait and its explicit coverage; the
+methods and existing statistics members retain their API 1.3 introduction.
 
 | Page member | Type | Since | Meaning |
 | --- | --- | --- | --- |
@@ -223,7 +224,8 @@ shape. All members below were introduced in API 1.3.
 | `capture` | object | 1.3 | `truncated_attempts`, `lost_attempts` |
 | `schedule_lateness_ms` | duration object | 1.3 | First start minus planned time, once per run |
 | `execution_wall_duration_ms` | duration object | 1.3 | Completed attempt start/end difference |
-| `runnable_wait_ms` | null | 1.3 | Unavailable in the current implementation |
+| `runnable_wait_ms` | duration object or null | 1.3; measured 1.4 | Complete terminal runs only; null for uninstrumented embedded services |
+| `runnable_wait_coverage` | object | 1.4 | Mutually exclusive `complete`, `partial`, `unmeasured`, `unfinished` run counts |
 
 | Nested member | Type | Since | Meaning |
 | --- | --- | --- | --- |
@@ -242,12 +244,41 @@ shape. All members below were introduced in API 1.3.
 | `execution_wall_duration_ms.samples` | integer | 1.3 | Valid sample count |
 | `execution_wall_duration_ms.average`, `.maximum` | number or null | 1.3 | Milliseconds; null when samples is zero |
 | `measurement.timing` | string | 1.3 | `wall_clock_derived` |
-| `measurement.runnable_wait` | string | 1.3 | `unavailable` |
+| `runnable_wait_ms.samples` | integer | 1.4 | Complete terminal run count, once per run across attempts |
+| `runnable_wait_ms.average`, `.maximum` | number or null | 1.4 | Monotonic observed milliseconds; null when samples is zero |
+| `runnable_wait_coverage.complete` | integer | 1.4 | Terminal runs observed completely from creation |
+| `runnable_wait_coverage.partial` | integer | 1.4 | Terminal runs with only a known lower bound |
+| `runnable_wait_coverage.unmeasured` | integer | 1.4 | Terminal runs with no observed measurement |
+| `runnable_wait_coverage.unfinished` | integer | 1.4 | All nonterminal runs, regardless of measurement quality |
+| `measurement.runnable_wait` | string | 1.3; measured 1.4 | `monotonic_observed`, or `unavailable` for uninstrumented embedded services |
 | `measurement.capture` | string | 1.3 | `persisted_output_flags` |
 
 Every fixed counter key is present, including when its value is zero. The
-measurement values distinguish wall-clock estimates and persisted capture
-flags from an eligible-capacity wait measurement.
+measurement values distinguish wall-clock estimates, monotonic observed wait,
+and persisted capture flags. `measurement.timing` applies only to schedule
+lateness and execution wall duration; `measurement.runnable_wait` describes
+the separate runnable-wait measure.
+
+Runnable wait sums intervals during which a run was observed eligible for
+selection, including capacity and fairness waits. It excludes execution,
+retry backoff, suspension, barriers and daemon downtime. Due boundaries begin
+when the scheduler observes eligibility; UTC timestamps do not reconstruct
+the accumulated monotonic duration. A crash can lose an uncheckpointed tail,
+and late instrumentation leaves earlier wait unknown; both produce Partial
+quality. Partial lower bounds never enter the average or maximum.
+
+Coverage classifies Scheduled, Running and RetryWait as `unfinished` first,
+then terminal runs by their persisted quality. Its four counters sum to
+`runs.total`; an available duration's `samples` equals `coverage.complete`.
+An empty Complete-terminal population returns
+`{"samples":0,"average":null,"maximum":null}`. A measured zero wait instead
+contributes a sample with zero average/maximum. Provenance does not imply
+that every retained run was instrumented; the coverage counters show this.
+
+Statistics are a read-only live view of retained rows. Reads do not force a
+checkpoint or persist an open interval's tail. Retention can remove cohort
+members between pages while the resolved window and cursor boundary remain
+fixed. Counts and measurements apply only to history still retained.
 
 ## Attributes and defaults
 

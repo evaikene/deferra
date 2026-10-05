@@ -40,7 +40,7 @@ schedule uses an explicit UTC `at` time, or the creation-only symbolic
 `{"kind":"once","at":"now"}`. The daemon resolves `now` in the creation
 transaction to a concrete microsecond timestamp and returns that concrete
 schedule. A cron schedule computes its next occurrence using the supplied timezone or,
-when omitted, the daemon's `schedule.default_timezone`. The result contains
+when omitted (Since 1.4), the daemon's `schedule.default_timezone`. The result contains
 the resolved timezone.
 
 ```json

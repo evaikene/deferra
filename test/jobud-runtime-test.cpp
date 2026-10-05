@@ -23,6 +23,7 @@
 #include "server.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "statistics_json.hpp"
+#include "statistics_rpc.hpp"
 #include "statistics_service.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_cron_engine.hpp"
@@ -1240,7 +1241,7 @@ TEST_CASE("Daemon capabilities follow every registered Phase 8 server method", "
         auto               info    = endpoint.call("system.info", JsonValue{.data = JsonValue::Object{}});
         auto const&        fields  = rpc_result(info).as_object();
         auto const&        methods = fields.at("capabilities").as_array();
-        CHECK(fields.at("api_version").as_object().at("minor").as_uint() == 3);
+        CHECK(fields.at("api_version").as_object().at("minor").as_uint() == 4);
         REQUIRE(methods.size() == 30U);
         for (auto index = std::size_t{1}; index < methods.size(); ++index) {
             CHECK(methods[index - 1U].as_string() < methods[index].as_string());
@@ -1388,7 +1389,7 @@ TEST_CASE("Daemon history and statistics RPC read retained data without exposing
         REQUIRE(scoped);
         REQUIRE(scoped->groups.size() == 1);
         CHECK(scoped->groups.front().runs.total == 1);
-        CHECK(scoped->measurement.runnable_wait == "unavailable");
+        CHECK(scoped->measurement.runnable_wait == "monotonic_observed");
         check_application_error(endpoint.call("queue.stats", *stats_next),
                                 "invalid_argument",
                                 "jobu.statistics.invalid_cursor");
@@ -1406,6 +1407,43 @@ TEST_CASE("Daemon history and statistics RPC read retained data without exposing
         CHECK(std::ranges::none_of(fixture.faults->calls,
                                    [](DatabaseCall const& call) { return call.boundary == "dispatch.secret"; }));
         CHECK(terminal.run.id != other_run.run.id);
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == EXIT_SUCCESS);
+}
+
+TEST_CASE("Statistics response budgets include measured fields and preserve read admission", "[jobud][statistics][rpc]")
+{
+    RuntimeFixture fixture;
+    fixture.create_runtime();
+    auto result = fixture.run([&] {
+        RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
+        auto               request = JsonValue{.data = JsonValue::Object{}};
+        auto               raw     = rpc_result(endpoint.call("system.stats", request));
+        auto body = serialize_json(jb::rpc::detail::encode_success_response(jb::rpc::RequestId{std::uint64_t{1}}, raw));
+        REQUIRE(body);
+
+        // At the exact envelope size the expanded result fits; one byte less must return the stable limit error.
+        for (auto limit : {body->size(), body->size() - 1U}) {
+            auto options                      = jb::rpc::ServerOptions{};
+            options.framing.max_body_bytes    = limit;
+            options.response_limit_error_code = "jobu.response.too_large";
+            jb::rpc::Server limited{options};
+            REQUIRE(register_statistics_methods(limited,
+                                                *RuntimeTestAccess::statistics(*fixture.runtime),
+                                                *RuntimeTestAccess::management(*fixture.runtime)));
+            RuntimeRpcEndpoint bounded{limited};
+            auto               reply = bounded.call("system.stats", request);
+            if (limit == body->size()) {
+                CHECK(rpc_result(reply) == raw);
+            }
+            else {
+                check_application_error(reply, "resource_exhausted", "jobu.response.too_large");
+            }
+        }
+        CHECK(rpc_result(endpoint.call("system.stats", request)) == raw);
+        CHECK(fixture.runtime->state() == RuntimeState::Serving);
         fixture.runtime->request_stop();
         return EXIT_SUCCESS;
     });
@@ -1522,7 +1560,7 @@ TEST_CASE("Fatal history RPC read closes all daemon admission before teardown", 
     require_consumed_faults(*fixture.faults);
 }
 
-TEST_CASE("Daemon advertises and serves cron preview controls at API 1.3", "[jobud][control][rpc]")
+TEST_CASE("Daemon advertises and serves cron preview controls at API 1.4", "[jobud][control][rpc]")
 {
     SystemCronEngine engine;
     RuntimeFixture   fixture;
@@ -1531,7 +1569,7 @@ TEST_CASE("Daemon advertises and serves cron preview controls at API 1.3", "[job
         RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
         auto               info        = endpoint.call("system.info", JsonValue{.data = JsonValue::Object{}});
         auto const&        info_fields = rpc_result(info).as_object();
-        CHECK(info_fields.at("api_version").as_object().at("minor").as_uint() == 3);
+        CHECK(info_fields.at("api_version").as_object().at("minor").as_uint() == 4);
         auto const& methods = info_fields.at("capabilities").as_array();
         for (auto const* name : {"job.run_now", "run.cancel", "schedule.validate", "schedule.next"}) {
             CHECK(std::ranges::count_if(methods,

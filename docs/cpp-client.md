@@ -77,8 +77,16 @@ Successful queue, job, and secret deletions return `EmptyReply`; cron validation
 returns `ScheduleValidationReply` only for a valid schedule. Invalid schedules
 produce a remote error.
 
+API 1.4 statistics replies include `StatisticsGroup::runnable_wait_coverage`
+and an available `runnable_wait_ms` duration for Complete terminal runs only.
+Both statistics methods use the shared decoder, which validates coverage
+and sample counts while allowing unknown response fields. Zero samples have
+null average/maximum; Partial and unfinished runs are excluded. See the
+[statistics types](protocol/types.md#statistics-page) for provenance and
+retained-history semantics.
+
 Cron requests use `CronScheduleInput{expression, optional_timezone}`.
-Omitting timezone uses the daemon's configured default; supplying `"UTC"`
+Since API 1.4, omitting timezone uses the daemon's configured default; supplying `"UTC"`
 keeps UTC explicit. `CreateJobRequest`, `UpdateJobRequest`, `validate_schedule`,
 and `ScheduleNextRequest` share this input contract. Stored job replies use
 `CronSchedule` with an explicit timezone. An omitted update schedule keeps the

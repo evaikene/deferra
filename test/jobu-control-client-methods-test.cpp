@@ -103,7 +103,7 @@ struct Fixture {
         device.inject_input(success(1U,
                                     system_info_to_json(SystemInfo{
                                         .daemon_version = "test",
-                                        .api_version    = {.major = 1, .minor = 3},
+                                        .api_version    = {.major = 1, .minor = 4},
                                         .capabilities   = all_methods()
         })));
         drain_tasks();
@@ -296,7 +296,7 @@ TEST_CASE("Every distinct typed result decodes into its public reply alternative
     auto       cases = std::vector<ReplyCase>{
         {[](auto& client) { return client.get_system_info(); },
          system_info_to_json(SystemInfo{.daemon_version = "test",
-                                        .api_version    = {.major = 1, .minor = 3},
+                                        .api_version    = {.major = 1, .minor = 4},
                                         .capabilities   = all_methods()}),
          ControlReply{SystemInfo{}}.index()},
         {[](auto& client) { return client.system_statistics(StatisticsRequest{}); },
@@ -414,6 +414,62 @@ TEST_CASE("Remote errors stay observed and malformed mutation replies stay uncer
     CHECK_FALSE(failures.back().second.outcome_unknown);
     fixture.drain_tasks();
     CHECK(failures.size() == 3U);
+}
+
+TEST_CASE("Both typed statistics methods preserve measured coverage and reject malformed replies",
+          "[jobu][client][statistics]")
+{
+    Fixture fixture;
+    fixture.initialize();
+    auto page = StatisticsPage{
+        .window      = {.from = UtcTimePoint{}, .to = UtcTimePoint{} + std::chrono::hours{1}},
+        .groups      = {StatisticsGroup{
+            .runs                   = {.total = 4, .scheduled = 1, .succeeded = 3},
+            .runnable_wait_ms       = StatisticsDuration{.samples = 1, .average = 1.5, .maximum = 1.5},
+            .runnable_wait_coverage = {.complete = 1, .partial = 1, .unmeasured = 1, .unfinished = 1},
+        }},
+        .measurement = {.runnable_wait = "monotonic_observed"},
+    };
+    auto raw      = encoded(statistics_page_to_json(page));
+    auto received = std::size_t{0};
+    auto failed   = std::size_t{0};
+    fixture.typed->reply_received.connect(fixture.typed.get(), [&](ControlCallId, ControlReply const& reply) {
+        auto const* result = std::get_if<StatisticsPage>(&reply);
+        REQUIRE(result != nullptr);
+        CHECK(result->measurement.runnable_wait == "monotonic_observed");
+        CHECK(encoded(statistics_page_to_json(*result)) == raw);
+        ++received;
+    });
+    fixture.typed->call_failed.connect(fixture.typed.get(), [&](ControlCallId, ControlFailure const& failure) {
+        CHECK(failure.kind == ControlFailureKind::Local);
+        CHECK(std::get<Error>(failure.error).code == "jobu.client.invalid_response");
+        CHECK_FALSE(failure.outcome_unknown);
+        ++failed;
+    });
+
+    for (auto queue_scope : {false, true}) {
+        auto submit = [&] {
+            return queue_scope ? fixture.typed->queue_statistics(QueueStatisticsQuery{.selector = std::string{"queue"}})
+                               : fixture.typed->system_statistics(StatisticsRequest{});
+        };
+        auto call = submit();
+        REQUIRE(call);
+        static_cast<void>(fixture.device.take_written_data());
+        fixture.device.inject_input(success(*call + 1U, raw));
+        fixture.drain_tasks();
+
+        auto  malformed = raw;
+        auto& group     = std::get<JsonValue::Object>(
+            std::get<JsonValue::Array>(std::get<JsonValue::Object>(malformed.data).at("groups").data).front().data);
+        group.erase("runnable_wait_coverage");
+        auto rejected = submit();
+        REQUIRE(rejected);
+        static_cast<void>(fixture.device.take_written_data());
+        fixture.device.inject_input(success(*rejected + 1U, malformed));
+        fixture.drain_tasks();
+    }
+    CHECK(received == 2);
+    CHECK(failed == 2);
 }
 
 TEST_CASE("Unknown response members are ignored and nullable output metadata stays absent", "[jobu][client]")

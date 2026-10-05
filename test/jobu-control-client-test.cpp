@@ -58,7 +58,7 @@ auto info(std::vector<std::string> methods = {"job.create", "run.list"}) -> Json
 {
     return system_info_to_json(SystemInfo{
         .daemon_version = "test",
-        .api_version    = {.major = 1, .minor = 3},
+        .api_version    = {.major = 1, .minor = 4},
         .capabilities   = std::move(methods),
     });
 }

@@ -20,7 +20,7 @@ The shared `schedule` object has these members:
 | --- | --- | --- | --- | --- |
 | `kind` | string | Yes | 1.3 | Fixed `cron` |
 | `expression` | string | Yes | 1.3 | Five-field cron expression or alias |
-| `timezone` | string | No | 1.3 | Nonempty IANA name or `UTC`; omission uses daemon default |
+| `timezone` | string | No | 1.3; omission 1.4 | Nonempty IANA name or `UTC`; omission uses daemon default |
 
 ## Validate (`schedule.validate`)
 

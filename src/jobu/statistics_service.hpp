@@ -20,17 +20,26 @@ class UuidGenerator;
 
 namespace jb::jobu {
 
+/// Copied, immutable read policy; construction and reads never activate telemetry.
+struct StatisticsServiceOptions {
+    /// Expose complete-terminal persisted wait samples and "monotonic_observed" provenance.
+    /// False keeps null/unavailable durations for uninstrumented embedded callers. Coverage is always reported.
+    bool runnable_wait_available{false};
+};
+
 /// Reads bounded statistics over immutable planned-run cohorts and their retained attempts.
 /// Borrows an already-open owner-thread database, UUID generator, and time source; they must outlive the service.
 /// Construction does no database work. Reads and shutdown run on that owner thread. A fatal storage or persisted-data
 /// failure closes admission and emits one sanitized failed signal after query handles have been released.
-/// Ordinary database read errors fail only that request. The optional parent owns the service.
+/// Ordinary database read errors fail only that request. Reads perform no writes or forced checkpoints.
+/// Options are copied; the optional parent owns the service.
 class StatisticsService final : public jb::core::Object {
 public:
     StatisticsService(jb::db::Database&        database,
                       jb::core::UuidGenerator& uuid_generator,
                       jb::core::TimeSource&    time_source,
-                      jb::core::Object*        parent = nullptr);
+                      StatisticsServiceOptions options = {},
+                      jb::core::Object*        parent  = nullptr);
     ~StatisticsService() override;
 
     StatisticsService(StatisticsService const&)                    = delete;

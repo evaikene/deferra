@@ -11,6 +11,7 @@ Diagnostics:
       readability-implicit-bool-conversion.AllowPointerConditions: true
     Remove: [
       readability-function-cognitive-complexity,
+      readability-trailing-comma,
       readability-convert-member-functions-to-static,
       readability-use-anyofallof,
       readability-magic-numbers,

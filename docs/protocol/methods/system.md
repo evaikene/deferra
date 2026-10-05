@@ -19,7 +19,7 @@ method-specific fields and ignores supplied params. The result has these members
 | `daemon_version` | string | 1.0 | Executable version |
 | `api_version` | object | 1.0 | Supported API version |
 | `api_version.major` | integer | 1.0 | Protocol compatibility family; currently 1 |
-| `api_version.minor` | integer | 1.0 | Additive API version; currently 3 |
+| `api_version.minor` | integer | 1.0 | Additive API version; currently 4 |
 | `capabilities` | array of strings | 1.0 | Sorted unique names of registered methods |
 
 For example, send `{"jsonrpc":"2.0","id":1,"method":"system.info","params":{}}`.
@@ -58,8 +58,11 @@ The result is a [statistics page](../types.md#statistics-page). An empty
 cohort grouped by `none` still has one zero-count group with `key:null`.
 See the [checked empty-cohort result](../examples/system-stats.result.json).
 Lateness and execution duration come from wall-clock timestamps; missing,
-negative, or unrepresentable samples are excluded. The page reports
-`runnable_wait_ms:null` and `measurement.runnable_wait:"unavailable"`.
+negative, or unrepresentable samples are excluded. API 1.4 reports persisted
+Complete-terminal runnable-wait samples with `monotonic_observed` provenance
+and per-group coverage. No Complete-terminal samples means zero samples and
+null average/maximum. Reads perform no timing writes or forced checkpoints;
+see the shared statistics type for quality and retained-history limits.
 Capture counts use persisted output flags; a missing output row is not
 evidence of successful capture.
 

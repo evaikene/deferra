@@ -34,11 +34,13 @@ using QueueStatisticsListRequest = std::variant<QueueStatisticsQuery, CursorRequ
 [[nodiscard]] auto queue_statistics_request_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<QueueStatisticsListRequest, jb::core::Error>;
 
-/// Encodes bounded groups, resolved window, nullable cursor, and explicit measurement provenance.
+/// Encodes bounded groups, resolved window, nullable cursor, coverage, and measurement provenance.
+/// Coverage must partition the run total and any available wait duration must sample exactly the Complete bucket.
 [[nodiscard]] auto statistics_page_to_json(StatisticsPage const& page)
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
-/// Decodes a statistics page into owning values, ignoring unknown response members.
+/// Decodes a statistics page into owning values, validating required coverage and duration invariants.
+/// Unknown response members are ignored; missing or inconsistent known fields are invalid responses.
 [[nodiscard]] auto statistics_page_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<StatisticsPage, jb::core::Error>;
 

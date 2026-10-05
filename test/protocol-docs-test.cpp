@@ -120,6 +120,16 @@ TEST_CASE("Published statistics request and result describe one empty cohort", "
     CHECK(std::holds_alternative<std::monostate>(result->groups.front().key));
     CHECK(result->groups.front().runs.total == 0);
     CHECK(result->groups.front().attempts.total == 0);
+    CHECK(result->measurement.runnable_wait == "monotonic_observed");
+    REQUIRE(result->groups.front().runnable_wait_ms);
+    CHECK(result->groups.front().runnable_wait_ms->samples == 0);
+    CHECK_FALSE(result->groups.front().runnable_wait_ms->average);
+    CHECK_FALSE(result->groups.front().runnable_wait_ms->maximum);
+    auto const& coverage = result->groups.front().runnable_wait_coverage;
+    CHECK(coverage.complete == 0);
+    CHECK(coverage.partial == 0);
+    CHECK(coverage.unmeasured == 0);
+    CHECK(coverage.unfinished == 0);
     CHECK_FALSE(result->next_cursor);
 }
 

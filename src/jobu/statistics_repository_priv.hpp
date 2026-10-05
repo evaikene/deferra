@@ -22,7 +22,8 @@ public:
     list_groups(StatisticsRequest const& request, std::optional<StatisticsGroupKey> after, std::size_t limit)
         -> jb::core::Result<std::vector<StatisticsGroupKey>, jb::core::Error>;
 
-    /// Counts the selected runs, then their attempts, without multiplying runs through joins.
+    /// Counts selected runs and their required timing rows, then attempts, without multiplying run samples.
+    /// Returns coverage and a Complete-terminal wait duration even when its sample population is empty.
     [[nodiscard]] auto aggregate(StatisticsRequest const& request, StatisticsGroupKey const& key)
         -> jb::core::Result<StatisticsGroup, jb::core::Error>;
 
