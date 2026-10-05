@@ -13,6 +13,8 @@ static_assert(std::is_constructible_v<jb::jobu::RetentionService,
                                       jb::jobu::AttributeRegistry const&,
                                       jb::core::TimeSource&>);
 static_assert(noexcept(std::declval<jb::jobu::RetentionService&>().stop()));
+static_assert(std::is_same_v<decltype(jb::jobu::RetentionService::sweep_completed),
+                             jb::core::Signal<jb::jobu::RetentionPurgeCounts>>);
 
 auto main() -> int
 {

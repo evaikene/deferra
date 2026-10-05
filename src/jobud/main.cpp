@@ -1,4 +1,5 @@
 #include "composition_priv.hpp"
+#include "daemon_logger_priv.hpp"
 #include "jobu_version_priv.hpp"
 #include "runtime_priv.hpp"
 #include "startup_priv.hpp"
@@ -21,6 +22,8 @@
 
 #include <fmt/format.h>
 
+#include <array>
+#include <cstdint>
 #include <cstdio> // IWYU pragma: keep for stderr and stdout
 #include <cstdlib>
 #include <filesystem>
@@ -117,12 +120,24 @@ auto main(int argc, char* argv[]) -> int
     }
     auto const startup = std::move(resolved).value();
 
+    // The installed sink outlives every worker and the relay itself, including destructor fallback logs.
+    jb::jobud::detail::DaemonLogScope logging{startup.logging_format, startup.logging_level};
+    log_event(LogLevel::Info, "jobud.starting");
+
     // The relay precedes Application and every worker-capable dependency. Its checked retirement
     // follows their complete scope teardown, including every early startup return.
 #if defined(__linux__) || defined(__APPLE__)
     auto installed = jb::jobud::detail::ShutdownSignalRelay::install();
     if (!installed) {
-        log_error("JobU signal setup failed: code={}", installed.error().code);
+        auto const fields = std::array{
+            LogField{.name = "subsystem", .value = std::string_view{"signal_setup"}        },
+            LogField{.name = "code",      .value = std::string_view{installed.error().code}}
+        };
+        log_event(LogLevel::Error, "jobud.failed", fields);
+        auto const stopped = std::array{
+            LogField{.name = "exit_status", .value = std::int64_t{EXIT_FAILURE}}
+        };
+        log_event(LogLevel::Info, "jobud.stopped", stopped);
         return EXIT_FAILURE;
     }
     auto relay = std::move(installed).value();
@@ -206,9 +221,19 @@ auto main(int argc, char* argv[]) -> int
 #if defined(__linux__) || defined(__APPLE__)
     auto closed = relay->close();
     if (!closed) {
-        log_error("JobU signal cleanup failed: code={}", closed.error().code);
+        auto const fields = std::array{
+            LogField{.name = "subsystem", .value = std::string_view{"signal_cleanup"}   },
+            LogField{.name = "code",      .value = std::string_view{closed.error().code}}
+        };
+        log_event(LogLevel::Error, "jobud.signal.cleanup_failed", fields);
         status = EXIT_FAILURE;
     }
+    // The relay destructor can retry cleanup and emit a safe diagnostic before the final record.
+    relay.reset();
 #endif
+    auto const stopped = std::array{
+        LogField{.name = "exit_status", .value = static_cast<std::int64_t>(status)}
+    };
+    log_event(LogLevel::Info, "jobud.stopped", stopped);
     return status;
 }

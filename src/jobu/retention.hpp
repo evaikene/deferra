@@ -81,9 +81,17 @@ public:
     /// Queued receivers get owning values. Direct receivers may stop or destroy the service.
     jb::core::Signal<RetentionPurgeCounts> batch_completed;
 
+    /// Committed totals from one complete sweep, including sweeps with zero deletions.
+    /// Emitted after the final batch notification and SQL cleanup, while that activation remains alive.
+    /// A batch receiver stopping/destroying/restarting the service can suppress this diagnostic.
+    /// Counts reset between sweeps and activations; stopped/failed partial sweeps emit no summary.
+    /// Queued receivers own their totals. Direct receivers may stop, restart or destroy the service.
+    jb::core::Signal<RetentionPurgeCounts> sweep_completed;
+
     /// Emitted once after failed maintenance has unwound transaction cleanup and disarmed work.
     /// Preserves trusted stable codes with sanitized Mutation diagnostics; persisted relationship
-    /// failures are fatal. No subsequent start, stop or callback retries a failed batch.
+    /// failures are fatal. Unrepresentable sweep totals fail with jobu.retention.counter_overflow.
+    /// No subsequent start, stop or callback retries a failed batch.
     jb::core::Signal<jb::core::Error> failed;
 
 private:

@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace jb::test {
@@ -77,14 +78,21 @@ class SecretExecutionLogger final : public jb::core::Logger {
 public:
     void log(jb::core::LogMessage const& message) override
     {
-        std::lock_guard lock{_mutex};
+        std::scoped_lock lock{_mutex};
         _messages.emplace_back(message.message);
+        _messages.emplace_back(message.event_name);
+        for (auto const& field : message.fields) {
+            _messages.emplace_back(field.name);
+            if (auto const* value = std::get_if<std::string_view>(&field.value)) {
+                _messages.emplace_back(*value);
+            }
+        }
     }
 
     void check(std::string_view expected_message) const
     {
-        std::lock_guard lock{_mutex};
-        bool            found = expected_message.empty();
+        std::scoped_lock lock{_mutex};
+        bool             found = expected_message.empty();
         for (auto const& message : _messages) {
             check_no_execution_secret(message);
             found = found || message.find(expected_message) != std::string::npos;

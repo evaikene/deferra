@@ -21,6 +21,7 @@
 #include "secret_json.hpp"
 #include "secret_service.hpp"
 #include "server.hpp"
+#include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "statistics_json.hpp"
 #include "statistics_rpc.hpp"
@@ -32,6 +33,7 @@
 #include "support/fake_time_source.hpp"
 #include "support/fault_database_driver.hpp"
 #include "support/memory_io_device.hpp"
+#include "support/operational_log_capture.hpp"
 #include "support/recovery_fixture.hpp"
 #include "support/storage_fault_helpers.hpp"
 #include "transaction.hpp"
@@ -1963,4 +1965,160 @@ TEST_CASE("Configured timezone and daemon attributes reach management and schedu
         fixture.runtime->request_stop();
         return EXIT_SUCCESS;
     }) == EXIT_SUCCESS);
+}
+
+TEST_CASE("Daemon operational recovery summary precedes readiness", "[jobud][logging]")
+{
+    OperationalLogGuard logs;
+    RuntimeFixture      f;
+    f.create_runtime();
+    REQUIRE(f.run([&] {
+        f.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+    auto records = logs.capture->records();
+    REQUIRE(records.size() == 2);
+    CHECK(records[0].event == "jobud.recovery.completed");
+    CHECK(records[0].level == LogLevel::Info);
+    REQUIRE(records[0].fields.size() == 8);
+    for (auto const& [name, value] : records[0].fields) {
+        CHECK(value.as_uint() == 0);
+    }
+    CHECK(records[1].event == "jobud.ready");
+}
+
+TEST_CASE("Daemon failure events retain only the first subsystem and stable code", "[jobud][logging]")
+{
+    OperationalLogGuard logs;
+    RuntimeFixture      f;
+    f.create_runtime();
+    REQUIRE(f.runtime->run(
+                []() -> RunnersResult {
+                    return RunnersResult::failure({.category = ErrorCategory::Unavailable,
+                                                   .code     = "net.http.backend_failed",
+                                                   .message  = "stage916-private-command",
+                                                   .detail   = "stage916-private-url-credentials"});
+                },
+                [] {
+                    FAIL("failed startup cannot serve");
+                    return EXIT_SUCCESS;
+                }) == EXIT_FAILURE);
+    f.runtime->fail("late", failure());
+    auto records = logs.capture->records();
+    REQUIRE(records.size() == 2);
+    CHECK(records.front().event == "jobud.recovery.completed");
+    CHECK(records.back().event == "jobud.failed");
+    CHECK(records.back().level == LogLevel::Error);
+    REQUIRE(records.back().fields.size() == 2);
+    CHECK(records.back().fields.at("subsystem").as_string() == "runners");
+    CHECK(records.back().fields.at("code").as_string() == "net.http.backend_failed");
+    for (auto const& message : records) {
+        auto encoded = serialize_json({.data = message.fields});
+        REQUIRE(encoded);
+        CHECK(encoded->find("stage916-private-") == std::string::npos);
+        CHECK(message.message.find("stage916-private-") == std::string::npos);
+    }
+}
+
+TEST_CASE("Daemon logs committed delays and completed sweeps through service subscriptions", "[jobud][logging]")
+{
+    OperationalLogGuard logs;
+    RuntimeFixture      f;
+    f.seed(1);
+    auto waiting = f.seed(2);
+    f.create_runtime();
+    REQUIRE(f.run([&] {
+        auto* telemetry = RuntimeTestAccess::telemetry(*f.runtime);
+        REQUIRE(telemetry->start()); // Production activation remains Stage 9.20.
+        RuntimeTestAccess::scheduler(*f.runtime)->request_rescan();
+        jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+        f.time.advance(11s);
+        RuntimeTestAccess::scheduler(*f.runtime)->request_rescan();
+        jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+        auto* retention = RuntimeTestAccess::retention(*f.runtime);
+        REQUIRE(retention->start());
+        for (int step = 0; step < 20; ++step) {
+            auto records = logs.capture->records();
+            if (std::ranges::any_of(records,
+                                    [](auto const& message) { return message.event == "jobud.retention.completed"; })) {
+                break;
+            }
+            jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+        }
+        f.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+    auto records = logs.capture->records();
+    auto delayed =
+        std::ranges::find_if(records, [](auto const& message) { return message.event == "jobud.run.delayed"; });
+    REQUIRE(delayed != records.end());
+    CHECK(delayed->level == LogLevel::Warning);
+    CHECK(delayed->fields.at("run_id").as_string() == waiting.run.id.to_string());
+    CHECK(delayed->fields.at("job_id").as_string() == waiting.run.job_id.to_string());
+    CHECK(delayed->fields.at("queue_id").as_string() == waiting.run.queue_id.to_string());
+    CHECK(delayed->fields.at("runnable_wait_us").as_int() == 11'000'000);
+    CHECK(delayed->fields.at("threshold_ms").as_int() == 10'000);
+    CHECK(delayed->fields.at("measurement").as_string() == "monotonic_observed");
+    CHECK(std::ranges::count_if(records, [](auto const& message) { return message.event == "jobud.run.delayed"; }) ==
+          1);
+    auto swept =
+        std::ranges::find_if(records, [](auto const& message) { return message.event == "jobud.retention.completed"; });
+    REQUIRE(swept != records.end());
+    CHECK(swept->level == LogLevel::Info);
+    REQUIRE(swept->fields.size() == 4);
+    for (auto const& [name, value] : swept->fields) {
+        CHECK(value.as_uint() == 0);
+    }
+}
+
+TEST_CASE("Database cleanup diagnostics omit backend messages and details", "[jobud][logging][fault]")
+{
+    OperationalLogGuard logs;
+    RuntimeFixture      f;
+    auto                error = fault_error();
+    error.message             = "stage916-private-sql-values";
+    error.detail              = "stage916-private-backend-detail";
+    SECTION("guard rollback")
+    {
+        auto transaction = jb::db::Transaction::begin(f.storage.database);
+        REQUIRE(transaction);
+        f.faults->faults.push_back({
+            .at    = {.boundary = "connection", .operation = DatabaseOperation::Rollback},
+            .error = error
+        });
+    }
+    SECTION("database close")
+    {
+        REQUIRE(f.storage.database.close());
+        auto database = std::make_unique<jb::db::Database>(std::make_unique<FaultDatabaseDriver>(
+            std::make_unique<jb::db::sqlite::Driver>(jb::db::sqlite::Options{.database_file = f.storage.database_file}),
+            f.faults));
+        REQUIRE(database->open());
+        f.faults->faults.push_back({
+            .at    = {.boundary = "connection", .operation = DatabaseOperation::Close},
+            .error = error
+        });
+        database.reset();
+        REQUIRE(f.storage.database.open());
+    }
+    SECTION("direct rollback")
+    {
+        REQUIRE(f.storage.database.close());
+        auto database = std::make_unique<jb::db::Database>(std::make_unique<FaultDatabaseDriver>(
+            std::make_unique<jb::db::sqlite::Driver>(jb::db::sqlite::Options{.database_file = f.storage.database_file}),
+            f.faults));
+        REQUIRE(database->open());
+        REQUIRE(database->transaction());
+        f.faults->faults.push_back({
+            .at    = {.boundary = "connection", .operation = DatabaseOperation::Rollback},
+            .error = error
+        });
+        database.reset();
+        REQUIRE(f.storage.database.open());
+    }
+    require_consumed_faults(*f.faults);
+    auto records = logs.capture->records();
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().message.find("db.io") != std::string::npos);
+    CHECK(records.front().message.find("stage916-private-") == std::string::npos);
 }
