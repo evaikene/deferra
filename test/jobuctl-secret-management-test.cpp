@@ -1,4 +1,5 @@
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
+#include "support/protected_daemon_state.hpp"
 #include "support/temporary_directory.hpp"
 
 #include "byte_buffer.hpp"
@@ -63,6 +64,7 @@ auto start_daemon(std::filesystem::path const& executable,
                   std::filesystem::path const& socket,
                   std::filesystem::path const& database) -> std::unique_ptr<Daemon>
 {
+    REQUIRE_FALSE(jb::test::protect_daemon_state(database));
     auto const pid = ::fork();
     REQUIRE(pid >= 0);
     if (pid == 0) {
@@ -228,7 +230,7 @@ auto write_file(std::filesystem::path const& path, std::string_view bytes) -> vo
 
 TEST_CASE("jobuctl secret commands preserve bytes and expose only metadata", "[jobuctl][secret]")
 {
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     auto const                   socket   = directory.path() / "jobud.sock";
     auto const                   database = directory.path() / "jobu.sqlite";
     auto const                   file     = directory.path() / "secret.bin";

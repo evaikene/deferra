@@ -36,7 +36,8 @@ enum class IdentityTransition : std::uint8_t {
     InitializeTarget
 };
 
-/// Resolved before any credential change. Paths and resources may use this identity only after verification.
+/// Resolved before credential changes; authorizes preparation of explicit protected directory leaves.
+/// Database, listener and worker resources require application and verification of this identity first.
 struct FinalIdentity {
     uid_t              user{};
     gid_t              group{};

@@ -817,6 +817,10 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JobU executable smoke tests
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
+    add_executable(jobud-runtime-paths-test jobud-runtime-paths-test.cpp support/temporary_directory.cpp)
+    target_link_libraries(jobud-runtime-paths-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
+    add_test(NAME jobud-runtime-paths-test COMMAND $<TARGET_FILE:jobud-runtime-paths-test>)
+
     add_executable(jobud-privileges-test jobud-privileges-test.cpp)
     target_link_libraries(jobud-privileges-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
     add_test(NAME jobud-privileges-test COMMAND $<TARGET_FILE:jobud-privileges-test>)
@@ -901,7 +905,6 @@ if(TARGET jobud)
     add_test(NAME jobud-check-defaults COMMAND $<TARGET_FILE:jobud> --check-config --no-config)
     add_test(NAME jobud-check-config-local COMMAND ${CMAKE_COMMAND}
         -DJOBUD_EXECUTABLE=$<TARGET_FILE:jobud>
-        -DTEST_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/jobud-check-config
         -P ${CMAKE_CURRENT_SOURCE_DIR}/jobud-check-config.cmake)
     add_test(NAME jobud-invalid-option COMMAND $<TARGET_FILE:jobud> --unknown)
     add_test(NAME jobud-conflicting-config COMMAND $<TARGET_FILE:jobud> --config /missing/jobud.ini --no-config)

@@ -451,7 +451,7 @@ auto main(int argc, char* argv[]) -> int
         return fail("expected jobud and jobuctl arguments");
     }
 
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     auto const                   jobud   = std::filesystem::path{argv[1]};
     auto const                   jobuctl = std::filesystem::path{argv[2]};
 

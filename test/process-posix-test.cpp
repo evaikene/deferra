@@ -54,7 +54,7 @@ auto helper(std::vector<std::string> arguments = {"exit", "37"}) -> ProcessStart
 
 auto descriptor_count() -> std::size_t
 {
-#if defined(__APPLE__)
+#ifdef __APPLE__
     auto const* path = "/dev/fd";
 #else
     auto const* path = "/proc/self/fd";
@@ -474,7 +474,7 @@ public:
     {
         REQUIRE(pid > 0);
 
-#if defined(__APPLE__)
+#ifdef __APPLE__
         _fd = ::kqueue();
         REQUIRE(_fd >= 0);
         struct kevent change;
@@ -519,7 +519,7 @@ public:
             return;
         }
 
-#if defined(__APPLE__)
+#ifdef __APPLE__
         struct kevent   event;
         struct timespec timeout{.tv_sec = 3, .tv_nsec = 0};
         int             ready;
@@ -1216,7 +1216,7 @@ TEST_CASE("POSIX Process old callbacks stay inert after failed removal restart a
 }
 
 namespace {
-#if defined(__linux__)
+#ifdef __linux__
 class RetainedProcessWatch final : public EpollProcessOperations {
 public:
     int removals{0};
@@ -1253,7 +1253,7 @@ TEST_CASE("POSIX Process retained delivered watch does not redispatch or block u
           "[core][process][posix]")
 {
     auto native = std::make_shared<RetainedProcessWatch>();
-#if defined(__linux__)
+#ifdef __linux__
     Run run{make_epoll_backend(native)};
 #else
     Run run{make_kqueue_backend(native)};
@@ -1346,7 +1346,7 @@ TEST_CASE("POSIX Process direct lifecycle slots defer destruction without leakin
 
 TEST_CASE("POSIX Process enforces and safely reports strict privilege hardening", "[core][process][posix][security]")
 {
-#if defined(__linux__)
+#ifdef __linux__
     SECTION("target observes Linux no-new-privileges")
     {
         Run  run;
@@ -1996,7 +1996,7 @@ TEST_CASE("POSIX Process reap waits for independently controlled output terminal
         };
         CHECK(run.loop->process_events(EventFlag::Watchers, 0) != ProcessEventsResult::Failed);
         CHECK(operations->eof[i]);
-        CHECK(run.finishes == static_cast<int>(i));
+        CHECK(std::cmp_equal(run.finishes, i));
     }
     CHECK(run.bytes[0].size() == 11);
     CHECK(run.bytes[1].size() == 17);

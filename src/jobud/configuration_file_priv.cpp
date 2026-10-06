@@ -1,5 +1,7 @@
 #include "configuration_file_priv.hpp"
 
+#include "runtime_paths_priv.hpp"
+
 #include <array>
 #include <cerrno>
 #include <cstddef>
@@ -12,23 +14,6 @@ namespace jb::jobud::detail {
 namespace {
 
 constexpr std::size_t kMaximumConfigurationBytes{65'536};
-
-class FileDescriptor {
-public:
-    explicit FileDescriptor(int value)
-        : _value{value}
-    {}
-
-    ~FileDescriptor() { ::close(_value); }
-
-    FileDescriptor(FileDescriptor const&)            = delete;
-    FileDescriptor& operator=(FileDescriptor const&) = delete;
-
-    [[nodiscard]] auto get() const noexcept -> int { return _value; }
-
-private:
-    int _value;
-};
 
 auto read_failed(jb::core::ErrorCategory category) -> StartupError
 {
@@ -44,9 +29,21 @@ auto read_configuration_file(std::filesystem::path const& path, bool allow_missi
 {
     using ReadResult = jb::core::Result<std::optional<std::string>, StartupError>;
 
+    // Configuration trust follows the invoking identity, independently of any later run-as target.
+    auto const user   = ::geteuid();
+    auto       parent = open_trusted_parent(path, user, allow_missing);
+    if (!parent) {
+        return ReadResult::failure(read_failed(parent.error().category));
+    }
+    if (!*parent) {
+        return ReadResult::success(std::nullopt);
+    }
+
     // Nonblocking open lets us reject FIFOs without waiting for a writer. Regular-file reads are unaffected.
     // The descriptor, rather than a later pathname lookup, owns the file we inspect and read.
-    auto const raw = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    auto const raw = ::openat(parent->value().directory.get(),
+                              parent->value().leaf.c_str(),
+                              O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (raw < 0) {
         if (allow_missing && errno == ENOENT) {
             return ReadResult::success(std::nullopt);
@@ -56,13 +53,14 @@ auto read_configuration_file(std::filesystem::path const& path, bool allow_missi
                                 : jb::core::ErrorCategory::Io;
         return ReadResult::failure(read_failed(category));
     }
-    FileDescriptor file{raw};
+    PathDescriptor file{raw};
 
     struct stat metadata{};
     if (::fstat(file.get(), &metadata) != 0) {
         return ReadResult::failure(read_failed(jb::core::ErrorCategory::Io));
     }
-    if (!S_ISREG(metadata.st_mode)) {
+    if (!S_ISREG(metadata.st_mode) || (metadata.st_uid != 0 && metadata.st_uid != user) ||
+        (metadata.st_mode & 0022) != 0) {
         return ReadResult::failure(read_failed(jb::core::ErrorCategory::PermissionDenied));
     }
 
