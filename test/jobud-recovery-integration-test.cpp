@@ -168,8 +168,11 @@ public:
             arguments[0] = "--config";
             arguments.insert(arguments.begin() + 1, path.string());
         }
-        if (allow_root_cli && ::geteuid() == 0) {
-            arguments.emplace_back("--allow-root-cli");
+        if (::geteuid() == 0) {
+            arguments.emplace_back("--allow-root-daemon");
+            if (allow_root_cli) {
+                arguments.emplace_back("--allow-root-cli");
+            }
         }
 
         started_after = std::chrono::time_point_cast<std::chrono::microseconds>(UtcClock::now());
@@ -899,8 +902,14 @@ TEST_CASE("Configured daemon logs readiness and final graceful exit in JSON and 
         }
         remaining.remove_prefix(end + 1);
     }
-    REQUIRE(events ==
-            std::vector<std::string>{"jobud.starting", "jobud.recovery.completed", "jobud.ready", "jobud.stopped"});
+    auto expected = std::vector<std::string>{"jobud.starting"};
+#ifdef __linux__
+    if (::geteuid() == 0) {
+        expected.emplace_back("jobud.unsafe.root_daemon");
+    }
+#endif
+    expected.insert(expected.end(), {"jobud.recovery.completed", "jobud.ready", "jobud.stopped"});
+    REQUIRE(events == expected);
 }
 
 TEST_CASE("Configured daemon filters lifecycle output without changing readiness", "[jobud][logging][integration]")

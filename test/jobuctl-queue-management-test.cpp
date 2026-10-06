@@ -125,6 +125,7 @@ auto spawn_jobud(std::filesystem::path const& executable,
                 socket_path.c_str(),
                 "--database",
                 database_path.c_str(),
+                ::geteuid() == 0 ? "--allow-root-daemon" : "--no-allow-root-daemon",
                 static_cast<char*>(nullptr));
         ::_exit(127);
     }
