@@ -905,7 +905,6 @@ if(TARGET jobud)
     add_test(NAME jobud-check-defaults COMMAND $<TARGET_FILE:jobud> --check-config --no-config)
     add_test(NAME jobud-check-config-local COMMAND ${CMAKE_COMMAND}
         -DJOBUD_EXECUTABLE=$<TARGET_FILE:jobud>
-        -DTEST_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/jobud-check-config
         -P ${CMAKE_CURRENT_SOURCE_DIR}/jobud-check-config.cmake)
     add_test(NAME jobud-invalid-option COMMAND $<TARGET_FILE:jobud> --unknown)
     add_test(NAME jobud-conflicting-config COMMAND $<TARGET_FILE:jobud> --config /missing/jobud.ini --no-config)

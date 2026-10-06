@@ -55,7 +55,10 @@ auto run_child(std::string executable, std::vector<std::string> arguments) -> Ca
 auto native_account() -> std::string
 {
     auto const* found = ::getpwuid(::getuid());
-    REQUIRE(found != nullptr);
+    if (found == nullptr) {
+        // Numeric container identities need no NSS entry for preservation or different-user refusal.
+        SKIP("named-account identity evidence requires a passwd entry for the invoking UID");
+    }
     return found->pw_name;
 }
 
@@ -85,14 +88,30 @@ TEST_CASE("native non-root helpers preserve identity and reject another account"
     auto const preserve     = run_child(JOBUD_IDENTITY_TEST_HELPER, {"preserve"});
     CHECK(preserve.exit.exit_code == 0);
     CHECK(preserve.output.find("verified uid=") != std::string::npos);
-    auto const same = run_child(JOBUD_IDENTITY_TEST_HELPER, {"target", native_account()});
-    CHECK(same.exit.exit_code == 0);
+
     auto const different = run_child(JOBUD_IDENTITY_TEST_HELPER, {"target", "root"});
     CHECK(different.exit.exit_code == 1);
     CHECK(different.output.find("jobud.privilege.identity_mismatch") != std::string::npos);
-    auto const different_group = run_child(JOBUD_IDENTITY_TEST_HELPER, {"target", native_account(), "root"});
+
+    CHECK(::geteuid() == parent_user);
+    CHECK(::getegid() == parent_group);
+}
+
+TEST_CASE("native non-root named identity matches its account and rejects another group", "[jobud][identity][native]")
+{
+    if (::geteuid() == 0) {
+        SKIP("ordinary non-root identity evidence requires a non-root test process");
+    }
+    auto const account      = native_account();
+    auto const parent_user  = ::geteuid();
+    auto const parent_group = ::getegid();
+    auto const same         = run_child(JOBUD_IDENTITY_TEST_HELPER, {"target", account});
+    CHECK(same.exit.exit_code == 0);
+
+    auto const different_group = run_child(JOBUD_IDENTITY_TEST_HELPER, {"target", account, "root"});
     CHECK(different_group.exit.exit_code == 1);
     CHECK(different_group.output.find("jobud.privilege.identity_mismatch") != std::string::npos);
+
     CHECK(::geteuid() == parent_user);
     CHECK(::getegid() == parent_group);
 }
