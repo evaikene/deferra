@@ -816,6 +816,24 @@ target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JobU executable smoke tests
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
+    add_executable(jobud-privileges-test jobud-privileges-test.cpp)
+    target_link_libraries(jobud-privileges-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
+    add_test(NAME jobud-privileges-test COMMAND $<TARGET_FILE:jobud-privileges-test>)
+
+    add_executable(jobud-identity-test-helper jobud-identity-test-helper.cpp)
+    target_link_libraries(jobud-identity-test-helper PRIVATE jobud-runtime)
+    add_executable(jobud-identity-integration-test jobud-identity-integration-test.cpp
+        support/temporary_directory.cpp)
+    target_link_libraries(jobud-identity-integration-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
+    target_compile_definitions(jobud-identity-integration-test PRIVATE
+        JOBUD_IDENTITY_TEST_HELPER="$<TARGET_FILE:jobud-identity-test-helper>"
+        JOBUD_EXECUTABLE="$<TARGET_FILE:jobud>")
+    add_dependencies(jobud-identity-integration-test jobud-identity-test-helper jobud)
+    add_test(NAME jobud-identity-integration-test COMMAND $<TARGET_FILE:jobud-identity-integration-test>)
+    set_tests_properties(jobud-identity-integration-test PROPERTIES TIMEOUT 60)
+endif()
+
 if(TARGET jobud-signal)
     # Compile the same relay with deterministic handler checkpoints only in this isolated helper.
     # The production jobud-signal library contains neither hooks nor runtime test switches.

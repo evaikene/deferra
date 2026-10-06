@@ -14,7 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#if defined(__APPLE__)
+#ifdef __APPLE__
 #  include <crt_externs.h>
 #endif
 #include <fcntl.h>
@@ -37,7 +37,7 @@ using namespace std::chrono_literals;
 
 auto process_environment() noexcept -> char**
 {
-#if defined(__APPLE__)
+#ifdef __APPLE__
     // macOS exposes the process environment through this accessor instead of declaring environ in unistd.h.
     return *_NSGetEnviron();
 #else
@@ -265,6 +265,9 @@ auto spawn_jobud(std::filesystem::path const& executable,
         "--http-concurrency",
         fmt::format("{}", http_concurrency),
     };
+    if (::geteuid() == 0) {
+        arguments.emplace_back("--allow-root-daemon");
+    }
     auto exec_arguments = std::vector<char*>{};
     exec_arguments.reserve(arguments.size() + 1U);
     for (auto& argument : arguments) {

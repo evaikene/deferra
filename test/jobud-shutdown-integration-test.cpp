@@ -47,6 +47,7 @@ public:
                                                   "--http-concurrency",
                                                   "1"};
         if (::geteuid() == 0) {
+            arguments.emplace_back("--allow-root-daemon");
             arguments.emplace_back("--allow-root-cli");
         }
         REQUIRE(daemon->start(

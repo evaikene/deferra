@@ -4,6 +4,10 @@
 #include "runtime_priv.hpp"
 #include "startup_priv.hpp"
 
+#ifdef __linux__
+#  include "privileges_priv.hpp"
+#endif
+
 #if defined(__linux__) || defined(__APPLE__)
 #  include "shutdown_signal_priv.hpp"
 #endif
@@ -144,6 +148,30 @@ auto main(int argc, char* argv[]) -> int
 #endif
 
     auto run_application = [&]() -> int {
+#if defined(__linux__) || defined(__APPLE__)
+        if (relay->requested()) {
+            return EXIT_SUCCESS;
+        }
+#endif
+#ifdef __linux__
+        // Finalize while startup is single-threaded, before Application, database or HTTP construction.
+        // Failed/partial drops leave this scope through the same relay retirement and final log path.
+        auto identity = jb::jobud::detail::finalize_process_identity(startup);
+        if (!identity) {
+            auto const fields = std::array{
+                LogField{.name = "subsystem", .value = std::string_view{"identity"}           },
+                LogField{.name = "code",      .value = std::string_view{identity.error().code}}
+            };
+            log_event(LogLevel::Error, "jobud.failed", fields);
+            return EXIT_FAILURE;
+        }
+        if (identity->user == 0) {
+            log_event(LogLevel::Warning, "jobud.unsafe.root_daemon");
+        }
+        if (relay->requested()) {
+            return EXIT_SUCCESS;
+        }
+#endif
         Application      app{0, nullptr};
         SystemTimeSource time_source;
         jb::db::Database database{

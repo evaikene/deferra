@@ -342,7 +342,7 @@ auto resolve_startup_options(StartupArguments const&      arguments,
 auto validate_readonly_accounts(StartupOptions const& options) -> jb::core::Result<void, StartupError>
 {
     using ValidationResult = jb::core::Result<void, StartupError>;
-    // This is only a name-existence check. Final-identity authorization and privilege changes belong to 9.17.
+    // Local validation checks names only. The running daemon authorizes and verifies its final identity separately.
     if (options.run_as_user && ::getpwnam(options.run_as_user->c_str()) == nullptr) {
         return ValidationResult::failure(invalid_option("daemon.run_as_user"));
     }

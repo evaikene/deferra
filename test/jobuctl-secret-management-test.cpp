@@ -72,6 +72,7 @@ auto start_daemon(std::filesystem::path const& executable,
                 socket.c_str(),
                 "--database",
                 database.c_str(),
+                ::geteuid() == 0 ? "--allow-root-daemon" : "--no-allow-root-daemon",
                 static_cast<char*>(nullptr));
         ::_exit(127);
     }
@@ -109,7 +110,7 @@ auto read_all(int fd) -> std::string
     }
 }
 
-#if defined(__linux__)
+#ifdef __linux__
 void check_process_arguments(pid_t pid, std::filesystem::path const& executable, std::string_view secret)
 {
     // Keep stdin open until exec has happened, so /proc exposes the actual jobuctl argument vector.
@@ -173,7 +174,7 @@ auto run_cli(std::filesystem::path const& executable,
     ::close(input_pipe[0]);
     ::close(output_pipe[1]);
     ::close(error_pipe[1]);
-#if defined(__linux__)
+#ifdef __linux__
     if (inspect_arguments) {
         check_process_arguments(pid, executable, input.substr(0, input.find('\n')));
     }

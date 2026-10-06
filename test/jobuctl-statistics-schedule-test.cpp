@@ -72,6 +72,7 @@ auto start_daemon(std::filesystem::path const& socket, std::filesystem::path con
                 socket.c_str(),
                 "--database",
                 database.c_str(),
+                ::geteuid() == 0 ? "--allow-root-daemon" : "--no-allow-root-daemon",
                 static_cast<char*>(nullptr));
         ::_exit(127);
     }

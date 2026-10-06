@@ -580,8 +580,11 @@ private:
                                                   std::to_string(_cli_concurrency),
                                                   "--http-concurrency",
                                                   "1"};
-        if (::geteuid() == 0 && _allow_root_cli) {
-            arguments.emplace_back("--allow-root-cli");
+        if (::geteuid() == 0) {
+            arguments.emplace_back("--allow-root-daemon");
+            if (_allow_root_cli) {
+                arguments.emplace_back("--allow-root-cli");
+            }
         }
         return arguments;
     }
@@ -895,7 +898,10 @@ TEST_CASE("root daemon denies CLI targets without the unsafe override", "[jobud]
     CHECK(fixture.state("denied").run_state == "scheduled");
     CHECK(fixture.state("denied").attempt_state.empty());
     CHECK_FALSE(std::filesystem::exists(sentinel));
-    CHECK(fixture.log.find("UNSAFE:") == std::string::npos);
+    CHECK(fixture.log.find("jobud.unsafe.root_cli") == std::string::npos);
+#ifdef __linux__
+    CHECK(fixture.log.find("jobud.unsafe.root_daemon") != std::string::npos);
+#endif
     CHECK(fixture.control({"system", "info"}).find("API version: 1.4") != std::string::npos);
 }
 
