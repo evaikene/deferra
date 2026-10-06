@@ -3,6 +3,7 @@ if(NOT DEFINED JOBUD_EXECUTABLE OR NOT DEFINED TEST_DIRECTORY)
 endif()
 
 file(MAKE_DIRECTORY "${TEST_DIRECTORY}")
+file(CHMOD "${TEST_DIRECTORY}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
 set(config_file "${TEST_DIRECTORY}/jobud.ini")
 set(database_file "${TEST_DIRECTORY}/unused.sqlite")
 set(socket_file "${TEST_DIRECTORY}/unused.sock")

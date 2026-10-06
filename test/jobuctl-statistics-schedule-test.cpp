@@ -6,6 +6,7 @@
 #include "statistics_service.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_time_source.hpp"
+#include "support/protected_daemon_state.hpp"
 #include "support/recovery_fixture.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
@@ -63,6 +64,7 @@ private:
 
 auto start_daemon(std::filesystem::path const& socket, std::filesystem::path const& database) -> std::unique_ptr<Daemon>
 {
+    REQUIRE_FALSE(jb::test::protect_daemon_state(database));
     auto const pid = ::fork();
     REQUIRE(pid >= 0);
     if (pid == 0) {
@@ -244,7 +246,7 @@ TEST_CASE("jobuctl renders the same persisted measured statistics as the service
 
 TEST_CASE("jobuctl exposes every advertised daemon method", "[jobuctl][integration]")
 {
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     auto const                   socket   = directory.path() / "jobud.sock";
     auto const                   database = directory.path() / "jobu.sqlite";
     auto                         daemon   = start_daemon(socket, database);
@@ -265,7 +267,7 @@ TEST_CASE("jobuctl exposes every advertised daemon method", "[jobuctl][integrati
 
 TEST_CASE("jobuctl statistics pages and cron previews use real daemon methods", "[jobuctl][integration]")
 {
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     auto const                   socket   = directory.path() / "jobud.sock";
     auto const                   database = directory.path() / "jobu.sqlite";
     auto                         daemon   = start_daemon(socket, database);

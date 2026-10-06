@@ -5,6 +5,7 @@
 #include "process.hpp"
 #include "protocol.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
+#include "support/protected_daemon_state.hpp"
 #include "support/shutdown_fixture.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -32,6 +33,7 @@ public:
     void start()
     {
         REQUIRE(work.storage.database.close());
+        REQUIRE_FALSE(protect_daemon_state(work.storage.database_file));
         socket = work.storage.directory.path() / ("daemon-" + std::to_string(++incarnation) + ".sock");
         exit.reset();
         daemon = std::make_unique<Process>();

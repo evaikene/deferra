@@ -16,6 +16,7 @@
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/http_test_server.hpp"
 #include "support/process_exit_watch.hpp"
+#include "support/protected_daemon_state.hpp"
 #include "support/recovery_fixture.hpp"
 #include "support/storage_fault_helpers.hpp"
 
@@ -142,6 +143,7 @@ public:
     {
         REQUIRE_FALSE(daemon);
         REQUIRE(storage.database.close());
+        REQUIRE_FALSE(jb::test::protect_daemon_state(storage.database_file));
         // A killed LocalServer leaves its socket entry intentionally intact. Never reuse that path.
         socket_path = storage.directory.path() / ("daemon-" + std::to_string(++incarnation) + ".sock");
         exit.reset();

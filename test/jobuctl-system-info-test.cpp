@@ -305,7 +305,7 @@ auto main(int argc, char* argv[]) -> int
         return fail("expected jobud, jobuctl, and project version arguments");
     }
 
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     auto const                   database_path = directory.path() / "jobu.sqlite";
     auto const                   socket_path   = directory.path() / "jobud-fresh.sock";
     auto                         daemon        = spawn_jobud(argv[1], socket_path, database_path);

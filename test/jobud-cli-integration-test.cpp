@@ -560,7 +560,7 @@ public:
     }
 
     Application                                        app{0, nullptr};
-    jb::test::TemporaryDirectory                       directory;
+    jb::test::TemporaryDirectory                       directory{std::filesystem::perms::owner_all};
     std::filesystem::path                              socket_path{directory.path() / "daemon.sock"};
     std::filesystem::path                              database_path{directory.path() / "daemon.sqlite"};
     std::string                                        log;

@@ -12,6 +12,10 @@
 namespace jb::test {
 
 TemporaryDirectory::TemporaryDirectory()
+    : TemporaryDirectory{std::filesystem::perms::unknown}
+{}
+
+TemporaryDirectory::TemporaryDirectory(std::filesystem::perms mode)
 {
     core::SystemTimeSource time_source;
     core::UuidV7Generator  uuid_generator{time_source};
@@ -27,6 +31,17 @@ TemporaryDirectory::TemporaryDirectory()
         std::error_code error;
         if (std::filesystem::create_directory(candidate, error)) {
             _path = std::move(candidate);
+            if (mode != std::filesystem::perms::unknown) {
+                std::filesystem::permissions(_path, mode, error);
+                if (error) {
+                    auto const cleanup_error = cleanup();
+                    if (cleanup_error) {
+                        throw std::filesystem::filesystem_error{"Unable to clean up unprotected temporary directory",
+                                                                cleanup_error};
+                    }
+                    throw std::filesystem::filesystem_error{"Unable to protect temporary directory", error};
+                }
+            }
             return;
         }
         if (error && error != std::errc::file_exists) {

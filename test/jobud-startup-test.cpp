@@ -150,7 +150,7 @@ auto http_request(TimeSource& time) -> AttemptStartRequest
 
 TEST_CASE("daemon startup maps default and explicit concurrency to Scheduler options", "[jobud][startup]")
 {
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     auto const                   ca_bundle = directory.path() / "ca.pem";
     std::ofstream{ca_bundle} << "test CA bundle";
 
@@ -289,7 +289,7 @@ TEST_CASE("daemon startup resolves compiled config and flag precedence", "[jobud
 
     CHECK_FALSE(resolve_startup_options({}, *config, paths, "/invocation"));
 
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     auto const                   ca_bundle = directory.path() / "ca.pem";
     std::ofstream{ca_bundle} << "test CA bundle";
     auto relative = parse_arguments({"--database", "state/daemon.sqlite", "--http-ca-bundle", "ca.pem"});
@@ -326,7 +326,7 @@ TEST_CASE("daemon local validation checks supplied account names", "[jobud][star
 
 TEST_CASE("daemon configuration file selection is bounded and read only", "[jobud][startup]")
 {
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     auto const                   config_path = directory.path() / "jobud.ini";
     auto const                   paths =
         CompiledPaths{.config = config_path, .database = "/compiled/jobu.sqlite3", .socket = "/compiled/jobud.sock"};
@@ -380,7 +380,7 @@ TEST_CASE("daemon configuration file selection is bounded and read only", "[jobu
 
 TEST_CASE("daemon configuration rejects a FIFO without waiting for a writer", "[jobud][startup]")
 {
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     auto const                   fifo_path = directory.path() / "jobud.ini";
     REQUIRE(::mkfifo(fifo_path.c_str(), 0600) == 0);
 
@@ -394,7 +394,7 @@ TEST_CASE("daemon configuration rejects a FIFO without waiting for a writer", "[
 
 TEST_CASE("daemon CLI paths preserve symlink traversal through dot-dot", "[jobud][startup]")
 {
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     auto const                   target = directory.path() / "target";
     std::filesystem::create_directories(target / "child");
     std::filesystem::create_directory_symlink(target / "child", directory.path() / "link");
@@ -517,7 +517,7 @@ TEST_CASE("daemon composition registration failures retain only previously owned
 TEST_CASE("root daemon composition leaves CLI pending while HTTP and management work", "[jobud][startup]")
 {
     Application                  app{0, nullptr};
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     SystemTimeSource             time;
     UuidV7Generator              generator{time};
     StandardAttributeRegistry    registry;

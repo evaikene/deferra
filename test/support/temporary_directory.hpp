@@ -14,6 +14,8 @@ class TemporaryDirectory {
 public:
     /// Creates a unique `jobu-test-` directory or throws when setup cannot continue.
     TemporaryDirectory();
+    /// An explicit mode overrides inherited umask permissions; unknown preserves the existing fixture default.
+    explicit TemporaryDirectory(std::filesystem::perms mode);
     /// Performs best-effort cleanup and never throws.
     ~TemporaryDirectory();
 

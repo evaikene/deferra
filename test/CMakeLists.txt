@@ -817,6 +817,10 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JobU executable smoke tests
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
+    add_executable(jobud-runtime-paths-test jobud-runtime-paths-test.cpp support/temporary_directory.cpp)
+    target_link_libraries(jobud-runtime-paths-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
+    add_test(NAME jobud-runtime-paths-test COMMAND $<TARGET_FILE:jobud-runtime-paths-test>)
+
     add_executable(jobud-privileges-test jobud-privileges-test.cpp)
     target_link_libraries(jobud-privileges-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
     add_test(NAME jobud-privileges-test COMMAND $<TARGET_FILE:jobud-privileges-test>)

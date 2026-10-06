@@ -6,6 +6,7 @@
 
 #ifdef __linux__
 #  include "privileges_priv.hpp"
+#  include "runtime_paths_priv.hpp"
 #endif
 
 #if defined(__linux__) || defined(__APPLE__)
@@ -17,6 +18,7 @@
 #include "attribute_registry.hpp"
 #include "cron.hpp"
 #include "database.hpp"
+#include "error.hpp"
 #include "http/system_http_client.hpp"
 #include "logging.hpp"
 #include "sqlite/sqlite_driver.hpp"
@@ -33,9 +35,25 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <span>
+#include <string_view>
+#include <sys/stat.h>
 #include <utility>
 
 namespace {
+
+void log_startup_failure(std::string_view subsystem, jb::core::Error const& error)
+{
+    using namespace jb::core;
+    auto const fields = std::array{
+        LogField{.name = "subsystem", .value = subsystem                     },
+        LogField{.name = "code",      .value = std::string_view{error.code}  },
+        LogField{.name = "reason",    .value = std::string_view{error.detail}}
+    };
+    // Only the filesystem helper's two error families carry reviewed fixed reason tokens.
+    auto const count = error.code == "jobud.path.unsafe" || error.code == "jobud.path.inspect_failed" ? 3U : 2U;
+    log_event(LogLevel::Error, "jobud.failed", std::span{fields}.first(count));
+}
 
 void print_help(jb::jobud::detail::CompiledPaths const& paths)
 {
@@ -133,11 +151,7 @@ auto main(int argc, char* argv[]) -> int
 #if defined(__linux__) || defined(__APPLE__)
     auto installed = jb::jobud::detail::ShutdownSignalRelay::install();
     if (!installed) {
-        auto const fields = std::array{
-            LogField{.name = "subsystem", .value = std::string_view{"signal_setup"}        },
-            LogField{.name = "code",      .value = std::string_view{installed.error().code}}
-        };
-        log_event(LogLevel::Error, "jobud.failed", fields);
+        log_startup_failure("signal_setup", installed.error());
         auto const stopped = std::array{
             LogField{.name = "exit_status", .value = std::int64_t{EXIT_FAILURE}}
         };
@@ -154,15 +168,29 @@ auto main(int argc, char* argv[]) -> int
         }
 #endif
 #ifdef __linux__
-        // Finalize while startup is single-threaded, before Application, database or HTTP construction.
-        // Failed/partial drops leave this scope through the same relay retirement and final log path.
-        auto identity = jb::jobud::detail::finalize_process_identity(startup);
+        // Resolve authorization before any filesystem mutation. Only explicit directory leaves
+        // may be prepared with privilege; all state files are opened after the verified permanent drop.
+        auto operations = jb::jobud::detail::make_system_privilege_operations();
+        auto identity   = jb::jobud::detail::resolve_final_identity(startup, *operations);
         if (!identity) {
-            auto const fields = std::array{
-                LogField{.name = "subsystem", .value = std::string_view{"identity"}           },
-                LogField{.name = "code",      .value = std::string_view{identity.error().code}}
-            };
-            log_event(LogLevel::Error, "jobud.failed", fields);
+            log_startup_failure("identity", identity.error());
+            return EXIT_FAILURE;
+        }
+        if (relay->requested()) {
+            return EXIT_SUCCESS;
+        }
+        ::umask(0077);
+        auto prepared = jb::jobud::detail::prepare_runtime_paths(startup, *identity, *operations);
+        if (!prepared) {
+            log_startup_failure("paths", prepared.error());
+            return EXIT_FAILURE;
+        }
+        if (relay->requested()) {
+            return EXIT_SUCCESS;
+        }
+        auto applied = jb::jobud::detail::apply_final_identity(*identity, *operations);
+        if (!applied) {
+            log_startup_failure("identity", applied.error());
             return EXIT_FAILURE;
         }
         if (identity->user == 0) {
@@ -171,11 +199,40 @@ auto main(int argc, char* argv[]) -> int
         if (relay->requested()) {
             return EXIT_SUCCESS;
         }
+        auto verified = jb::jobud::detail::verify_runtime_paths(*prepared, identity->user);
+        if (verified) {
+            verified = jb::jobud::detail::validate_database_artifacts(*prepared, identity->user);
+        }
+        if (!verified) {
+            log_startup_failure("paths", verified.error());
+            return EXIT_FAILURE;
+        }
+        auto effective_startup          = startup;
+        effective_startup.database_path = prepared->database_path();
+        effective_startup.socket_path   = prepared->socket_path();
+        if (effective_startup.http_ca_bundle) {
+            std::error_code error;
+            auto            canonical = std::filesystem::canonical(*effective_startup.http_ca_bundle, error);
+            if (error) {
+                auto const fields = std::array{
+                    LogField{.name = "subsystem", .value = std::string_view{"http_setup"}               },
+                    LogField{.name = "code",      .value = std::string_view{"jobud.path.inspect_failed"}}
+                };
+                log_event(LogLevel::Error, "jobud.failed", fields);
+                return EXIT_FAILURE;
+            }
+            effective_startup.http_ca_bundle = std::move(canonical);
+        }
+        if (relay->requested()) {
+            return EXIT_SUCCESS;
+        }
+#else
+        auto const& effective_startup = startup;
 #endif
-        Application      app{0, nullptr};
-        SystemTimeSource time_source;
-        jb::db::Database database{
-            std::make_unique<jb::db::sqlite::Driver>(jb::db::sqlite::Options{.database_file = startup.database_path})};
+        Application               app{0, nullptr};
+        SystemTimeSource          time_source;
+        jb::db::Database          database{std::make_unique<jb::db::sqlite::Driver>(
+            jb::db::sqlite::Options{.database_file = effective_startup.database_path})};
         UuidV7Generator           uuid_generator{time_source};
         StandardAttributeRegistry attribute_registry;
         SystemCronEngine          cron;
@@ -190,7 +247,7 @@ auto main(int argc, char* argv[]) -> int
                                                  cron,
                                                  uuid_generator,
                                                  time_source,
-                                                 startup,
+                                                 effective_startup,
                                                  std::move(should_stop)};
 #if defined(__linux__) || defined(__APPLE__)
         auto attached = relay->attach(*app.event_loop(), [&runtime] { runtime.request_stop(); });
@@ -210,17 +267,31 @@ auto main(int argc, char* argv[]) -> int
             runtime.fail("database_open", opened.error());
             return runtime.exit_code();
         }
+#ifdef __linux__
+        auto artifacts = jb::jobud::detail::validate_database_artifacts(*prepared, identity->user);
+        if (!artifacts) {
+            runtime.fail("database_paths", artifacts.error());
+            return runtime.exit_code();
+        }
+#endif
         auto schema = jb::jobu::sqlite::ensure_schema(database);
         if (!schema) {
             runtime.fail("schema", schema.error());
             return runtime.exit_code();
         }
+#ifdef __linux__
+        artifacts = jb::jobud::detail::validate_database_artifacts(*prepared, identity->user);
+        if (!artifacts) {
+            runtime.fail("database_paths", artifacts.error());
+            return runtime.exit_code();
+        }
+#endif
 
         auto make_runners = [&]() -> Result<jb::jobud::detail::RuntimeRunners, Error> {
             using RunnersResult = Result<jb::jobud::detail::RuntimeRunners, Error>;
             auto created        = jb::net::http::SystemHttpClient::create(
                 *app.event_loop(),
-                {.ca_bundle = startup.http_ca_bundle, .proxy = startup.http_proxy});
+                {.ca_bundle = effective_startup.http_ca_bundle, .proxy = effective_startup.http_proxy});
             if (!created) {
                 return RunnersResult::failure(std::move(created).error());
             }

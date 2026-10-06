@@ -8,8 +8,10 @@
 
 namespace jb::jobud::detail {
 
-/// Reads one bounded regular file without following its final pathname component.
-/// Parent ownership and mode checks are added at the protected-path stage.
+/// Reads at most 64 KiB from the same inspected descriptor, without following a leaf symlink.
+/// The invoking user or root must own the file and control its protected parent chain;
+/// root invocations require root ownership. Group/other write access is refused.
+/// Optional absence is accepted only through an otherwise trusted existing prefix.
 [[nodiscard]] auto read_configuration_file(std::filesystem::path const& path, bool allow_missing)
     -> jb::core::Result<std::optional<std::string>, StartupError>;
 

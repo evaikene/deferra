@@ -1,3 +1,4 @@
+#include "support/protected_daemon_state.hpp"
 #include "support/temporary_directory.hpp"
 
 #include "database.hpp"
@@ -224,6 +225,9 @@ auto spawn_jobud(std::filesystem::path const& executable,
                  std::filesystem::path const& database_path,
                  bool                         allow_root_cli = false) -> std::optional<ChildProcess>
 {
+    if (jb::test::protect_daemon_state(database_path)) {
+        return std::nullopt;
+    }
     auto const pid = ::fork();
     if (pid < 0) {
         return std::nullopt;
@@ -834,7 +838,7 @@ auto main(int argc, char* argv[]) -> int
         return fail("expected jobud and jobuctl arguments");
     }
 
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     auto const                   database_path = directory.path() / "jobu.sqlite";
     auto const                   socket_path   = directory.path() / "jobud-fresh.sock";
 

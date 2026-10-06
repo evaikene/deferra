@@ -10,6 +10,7 @@
 #include <chrono> // IWYU pragma: keep duration literals in process requests.
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <pwd.h>
 #include <string>
@@ -101,7 +102,7 @@ TEST_CASE("non-root daemon refusal precedes resource creation", "[jobud][identit
     if (::geteuid() == 0) {
         SKIP("native non-root daemon refusal requires a non-root test process");
     }
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     auto const                   result = run_child(JOBUD_EXECUTABLE,
                                                     {"--no-config",
                                                      "--run-as-user",
@@ -152,7 +153,7 @@ TEST_CASE("root daemon refusal occurs before database or endpoint creation regar
     if (::geteuid() != 0) {
         SKIP("native root daemon refusal requires a root test process");
     }
-    jb::test::TemporaryDirectory directory;
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     auto const                   database = directory.path() / "must-not-create.sqlite";
     auto const                   socket   = directory.path() / "must-not-create.sock";
     auto                         arguments =
@@ -178,11 +179,22 @@ TEST_CASE("root daemon constructs resources under the requested final user even 
     auto       account    = operations->account(target);
     REQUIRE(account);
 
-    // The fixture provisions its own leaf. Production directory preparation belongs to Stage 9.18.
-    jb::test::TemporaryDirectory directory;
-    REQUIRE(::chown(directory.path().c_str(), account->user, account->primary_group) == 0);
-    auto const                 database = directory.path() / "daemon.sqlite";
-    auto const                 socket   = directory.path() / "daemon.sock";
+    // A traversable root-owned parent protects the names while the daemon prepares final-user leaves.
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all | std::filesystem::perms::group_read |
+                                           std::filesystem::perms::group_exec | std::filesystem::perms::others_read |
+                                           std::filesystem::perms::others_exec};
+    auto const                   state_directory   = directory.path() / "state";
+    auto const                   runtime_directory = directory.path() / "runtime";
+    if (GENERATE(false, true)) {
+        REQUIRE(std::filesystem::create_directory(state_directory));
+        REQUIRE(std::filesystem::create_directory(runtime_directory));
+        for (auto const& leaf : {state_directory, runtime_directory}) {
+            REQUIRE(::chmod(leaf.c_str(), 0700) == 0);
+            REQUIRE(::chown(leaf.c_str(), account->user, account->primary_group) == 0);
+        }
+    }
+    auto const                 database = state_directory / "daemon.sqlite";
+    auto const                 socket   = runtime_directory / "daemon.sock";
     Application                app{0, nullptr};
     Process                    daemon;
     std::string                log;
@@ -216,8 +228,17 @@ TEST_CASE("root daemon constructs resources under the requested final user even 
     CHECK(log.find("jobud.unsafe.root_cli") == std::string::npos);
 
     struct stat state{};
-    REQUIRE(::stat(database.c_str(), &state) == 0);
-    CHECK(state.st_uid == account->user);
+    for (auto const& leaf : {state_directory, runtime_directory}) {
+        REQUIRE(::stat(leaf.c_str(), &state) == 0);
+        CHECK(state.st_uid == account->user);
+        CHECK((state.st_mode & 07777) == 0700);
+    }
+    for (auto const* suffix : {"", ".lock", "-wal", "-shm"}) {
+        auto const path = database.string() + suffix;
+        REQUIRE(::stat(path.c_str(), &state) == 0);
+        CHECK(state.st_uid == account->user);
+        CHECK((state.st_mode & 07777) == 0600);
+    }
     REQUIRE(::stat(socket.c_str(), &state) == 0);
     CHECK(state.st_uid == account->user);
     REQUIRE(daemon.stop());
@@ -225,4 +246,98 @@ TEST_CASE("root daemon constructs resources under the requested final user even 
     REQUIRE(exit);
     CHECK(exit->exit_code == 0);
     CHECK(::geteuid() == 0);
+}
+
+TEST_CASE("daemon refuses unsafe state before opening the database", "[jobud][paths][native]")
+{
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    auto const                   database    = directory.path() / "daemon.sqlite";
+    auto const                   socket      = directory.path() / "daemon.sock";
+    auto const                   unsafe_leaf = GENERATE(true, false);
+    if (unsafe_leaf) {
+        REQUIRE(::chmod(directory.path().c_str(), 0755) == 0);
+    }
+    else {
+        std::ofstream{database} << "must remain untouched";
+        REQUIRE(::chmod(database.c_str(), 0644) == 0);
+    }
+    auto arguments =
+        std::vector<std::string>{"--no-config", "--database", database.string(), "--socket", socket.string()};
+    if (::geteuid() == 0) {
+        arguments.emplace_back("--allow-root-daemon");
+    }
+    auto const result = run_child(JOBUD_EXECUTABLE, std::move(arguments));
+    CHECK(result.exit.exit_code == 1);
+    CHECK(result.output.find("jobud.path.unsafe") != std::string::npos);
+    CHECK(result.output.find("jobud.ready") == std::string::npos);
+    CHECK(result.output.find("jobud.stopped") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(socket));
+    CHECK_FALSE(std::filesystem::exists(database.string() + ".lock"));
+    if (!unsafe_leaf) {
+        struct stat metadata{};
+        REQUIRE(::stat(database.c_str(), &metadata) == 0);
+        CHECK((metadata.st_mode & 07777) == 0644);
+        std::string contents;
+        std::getline(std::ifstream{database}, contents);
+        CHECK(contents == "must remain untouched");
+    }
+}
+
+TEST_CASE("daemon opens the physical destination of relative symlink dot-dot paths", "[jobud][paths][native]")
+{
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    auto const                   target = directory.path() / "target";
+    std::filesystem::create_directories(target / "child");
+    REQUIRE(::chmod(target.c_str(), 0700) == 0);
+    std::filesystem::create_directory_symlink(target / "child", directory.path() / "alias");
+    std::ofstream{target / "daemon.ini"} << "cli.concurrency = 3\n";
+    std::ofstream{directory.path() / "daemon.ini"} << "unknown = wrong-file\n";
+    auto arguments = std::vector<std::string>{"--config",
+                                              "alias/../daemon.ini",
+                                              "--database",
+                                              "alias/../daemon.sqlite",
+                                              "--socket",
+                                              "alias/../daemon.sock"};
+    if (::geteuid() == 0) {
+        arguments.emplace_back("--allow-root-daemon");
+    }
+
+    Application                app{0, nullptr};
+    Process                    daemon;
+    std::string                log;
+    bool                       ready{false};
+    std::optional<ProcessExit> exit;
+    daemon.standard_error.connect(&app, [&](ByteBuffer const& bytes) {
+        log.append(as_string_view(bytes));
+        if (!ready && log.find("jobud.ready") != std::string::npos) {
+            ready = true;
+            app.quit();
+        }
+    });
+    daemon.finished.connect(&app, [&](ProcessExit const& value) {
+        exit = value;
+        app.quit();
+    });
+    REQUIRE(daemon.start({.executable        = JOBUD_EXECUTABLE,
+                          .arguments         = std::move(arguments),
+                          .working_directory = directory.path(),
+                          .timeout           = 10s}));
+    static_cast<void>(app.exec());
+    INFO(log);
+    REQUIRE(ready);
+    REQUIRE_FALSE(exit);
+    REQUIRE(std::filesystem::is_regular_file(target / "daemon.sqlite"));
+    CHECK_FALSE(std::filesystem::exists(directory.path() / "daemon.sqlite"));
+    struct stat metadata{};
+    for (auto const* suffix : {"", ".lock", "-wal", "-shm"}) {
+        auto const path = (target / "daemon.sqlite").string() + suffix;
+        REQUIRE(::stat(path.c_str(), &metadata) == 0);
+        CHECK(metadata.st_uid == ::geteuid());
+        CHECK((metadata.st_mode & 07777) == 0600);
+    }
+    REQUIRE(daemon.stop());
+    static_cast<void>(app.exec());
+    REQUIRE(exit);
+    CHECK(exit->exit_code == 0);
+    CHECK_FALSE(std::filesystem::exists(target / "daemon.sock"));
 }
