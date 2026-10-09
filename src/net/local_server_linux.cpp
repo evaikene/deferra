@@ -3,11 +3,16 @@
 #include "local_server_priv.hpp"
 #include "local_socket_priv.hpp"
 
+#ifdef JB_LOCAL_SERVER_TESTING
+#  include "local_server_setup_hooks.hpp"
+#endif
+
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -111,7 +116,25 @@ auto bind_listener(int fd, sockaddr_un const& address, socklen_t length) -> int
 auto apply_permissions(std::filesystem::path const& path, mode_t permissions) -> int
 {
     for (;;) {
+#ifdef JB_LOCAL_SERVER_TESTING
+        auto const result = jb::test::local_server_permissions(path, permissions);
+#else
         auto const result = ::chmod(path.c_str(), permissions);
+#endif
+        if (result == 0 || errno != EINTR) {
+            return result;
+        }
+    }
+}
+
+auto apply_group(std::filesystem::path const& path, gid_t group) -> int
+{
+    for (;;) {
+#ifdef JB_LOCAL_SERVER_TESTING
+        auto const result = jb::test::local_server_group(path, group);
+#else
+        auto const result = ::lchown(path.c_str(), static_cast<uid_t>(-1), group);
+#endif
         if (result == 0 || errno != EINTR) {
             return result;
         }
@@ -121,7 +144,11 @@ auto apply_permissions(std::filesystem::path const& path, mode_t permissions) ->
 auto start_listening(int fd, int backlog) -> int
 {
     for (;;) {
+#ifdef JB_LOCAL_SERVER_TESTING
+        auto const result = jb::test::local_server_listen(fd, backlog);
+#else
         auto const result = ::listen(fd, backlog);
+#endif
         if (result == 0 || errno != EINTR) {
             return result;
         }
@@ -259,6 +286,11 @@ auto LocalServer::listen(std::filesystem::path const& path, LocalServerOptions o
         return false;
     }
 
+    if (options.group_id && *options.group_id >= static_cast<std::uint64_t>(std::numeric_limits<gid_t>::max())) {
+        store_error(*d, jb::core::IOError::InvalidArgument, "local server group is not a usable native group ID");
+        return false;
+    }
+
     auto const& native_path = path.native();
     if (native_path.empty()) {
         store_error(*d, jb::core::IOError::InvalidArgument, "local server path must not be empty");
@@ -335,6 +367,12 @@ auto LocalServer::listen(std::filesystem::path const& path, LocalServerOptions o
         return false;
     }
 
+    // Group changes can clear permission bits. Establish ownership first, then verify
+    // the complete requested metadata before the socket can accept any connection.
+    if (options.group_id && apply_group(path, static_cast<gid_t>(*options.group_id)) < 0) {
+        return fail_after_bind("local server group update failed", errno);
+    }
+
     using PermissionBits       = std::underlying_type_t<std::filesystem::perms>;
     auto const permission_bits = static_cast<PermissionBits>(options.permissions);
     if (apply_permissions(path, static_cast<mode_t>(permission_bits)) < 0) {
@@ -347,6 +385,13 @@ auto LocalServer::listen(std::filesystem::path const& path, LocalServerOptions o
     }
     if (!metadata_matches(*d, permission_metadata)) {
         store_error(*d, jb::core::IOError::OpenError, "local server socket path changed during setup");
+        static_cast<void>(cleanup_owned_path(*d));
+        return false;
+    }
+
+    if ((permission_metadata.st_mode & 07777) != static_cast<mode_t>(permission_bits) ||
+        (options.group_id && permission_metadata.st_gid != static_cast<gid_t>(*options.group_id))) {
+        store_error(*d, jb::core::IOError::OpenError, "local server socket ownership or permissions were not applied");
         static_cast<void>(cleanup_owned_path(*d));
         return false;
     }

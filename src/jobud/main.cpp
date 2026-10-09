@@ -5,6 +5,7 @@
 #include "startup_priv.hpp"
 
 #ifdef __linux__
+#  include "endpoint_guard_priv.hpp"
 #  include "privileges_priv.hpp"
 #  include "runtime_paths_priv.hpp"
 #endif
@@ -20,6 +21,7 @@
 #include "database.hpp"
 #include "error.hpp"
 #include "http/system_http_client.hpp"
+#include "local_server.hpp"
 #include "logging.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
@@ -226,8 +228,25 @@ auto main(int argc, char* argv[]) -> int
         if (relay->requested()) {
             return EXIT_SUCCESS;
         }
+        // Own the endpoint before database creation. The guard outlives runtime and database,
+        // including every partial-startup return; no lock pathname is removed during teardown.
+        auto endpoint = jb::jobud::detail::EndpointGuard::acquire(prepared->runtime, identity->user);
+        if (!endpoint) {
+            log_startup_failure("endpoint", endpoint.error());
+            return EXIT_FAILURE;
+        }
+        if (relay->requested()) {
+            return EXIT_SUCCESS;
+        }
 #else
         auto const& effective_startup = startup;
+#endif
+        auto                                    listener_options = jb::net::LocalServerOptions{};
+        jb::jobud::detail::EndpointGuard const* endpoint_guard{};
+        listener_options.permissions = static_cast<std::filesystem::perms>(effective_startup.socket_mode);
+#ifdef __linux__
+        listener_options.group_id = prepared->runtime_group;
+        endpoint_guard            = &*endpoint;
 #endif
         Application               app{0, nullptr};
         SystemTimeSource          time_source;
@@ -248,7 +267,9 @@ auto main(int argc, char* argv[]) -> int
                                                  uuid_generator,
                                                  time_source,
                                                  effective_startup,
-                                                 std::move(should_stop)};
+                                                 std::move(should_stop),
+                                                 listener_options,
+                                                 endpoint_guard};
 #if defined(__linux__) || defined(__APPLE__)
         auto attached = relay->attach(*app.event_loop(), [&runtime] { runtime.request_stop(); });
         if (!attached) {
@@ -271,6 +292,17 @@ auto main(int argc, char* argv[]) -> int
         auto artifacts = jb::jobud::detail::validate_database_artifacts(*prepared, identity->user);
         if (!artifacts) {
             runtime.fail("database_paths", artifacts.error());
+            return runtime.exit_code();
+        }
+        if (relay->requested()) {
+            runtime.request_stop();
+            return runtime.exit_code();
+        }
+        // Database ownership must succeed before a stale endpoint may be removed. Recovery and
+        // runner construction are still dormant, so a collision cannot dispatch external work.
+        auto admitted = endpoint->prepare_socket();
+        if (!admitted) {
+            runtime.fail("endpoint", admitted.error());
             return runtime.exit_code();
         }
 #endif
@@ -306,6 +338,13 @@ auto main(int argc, char* argv[]) -> int
             }
             return RunnersResult::success(std::move(runners));
         };
+#ifdef __linux__
+        auto endpoint_verified = endpoint->verify();
+        if (!endpoint_verified) {
+            runtime.fail("endpoint", endpoint_verified.error());
+            return runtime.exit_code();
+        }
+#endif
         static_cast<void>(runtime.run(make_runners, [&app] { return app.exec(); }));
 
         // run() has destroyed service queries and transactions before releasing database ownership.

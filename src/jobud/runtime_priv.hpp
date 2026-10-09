@@ -2,6 +2,7 @@
 
 #include "attempt_executor_group.hpp"
 #include "http_client.hpp"
+#include "local_server.hpp"
 #include "object.hpp"
 #include "startup_priv.hpp"
 
@@ -52,6 +53,7 @@ struct RuntimeRunners {
 };
 
 struct RuntimeTestAccess;
+class EndpointGuard;
 
 /// Owner-thread daemon composition. Borrowed dependencies and the signal predicate's captures must outlive it.
 /// Recovery precedes runner construction, synchronous dispatch, and listening. Terminal requests only latch
@@ -61,6 +63,9 @@ struct RuntimeTestAccess;
 /// The signal predicate is polled synchronously and must not throw, mutate storage, or reenter the runtime.
 /// No Object parent is assigned to uniquely owned services. Destruction is an idempotent cleanup fallback and
 /// must not occur inside a service, executor, or signal callback.
+/// Main owns endpoint admission separately, before database open. listener_options contains already
+/// authorized numeric ownership; this runtime neither resolves accounts nor removes stale endpoints.
+/// An optional borrowed endpoint guard is rechecked before dispatch and listen and must outlive the runtime.
 class DaemonRuntime final : public jb::core::Object {
 public:
     DaemonRuntime(jb::core::EventLoop&               loop,
@@ -70,7 +75,9 @@ public:
                   jb::core::UuidGenerator&           uuid_generator,
                   jb::core::TimeSource&              time_source,
                   StartupOptions                     options,
-                  std::function<bool()>              should_stop = {});
+                  std::function<bool()>              should_stop      = {},
+                  jb::net::LocalServerOptions        listener_options = {},
+                  EndpointGuard const*               endpoint         = nullptr);
     ~DaemonRuntime() override;
 
     /// Runs once against an open, schema-prepared, exclusively owned database. The factory is invoked only

@@ -8,8 +8,10 @@
 #include "local_socket.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace jb::net {
@@ -30,6 +32,12 @@ struct LocalServerOptions {
 
     /// Per-connection input-buffer limit in bytes; zero means unlimited.
     std::size_t accepted_read_buffer_limit{std::size_t{2} * 1024U * 1024U};
+
+    /// Numeric group assigned to the new socket before permissions and listening.
+    /// Absence preserves the operating system's group choice. The value must fit
+    /// the native group type and must not be its no-change sentinel. Assignment
+    /// requires operating-system permission; failure removes only this server's socket.
+    std::optional<std::uint64_t> group_id;
 };
 
 /// Event-loop-driven listener for local filesystem IPC connections.
@@ -52,7 +60,8 @@ public:
     /// The path and options are validated before native resources are retained.
     /// The parent directory must already exist, and any existing entry at @p path
     /// is preserved and causes failure; stale entries are never removed. After a
-    /// successful bind, the requested permissions are applied before listening
+    /// successful bind, the optional group and requested permissions are applied
+    /// and verified before listening
     /// begins. A synchronous failure returns false, stores an error, and does not
     /// emit accept_error. Calling listen() while already listening leaves the
     /// active listener, path, and pending queue unchanged.

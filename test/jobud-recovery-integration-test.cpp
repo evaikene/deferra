@@ -144,8 +144,13 @@ public:
         REQUIRE_FALSE(daemon);
         REQUIRE(storage.database.close());
         REQUIRE_FALSE(jb::test::protect_daemon_state(storage.database_file));
-        // A killed LocalServer leaves its socket entry intentionally intact. Never reuse that path.
+#ifdef __linux__
+        // Restart must reacquire the surviving endpoint lock and prove the crashed socket stale.
+        socket_path = storage.directory.path() / "daemon.sock";
+#else
+        // Native daemon endpoint ownership is still deferred to the macOS adaptation stage.
         socket_path = storage.directory.path() / ("daemon-" + std::to_string(++incarnation) + ".sock");
+#endif
         exit.reset();
         log.clear();
         daemon = std::make_unique<Process>();
@@ -185,10 +190,18 @@ public:
     void start(bool allow_root_cli = false)
     {
         launch(allow_root_cli);
+        // A crashed socket entry already exists before the replacement listener is ready.
+        // Retry nonblocking connections within until's deadline; lifecycle logs may be filtered.
+        bool                 connected{false};
+        jb::net::LocalSocket probe;
+        probe.connected.connect(&app, [&] { connected = true; });
         until([&] {
-            std::error_code error;
-            return std::filesystem::is_socket(socket_path, error);
+            if (!connected && probe.state() == jb::net::LocalSocketState::Unconnected) {
+                probe.connect_to_server(socket_path);
+            }
+            return connected;
         });
+        probe.abort();
         // A successful real client round trip proves recovery and scheduler startup have both returned.
         control_info();
         ready_before = UtcClock::now();
@@ -418,8 +431,10 @@ public:
     std::string     configuration;
 
 private:
-    std::filesystem::path                              socket_path;
-    unsigned                                           incarnation{0};
+    std::filesystem::path socket_path;
+#ifndef __linux__
+    unsigned incarnation{0};
+#endif
     std::string                                        log;
     std::optional<ProcessExit>                         exit;
     std::unique_ptr<sqlite3, decltype(&sqlite3_close)> observer{nullptr, sqlite3_close};

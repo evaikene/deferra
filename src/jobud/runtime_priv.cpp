@@ -1,5 +1,9 @@
 #include "runtime_priv.hpp"
 
+#ifdef __linux__
+#  include "endpoint_guard_priv.hpp"
+#endif
+
 #include "connection.hpp"
 #include "control_rpc.hpp"
 #include "database.hpp"
@@ -8,7 +12,6 @@
 #include "history_rpc.hpp"
 #include "history_service.hpp"
 #include "jobu_version_priv.hpp"
-#include "local_server.hpp"
 #include "logging.hpp"
 #include "management.hpp"
 #include "management_rpc.hpp"
@@ -111,7 +114,9 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
             jb::core::UuidGenerator&           uuid_value,
             jb::core::TimeSource&              time_value,
             StartupOptions                     options_value,
-            std::function<bool()>              stop_value)
+            std::function<bool()>              stop_value,
+            jb::net::LocalServerOptions        listener_value,
+            EndpointGuard const*               endpoint_value)
         : loop{loop_value}
         , database{database_value}
         , attributes{attributes_value}
@@ -120,6 +125,8 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         , time_source{time_value}
         , options{std::move(options_value)}
         , should_stop{std::move(stop_value)}
+        , listener_options{listener_value}
+        , endpoint{endpoint_value}
         , execution{*this}
         , secret_provider{database_value}
     {}
@@ -230,6 +237,20 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
             }
         }
         return false;
+    }
+
+    auto check_endpoint() -> bool
+    {
+#ifdef __linux__
+        if (endpoint) {
+            auto verified = endpoint->verify();
+            if (!verified) {
+                fail("endpoint", verified.error());
+                return false;
+            }
+        }
+#endif
+        return true;
     }
 
     auto recover() -> bool
@@ -370,7 +391,7 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         });
 
         // Readiness requires successful scheduler startup; listening must not expose a partially started runtime.
-        if (poll_stop() || check_http_failure()) {
+        if (poll_stop() || check_http_failure() || !check_endpoint()) {
             return false;
         }
         auto started = scheduler->start();
@@ -380,10 +401,10 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
             }
             return false;
         }
-        if (poll_stop() || check_http_failure()) {
+        if (poll_stop() || check_http_failure() || !check_endpoint()) {
             return false;
         }
-        if (!listener->listen(options.socket_path)) {
+        if (!listener->listen(options.socket_path, listener_options)) {
             fail("listener", runtime_error("jobud.listen.failed"));
             return false;
         }
@@ -446,6 +467,8 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
     jb::core::TimeSource&                         time_source;
     StartupOptions                                options;
     std::function<bool()>                         should_stop;
+    jb::net::LocalServerOptions                   listener_options;
+    EndpointGuard const*                          endpoint;
     RuntimeState                                  state{RuntimeState::Starting};
     int                                           exit_code{EXIT_SUCCESS};
     RuntimeRunners                                runners;
@@ -471,13 +494,16 @@ DaemonRuntime::DaemonRuntime(jb::core::EventLoop&               loop,
                              jb::core::UuidGenerator&           uuid_generator,
                              jb::core::TimeSource&              time_source,
                              StartupOptions                     options,
-                             std::function<bool()>              should_stop)
+                             std::function<bool()>              should_stop,
+                             jb::net::LocalServerOptions        listener_options,
+                             EndpointGuard const*               endpoint)
     : Object{
           *new Private{loop,
                        database, attributes,
                        cron, uuid_generator,
                        time_source, std::move(options),
-                       std::move(should_stop)}
+                       std::move(should_stop),
+                       listener_options, endpoint}
 }
 {
     // Bind only after Object owns the private block; service connections are installed later by run().
