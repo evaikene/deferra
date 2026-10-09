@@ -6,6 +6,7 @@
 #include "control_json.hpp"
 #include "help_priv.hpp"
 #include "input_priv.hpp"
+#include "jobu_paths_priv.hpp"
 #include "json.hpp"
 #include "management_json.hpp"
 #include "payload_template_priv.hpp"
@@ -97,6 +98,58 @@ TEST_CASE("jobuctl parser retains socket selection and command family errors", "
     CHECK(parse({"--socket", "/tmp/custom.sock", "job", "unknown"}).error == "unknown command action");
     CHECK(parse({"--socket", "/tmp/custom.sock", "queue", "list", "--socket", "/tmp/other.sock"}).error ==
           "--socket may be supplied only once");
+}
+
+TEST_CASE("jobuctl parser shares the compiled endpoint across typed and request-file commands", "[jobuctl][parse]")
+{
+    auto typed = parse({"queue", "list", "--json", "--timeout", "75"});
+    REQUIRE(typed.command);
+    CHECK(typed.command->socket_path == jb::jobu::detail::default_socket_path);
+    CHECK(typed.command->method == "queue.list");
+    CHECK(typed.command->json);
+    CHECK(typed.command->timeout == std::chrono::milliseconds{75});
+    CHECK(std::holds_alternative<QueueListRequest>(typed.command->request));
+
+    // Parsing selects the raw-input branch without reading its file; main resolves local actions first.
+    auto raw = parse({"queue", "create", "--request-file", "unread-request.json"});
+    REQUIRE(raw.command);
+    CHECK(raw.command->socket_path == typed.command->socket_path);
+    CHECK(raw.command->method == "queue.create");
+    CHECK(raw.command->request_file == "unread-request.json");
+    CHECK(std::holds_alternative<std::monostate>(raw.command->request));
+
+    auto alias = parse({"queue", "add", "reports"});
+    REQUIRE(alias.command);
+    CHECK(alias.command->socket_path == typed.command->socket_path);
+    CHECK(alias.command->method == raw.command->method);
+}
+
+TEST_CASE("jobuctl explicit sockets override the default without weakening flag validation", "[jobuctl][parse]")
+{
+    for (auto const& arguments : std::vector<std::vector<std::string>>{
+             {"--socket", "custom.sock", "queue", "list"},
+             {"queue", "--socket", "custom.sock", "list"},
+             {"queue", "list", "--socket", "custom.sock"},
+             {"queue", "list", "--socket=custom.sock"},
+             {"queue", "create", "--request-file", "request.json", "--socket", "custom.sock"}
+    }) {
+        CAPTURE(arguments);
+        auto result = parse(arguments);
+        REQUIRE(result.command);
+        CHECK(result.command->socket_path == "custom.sock");
+    }
+
+    for (auto const& arguments : std::vector<std::vector<std::string>>{
+             {"queue", "list", "--socket", ""},
+             {"queue", "list", "--socket="},
+             {"queue", "list", "--socket"},
+             {"--socket", "one.sock", "queue", "list", "--socket=two.sock"}
+    }) {
+        CAPTURE(arguments);
+        auto result = parse(arguments);
+        CHECK_FALSE(result.command);
+        CHECK_FALSE(result.error.empty());
+    }
 }
 
 TEST_CASE("jobuctl job list builds explicit state and deletion filters", "[jobuctl][parse][job][list]")
@@ -827,6 +880,7 @@ TEST_CASE("jobuctl help is local at root group leaf and alias paths", "[jobuctl]
         auto text = render_help(*help);
         CHECK(text.find("Groups:") != std::string::npos);
         CHECK(text.find("--socket PATH") != std::string::npos);
+        CHECK(text.find(jb::jobu::detail::default_socket_path) != std::string::npos);
         CHECK(text.find("--expected-exit-code") == std::string::npos);
     }
     for (auto const& group : command_groups()) {
@@ -841,6 +895,7 @@ TEST_CASE("jobuctl help is local at root group leaf and alias paths", "[jobuctl]
             CHECK(help.group == group.name);
             CHECK(help.action.empty());
             CHECK(render_help(help).find("Commands:") != std::string::npos);
+            CHECK(render_help(help).find(jb::jobu::detail::default_socket_path) != std::string::npos);
         }
     }
 
@@ -857,6 +912,7 @@ TEST_CASE("jobuctl help is local at root group leaf and alias paths", "[jobuctl]
             auto text = render_help(std::get<HelpCommand>(*result.action));
             CHECK(text.find(spec.summary) != std::string::npos);
             CHECK(text.find("Example:") != std::string::npos);
+            CHECK(text.find(jb::jobu::detail::default_socket_path) != std::string::npos);
             for (auto const& option : spec.options) {
                 CHECK(text.find("--" + std::string{option.option.long_name}) != std::string::npos);
             }
@@ -966,7 +1022,7 @@ TEST_CASE("jobuctl globals and aliases preserve canonical remote requests", "[jo
     CHECK(alias_request.type == canonical_request.type);
     CHECK(alias_request.payload == canonical_request.payload);
 
-    CHECK_FALSE(parse_action({"queue", "list"}).action);
+    CHECK(parse({"queue", "list"}).command);
     CHECK_FALSE(parse_action({"--socket", "one", "queue", "list", "--socket", "two"}).action);
     auto version = parse_action({"--version"});
     REQUIRE(version.action);

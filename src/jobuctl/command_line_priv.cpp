@@ -5,6 +5,7 @@
 #include "command_registry_priv.hpp"
 #include "commands/commands_priv.hpp"
 #include "event_loop_types.hpp"
+#include "jobu_paths_priv.hpp"
 
 #include <algorithm>
 #include <array>
@@ -298,11 +299,10 @@ auto parse_command_line(int argc, char* argv[], StandardAttributeRegistry const&
     if (options.help || selected.help_path || !selected.command) {
         return {.action = std::move(selected.usage)};
     }
-    if (!options.socket) {
-        return {.error          = "--socket PATH is required for remote commands",
-                .usage          = std::move(selected.usage),
-                .json_requested = json_requested};
-    }
+
+    // Resolve the endpoint once so typed commands and deferred request-file input use the same selection.
+    auto socket_path =
+        options.socket ? std::move(*options.socket) : std::filesystem::path{jb::jobu::detail::default_socket_path};
     if (options.request_file) {
         if (!options.local.empty()) {
             return {.error          = "--request-file cannot be combined with command operands or options",
@@ -311,7 +311,7 @@ auto parse_command_line(int argc, char* argv[], StandardAttributeRegistry const&
         }
         return {
             .action = Command{
-                              .socket_path  = std::move(*options.socket),
+                              .socket_path  = std::move(socket_path),
                               .kind         = selected.command->kind,
                               .method       = selected.command->capability,
                               .request_file = std::move(options.request_file),
@@ -324,7 +324,7 @@ auto parse_command_line(int argc, char* argv[], StandardAttributeRegistry const&
         };
     }
 
-    auto built = selected.command->build(std::move(*options.socket), selected.command->name, options.local, registry);
+    auto built = selected.command->build(std::move(socket_path), selected.command->name, options.local, registry);
     if (!built.command) {
         return {.error = std::move(built.error), .usage = std::move(selected.usage), .json_requested = json_requested};
     }

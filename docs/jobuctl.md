@@ -38,15 +38,33 @@ An unknown group, command, or option is an error, even alongside `--help`. An op
 
 ## Connecting to the daemon
 
-Remote commands require `--socket PATH`. This option can precede or follow the command path; supply it only once:
+Remote commands use the socket path compiled into the application when `--socket` is omitted:
 
 ```sh
-jobuctl --socket /run/jobu.sock system info
-jobuctl queue list --socket /run/jobu.sock
-jobuctl queue --socket /run/jobu.sock create reports
+jobuctl system info
+jobuctl queue list
 ```
 
-Choose the path used by your daemon. There is no automatic socket discovery.
+The default is `${JB_JOBU_RUNDIR}/jobud.sock`, shared with `jobud`. In a fresh build,
+`JB_JOBU_RUNDIR` defaults to `${CMAKE_INSTALL_PREFIX}/var/run`, normally giving
+`/usr/local/var/run/jobud.sock`. Run `jobuctl --help` to see your executable's actual
+compiled default. Changing installation destinations with `DESTDIR` or
+`cmake --install --prefix` does not change that compiled path.
+
+Use a nonempty `--socket PATH` to override it. The option can precede, appear
+between, or follow the command path; supply it only once:
+
+```sh
+jobuctl --socket /run/jobu/jobud.sock system info
+jobuctl queue list --socket /run/jobu/jobud.sock
+jobuctl queue --socket /run/jobu/jobud.sock create reports
+```
+
+Choose the path used by your daemon. If its `socket.path` configuration or
+`jobud --socket` selects a different endpoint, pass that path to `jobuctl` explicitly.
+The client does not read daemon configuration, consult environment variables for
+an endpoint, search alternate paths, or probe other installations. A failed
+connection identifies the attempted endpoint safely and suggests `--socket PATH`.
 
 Global options also work before or after the command path:
 
@@ -60,7 +78,7 @@ Global options also work before or after the command path:
 
 ```sh
 printf '{"limit":20}\n' > queue-list.json
-jobuctl --socket /run/jobu.sock queue list --request-file queue-list.json
+jobuctl queue list --request-file queue-list.json
 ```
 
 Help and version finish without reading a request file or standard input. `--json` does not change help into JSON.
@@ -70,8 +88,8 @@ Queue operations select a queue with exactly one of `--id UUID` or `--name NAME`
 For example:
 
 ```sh
-jobuctl --socket /run/jobu.sock queue create reports
-jobuctl --socket /run/jobu.sock job create \
+jobuctl queue create reports
+jobuctl job create \
     --queue-name reports --type cli --at 2030-01-01T00:00:00Z \
     --command /bin/echo --arg=hello
 ```
@@ -92,10 +110,10 @@ filter while also allowing selection of a deleted queue. `--all` and `--state`
 cannot be combined.
 
 ```sh
-jobuctl --socket /run/jobu.sock job list
-jobuctl --socket /run/jobu.sock job list --state succeeded
-jobuctl --socket /run/jobu.sock job list --state deleted --queue-name reports
-jobuctl --socket /run/jobu.sock job list --all --include-deleted
+jobuctl job list
+jobuctl job list --state succeeded
+jobuctl job list --state deleted --queue-name reports
+jobuctl job list --all --include-deleted
 ```
 
 Queue selectors, `--limit`, and `--after` work with these filters. Pages are
@@ -117,10 +135,10 @@ automatically purge retained history or emit runnable-wait warnings.
 
 ```sh
 printf '{"retry.max_attempts":2}\n' > queue-defaults.json
-jobuctl --socket /run/jobu.sock queue create reports \
+jobuctl queue create reports \
     --defaults-file queue-defaults.json --history-retention-seconds 86400
-jobuctl --socket /run/jobu.sock queue update --name reports --history-retention-seconds 0
-jobuctl --socket /run/jobu.sock queue update --name reports --inherit-history-retention
+jobuctl queue update --name reports --history-retention-seconds 0
+jobuctl queue update --name reports --inherit-history-retention
 ```
 
 Job create/update accept repeated `--attribute NAME=JSON_VALUE` for distinct registered job attributes. JSON values keep their types, so a numeric value is written as `--attribute retry.max_attempts=2`. On update, supplied attributes replace those named values; omitted attributes remain unchanged. `job update` still requires the current `--revision`, and `--clear-name` explicitly clears the name. A stale revision is returned as a conflict; the CLI does not fetch a newer revision and retry.
@@ -161,9 +179,9 @@ can become a new creation after its key retires. The daemon currently performs
 no automatic history cleanup.
 
 ```sh
-jobuctl --socket /run/jobu.sock job run-now JOB_UUID --idempotency-key manual-42 --json
-jobuctl --socket /run/jobu.sock run get RUN_UUID --json
-jobuctl --socket /run/jobu.sock run list --job-id JOB_UUID --state failed --limit 20
+jobuctl job run-now JOB_UUID --idempotency-key manual-42 --json
+jobuctl run get RUN_UUID --json
+jobuctl run list --job-id JOB_UUID --state failed --limit 20
 ```
 
 `run list` accepts `--queue-id`, `--job-id`, `--state`, `--origin scheduled|manual`, `--type cli|http`, and the UTC bounds `--planned-from/--planned-to`, `--started-from/--started-to`, and `--completed-from/--completed-to`. Lower bounds are inclusive and upper bounds are exclusive. Filters combine. `--limit` is 1–200, default 100. The result contains run summaries, without payload, result, attempts, or output. Full run details are available through `run get`.
@@ -173,9 +191,9 @@ When a run page has `next_cursor`, pass it as `run list --cursor TOKEN` with no 
 `run cancel RUN_UUID` succeeds when the daemon returns either `completed` or `requested`. A `requested` reply means active work is still settling. Add `--wait` to submit cancellation once and observe `run.get` until the run is durably `cancelled`, another terminal state causes a conflict, or the overall deadline expires. Set `--timeout` long enough for the job's process termination grace when waiting on active work. After a wait timeout, inspect the run before deciding what to do next. A successful `run get` can describe a failed run without changing the CLI's exit status.
 
 ```sh
-jobuctl --socket /run/jobu.sock run cancel RUN_UUID --wait --json
-jobuctl --socket /run/jobu.sock attempt list RUN_UUID --limit 20 --json
-jobuctl --socket /run/jobu.sock attempt get RUN_UUID 1 --json
+jobuctl run cancel RUN_UUID --wait --json
+jobuctl attempt list RUN_UUID --limit 20 --json
+jobuctl attempt get RUN_UUID 1 --json
 ```
 
 `attempt list` returns newest attempt numbers first. Its summaries contain no
@@ -189,9 +207,9 @@ applies to `attempt output`.
 By default, output shows metadata and an escaped text or base64 preview. `--json` prints the complete protocol result. `--raw` writes only this chunk's decoded bytes to standard output, including binary bytes. `--output-file PATH` writes only this chunk to a newly created file and refuses an existing path. These three modes are mutually exclusive.
 
 ```sh
-jobuctl --socket /run/jobu.sock attempt output RUN_UUID 1 --channel stdout --offset 0 --limit 4096 --json
-jobuctl --socket /run/jobu.sock attempt output RUN_UUID 1 --channel stdout --raw > chunk.bin
-jobuctl --socket /run/jobu.sock attempt output RUN_UUID 1 --channel stdout --output-file chunk.bin
+jobuctl attempt output RUN_UUID 1 --channel stdout --offset 0 --limit 4096 --json
+jobuctl attempt output RUN_UUID 1 --channel stdout --raw > chunk.bin
+jobuctl attempt output RUN_UUID 1 --channel stdout --output-file chunk.bin
 ```
 
 ## Retained statistics
@@ -206,8 +224,8 @@ the daemon's current UTC time; omit its lower bound to use 24 hours before the
 resolved upper bound.
 
 ```sh
-jobuctl --socket /run/jobu.sock system stats --group-by state --json
-jobuctl --socket /run/jobu.sock queue stats --name reports \
+jobuctl system stats --group-by state --json
+jobuctl queue stats --name reports \
     --planned-from 2030-01-01T00:00:00Z --planned-to 2030-01-02T00:00:00Z \
     --group-by job --limit 20
 ```
@@ -244,8 +262,8 @@ instant. Both accept `--timezone ZONE`; omission uses the daemon default
 results are UTC. Invalid expressions and timezones are reported as errors.
 
 ```sh
-jobuctl --socket /run/jobu.sock schedule validate '0 9 * * FRI-MON'
-jobuctl --socket /run/jobu.sock schedule next '@daily' \
+jobuctl schedule validate '0 9 * * FRI-MON'
+jobuctl schedule next '@daily' \
     --timezone Europe/Tallinn --after 2030-01-01T00:00:00Z --count 2 --json
 ```
 
@@ -265,9 +283,9 @@ in a file with access restricted to trusted users, or pass it through standard
 input. The CLI does not print the value, its size, or a preview.
 
 ```sh
-jobuctl --socket /run/jobu.sock secret set reports.token --file /private/token.bin
-jobuctl --socket /run/jobu.sock secret set reports.token --stdin < /private/next-token.bin
-jobuctl --socket /run/jobu.sock secret list --limit 20 --json
+jobuctl secret set reports.token --file /private/token.bin
+jobuctl secret set reports.token --stdin < /private/next-token.bin
+jobuctl secret list --limit 20 --json
 ```
 
 `secret list` returns names and creation/update timestamps only, ordered by
@@ -295,7 +313,7 @@ attached values, such as `--arg-secret=reports.token` and
 `--env-secret=REPORT_TOKEN=reports.token`.
 
 ```sh
-jobuctl --socket /run/jobu.sock job create \
+jobuctl job create \
     --queue-name reports --type cli --at 2030-01-01T00:00:00Z \
     --command /usr/local/bin/report \
     --arg=--token --arg-secret reports.token --arg=--mode --arg=daily \
@@ -315,7 +333,7 @@ used for HTTP jobs. `job update` still uses a request file to replace a payload.
 Repeat `--arg` to pass multiple arguments to a CLI job. Each value becomes one argument, preserving order and empty strings. Use `--arg=VALUE` for values beginning with a dash, especially values that resemble `jobuctl` options:
 
 ```sh
-jobuctl --socket /run/jobu.sock job create \
+jobuctl job create \
     --queue-name reports --type cli --at 2030-01-01T00:00:00Z \
     --command /bin/echo --arg=--help --arg=-h --arg= --arg='two words'
 ```
@@ -330,7 +348,7 @@ writing a new command.
 `--` ends option handling. Following tokens are positional data where the command accepts them; otherwise they are extra-operand errors. For example, this creates a queue named `--help`:
 
 ```sh
-jobuctl --socket /run/jobu.sock queue create -- --help
+jobuctl queue create -- --help
 ```
 
 ## Results and errors

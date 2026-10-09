@@ -5,11 +5,15 @@
 #include "object_priv.hpp"
 #include "timer.hpp"
 
+#include <fmt/format.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 
 namespace jb::jobuctl::detail {
@@ -19,6 +23,28 @@ using namespace jb::jobu;
 using namespace jb::net;
 
 namespace {
+
+auto connection_error_message(std::filesystem::path const& endpoint) -> std::string
+{
+    // POSIX paths can contain arbitrary bytes. Keep the quoted endpoint safe for terminals and JSON UTF-8 encoding.
+    auto escaped = std::string{};
+    for (auto const character : endpoint.string()) {
+        auto const byte = static_cast<unsigned char>(character);
+        if (character == '"' || character == '\\') {
+            escaped += '\\';
+            escaped += character;
+        }
+        else if (byte < 0x20U || byte >= 0x7fU) {
+            escaped += fmt::format("\\x{:02X}", byte);
+        }
+        else {
+            escaped += character;
+        }
+    }
+
+    return fmt::format("Daemon socket connection failed at \"{}\". Use --socket PATH to select the daemon endpoint.",
+                       escaped);
+}
 
 enum class SessionPhase : std::uint8_t {
     Idle,
@@ -265,7 +291,7 @@ Session::Session(Command command, StandardAttributeRegistry const& registry)
                    {
                        .category = ErrorCategory::Io,
                        .code     = "jobuctl.connection_failed",
-                       .message  = "Daemon socket connection failed",
+                       .message  = connection_error_message(state->command.socket_path),
                    },
                    state->phase == SessionPhase::Command && state->active_call && is_mutation(state->command.kind)));
     });

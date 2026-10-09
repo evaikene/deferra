@@ -44,7 +44,7 @@ constexpr std::array groups{
 constexpr std::array globals{
     value_option("socket",
                  "PATH",
-                 "Daemon socket; required for remote commands. May precede or follow the command path."),
+                 "Override the compiled daemon socket default. May precede or follow the command path."),
     flag("json", "Print one compact JSON result; errors use one JSON object on standard error."),
     value_option("timeout", "MS", "Overall command deadline in positive milliseconds; default: 5000."),
     value_option("request-file", "FILE", "Read complete JSON params from FILE, or - for standard input."),
@@ -239,7 +239,7 @@ constexpr CommandSpec system_info_command{
     .maximum_operands = 0,
     .options          = {},
     .rules            = {},
-    .example          = "jobuctl --socket /run/jobu.sock system info",
+    .example          = "jobuctl system info",
     .capability       = "system.info",
     .build            = parse_system_command,
 };
@@ -250,7 +250,7 @@ constexpr CommandSpec system_stats_command{
     .summary    = "Summarize retained runs and attempts",
     .options    = system_stats,
     .rules      = "The planned window is at most 31 days. --cursor excludes filters, grouping, and --limit.",
-    .example    = "jobuctl --socket /run/jobu.sock system stats --group-by state --limit 20",
+    .example    = "jobuctl system stats --group-by state --limit 20",
     .capability = "system.stats",
     .build      = parse_system_statistics_command,
 };
@@ -265,7 +265,7 @@ constexpr CommandSpec queue_create_command{
     .maximum_operands = 1,
     .options          = queue_create,
     .rules            = "NAME is required.",
-    .example          = "jobuctl --socket /run/jobu.sock queue create reports",
+    .example          = "jobuctl queue create reports",
     .capability       = "queue.create",
     .build            = parse_queue_command,
 };
@@ -280,7 +280,7 @@ constexpr CommandSpec queue_get_command{
     .maximum_operands = 0,
     .options          = queue_selector,
     .rules            = select_queue,
-    .example          = "jobuctl --socket /run/jobu.sock queue get --name reports",
+    .example          = "jobuctl queue get --name reports",
     .capability       = "queue.get",
     .build            = parse_queue_command,
 };
@@ -295,7 +295,7 @@ constexpr CommandSpec queue_list_command{
     .maximum_operands = 0,
     .options          = queue_list,
     .rules            = {},
-    .example          = "jobuctl --socket /run/jobu.sock queue list --limit 20",
+    .example          = "jobuctl queue list --limit 20",
     .capability       = "queue.list",
     .build            = parse_queue_command,
 };
@@ -311,7 +311,7 @@ constexpr CommandSpec queue_update_command{
     .options          = queue_update,
     .rules            = "Supply exactly one of --id or --name and at least one replacement field. Unspecified fields "
                         "remain unchanged.",
-    .example          = "jobuctl --socket /run/jobu.sock queue update --name reports --weight 2",
+    .example          = "jobuctl queue update --name reports --weight 2",
     .capability       = "queue.update",
     .build            = parse_queue_command,
 };
@@ -326,7 +326,7 @@ constexpr CommandSpec queue_suspend_command{
     .maximum_operands = 0,
     .options          = queue_suspend,
     .rules            = select_queue,
-    .example          = "jobuctl --socket /run/jobu.sock queue suspend --name reports",
+    .example          = "jobuctl queue suspend --name reports",
     .capability       = "queue.suspend",
     .build            = parse_queue_command,
 };
@@ -341,7 +341,7 @@ constexpr CommandSpec queue_resume_command{
     .maximum_operands = 0,
     .options          = queue_selector,
     .rules            = select_queue,
-    .example          = "jobuctl --socket /run/jobu.sock queue resume --name reports",
+    .example          = "jobuctl queue resume --name reports",
     .capability       = "queue.resume",
     .build            = parse_queue_command,
 };
@@ -356,7 +356,7 @@ constexpr CommandSpec queue_delete_command{
     .maximum_operands = 0,
     .options          = queue_selector,
     .rules            = select_queue,
-    .example          = "jobuctl --socket /run/jobu.sock queue delete --name reports",
+    .example          = "jobuctl queue delete --name reports",
     .capability       = "queue.delete",
     .build            = parse_queue_command,
 };
@@ -367,7 +367,7 @@ constexpr CommandSpec queue_stats_command{
     .summary    = "Summarize one queue's retained history",
     .options    = queue_stats,
     .rules      = "Initially require exactly one of --id or --name. --cursor alone continues a page.",
-    .example    = "jobuctl --socket /run/jobu.sock queue stats --name reports --group-by job",
+    .example    = "jobuctl queue stats --name reports --group-by job",
     .capability = "queue.stats",
     .build      = parse_queue_statistics_command,
 };
@@ -387,7 +387,7 @@ constexpr CommandSpec job_create_command{
                         "--env-secret, and --unset-env.\n"
                         "Secret options name existing secrets and replace whole values; arguments retain option order.\n"
                         "CLI environment defaults to empty apart from JobU-provided variables; arguments default to empty.",
-    .example          = "jobuctl --socket /run/jobu.sock job create --queue-name reports --type cli \\\n"
+    .example          = "jobuctl job create --queue-name reports --type cli \\\n"
                         "      --at 2030-01-01T00:00:00Z --command /bin/echo --arg=--token \\\n"
                         "      --arg-secret reports.token --env-secret REPORT_TOKEN=reports.token",
     .capability       = "job.create",
@@ -404,7 +404,7 @@ constexpr CommandSpec job_get_command{
     .maximum_operands = 1,
     .options          = {},
     .rules            = job_uuid,
-    .example          = "jobuctl --socket /run/jobu.sock job get 00000000-0000-7000-8000-000000000001",
+    .example          = "jobuctl job get 00000000-0000-7000-8000-000000000001",
     .capability       = "job.get",
     .build            = parse_job_command,
 };
@@ -422,7 +422,7 @@ constexpr CommandSpec job_list_command{
                         "--include-deleted alone lists all states; with --state it also permits a deleted queue.\n"
                         "--state deleted includes deleted jobs. --request-file uses the supplied JSON without this default.\n"
                         "Optionally select one queue; omit both queue selectors to list across queues.",
-    .example          = "jobuctl --socket /run/jobu.sock job list --state succeeded",
+    .example          = "jobuctl job list --state succeeded",
     .capability       = "job.list",
     .build            = parse_job_command,
 };
@@ -436,9 +436,8 @@ constexpr CommandSpec job_update_command{
     .operands         = "UUID",
     .maximum_operands = 1,
     .options          = job_update,
-    .rules = "Require UUID, --revision, and at least one replacement field. Unspecified fields remain unchanged.",
-    .example =
-        "jobuctl --socket /run/jobu.sock job update 00000000-0000-7000-8000-000000000001 --revision 1 --priority 2",
+    .rules      = "Require UUID, --revision, and at least one replacement field. Unspecified fields remain unchanged.",
+    .example    = "jobuctl job update 00000000-0000-7000-8000-000000000001 --revision 1 --priority 2",
     .capability = "job.update",
     .build      = parse_job_command,
 };
@@ -453,7 +452,7 @@ constexpr CommandSpec job_suspend_command{
     .maximum_operands = 1,
     .options          = job_suspend,
     .rules            = job_uuid,
-    .example          = "jobuctl --socket /run/jobu.sock job suspend 00000000-0000-7000-8000-000000000001",
+    .example          = "jobuctl job suspend 00000000-0000-7000-8000-000000000001",
     .capability       = "job.suspend",
     .build            = parse_job_command,
 };
@@ -468,7 +467,7 @@ constexpr CommandSpec job_resume_command{
     .maximum_operands = 1,
     .options          = {},
     .rules            = job_uuid,
-    .example          = "jobuctl --socket /run/jobu.sock job resume 00000000-0000-7000-8000-000000000001",
+    .example          = "jobuctl job resume 00000000-0000-7000-8000-000000000001",
     .capability       = "job.resume",
     .build            = parse_job_command,
 };
@@ -483,7 +482,7 @@ constexpr CommandSpec job_move_command{
     .maximum_operands = 1,
     .options          = job_move,
     .rules            = "Require UUID, --revision, and exactly one of --queue-id or --queue-name.",
-    .example          = "jobuctl --socket /run/jobu.sock job move 00000000-0000-7000-8000-000000000001 --revision 1 "
+    .example          = "jobuctl job move 00000000-0000-7000-8000-000000000001 --revision 1 "
                         "--queue-name reports",
     .capability       = "job.move",
     .build            = parse_job_command,
@@ -499,7 +498,7 @@ constexpr CommandSpec job_delete_command{
     .maximum_operands = 1,
     .options          = job_delete,
     .rules            = "Require UUID and --revision.",
-    .example          = "jobuctl --socket /run/jobu.sock job delete 00000000-0000-7000-8000-000000000001 --revision 1",
+    .example          = "jobuctl job delete 00000000-0000-7000-8000-000000000001 --revision 1",
     .capability       = "job.delete",
     .build            = parse_job_command,
 };
@@ -514,7 +513,7 @@ constexpr CommandSpec job_run_now_command{
     .maximum_operands = 1,
     .options          = job_run_now,
     .rules            = "The optional idempotency key safely replays the same Run Now request.",
-    .example          = "jobuctl --socket /run/jobu.sock job run-now 00000000-0000-7000-8000-000000000001",
+    .example          = "jobuctl job run-now 00000000-0000-7000-8000-000000000001",
     .capability       = "job.run_now",
     .build            = parse_job_command,
 };
@@ -529,7 +528,7 @@ constexpr CommandSpec run_get_command{
     .maximum_operands = 1,
     .options          = {},
     .rules            = {},
-    .example          = "jobuctl --socket /run/jobu.sock run get 00000000-0000-7000-8000-000000000002",
+    .example          = "jobuctl run get 00000000-0000-7000-8000-000000000002",
     .capability       = "run.get",
     .build            = parse_run_command,
 };
@@ -543,7 +542,7 @@ constexpr CommandSpec run_list_command{
     .maximum_operands = 0,
     .options          = run_list,
     .rules            = "--cursor is a cursor-only continuation; omit every filter and --limit with it.",
-    .example          = "jobuctl --socket /run/jobu.sock run list --state failed --limit 20",
+    .example          = "jobuctl run list --state failed --limit 20",
     .capability       = "run.list",
     .build            = parse_run_command,
 };
@@ -557,7 +556,7 @@ constexpr CommandSpec run_cancel_command{
     .maximum_operands = 1,
     .options          = run_cancel,
     .rules            = "--wait observes the final state using run.get under the overall deadline.",
-    .example          = "jobuctl --socket /run/jobu.sock run cancel 00000000-0000-7000-8000-000000000002 --wait",
+    .example          = "jobuctl run cancel 00000000-0000-7000-8000-000000000002 --wait",
     .capability       = "run.cancel",
     .build            = parse_run_command,
 };
@@ -571,7 +570,7 @@ constexpr CommandSpec attempt_get_command{
     .maximum_operands = 2,
     .options          = {},
     .rules            = "NUMBER is a positive attempt number.",
-    .example          = "jobuctl --socket /run/jobu.sock attempt get 00000000-0000-7000-8000-000000000002 1",
+    .example          = "jobuctl attempt get 00000000-0000-7000-8000-000000000002 1",
     .capability       = "attempt.get",
     .build            = parse_attempt_command,
 };
@@ -585,7 +584,7 @@ constexpr CommandSpec attempt_list_command{
     .maximum_operands = 1,
     .options          = attempt_list,
     .rules            = "Require RUN_UUID initially; --cursor alone continues a page.",
-    .example          = "jobuctl --socket /run/jobu.sock attempt list 00000000-0000-7000-8000-000000000002 --limit 20",
+    .example          = "jobuctl attempt list 00000000-0000-7000-8000-000000000002 --limit 20",
     .capability       = "attempt.list",
     .build            = parse_attempt_command,
 };
@@ -600,8 +599,7 @@ constexpr CommandSpec attempt_output_command{
     .options          = attempt_output,
     .rules =
         "Require --channel. --raw, --output-file, and --json are mutually exclusive; each delivers one chunk only.",
-    .example =
-        "jobuctl --socket /run/jobu.sock attempt output 00000000-0000-7000-8000-000000000002 1 --channel stdout --raw",
+    .example    = "jobuctl attempt output 00000000-0000-7000-8000-000000000002 1 --channel stdout --raw",
     .capability = "attempt.output",
     .build      = parse_attempt_command,
 };
@@ -616,7 +614,7 @@ constexpr CommandSpec secret_set_command{
     .options          = secret_set,
     .rules            = "Require NAME and exactly one of --file or --stdin. Values are raw bytes, up to 65536 bytes.\n"
                         "Alternatively, use --request-file for a complete JSON params object; do not combine input modes.",
-    .example          = "jobuctl --socket /run/jobu.sock secret set reports.token --stdin < token.bin",
+    .example          = "jobuctl secret set reports.token --stdin < token.bin",
     .capability       = "secret.set",
     .build            = parse_secret_command,
 };
@@ -630,7 +628,7 @@ constexpr CommandSpec secret_list_command{
     .maximum_operands = 0,
     .options          = secret_list,
     .rules            = "Values, sizes, and digests are never returned. --after-name is an exclusive boundary.",
-    .example          = "jobuctl --socket /run/jobu.sock secret list --limit 20",
+    .example          = "jobuctl secret list --limit 20",
     .capability       = "secret.list",
     .build            = parse_secret_command,
 };
@@ -644,7 +642,7 @@ constexpr CommandSpec secret_delete_command{
     .maximum_operands = 1,
     .options          = {},
     .rules            = "Current job definitions and nonterminal run snapshots can prevent deletion.",
-    .example          = "jobuctl --socket /run/jobu.sock secret delete reports.token",
+    .example          = "jobuctl secret delete reports.token",
     .capability       = "secret.delete",
     .build            = parse_secret_command,
 };
@@ -658,7 +656,7 @@ constexpr CommandSpec schedule_validate_command{
     .options          = schedule_validate,
     .rules      = "EXPRESSION is required. Omitted --timezone uses the daemon default. Invalid schedules return a "
                   "structured error.",
-    .example    = "jobuctl --socket /run/jobu.sock schedule validate '0 9 * * FRI-MON'",
+    .example    = "jobuctl schedule validate '0 9 * * FRI-MON'",
     .capability = "schedule.validate",
     .build      = parse_schedule_command,
 };
@@ -671,7 +669,7 @@ constexpr CommandSpec schedule_next_command{
     .maximum_operands = 1,
     .options          = schedule_next,
     .rules   = "Require EXPRESSION and --after UTC. Omitted --timezone uses the daemon default; --count defaults to 5.",
-    .example = "jobuctl --socket /run/jobu.sock schedule next '@daily' --after 2030-01-01T00:00:00Z",
+    .example = "jobuctl schedule next '@daily' --after 2030-01-01T00:00:00Z",
     .capability = "schedule.next",
     .build      = parse_schedule_command,
 };

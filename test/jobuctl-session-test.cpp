@@ -57,7 +57,8 @@ enum class PeerBehavior : std::uint8_t {
     RunCancelNeverSettles,
     OutputChunk,
     SilentHandshake,
-    SilentCommand
+    SilentCommand,
+    DisconnectCommand
 };
 
 struct Exchange {
@@ -107,6 +108,11 @@ auto run_session(PeerBehavior             behavior,
             auto const& fields = request->as_object();
             auto const& method = fields.at("method").as_string();
             exchange.methods.push_back(method);
+            if (behavior == PeerBehavior::DisconnectCommand && method != "system.info") {
+                // The peer has received the mutation but deliberately closes before replying.
+                peer->abort();
+                return;
+            }
             if (behavior == PeerBehavior::SilentHandshake ||
                 (behavior == PeerBehavior::SilentCommand && method != "system.info")) {
                 continue;
@@ -476,6 +482,17 @@ TEST_CASE("jobuctl session enforces one overall command deadline", "[jobuctl][se
         CHECK(error.at("code").as_string() == "jobu.client.timeout");
         CHECK(error.at("outcome_unknown").as_bool());
     }
+}
+
+TEST_CASE("jobuctl connection loss preserves uncertainty after mutation delivery", "[jobuctl][session]")
+{
+    auto exchange = run_session(PeerBehavior::DisconnectCommand, {"queue", "create", "reports"}, {"--json"});
+    CHECK(exchange.methods == std::vector<std::string>{"system.info", "queue.create"});
+    CHECK(exchange.exit->exit_code == 3);
+    CHECK(exchange.output.empty());
+    auto value = parse_json(exchange.error);
+    REQUIRE(value);
+    CHECK(value->as_object().at("error").as_object().at("outcome_unknown").as_bool());
 }
 
 TEST_CASE("jobuctl suspend wait submits once and reads until suspension completes", "[jobuctl][session]")
