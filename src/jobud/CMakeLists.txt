@@ -13,7 +13,7 @@ add_executable(${TARGET} main.cpp composition_priv.cpp)
 add_library(jobud-runtime STATIC runtime_priv.cpp startup_priv.cpp configuration_priv.cpp configuration_file_priv.cpp
     daemon_logger_priv.cpp runtime_paths_priv.cpp)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_sources(jobud-runtime PRIVATE privileges_posix.cpp privileges_linux.cpp)
+    target_sources(jobud-runtime PRIVATE privileges_posix.cpp privileges_linux.cpp endpoint_guard_priv.cpp)
 endif()
 target_include_directories(jobud-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
     PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

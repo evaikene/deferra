@@ -817,6 +817,21 @@ add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
 # JobU executable smoke tests
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
+    add_executable(jobud-endpoint-test jobud-endpoint-test.cpp support/temporary_directory.cpp)
+    target_link_libraries(jobud-endpoint-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
+    add_test(NAME jobud-endpoint-test COMMAND $<TARGET_FILE:jobud-endpoint-test>)
+
+    add_executable(jobud-endpoint-test-helper jobud-endpoint-test-helper.cpp)
+    target_link_libraries(jobud-endpoint-test-helper PRIVATE net)
+    add_executable(jobud-endpoint-integration-test jobud-endpoint-integration-test.cpp support/temporary_directory.cpp)
+    target_link_libraries(jobud-endpoint-integration-test PRIVATE jobud-runtime jobu-sqlite Catch2::Catch2WithMain)
+    target_compile_definitions(jobud-endpoint-integration-test PRIVATE
+        JOBUD_EXECUTABLE="$<TARGET_FILE:jobud>"
+        JOBUD_ENDPOINT_TEST_HELPER="$<TARGET_FILE:jobud-endpoint-test-helper>")
+    add_dependencies(jobud-endpoint-integration-test jobud jobud-endpoint-test-helper)
+    add_test(NAME jobud-endpoint-integration-test COMMAND $<TARGET_FILE:jobud-endpoint-integration-test>)
+    set_tests_properties(jobud-endpoint-integration-test PROPERTIES TIMEOUT 90)
+
     add_executable(jobud-runtime-paths-test jobud-runtime-paths-test.cpp support/temporary_directory.cpp)
     target_link_libraries(jobud-runtime-paths-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
     add_test(NAME jobud-runtime-paths-test COMMAND $<TARGET_FILE:jobud-runtime-paths-test>)
@@ -1105,6 +1120,16 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
     endif()
 
     # Platform local server test
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # The production net library contains no syscall hooks. This isolated build checks pre-listen failures.
+        add_executable(local-server-setup-test local-server-setup-test.cpp
+            ../src/net/local_server_linux.cpp support/temporary_directory.cpp)
+        target_compile_definitions(local-server-setup-test PRIVATE JB_LOCAL_SERVER_TESTING)
+        target_include_directories(local-server-setup-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/support)
+        target_link_libraries(local-server-setup-test PRIVATE net Catch2::Catch2WithMain)
+        add_test(NAME local-server-setup-test COMMAND $<TARGET_FILE:local-server-setup-test>)
+    endif()
+
     set(TARGET "local-server-test")
     add_executable(${TARGET}
         local-server-test.cpp

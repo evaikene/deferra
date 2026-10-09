@@ -49,6 +49,20 @@ the queue policy, an interrupted run may wait for a retry or finish as failed.
 When that run was the last outstanding work for a one-time job, the job also
 becomes failed. A schema or recovery error prevents the daemon from serving.
 
+On Linux, the daemon holds a separate `${socket.path}.lock` through shutdown,
+so daemons using different databases cannot own the same endpoint. The lock
+file remains after exit. Restart removes a crashed socket only after acquiring
+both locks and proving that the unchanged, daemon-owned socket refuses a
+connection. Live or ambiguous endpoints, symlinks and other file types are
+preserved; deleting a lock pathname does not safely bypass another owner.
+
+Socket mode defaults to `0600`. Configuring `socket.mode = 0660` and an
+authorized `socket.group` grants that group's members full daemon authority,
+including CLI work and secret management. This requires the protected runtime
+directory to have the matching group and mode `0750`, with traversal through
+its ancestors. Group access is an administrative trust boundary; it supplies
+neither read-only monitoring nor per-user authorization.
+
 In another terminal, create a queue and a job due immediately:
 
 ```sh

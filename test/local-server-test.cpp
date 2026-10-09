@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -52,7 +53,7 @@ void check_socket_options(int fd)
     REQUIRE(descriptor_flags >= 0);
     CHECK((descriptor_flags & FD_CLOEXEC) != 0);
 
-#if defined(SO_NOSIGPIPE)
+#ifdef SO_NOSIGPIPE
     int       no_sigpipe = 0;
     socklen_t length     = sizeof(no_sigpipe);
     REQUIRE(::getsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, &length) == 0);
@@ -334,6 +335,12 @@ TEST_CASE("LocalServer rejects invalid paths and options without side effects", 
     options.permissions  = static_cast<std::filesystem::perms>(mask | static_cast<PermissionBits>(1U << 20U));
     check_invalid(directory.path() / "invalid-permissions.sock", options);
 
+    options          = {};
+    options.group_id = std::numeric_limits<std::uint64_t>::max();
+    check_invalid(directory.path() / "invalid-group.sock", options);
+    options.group_id = std::numeric_limits<gid_t>::max();
+    check_invalid(directory.path() / "sentinel-group.sock", options);
+
     CHECK(accept_error_count == 0);
 }
 
@@ -426,6 +433,23 @@ TEST_CASE("LocalServer applies permissions before exposing a listener", "[net][l
     CHECK_FALSE(std::filesystem::exists(no_access_path));
 }
 
+TEST_CASE("LocalServer assigns an explicit native group before listening", "[net][local-server]")
+{
+    Application                  app{0, nullptr};
+    jb::test::TemporaryDirectory directory;
+    LocalServer                  server;
+    auto                         options = LocalServerOptions{};
+    options.group_id                     = ::getegid();
+    options.permissions                  = std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
+                                           std::filesystem::perms::group_read | std::filesystem::perms::group_write;
+    auto const path                      = directory.path() / "group.sock";
+    REQUIRE(server.listen(path, options));
+    CHECK(path_metadata(path).st_gid == ::getegid());
+    CHECK(socket_mode(path) == 0660);
+    server.close();
+    CHECK_FALSE(std::filesystem::exists(path));
+}
+
 TEST_CASE("LocalServer exchanges binary data through accepted LocalSockets", "[net][local-server]")
 {
     Application                  app{0, nullptr};
@@ -447,7 +471,7 @@ TEST_CASE("LocalServer exchanges binary data through accepted LocalSockets", "[n
     CHECK(accepted->is_open());
     CHECK(accepted->server_path() == server.server_path());
     CHECK(accepted->read_buffer_limit() == options.accepted_read_buffer_limit);
-#if defined(__APPLE__)
+#ifdef __APPLE__
     CHECK_FALSE(accepted->peer_credentials().process_id);
     REQUIRE(accepted->peer_credentials().user_id);
     REQUIRE(accepted->peer_credentials().group_id);
