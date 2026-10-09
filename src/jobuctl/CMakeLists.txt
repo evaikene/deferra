@@ -29,6 +29,7 @@ add_library(jobuctl-private STATIC
 target_include_directories(jobuctl-private PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(jobuctl-private PUBLIC cxx_std_20)
 target_link_libraries(jobuctl-private PUBLIC jobu-client)
+target_link_libraries(jobuctl-private PRIVATE jobu-paths-private)
 
 add_executable(${TARGET} main.cpp)
 
@@ -40,4 +41,3 @@ target_include_directories(${TARGET}
 target_compile_features(${TARGET} PRIVATE cxx_std_20)
 
 target_link_libraries(${TARGET} PRIVATE jobuctl-private)
-target_link_libraries(${TARGET} PRIVATE jobu-paths-private)

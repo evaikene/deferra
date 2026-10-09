@@ -1,6 +1,7 @@
 #include "help_priv.hpp"
 
 #include "command_registry_priv.hpp"
+#include "jobu_paths_priv.hpp"
 
 #include <fmt/format.h>
 
@@ -25,6 +26,9 @@ void append_options(std::string& text, std::span<OptionSpec const> options, bool
             spelling += fmt::format(" {}", spec.value_name);
         }
         text += fmt::format("  {}\n      {}\n", spelling, spec.description);
+        if (spec.option.long_name == "socket") {
+            text += fmt::format("      Default: {}\n", jb::jobu::detail::default_socket_path);
+        }
     }
 }
 

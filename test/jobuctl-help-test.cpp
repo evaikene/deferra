@@ -1,5 +1,8 @@
 #include "support/temporary_directory.hpp"
 
+#include "jobu_paths_priv.hpp"
+#include "json.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
@@ -8,6 +11,7 @@
 #include <csignal> // IWYU pragma: keep POSIX kill signal constants.
 #include <cstddef>
 #include <fcntl.h>
+#include <filesystem>
 #include <poll.h>
 #include <string>
 #include <sys/stat.h>
@@ -218,6 +222,7 @@ TEST_CASE("jobuctl executable prints local help with blocked or closed stdin", "
             auto result = run(arguments, blocked);
             CHECK(result.code == 0);
             CHECK(result.out.starts_with("Usage:\n"));
+            CHECK(result.out.find(jb::jobu::detail::default_socket_path) != std::string::npos);
             CHECK(result.err.empty());
         }
         auto version = run({"--version"}, blocked);
@@ -252,6 +257,7 @@ TEST_CASE("jobuctl help reaches every registered command and alias without a dae
         CHECK(result.code == 0);
         CHECK(result.out.starts_with("Usage:\n"));
         CHECK(result.out.find("--request-file") != std::string::npos);
+        CHECK(result.out.find(jb::jobu::detail::default_socket_path) != std::string::npos);
         CHECK(result.err.empty());
     }
 }
@@ -266,7 +272,7 @@ TEST_CASE("jobuctl executable rejects invalid help syntax with contextual stderr
              {"queue", "list", "--", "--help"},
              {"job", "create", "--arg-secret", "--help"},
              {"job", "add", "--env-secret", "--help"},
-             {"queue", "list"},
+             {"queue", "get"},
              {"run", "unknown", "--help"},
              {"secret", "unknown", "--help"}
     }) {
@@ -280,6 +286,51 @@ TEST_CASE("jobuctl executable rejects invalid help syntax with contextual stderr
     CHECK(group.err.find("queue COMMAND") != std::string::npos);
     auto leaf = run({"queue", "get", "--name", "--help"});
     CHECK(leaf.err.find("queue get") != std::string::npos);
+}
+
+TEST_CASE("jobuctl connection diagnostics identify the selected endpoint safely", "[jobuctl][connection]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   endpoint = directory.path() / "missing.sock";
+    for (auto const json : {false, true}) {
+        auto arguments = std::vector<std::string>{"--socket", endpoint.string(), "queue", "list"};
+        if (json) {
+            arguments.emplace_back("--json");
+        }
+        auto result = run(arguments);
+        CHECK(result.code == 3);
+        CHECK(result.out.empty());
+        CHECK(result.err.find(endpoint.string()) != std::string::npos);
+        CHECK(result.err.find("--socket PATH") != std::string::npos);
+        CHECK(result.err.find("Usage:\n") == std::string::npos);
+        if (json) {
+            auto value = jb::core::parse_json(result.err);
+            REQUIRE(value);
+            auto const& error = value->as_object().at("error").as_object();
+            CHECK(error.size() == 6);
+            CHECK(error.at("kind").as_string() == "local");
+            CHECK(error.at("code").as_string() == "jobuctl.connection_failed");
+            CHECK(error.at("category").as_string() == "io");
+            CHECK(error.at("rpc_code").is_null());
+            CHECK_FALSE(error.at("outcome_unknown").as_bool());
+        }
+    }
+
+    // Native paths may contain terminal controls and invalid UTF-8. Both renderers must retain the real error code.
+    auto const unusual = directory.path() / "missing\n\x1b\xff\"\\.sock";
+    auto       human   = run({"--socket", unusual.string(), "queue", "list"});
+    CHECK(human.code == 3);
+    CHECK(human.err.find("missing\\x0A\\x1B\\xFF\\\"\\\\.sock") != std::string::npos);
+    CHECK(human.err.find('\x1b') == std::string::npos);
+    CHECK(human.err.find('\xff') == std::string::npos);
+
+    auto json = run({"--socket", unusual.string(), "queue", "list", "--json"});
+    CHECK(json.code == 3);
+    auto value = jb::core::parse_json(json.err);
+    REQUIRE(value);
+    auto const& error = value->as_object().at("error").as_object();
+    CHECK(error.at("code").as_string() == "jobuctl.connection_failed");
+    CHECK(error.at("message").as_string().find("missing\\x0A\\x1B\\xFF\\\"\\\\.sock") != std::string::npos);
 }
 
 TEST_CASE("jobuctl local selection does not open supplied file paths", "[jobuctl][help]")
