@@ -6,7 +6,9 @@
 #include "management.hpp"
 #include "run_repository_priv.hpp"
 #include "time_source.hpp"
+#include "transaction.hpp"
 #include "uuid.hpp"
+#include "wait_repository_priv.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <sqlite3.h>
@@ -156,7 +158,7 @@ void ShutdownWork::require_reaped() const
     REQUIRE(errno == ECHILD);
 }
 
-auto ShutdownWork::snapshot() const -> std::vector<std::vector<std::string>>
+auto ShutdownWork::snapshot(bool include_timing) const -> std::vector<std::vector<std::string>>
 {
     auto                                  connection = observer(storage.database_file);
     std::vector<std::vector<std::string>> rows;
@@ -169,6 +171,9 @@ auto ShutdownWork::snapshot() const -> std::vector<std::vector<std::string>>
                               "jobu_idempotency",
                               "jobu_secrets",
                               "jobu_secret_refs"}) {
+        if (!include_timing && std::string_view{table} == "jobu_run_timing") {
+            continue;
+        }
         auto const    sql = std::string{"SELECT * FROM "} + table + " ORDER BY 1, 2, 3";
         sqlite3_stmt* raw{};
         REQUIRE(sqlite3_prepare_v2(connection.get(), sql.c_str(), -1, &raw, nullptr) == SQLITE_OK);
@@ -207,8 +212,22 @@ auto ShutdownWork::count(std::string const& sql) const -> std::int64_t
 
 void ShutdownWork::hold_recovery()
 {
-    // Do this only after proving shutdown left the entire database unchanged. Pending followers remain
-    // eligible throughout shutdown, but suspension prevents them and zero-delay retries racing recovery checks.
+    // Fatal stop leaves abandoned intervals. Repair those through the production timing repository
+    // before using an uninstrumented embedded controller; leave attempt recovery to the next incarnation.
+    WaitRepository waits{storage.database};
+    auto           open = waits.list_open(200);
+    REQUIRE(open);
+    if (!open->empty()) {
+        auto transaction = jb::db::Transaction::begin(storage.database);
+        REQUIRE(transaction);
+        for (auto const& id : *open) {
+            REQUIRE(waits.repair_abandoned(id));
+        }
+        REQUIRE(transaction->commit());
+    }
+
+    // Pending followers were eligible throughout shutdown. Suspension now prevents them
+    // and zero-delay retries racing the subsequent recovery assertions.
     SystemTimeSource  time;
     SystemCronEngine  cron;
     UuidV7Generator   generator{time};

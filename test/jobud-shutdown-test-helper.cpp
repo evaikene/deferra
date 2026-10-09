@@ -181,7 +181,7 @@ void exercise(std::string_view scenario)
         work.await_work();
         REQUIRE(completions.size() == 2);
         auto* management = RuntimeTestAccess::management(*runtime);
-        running          = work.snapshot();
+        running          = work.snapshot(scenario != "normal stop");
         auto  device     = std::make_unique<MemoryIODevice>();
         auto* peer       = device.get();
         device->open();
@@ -218,7 +218,15 @@ void exercise(std::string_view scenario)
     REQUIRE(runtime->state() == RuntimeState::Stopped);
     work.require_cleanup();
     work.require_reaped();
-    REQUIRE(work.snapshot() == running);
+    REQUIRE(work.snapshot(scenario != "normal stop") == running);
+    if (scenario == "normal stop") {
+        CHECK(work.count("SELECT count(*) FROM jobu_run_timing WHERE open_epoch IS NOT NULL") == 0);
+        CHECK(work.count("SELECT count(*) FROM jobu_run_timing t JOIN jobu_runs r ON r.id=t.run_id "
+                         "WHERE r.state='scheduled' AND t.runnable_wait_us > 0") == 2);
+    }
+    else {
+        CHECK(work.count("SELECT count(*) FROM jobu_run_timing WHERE open_epoch IS NOT NULL") == 2);
+    }
 
     // These are child-to-group callbacks, whose contract ends at executor destruction. The final-drain
     // checks above exercise the terminal gate while owners are alive; scheduler-token lifetime has its own tests.
