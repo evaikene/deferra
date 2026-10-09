@@ -1,0 +1,425 @@
+# -----------------------------------------------------------------------------
+# JobU daemon configuration
+# -----------------------------------------------------------------------------
+#
+# Getting started
+#   1. Review the database and socket paths, daemon account, and permissions.
+#   2. Copy this example to the jobud.ini location configured for your installation.
+#   3. Uncomment optional settings only when you need to override their defaults.
+#
+# JobU reads this file once at startup; restart the daemon to apply changes.
+# Explicit command-line options override settings in this file.
+# Protect the configuration file and its parent directories against replacement.
+# The whole file, including comments, must fit within 64 KiB.
+#
+# File syntax
+#   Use the dotted setting names shown below. INI sections, includes, substitutions,
+#   and comments at the end of a setting line are not supported.
+#   All filesystem paths must be absolute.
+#
+# Units for startup settings (everything before the "Default job behavior" section)
+#   Booleans: true/1/on/yes or false/0/off/no; words are case-insensitive.
+#   Intervals: seconds, or a number followed by s, m, h, or d.
+#              For example, 60, 60s, and 1m all mean one minute.
+#   Sizes: bytes, or a number followed by lowercase k, m, or g (multiples of 1024).
+#          For example, 1024 and 1k both mean 1024 bytes.
+#   Numeric values cannot have a sign, overflow their range, or contain extra text.
+#
+# The optional defaults.* settings later in this file use JSON values and different
+# units. Read that section's introduction before changing them.
+
+
+# -----------------------------------------------------------------------------
+# Database storage
+# -----------------------------------------------------------------------------
+
+# Database backend to use.
+# Default: sqlite. This is the only supported backend in v1.
+database.backend = sqlite
+
+# File in which SQLite stores jobs, schedules, and history.
+# Default: the path set through JB_JOBU_STATEDIR when JobU was built.
+# Value: an absolute path.
+#
+# The directory containing the database must belong to the daemon's final user
+# and have mode 0700 (owner access only). Database, WAL, SHM, and lock files are
+# also restricted to the owner. Provision missing parent directories yourself;
+# JobU does not recursively create or repair the directory permissions.
+database.path = @JOBU_DATABASE_PATH_INI@
+
+
+# -----------------------------------------------------------------------------
+# Daemon account and root permissions
+# -----------------------------------------------------------------------------
+
+# Account the daemon should run as after startup.
+# Default: omitted. If set, use a nonempty account name.
+#
+# When starting in the foreground as root, select a non-root account unless you
+# explicitly allow a root daemon below. A non-root user can select only itself.
+# Managed services normally start directly as a dedicated account and leave
+# this setting commented out.
+# daemon.run_as_user = jobu
+
+# Group to use when switching to the selected daemon account.
+# Default: omitted or empty uses that account's primary group.
+# Value: a group name. Requires daemon.run_as_user or a command-line user override.
+# The group is resolved before the daemon drops privileges.
+# daemon.run_as_group = jobu
+
+# Allow the daemon itself to run as root. Keep false for normal operation.
+# Default: false. Value: a boolean.
+# This does not allow CLI jobs to run as root or cancel a requested account switch.
+daemon.allow_root = false
+
+# Allow CLI jobs to run as root. Keep false for normal operation.
+# Default: false. Value: a boolean.
+# This is separate from daemon.allow_root. Ordinary non-root CLI jobs remain
+# enabled, and this setting alone does not permit the daemon to run as root.
+cli.allow_root = false
+
+
+# -----------------------------------------------------------------------------
+# Local control socket and access
+# -----------------------------------------------------------------------------
+
+# Unix socket through which clients connect to the daemon.
+# Default: the path set through JB_JOBU_RUNDIR when JobU was built.
+# Value: an absolute path that fits the operating system's Unix socket path limit.
+# With private access (0600 below), the socket directory uses mode 0700.
+socket.path = @JOBU_SOCKET_PATH_INI@
+
+# Account that owns the socket.
+# Default: omitted or empty uses the daemon's final user.
+# Value: an account name resolving to that same user ID.
+# This setting cannot give ownership to a different user.
+# socket.owner = jobu
+
+# Who can connect to the control socket.
+# Default: 0600. Allowed: exactly 0600 or 0660, including the leading zero.
+#   0600: owner only.
+#   0660: owner and group.
+#
+# Group access grants full administrative authority, including running CLI jobs
+# and accessing secrets. For 0660, the socket directory must have the matching
+# group and mode 0750, with safe access through its parent directories.
+socket.mode = 0600
+
+# Group that owns the socket; relevant when enabling group access above.
+# Default: omitted or empty uses the daemon's final primary group.
+# Value: a group name from the daemon's final primary or supplementary groups.
+# Provision the account, group memberships, and directory ownership before
+# enabling socket mode 0660.
+# socket.group = jobu
+
+
+# -----------------------------------------------------------------------------
+# Execution capacity
+# -----------------------------------------------------------------------------
+
+# Maximum number of CLI jobs the CLI runner can execute concurrently.
+# Default: 4. Allowed: a whole number from 1 to 4294967295; zero is not allowed.
+cli.concurrency = 4
+
+# Maximum number of HTTP jobs the HTTP runner can execute concurrently.
+# Default: 16. Allowed: a whole number from 1 to 4294967295; zero is not allowed.
+http.concurrency = 16
+
+
+# -----------------------------------------------------------------------------
+# HTTP connections
+# -----------------------------------------------------------------------------
+
+# Explicit proxy for outgoing HTTP requests.
+# Default: omitted or empty leaves the explicit proxy unset.
+# Value: a valid HTTP or HTTPS URL.
+# Proxy credentials are sensitive. Protect this file and avoid logging proxy URLs.
+# http.proxy = https://proxy.example.invalid:443
+
+# Certificate authority bundle used to verify HTTPS servers.
+# Default: omitted or empty uses the system trust store.
+# Value: an absolute path to a readable regular file.
+# HTTP setup checks readability again as the daemon's final user.
+# http.ca_bundle = /etc/ssl/certs/ca-certificates.crt
+
+
+# -----------------------------------------------------------------------------
+# Scheduling
+# -----------------------------------------------------------------------------
+
+# Timezone used when a cron request does not specify one.
+# Default: UTC. Value: a supported IANA timezone name.
+# A timezone supplied in the request takes precedence. Changing this setting
+# does not alter schedules already stored in the database.
+schedule.default_timezone = UTC
+
+
+# -----------------------------------------------------------------------------
+# History cleanup
+# -----------------------------------------------------------------------------
+
+# How long to keep history for completed runs when the queue has no override.
+# Default: 30d (30 days, or 2592000 seconds).
+# Allowed: an interval from 0 to 9223372036854 seconds; 0 keeps history indefinitely.
+#
+# The run's queue can override this duration. A run becomes eligible for deletion
+# only when its terminal completion time is strictly older than the cutoff.
+# Deletion is permanent: statistics and replay of requests with idempotency keys
+# depend on the records that remain in the database.
+history.default_retention = 30d
+
+# How long to wait after a history cleanup sweep finishes before starting another.
+# Default: 1m (60 seconds). Allowed: an interval from 1 to 86400 seconds (24 hours).
+history.sweep_interval = 1m
+
+# Maximum number of parent records removed in one cleanup batch.
+# Default: 100. Allowed: a whole number from 1 to 1000.
+# Related attempts and output are deleted with their parents, so this setting
+# does not bound the number of attempt records or output bytes deleted.
+# The pause between batches is fixed at 10 milliseconds and cannot be configured.
+history.batch_size = 100
+
+
+# -----------------------------------------------------------------------------
+# Timing checkpoints
+# -----------------------------------------------------------------------------
+
+# How often to save timing measurements for work still in progress.
+# Default: 30s. Allowed: an interval from 1 to 86400 seconds (24 hours).
+#
+# Each batch contains at most 200 records. Large sweeps can take longer than the
+# configured interval. A crash may lose measurements since the last checkpoint
+# and leave them marked partial; this interval is not a guaranteed loss limit.
+telemetry.checkpoint_interval = 30s
+
+
+# -----------------------------------------------------------------------------
+# Control protocol (RPC) limits
+# -----------------------------------------------------------------------------
+
+# Maximum size of an RPC frame header.
+# Default: 16k (16384 bytes). Allowed: a size from 1024 to 65536 bytes (1 to 64 KiB).
+rpc.header_limit_bytes = 16k
+
+# Maximum size of an RPC message body.
+# Default: 1m (1048576 bytes). Allowed: a size from 1048576 to 16777216 bytes
+# (1 to 16 MiB). Smaller limits for specific methods and results still apply,
+# as does the fixed maximum JSON nesting depth of 64.
+rpc.body_limit_bytes = 1m
+
+# Maximum number of entries in one RPC batch.
+# Default: 64. Allowed: a whole number from 1 to 64.
+rpc.max_batch_entries = 64
+
+# Maximum number of clients connected at the same time.
+# Default: 128. Allowed: a whole number from 1 to 4096.
+rpc.max_connections = 128
+
+# Maximum output waiting to be sent to a single client connection.
+# Default: 2m (2097152 bytes).
+# Allowed: a size no smaller than rpc.body_limit_bytes + rpc.header_limit_bytes,
+# and no larger than 64m (67108864 bytes). Adjust this when raising frame limits.
+rpc.queued_output_bytes = 2m
+
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+
+# Least severe messages to write to standard error (stderr).
+# Default: info. Allowed: fatal, error, warning, info, debug1, debug2, debug3.
+# The selected level and all more severe messages are logged.
+logging.level = info
+
+# Format of messages written to standard error.
+# Default: json. Allowed: json or text.
+# The daemon does not rotate log files. Configure retention and rotation in your
+# service manager or logging system, or manage them yourself.
+logging.format = json
+
+
+# -----------------------------------------------------------------------------
+# Default job behavior (optional)
+# -----------------------------------------------------------------------------
+#
+# These settings supply defaults for jobs. More specific settings take precedence:
+#   built-in defaults -> daemon defaults below -> queue settings -> job settings.
+#
+# All examples below are commented out and show the built-in defaults. Uncomment
+# a setting to supply your own daemon default. Changes apply when new values are
+# resolved after a restart; they do not rewrite stored snapshots or change a
+# replay of an earlier creation request retained under an idempotency key.
+#
+# Value syntax and units
+#   Each defaults.* setting takes one strict JSON value. INI removes one pair of
+#   surrounding quotes before the JSON is read. For a JSON string, preserve the
+#   double quotes by wrapping the whole value in single quotes: '"reschedule"'.
+#   Booleans must be the JSON values true or false.
+#   Durations are whole MILLISECONDS, without s/m/h/d suffixes.
+#   Sizes are whole BYTES, without k/m/g suffixes.
+#   Related settings must also be valid together, as explained below. References
+#   to other attributes mean their effective values after applying all overrides.
+
+
+# -----------------------------------------------------------------------------
+# Job timeout
+# -----------------------------------------------------------------------------
+
+# Maximum time allowed for one execution attempt.
+# Built-in default: 120000 milliseconds (2 minutes).
+# Allowed: a whole number from 1 to 2592000000 milliseconds (30 days).
+# Zero and unlimited timeout values are not accepted.
+# defaults.job.timeout = 120000
+
+
+# -----------------------------------------------------------------------------
+# Retry policy
+# -----------------------------------------------------------------------------
+
+# Total number of execution attempts, including the first attempt.
+# Built-in default: 1 (no retries). Allowed: a whole number from 1 to 100.
+# Increase this to enable retries; the CLI exit-code and HTTP failure settings
+# below determine which failures qualify.
+# defaults.retry.max_attempts = 1
+
+# Delay before the first retry.
+# Built-in default: 0 milliseconds.
+# Allowed: a whole number from 0 to 86400000 milliseconds (24 hours).
+# Must not exceed retry.max_delay. Time spent executing a retry is not counted
+# as time spent waiting for a runnable job to start.
+# defaults.retry.initial_delay = 0
+
+# How the delay changes between retries.
+# Built-in default: "fixed". Allowed: the JSON string "fixed" or "exponential".
+# Both strategies respect the delay ceiling and jitter. Changing the strategy
+# alone does not enable extra attempts; set retry.max_attempts as needed.
+# defaults.retry.strategy = '"fixed"'
+
+# Factor used to increase the delay between retries with the exponential strategy.
+# Built-in default: 2.0. Allowed: a finite JSON number from 1 to 100.
+# This value is accepted but has no effect when retry.strategy is "fixed".
+# defaults.retry.multiplier = 2.0
+
+# Random variation added to the retry delay, expressed as a fraction.
+# Built-in default: 0.0 (no jitter). Allowed: a finite JSON number from 0 to 1.
+# Variation is symmetric around the calculated delay and stays within the retry
+# policy's limits.
+# defaults.retry.jitter = 0.0
+
+# Longest permitted retry delay.
+# Built-in default: 86400000 milliseconds (24 hours).
+# Allowed: a whole number from 0 to 86400000 milliseconds.
+# Must be at least retry.initial_delay. Also caps accepted HTTP Retry-After delays.
+# defaults.retry.max_delay = 86400000
+
+# Whether a job keeps its queue slot while waiting to retry.
+# Built-in default: "reschedule".
+# Allowed: the JSON string "reschedule" (release the slot during the delay)
+# or "blocking" (keep the slot during the delay).
+# defaults.retry.mode = '"reschedule"'
+
+
+# -----------------------------------------------------------------------------
+# CLI job behavior
+# -----------------------------------------------------------------------------
+
+# Unexpected exit codes that qualify for a retry.
+# Built-in default: ["0-255"].
+# Allowed: a JSON array of up to 64 strings, each naming a code from 0 to 255 or
+# an inclusive range with increasing endpoints. Use decimal numbers without
+# leading zeros; duplicates and overlapping ranges are not allowed.
+#
+# An empty array [] disables exit-code retries. Expected exit codes still count
+# as success. Actual retries also require retry.max_attempts to be greater than 1.
+# defaults.cli.retry_exit_codes = ["0-255"]
+
+# Grace period after requesting CLI termination, before forcibly cleaning up
+# the process group.
+# Built-in default: 5000 milliseconds (5 seconds).
+# Allowed: a whole number from 0 to 300000 milliseconds (5 minutes).
+# Zero requests immediate forced cleanup after termination.
+# defaults.cli.termination_grace = 5000
+
+
+# -----------------------------------------------------------------------------
+# HTTP job behavior
+# -----------------------------------------------------------------------------
+
+# Follow redirects returned by an HTTP server.
+# Built-in default: false. Allowed: a JSON boolean.
+# Enabling this requires http.max_redirects to be at least 1.
+# defaults.http.follow_redirects = false
+
+# Maximum number of redirects to follow for a request.
+# Built-in default: 5. Allowed: a whole number from 0 to 20.
+# Zero is allowed only when http.follow_redirects is false.
+# defaults.http.max_redirects = 5
+
+# Verify the server's TLS certificate and hostname for HTTPS requests.
+# Built-in default: true. Allowed: a JSON boolean. Keep true for normal operation.
+# Disabling verification removes server authentication.
+# defaults.http.tls_verify = true
+
+# Send the run ID as the HTTP idempotency key.
+# Built-in default: false. Allowed: a JSON boolean.
+# This can help a remote service recognize repeated requests, but does not
+# guarantee that it will deduplicate retries.
+# defaults.http.idempotency_key = false
+
+# HTTP transport failures that qualify for a retry.
+# Built-in default: the six categories shown in the example below.
+# Allowed: a JSON array of up to 16 distinct strings, chosen from:
+#   resolve, connect, tls_handshake, tls_verification, timeout, send, receive,
+#   redirect, protocol.
+#
+# The built-in list excludes TLS verification, redirect, and protocol failures.
+# An empty array [] disables transport-error retries. Retries still require
+# enough attempts to be allowed by retry.max_attempts.
+# defaults.http.retry_errors = ["resolve", "connect", "tls_handshake", "timeout", "send", "receive"]
+
+# Unexpected HTTP response statuses that qualify for a retry.
+# Built-in default: ["408", "429", "500-599"].
+# Allowed: a JSON array of up to 64 distinct strings, each naming a status from
+# 100 to 599 or an inclusive range with increasing endpoints. Use decimal numbers
+# without leading zeros or whitespace.
+#
+# An empty array [] disables status retries. Expected statuses still count as
+# success, even if they appear in this list.
+# defaults.http.retry_statuses = ["408", "429", "500-599"]
+
+
+# -----------------------------------------------------------------------------
+# Captured job output
+# -----------------------------------------------------------------------------
+
+# When to retain output from execution attempts.
+# Built-in default: "on_error". Allowed: the JSON string "none", "on_error", or
+# "always". "on_error" retains output from failed attempts.
+# Captured output can contain sensitive information.
+# defaults.output.capture = '"on_error"'
+
+# Maximum HTTP response body to capture.
+# Built-in default: 1048576 bytes (1 MiB).
+# Allowed: a whole number from 0 to 67108864 bytes (64 MiB).
+# Zero keeps no body bytes, though observation and truncation metadata may remain.
+# defaults.output.http_body_limit = 1048576
+
+# Maximum raw HTTP response headers to capture.
+# Built-in default: 65536 bytes (64 KiB).
+# Allowed: a whole number from 0 to 4194304 bytes (4 MiB).
+# Zero keeps no header bytes. Headers may contain credentials and cookies.
+# defaults.output.http_headers_limit = 65536
+
+# Maximum CLI standard error (stderr) output to capture.
+# Built-in default: 1048576 bytes (1 MiB).
+# Allowed: a whole number from 0 to 67108864 bytes (64 MiB).
+# Zero keeps no stderr bytes. The capture policy determines whether observed
+# output is retained.
+# defaults.output.stderr_limit = 1048576
+
+# Maximum CLI standard output (stdout) to capture.
+# Built-in default: 1048576 bytes (1 MiB).
+# Allowed: a whole number from 0 to 67108864 bytes (64 MiB).
+# Zero keeps no stdout bytes. The capture policy determines whether observed
+# output is retained.
+# defaults.output.stdout_limit = 1048576

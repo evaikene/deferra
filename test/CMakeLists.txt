@@ -3,6 +3,19 @@ find_package(OpenSSL REQUIRED)
 
 enable_testing()
 
+# Installation is checked in a fresh private prefix. No deployment identities or
+# service-manager access are required; SDK exports are verified in the next stage.
+get_property(JOBU_INSTALL_LIBRARIES GLOBAL PROPERTY JOBU_INSTALL_LIBRARIES)
+get_property(JOBU_INSTALL_MODULES GLOBAL PROPERTY JOBU_INSTALL_MODULES)
+get_property(JOBU_INSTALL_PUBLIC_HEADERS GLOBAL PROPERTY JOBU_INSTALL_PUBLIC_HEADERS)
+get_property(JOBU_INSTALL_HEADERS GLOBAL PROPERTY JOBU_INSTALL_HEADERS)
+get_property(JOBU_INSTALL_APPLICATIONS GLOBAL PROPERTY JOBU_INSTALL_APPLICATIONS)
+configure_file(jobu-install-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-install-test.cmake" @ONLY)
+add_test(NAME jobu-install-test COMMAND ${CMAKE_COMMAND}
+    -P "${CMAKE_CURRENT_BINARY_DIR}/jobu-install-test.cmake")
+set_tests_properties(jobu-install-test PROPERTIES TIMEOUT 180
+    SKIP_REGULAR_EXPRESSION "Unsupported install-test layout:")
+
 # Generic forwarding/fault support, independent of SQLite and JobU.
 add_executable(fault-database-driver-test
     fault-database-driver-test.cpp support/fault_database_driver.cpp support/fake_database_driver.cpp)
@@ -908,6 +921,11 @@ if(TARGET jobud)
         add_executable(jobud-configuration-test jobud-configuration-test.cpp support/temporary_directory.cpp)
         target_link_libraries(jobud-configuration-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
         add_test(NAME jobud-configuration-test COMMAND $<TARGET_FILE:jobud-configuration-test>)
+
+        add_executable(jobud-config-example-test jobud-config-example-test.cpp)
+        target_link_libraries(jobud-config-example-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
+        target_compile_definitions(jobud-config-example-test PRIVATE JOBUD_CONFIG_EXAMPLE="${JOBU_CONFIG_EXAMPLE}")
+        add_test(NAME jobud-config-example-test COMMAND $<TARGET_FILE:jobud-config-example-test>)
 
         add_executable(jobud-logger-test jobud-logger-test.cpp)
         target_link_libraries(jobud-logger-test PRIVATE jobud-runtime Catch2::Catch2WithMain)

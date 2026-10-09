@@ -439,7 +439,7 @@ Do not invent a parallel default-attribute type system. Assemble the `defaults.*
 
 JSON values are interpreted **after the existing INI unquoting rule**. For a JSON string use an outer INI single-quoted wrapper, e.g. `defaults.retry.mode = '"reschedule"'`; the parser removes only the outer single quotes, preserving the JSON double quotes. Numbers/booleans can be unquoted, and objects/arrays retain their normal JSON syntax. Test this two-layer boundary and show it in the configuration reference. Do not change the generic INI quote behavior or invent escaping that it does not implement.
 
-Example installed template, using substituted absolute paths:
+Illustrative excerpt of the installed template, using substituted absolute paths; the exhaustive commented sample is a Stage 9.22 deliverable specified in §11.1:
 
 ```ini
 # Flat dotted keys; no section headers or inline comments.
@@ -583,6 +583,8 @@ Provide standard `install` rules with components:
 - **Documentation:** protocol/client/CLI/operations guides and configuration reference under the configured documentation directory. Planning/handoff records need not be installed as user manuals.
 
 Install configuration as `jobud.ini.example`, not by overwriting an operator's active `jobud.ini`. Put complete service examples under `${CMAKE_INSTALL_DATADIR}/jobu/services`; an explicit system packaging profile may also stage the unit to the vendor unit directory. Activation and initial config copying remain administrator actions.
+
+Stage 9.22 must generate and install an **exhaustive, commented INI sample** from `packaging/jobud.ini.in`. Include every accepted fixed configuration key and a concrete `defaults.<name>` entry for every registered attribute accepting `DaemonDefault` scope. Full-line comments explain each directive's purpose, default or omission behavior, value type, units, accepted values/ranges, and important cross-field or security constraints. Generate operational paths from the shared CMake values. Keep deployment-specific optional examples commented out where enabling them would require an account, credential or existing external file; unsafe root permissions remain false. Document built-in attribute defaults and valid JSON spellings, including the INI single-quote wrapper for JSON strings; commented attribute examples may preserve the omitted daemon-default layer. The sample must be usable without enabling optional features merely to demonstrate their directives.
 
 ### 11.2 Exported components and dependencies
 
@@ -909,11 +911,11 @@ Update existing daemon integration fixtures that intentionally run in a root tes
 
 ### Stage 9.22 — Install targets and header closure
 
-**Depends:** 9.20–9.21. **Implement:** GNUInstallDirs, install components, BUILD_TESTING/examples switches, explicit headers including required inline support, PIC and build/install include separation. Stage examples/config/service assets without activation.
+**Depends:** 9.20–9.21. **Implement:** GNUInstallDirs, install components, BUILD_TESTING/examples switches, explicit headers including required inline support, PIC and build/install include separation. Generate and install the exhaustive, commented `jobud.ini.example` specified in §11.1. Stage examples/config/service assets without activation.
 
-**Verify:** Fresh `cmake --install`, DESTDIR file manifest, no user/config/data modification, repeated install preserving active config, header include audit, no installed source-tree paths and package build with tests/examples off.
+**Verify:** Fresh `cmake --install`, DESTDIR file manifest, no user/config/data modification, repeated install preserving active config, header include audit, no installed source-tree paths and package build with tests/examples off. Check sample completeness against the accepted fixed keys and daemon-default attribute registry; validate the generated sample with `jobud --check-config` in a protected fixture and validate documented `defaults.*` examples through the existing parser/registry.
 
-**Exit:** Standard install target works before package generators or service activation are involved.
+**Exit:** Standard install target works and delivers the exhaustive, commented configuration sample before package generators or service activation are involved.
 
 ### Stage 9.23 — Exported SDK and external consumers
 

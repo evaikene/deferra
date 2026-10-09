@@ -8,6 +8,11 @@ set(TARGET db-sqlite)
 
 message("** Setting up ${TARGET}")
 
+# Public headers and the explicit installed-header manifest.
+set(HDRS
+    sqlite_driver.hpp
+)
+
 add_library(${TARGET} STATIC)
 
 target_sources(${TARGET}
@@ -18,8 +23,7 @@ target_sources(${TARGET}
         sqlite_error.hpp
         sqlite_query.cpp
         sqlite_query_priv.hpp
-    PUBLIC
-        sqlite_driver.hpp
+        ${HDRS}
 )
 
 target_compile_features(${TARGET} PUBLIC cxx_std_20)
@@ -30,3 +34,5 @@ target_link_libraries(${TARGET}
     PRIVATE
         SQLite3::SQLite3
 )
+
+jobu_install_library(${TARGET} db/sqlite HEADERS ${HDRS})

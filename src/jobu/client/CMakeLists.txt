@@ -2,9 +2,12 @@ set(TARGET jobu-client)
 
 message("** Setting up ${TARGET}")
 
-add_library(${TARGET} STATIC)
+# Public headers and the explicit installed-header manifest.
+set(HDRS
+    control_client.hpp
+)
 
-target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+add_library(${TARGET} STATIC)
 
 target_sources(${TARGET}
     PRIVATE
@@ -12,9 +15,10 @@ target_sources(${TARGET}
         control_client_methods.cpp
         control_client_priv.hpp
         control_client_results.cpp
-    PUBLIC
-        control_client.hpp
+        ${HDRS}
 )
 
 target_compile_features(${TARGET} PUBLIC cxx_std_20)
 target_link_libraries(${TARGET} PUBLIC jobu rpc)
+
+jobu_install_library(${TARGET} jobu/client HEADERS ${HDRS})

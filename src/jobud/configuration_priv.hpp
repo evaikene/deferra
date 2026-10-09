@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -65,6 +66,10 @@ struct ConfigurationInput {
     /// A full permitted input frame fits in the accepted socket's read buffer.
     std::size_t                          rpc_read_buffer_capacity{0};
 };
+
+/// Process-lifetime inventory of accepted fixed keys, excluding registry-driven defaults.*.
+/// Parsing and sample completeness checks share this inventory; converters remain the value-policy authority.
+[[nodiscard]] auto fixed_configuration_keys() -> std::span<std::string_view const>;
 
 /// Parses and validates bounded daemon INI text without opening daemon resources.
 /// Account ownership and path trust are checked after startup precedence is resolved.

@@ -1,0 +1,29 @@
+[Unit]
+Description=JobU scheduler
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=jobu
+Group=jobu
+UMask=0077
+RuntimeDirectory=jobu
+RuntimeDirectoryMode=0700
+StateDirectory=jobu
+StateDirectoryMode=0700
+ExecStart=@JOBU_BINDIR@/jobud --config @JB_JOBU_SYSCONFDIR@/jobud.ini
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=15
+SendSIGKILL=yes
+NoNewPrivileges=yes
+LimitCORE=0
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

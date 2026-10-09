@@ -41,3 +41,5 @@ target_include_directories(${TARGET}
 target_compile_features(${TARGET} PRIVATE cxx_std_20)
 
 target_link_libraries(${TARGET} PRIVATE jobuctl-private)
+
+jobu_install_application(${TARGET})

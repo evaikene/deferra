@@ -1,0 +1,163 @@
+cmake_minimum_required(VERSION 3.20)
+
+set(build_directory [==[@CMAKE_BINARY_DIR@]==])
+set(compiler [==[@CMAKE_CXX_COMPILER@]==])
+set(binary_directory [==[@CMAKE_INSTALL_BINDIR@]==])
+set(library_directory [==[@CMAKE_INSTALL_LIBDIR@]==])
+set(include_directory [==[@CMAKE_INSTALL_INCLUDEDIR@]==])
+set(data_directory [==[@CMAKE_INSTALL_DATADIR@]==])
+set(documentation_directory [==[@CMAKE_INSTALL_DOCDIR@]==])
+set(public_headers [==[@JOBU_INSTALL_PUBLIC_HEADERS@]==])
+set(installed_headers [==[@JOBU_INSTALL_HEADERS@]==])
+set(modules [==[@JOBU_INSTALL_MODULES@]==])
+set(libraries [==[@JOBU_INSTALL_LIBRARIES@]==])
+set(applications [==[@JOBU_INSTALL_APPLICATIONS@]==])
+set(protocol_manuals [==[@JOBU_PROTOCOL_MANUALS@]==])
+set(manuals [==[@JOBU_MANUALS@]==])
+set(source_sample [==[@JOBU_CONFIG_EXAMPLE@]==])
+
+# This regression covers the normal prefix-relative GNUInstallDirs layout.
+# Absolute destination overrides are legitimate operator policy, but must never
+# cause this fixture to install outside its private staging leaf.
+foreach(directory binary_directory library_directory include_directory data_directory documentation_directory)
+    if(IS_ABSOLUTE "${${directory}}" OR "${${directory}}" MATCHES "(^|/)[.][.](/|$)")
+        message(STATUS "Unsupported install-test layout: ${directory} is not prefix-relative")
+        return()
+    endif()
+endforeach()
+execute_process(COMMAND mktemp -d /tmp/jobu-install.XXXXXX
+    RESULT_VARIABLE status OUTPUT_VARIABLE fixture OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT status EQUAL 0 OR fixture STREQUAL "")
+    message(FATAL_ERROR "private install fixture creation failed")
+endif()
+file(CHMOD "${fixture}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+set(prefix "${fixture}/prefix")
+
+function(install_to destination component)
+    set(arguments --install "${build_directory}" --prefix "${destination}")
+    if(NOT component STREQUAL "")
+        list(APPEND arguments --component "${component}")
+    endif()
+    execute_process(COMMAND "@CMAKE_COMMAND@" ${arguments}
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "install failed in ${fixture}: ${result}\n${output}\n${error}")
+    endif()
+endfunction()
+
+set(runtime_files
+    "${data_directory}/jobu/jobud.ini.example"
+    "${data_directory}/jobu/LICENSE" "${data_directory}/jobu/THIRD_PARTY_NOTICES.md"
+    "${data_directory}/jobu/services/jobud.service.in" "${data_directory}/jobu/services/README.md")
+foreach(application IN LISTS applications)
+    list(APPEND runtime_files "${binary_directory}/${application}@CMAKE_EXECUTABLE_SUFFIX@")
+endforeach()
+set(development_files
+    "${data_directory}/jobu/examples/jobu-client/CMakeLists.txt"
+    "${data_directory}/jobu/examples/jobu-client/main.cpp"
+    "${data_directory}/jobu/examples/jobu-client/idempotent_creation.cpp")
+foreach(library IN LISTS libraries)
+    list(APPEND development_files "${library_directory}/@CMAKE_STATIC_LIBRARY_PREFIX@${library}@CMAKE_STATIC_LIBRARY_SUFFIX@")
+endforeach()
+foreach(header IN LISTS installed_headers)
+    list(APPEND development_files "${include_directory}/jb/${header}")
+endforeach()
+set(documentation_files)
+foreach(manual IN LISTS manuals)
+    list(APPEND documentation_files "${documentation_directory}/${manual}")
+endforeach()
+foreach(manual IN LISTS protocol_manuals)
+    list(APPEND documentation_files "${documentation_directory}/protocol/${manual}")
+endforeach()
+
+function(check_manifest destination expected)
+    file(GLOB_RECURSE actual LIST_DIRECTORIES FALSE RELATIVE "${destination}" "${destination}/*")
+    list(SORT actual)
+    list(SORT expected)
+    if(NOT actual STREQUAL expected)
+        message(FATAL_ERROR "unexpected installed files in ${destination}\nactual=${actual}\nexpected=${expected}")
+    endif()
+endfunction()
+
+# Operator-owned files must survive both initial and repeated installation.
+set(operator_files etc/jobud.ini var/lib/operator.sqlite3 var/run/operator.lock)
+foreach(file IN LISTS operator_files)
+    get_filename_component(parent "${prefix}/${file}" DIRECTORY)
+    file(MAKE_DIRECTORY "${parent}")
+    file(WRITE "${prefix}/${file}" "operator-owned sentinel\n")
+endforeach()
+install_to("${prefix}" "")
+install_to("${prefix}" "")
+foreach(file IN LISTS operator_files)
+    file(READ "${prefix}/${file}" contents)
+    if(NOT contents STREQUAL "operator-owned sentinel\n")
+        message(FATAL_ERROR "installation changed operator file ${file}")
+    endif()
+endforeach()
+set(all_files ${runtime_files} ${development_files} ${documentation_files})
+check_manifest("${prefix}" "${all_files};${operator_files}")
+file(READ "${source_sample}" expected_sample)
+file(READ "${prefix}/${data_directory}/jobu/jobud.ini.example" installed_sample)
+if(NOT installed_sample STREQUAL expected_sample)
+    message(FATAL_ERROR "installation changed configured operational paths")
+endif()
+
+# Compile every public installed header using only installed module roots.
+# signal_priv.hpp is intentionally non-standalone and is checked via object.hpp.
+set(include_flags "-I${prefix}/${include_directory}")
+foreach(module IN LISTS modules)
+    list(APPEND include_flags "-I${prefix}/${include_directory}/jb/${module}")
+endforeach()
+foreach(header IN LISTS public_headers)
+    file(WRITE "${fixture}/header.cpp" "#include <jb/${header}>\n")
+    execute_process(COMMAND "${compiler}" -std=c++20 -fsyntax-only ${include_flags} "${fixture}/header.cpp"
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "installed header ${header} failed: ${output}\n${error}")
+    endif()
+endforeach()
+file(WRITE "${fixture}/signal.cpp"
+    "#include <jb/core/object.hpp>\nvoid check() { jb::core::Object receiver; jb::core::Signal<int> signal; signal.connect(&receiver, [](int) {}); }\n")
+execute_process(COMMAND "${compiler}" -std=c++20 -fsyntax-only ${include_flags} "${fixture}/signal.cpp"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "installed Object/Signal template failed: ${output}\n${error}")
+endif()
+
+# Check the actual installed executable/sample without opening daemon resources.
+if("jobud" IN_LIST applications)
+    execute_process(COMMAND "${prefix}/${binary_directory}/jobud" --check-config
+        --config "${prefix}/${data_directory}/jobu/jobud.ini.example"
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(NOT result EQUAL 0 OR NOT output MATCHES "Configuration valid:" OR NOT error STREQUAL "")
+        message(FATAL_ERROR "installed sample check failed: ${result}\n${output}\n${error}")
+    endif()
+    check_manifest("${prefix}" "${all_files};${operator_files}")
+endif()
+
+foreach(component Runtime Development Documentation)
+    string(TOLOWER "${component}" component_name)
+    set(component_prefix "${fixture}/${component_name}")
+    install_to("${component_prefix}" "${component}")
+    check_manifest("${component_prefix}" "${${component_name}_files}")
+endforeach()
+
+# DESTDIR changes only staging. --prefix changes destinations, not the generated
+# sample or compiled application defaults. All configured files still match.
+execute_process(COMMAND "@CMAKE_COMMAND@" -E env "DESTDIR=${fixture}/destdir"
+    "@CMAKE_COMMAND@" --install "${build_directory}" --prefix /opt/jobu-install-fixture
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "DESTDIR install failed: ${output}\n${error}")
+endif()
+set(staged_prefix "${fixture}/destdir/opt/jobu-install-fixture")
+check_manifest("${staged_prefix}" "${all_files}")
+file(READ "${staged_prefix}/${data_directory}/jobu/jobud.ini.example" staged_sample)
+if(NOT staged_sample STREQUAL expected_sample)
+    message(FATAL_ERROR "DESTDIR leaked into configuration defaults")
+endif()
+
+list(LENGTH public_headers header_count)
+message(STATUS "Installed-header audit: ${header_count} public headers and Object/Signal template passed")
+message(STATUS "Complete/component/repeated/DESTDIR installs and protected sample check passed")
+file(REMOVE_RECURSE "${fixture}")
