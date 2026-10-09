@@ -27,13 +27,15 @@ public:
     void await_work();
     void require_cleanup();
     void require_reaped() const;
-    /// Called only after unchanged shutdown state was asserted and exclusive database ownership reopened.
+    /// Called after shutdown domain/timing checks and exclusive database ownership reopened.
+    /// Repairs abandoned timing before embedded control; domain recovery stays in the next incarnation.
     void hold_recovery();
     void require_recovery(bool retry);
     void until(std::function<bool()> const& predicate);
 
     /// Independent read-only connection; no statement or ownership lock survives the call.
-    auto snapshot() const -> std::vector<std::vector<std::string>>;
+    /// Healthy stop may settle timing while preserving all domain rows; fatal comparisons include timing.
+    auto snapshot(bool include_timing = true) const -> std::vector<std::vector<std::string>>;
     auto count(std::string const& sql) const -> std::int64_t;
 
     core::Application    app{0, nullptr};

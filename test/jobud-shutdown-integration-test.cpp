@@ -119,10 +119,13 @@ TEST_CASE("SIGTERM and SIGINT stop mixed work without durable finalization", "[j
     fixture.start();
     fixture.work.await_work();
 
-    auto const running = fixture.work.snapshot();
+    auto const running = fixture.work.snapshot(false);
     fixture.stop(signal);
     fixture.work.require_cleanup();
-    REQUIRE(fixture.work.snapshot() == running);
+    REQUIRE(fixture.work.snapshot(false) == running);
+    CHECK(fixture.work.count("SELECT count(*) FROM jobu_run_timing WHERE open_epoch IS NOT NULL") == 0);
+    CHECK(fixture.work.count("SELECT count(*) FROM jobu_run_timing t JOIN jobu_runs r ON r.id=t.run_id "
+                             "WHERE r.state='scheduled' AND t.runnable_wait_us > 0") == 2);
     fixture.work.hold_recovery();
 
     fixture.start();

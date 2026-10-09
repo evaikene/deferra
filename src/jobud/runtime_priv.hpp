@@ -60,6 +60,9 @@ class EndpointGuard;
 /// admission/persistence gates, capture telemetry stop and request loop exit; run() performs healthy
 /// timing settlement and destructive cleanup after stack unwinding. Telemetry outlives its borrowers;
 /// cleanup writes are skipped after any fatal runtime failure, including late HTTP teardown failure.
+/// Telemetry activates before scheduler dispatch; retention starts after listening and Serving.
+/// Readiness requires both activations. Resolved options determine maintenance and RPC limits,
+/// including the accepted socket's input-buffer capacity.
 /// The signal predicate is polled synchronously and must not throw, mutate storage, or reenter the runtime.
 /// No Object parent is assigned to uniquely owned services. Destruction is an idempotent cleanup fallback and
 /// must not occur inside a service, executor, or signal callback.

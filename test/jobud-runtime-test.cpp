@@ -443,24 +443,83 @@ TEST_CASE("Daemon recovery precedes runner construction and scheduler startup")
     REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
 }
 
-TEST_CASE("Daemon owns dormant telemetry without activating measurement or checkpointing", "[jobud][telemetry]")
+TEST_CASE("Daemon activates configured checkpoints before dispatch and creates complete new work", "[jobud][telemetry]")
 {
+    auto           interval = GENERATE(1s, 37s);
     RuntimeFixture f;
-    auto           run = f.seed();
+    auto           running                  = f.seed(1);
+    auto           waiting                  = f.seed(2);
+    f.options.telemetry_checkpoint_interval = interval;
     f.create_runtime();
-    auto result = f.run([&] {
-        REQUIRE(RuntimeTestAccess::telemetry(*f.runtime) != nullptr);
+    REQUIRE(f.run([&] {
         detail::WaitRepository timing{f.storage.database};
-        CHECK(timing.read(run.run.id)->quality == detail::WaitQuality::Unmeasured);
-        CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
+        REQUIRE(timing.read(waiting.run.id)->open_epoch);
+        CHECK(timing.read(waiting.run.id)->quality == detail::WaitQuality::Partial);
+        CHECK_FALSE(timing.read(running.run.id)->open_epoch);
+
+        auto* management = RuntimeTestAccess::management(*f.runtime);
+        auto  created    = management->create_job({
+            .queue    = recovery_id(1),
+            .schedule = OnceSchedule{.planned_at = f.time.utc_now() + 1h},
+            .payload  = JsonValue{.data = JsonValue::Object{{"command", JsonValue{.data = std::string{"/true"}}}}},
+        });
+        REQUIRE(created);
+        detail::RunRepository runs{f.storage.database, f.storage.registry};
+        auto                  future = runs.find_schedule_owned(created->id);
+        REQUIRE(future);
+        REQUIRE(future->has_value());
+        CHECK(timing.read((**future).id)->quality == detail::WaitQuality::Complete);
+        CHECK_FALSE(timing.read((**future).id)->open_epoch);
+
+        // Isolate checkpoint cadence from scheduler wakes and the independently active retention timer.
+        RuntimeTestAccess::retention(*f.runtime)->stop();
+        RuntimeTestAccess::scheduler(*f.runtime)->shutdown();
+        REQUIRE(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 1);
+        for (int page = 1; page <= 2; ++page) {
+            f.time.advance(interval);
+            auto before = Clock::now();
+            jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+            auto after = Clock::now();
+            CHECK(timing.read(waiting.run.id)->runnable_wait_us ==
+                  std::chrono::duration_cast<std::chrono::microseconds>(page * interval).count());
+            auto deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*f.loop.loop);
+            REQUIRE(deadline);
+            CHECK(*deadline >= before + interval);
+            CHECK(*deadline <= after + interval);
+        }
         f.faults->calls.clear();
         f.runtime->request_stop();
         CHECK(f.faults->calls.empty());
         return EXIT_SUCCESS;
-    });
-    REQUIRE(result == EXIT_SUCCESS);
-    CHECK(f.faults->calls.empty());
-    f.require_running(run);
+    }) == EXIT_SUCCESS);
+    detail::WaitRepository timing{f.storage.database};
+    CHECK_FALSE(timing.read(waiting.run.id)->open_epoch);
+    f.require_running(running);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
+}
+
+TEST_CASE("Daemon recovery successors are covered before telemetry activation", "[jobud][telemetry][recovery]")
+{
+    RuntimeFixture f;
+    auto           job = f.storage.make_job(recovery_id(11), recovery_id(1));
+    job.schedule       = CronSchedule{.expression = "* * * * *", .timezone = "UTC"};
+    f.cron.set_occurrences(std::get<CronSchedule>(job.schedule), {UtcTimePoint{180s}, UtcTimePoint{240s}});
+    f.storage.insert_job(job); // Recovery must create the missing recurring occurrence.
+    f.create_runtime();
+    REQUIRE(f.run([&] {
+        detail::RunRepository runs{f.storage.database, f.storage.registry};
+        auto                  successor = runs.find_schedule_owned(job.id);
+        REQUIRE(successor);
+        REQUIRE(successor->has_value());
+        detail::WaitRepository timing{f.storage.database};
+        auto                   row = timing.read((**successor).id);
+        REQUIRE(row);
+        CHECK(row->quality == detail::WaitQuality::Complete);
+        CHECK(row->runnable_wait_us == 0);
+        CHECK_FALSE(row->open_epoch);
+        f.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
 }
 
 TEST_CASE("Daemon settles captured timing after a synchronous mutation receiver unwinds", "[jobud][telemetry][stop]")
@@ -473,7 +532,6 @@ TEST_CASE("Daemon settles captured timing after a synchronous mutation receiver 
     auto result  = f.run([&] {
         auto* telemetry = RuntimeTestAccess::telemetry(*f.runtime);
         REQUIRE(telemetry != nullptr);
-        REQUIRE(telemetry->start()); // Explicit test activation; configured activation remains Stage 9.20.
         RuntimeTestAccess::scheduler(*f.runtime)->request_rescan();
         jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
         detail::WaitRepository timing{f.storage.database};
@@ -517,7 +575,7 @@ TEST_CASE("Daemon skips healthy timing writes after fatal stop including late ru
     f.create_runtime();
     auto result = f.run([&] {
         auto* telemetry = RuntimeTestAccess::telemetry(*f.runtime);
-        REQUIRE(telemetry->start());
+        REQUIRE(telemetry != nullptr);
         RuntimeTestAccess::scheduler(*f.runtime)->request_rescan();
         jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
         detail::WaitRepository timing{f.storage.database};
@@ -564,7 +622,7 @@ TEST_CASE("Daemon telemetry failure gates admission before the notifying receive
     bool notified = false;
     auto result   = f.run([&] {
         auto* telemetry = RuntimeTestAccess::telemetry(*f.runtime);
-        REQUIRE(telemetry->start());
+        REQUIRE(telemetry != nullptr);
         telemetry->failed.connect(f.runtime.get(), [&](Error const&) {
             CHECK(f.runtime->exit_code() == EXIT_FAILURE);
             CHECK(f.runtime->state() == RuntimeState::Stopping);
@@ -575,6 +633,7 @@ TEST_CASE("Daemon telemetry failure gates admission before the notifying receive
             f.storage.reopen();
             notified = true;
         });
+        RuntimeTestAccess::retention(*f.runtime)->stop();
         f.faults->faults.push_back({
             .at    = {.boundary = "connection", .operation = DatabaseOperation::Begin},
             .error = fault_error(),
@@ -587,26 +646,60 @@ TEST_CASE("Daemon telemetry failure gates admission before the notifying receive
     require_consumed_faults(*f.faults);
 }
 
-TEST_CASE("Daemon owns dormant retention without activating configured maintenance")
+TEST_CASE("Daemon activates configured retention with inherited finite and unlimited policies", "[jobud][retention]")
 {
-    RuntimeFixture fixture;
-    auto           terminal            = fixture.seed(1, JobType::Cli, RunState::Succeeded);
-    fixture.options.default_retention  = 0s;
-    fixture.options.history_batch_size = 1;
-    fixture.create_runtime();
-    REQUIRE(fixture.run([&] {
-        REQUIRE(fixture.runtime->state() == RuntimeState::Serving);
-        REQUIRE(RuntimeTestAccess::retention(*fixture.runtime) != nullptr);
-        CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.loop.loop) == 0);
-        auto calls = fixture.faults->calls;
-        jb::core::priv::EventLoopTestAccess::fire_timers(*fixture.loop.loop, TimePoint::max());
-        CHECK(fixture.faults->calls == calls);
-        fixture.storage.require_run(terminal);
-        fixture.runtime->request_stop();
+    auto           inherited_retention = GENERATE(0s, 5s);
+    RuntimeFixture f;
+    auto           inherited                = f.seed(1, JobType::Cli, RunState::Succeeded);
+    f.options.default_retention             = inherited_retention;
+    f.options.history_batch_size            = 1;
+    f.options.history_sweep_interval        = 37s;
+    f.options.telemetry_checkpoint_interval = 86400s;
+
+    std::vector<RecoveryRunFixture> overrides;
+    for (auto suffix : {2U, 3U}) {
+        auto queue              = recovery_queue(recovery_id(suffix));
+        queue.history_retention = suffix == 2U ? 0s : 5s;
+        f.storage.insert_queue(queue);
+        auto job  = f.storage.make_job(recovery_id(suffix + 10), queue.id);
+        job.state = JobState::Succeeded;
+        auto run  = f.storage.make_run(recovery_id(suffix + 100), job, RunState::Succeeded);
+        f.storage.insert_job(job);
+        f.storage.insert_run(run);
+        overrides.push_back(std::move(run));
+    }
+    f.create_runtime();
+    REQUIRE(f.run([&] {
+        REQUIRE(f.runtime->state() == RuntimeState::Serving);
+        auto* retention = RuntimeTestAccess::retention(*f.runtime);
+        REQUIRE(retention != nullptr);
+        f.storage.require_run(inherited); // Activation arms work without purging synchronously.
+        bool swept = false;
+        retention->batch_completed.connect(f.runtime.get(), [](RetentionPurgeCounts const& counts) {
+            CHECK(counts.runs + counts.jobs + counts.queues <= 1);
+        });
+        retention->sweep_completed.connect(f.runtime.get(), [&](RetentionPurgeCounts const& counts) {
+            CHECK(counts.runs == (inherited_retention == 0s ? 1U : 2U));
+            swept = true;
+        });
+        auto before = Clock::now();
+        for (int batch = 0; batch < 20 && !swept; ++batch) {
+            jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+        }
+        auto after = Clock::now();
+        REQUIRE(swept);
+        auto deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*f.loop.loop);
+        REQUIRE(deadline);
+        CHECK(*deadline >= before + 37s);
+        CHECK(*deadline <= after + 37s);
+        detail::RunRepository runs{f.storage.database, f.storage.registry};
+        CHECK(runs.find_by_id(inherited.run.id)->has_value() == (inherited_retention == 0s));
+        f.storage.require_run(overrides.front());
+        CHECK_FALSE(runs.find_by_id(overrides.back().run.id)->has_value());
+        f.runtime->request_stop();
         return EXIT_SUCCESS;
     }) == EXIT_SUCCESS);
-    CHECK(fixture.runtime->state() == RuntimeState::Stopped);
-    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.loop.loop) == 0);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
 }
 
 TEST_CASE("Daemon retention batch receivers may synchronously request a non-SQL stop")
@@ -630,8 +723,6 @@ TEST_CASE("Daemon retention batch receivers may synchronously request a non-SQL 
             CHECK(created.error().code == "jobu.service.stopping");
             stopped = true;
         });
-        // Test-only activation occurs after Serving. Production option mapping/start remains Stage 9.20.
-        REQUIRE(retention->start());
         auto deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*fixture.loop.loop);
         REQUIRE(deadline);
         jb::core::priv::EventLoopTestAccess::fire_next_timer(*fixture.loop.loop);
@@ -673,7 +764,6 @@ TEST_CASE("Daemon retention failure closes admission after cleanup without callb
             CHECK(secret.error().code == "jobu.service.stopping");
             CHECK(RuntimeTestAccess::scheduler(*fixture.runtime)->state() == SchedulerState::Shutdown);
         });
-        REQUIRE(retention->start());
         fixture.faults->faults.push_back({
             .at    = {.boundary = "connection", .operation = DatabaseOperation::Begin},
             .error = fault_error()
@@ -692,6 +782,95 @@ TEST_CASE("Daemon retention failure closes admission after cleanup without callb
     CHECK(fixture.runtime->state() == RuntimeState::Stopped);
     CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.loop.loop) == 0);
     CHECK(fixture.record.destruction == std::vector<std::string>{"executor", "http"});
+}
+
+TEST_CASE("Daemon activation failures never announce readiness and unwind every timer", "[jobud][startup][fault]")
+{
+    OperationalLogGuard logs;
+    RuntimeFixture      f;
+    bool                dispatched = false;
+    SECTION("telemetry rejects its policy before dispatch")
+    {
+        f.options.telemetry_checkpoint_interval = 0s;
+    }
+    SECTION("retention rejects its policy after listening")
+    {
+        f.options.history_batch_size = 0;
+        dispatched                   = true;
+    }
+    auto seeded = f.seed();
+    f.create_runtime();
+    REQUIRE(f.run([] {
+        FAIL("failed activation must not enter the event loop");
+        return EXIT_SUCCESS;
+    }) == EXIT_FAILURE);
+    CHECK(f.record.starts.size() == (dispatched ? 1 : 0));
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
+    CHECK_FALSE(std::filesystem::exists(f.options.socket_path));
+    auto records = logs.capture->records();
+    CHECK(std::ranges::none_of(records, [](auto const& entry) { return entry.event == "jobud.ready"; }));
+    REQUIRE(records.back().event == "jobud.failed");
+    CHECK(records.back().fields.at("subsystem").as_string() == (dispatched ? "retention_start" : "telemetry_start"));
+    if (dispatched) {
+        f.require_running(seeded);
+    }
+    else {
+        f.storage.require_run(seeded);
+    }
+}
+
+TEST_CASE("Daemon observes early signals around every new activation boundary", "[jobud][startup][signal]")
+{
+    auto                phase = GENERATE(0, 1, 2, 3);
+    OperationalLogGuard logs;
+    RuntimeFixture      f;
+    bool                signaled = false;
+    f.create_runtime([&] {
+        auto timers  = jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop);
+        // An empty scheduler has no timer. These conditions distinguish runner construction,
+        // accounting activation, successful listen, and asynchronous maintenance activation.
+        bool reached = (phase == 0 && f.factory_calls != 0) ||
+                       (phase == 1 && timers == 1 && f.runtime->state() == RuntimeState::Recovering) ||
+                       (phase == 2 && f.runtime->state() == RuntimeState::Serving && timers == 1) ||
+                       (phase == 3 && f.runtime->state() == RuntimeState::Serving && timers == 2);
+        signaled     = signaled || reached;
+        return signaled;
+    });
+    REQUIRE(f.run([] {
+        FAIL("early termination must not enter the event loop");
+        return EXIT_FAILURE;
+    }) == EXIT_SUCCESS);
+    REQUIRE(signaled);
+    CHECK(f.record.starts.empty());
+    CHECK(f.record.destruction == std::vector<std::string>{"executor", "http"});
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
+    CHECK_FALSE(std::filesystem::exists(f.options.socket_path));
+    auto records = logs.capture->records();
+    CHECK(std::ranges::none_of(records, [](auto const& entry) { return entry.event == "jobud.ready"; }));
+}
+
+TEST_CASE("Daemon synchronous startup shutdown captures telemetry without reentrant SQL", "[jobud][startup][stop]")
+{
+    RuntimeFixture f;
+    auto           seeded = f.seed();
+    f.record.on_start     = [&] {
+        auto calls = f.faults->calls;
+        f.runtime->request_stop();
+        CHECK(f.faults->calls == calls);
+        CHECK(f.record.destruction.empty());
+    };
+    f.create_runtime();
+    REQUIRE(f.run([] {
+        FAIL("synchronous shutdown must prevent listening");
+        return EXIT_FAILURE;
+    }) == EXIT_SUCCESS);
+    detail::RunRepository runs{f.storage.database, f.storage.registry};
+    CHECK(runs.find_by_id(seeded.run.id)->value().state == RunState::Running);
+    detail::WaitRepository timing{f.storage.database};
+    CHECK(timing.read(seeded.run.id)->quality == detail::WaitQuality::Partial);
+    CHECK_FALSE(timing.read(seeded.run.id)->open_epoch);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
+    CHECK_FALSE(std::filesystem::exists(f.options.socket_path));
 }
 
 TEST_CASE("Daemon startup failures unwind runners without terminalizing durable attempts")
@@ -1415,6 +1594,142 @@ TEST_CASE("Daemon history and statistics RPC read retained data without exposing
     CHECK(result == EXIT_SUCCESS);
 }
 
+TEST_CASE("Configured RPC framing batch and connection limits reach the daemon server", "[jobud][rpc][limits]")
+{
+    RuntimeFixture f;
+    f.options.rpc_header_limit_bytes   = 1024;
+    f.options.rpc_body_limit_bytes     = std::size_t{3} * 1024U * 1024U;
+    f.options.rpc_read_buffer_capacity = f.options.rpc_body_limit_bytes + f.options.rpc_header_limit_bytes;
+    f.options.rpc_queued_output_bytes  = f.options.rpc_read_buffer_capacity;
+    f.options.rpc_max_batch_entries    = 2;
+    f.options.rpc_max_connections      = 1;
+    f.create_runtime();
+    REQUIRE(f.run([&] {
+        auto*       server = RuntimeTestAccess::rpc(*f.runtime);
+        std::string error;
+        server->connection_error.connect(f.runtime.get(),
+                                         [&](jb::rpc::ConnectionId, Error const& value) { error = value.code; });
+        auto  device = std::make_unique<MemoryIODevice>();
+        auto* raw    = device.get();
+        device->open();
+        REQUIRE(server->add_connection(std::move(device)));
+        auto extra = std::make_unique<MemoryIODevice>();
+        extra->open();
+        auto rejected = server->add_connection(std::move(extra));
+        REQUIRE_FALSE(rejected);
+        CHECK(rejected.error().code == "rpc.connection_limit");
+
+        // Accept a body beyond both original framing and transport defaults.
+        auto request_body = serialize_json(jb::rpc::detail::encode_request(std::uint64_t{1}, "system.info"));
+        REQUIRE(request_body);
+        auto padded = std::string(std::size_t{2} * 1024U * 1024U, ' ') + *request_body;
+        auto framed = jb::rpc::frame_message(padded, {.max_body_bytes = f.options.rpc_body_limit_bytes});
+        REQUIRE(framed);
+        raw->inject_input(*framed);
+        CHECK(error.empty());
+        jb::rpc::StreamFramer framer;
+        auto                  replies = framer.append(raw->take_written_data());
+        REQUIRE(replies);
+        REQUIRE(replies->size() == 1);
+        auto parsed = parse_json(replies->front());
+        REQUIRE(parsed);
+        CHECK(parsed->as_object().contains("result"));
+
+        auto batch = JsonValue::Array{};
+        for (std::uint64_t id = 1; id <= 3; ++id) {
+            batch.push_back(jb::rpc::detail::encode_request(id, "system.info"));
+        }
+        auto body = serialize_json({.data = batch});
+        REQUIRE(body);
+        raw->inject_input(jb::rpc::frame_message(*body).value());
+        replies = framer.append(raw->take_written_data());
+        REQUIRE(replies);
+        REQUIRE(replies->size() == 1);
+        auto rejected_batch = parse_json(replies->front());
+        REQUIRE(rejected_batch);
+        CHECK(rejected_batch->as_object().contains("error"));
+        batch.pop_back();
+        raw->inject_input(jb::rpc::frame_message(serialize_json({.data = batch}).value()).value());
+        replies = framer.append(raw->take_written_data());
+        REQUIRE(replies);
+        REQUIRE(replies->size() == 1);
+        auto accepted_batch = parse_json(replies->front());
+        REQUIRE(accepted_batch);
+        REQUIRE(accepted_batch->is_array());
+        CHECK(accepted_batch->as_array().size() == 2);
+
+        SECTION("configured header bound closes only the connection")
+        {
+            raw->inject_input(std::string(1025, 'x'));
+            CHECK(error == "rpc.framing.header_too_large");
+        }
+        SECTION("configured body bound rejects an oversized declaration")
+        {
+            raw->inject_input("Content-Length: 3145729\r\n\r\n");
+            CHECK(error == "rpc.framing.body_too_large");
+        }
+        CHECK(server->connection_count() == 0);
+        CHECK(f.runtime->state() == RuntimeState::Serving);
+        f.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+}
+
+TEST_CASE("Configured RPC output budgets close oversized and overflowing connections", "[jobud][rpc][limits]")
+{
+    RuntimeFixture f;
+    f.options.rpc_queued_output_bytes = f.options.rpc_body_limit_bytes + f.options.rpc_header_limit_bytes;
+    f.create_runtime();
+    REQUIRE(f.run([&] {
+        auto* server = RuntimeTestAccess::rpc(*f.runtime);
+        SECTION("an unbounded generic reply obeys the configured framing bound")
+        {
+            REQUIRE(server->register_method("test.large", [&](auto const&, auto const&) {
+                return jb::rpc::MethodResult::success({.data = std::string(f.options.rpc_body_limit_bytes, 'x')});
+            }));
+            auto  device = std::make_unique<MemoryIODevice>();
+            auto* raw    = device.get();
+            device->open();
+            REQUIRE(server->add_connection(std::move(device)));
+            std::string error;
+            server->connection_error.connect(f.runtime.get(),
+                                             [&](jb::rpc::ConnectionId, Error const& value) { error = value.code; });
+            auto frame = jb::rpc::frame_message(
+                             serialize_json(jb::rpc::detail::encode_request(std::uint64_t{1}, "test.large")).value())
+                             .value();
+            raw->inject_input(frame);
+            CHECK(error == "rpc.framing.body_too_large");
+            CHECK(server->connection_count() == 0);
+        }
+        SECTION("unacknowledged replies exhaust the configured queue before its old default")
+        {
+            REQUIRE(server->register_method("test.large", [](auto const&, auto const&) {
+                return jb::rpc::MethodResult::success({.data = std::string(700'000, 'x')});
+            }));
+            auto  device = std::make_unique<MemoryIODevice>();
+            auto* raw    = device.get();
+            device->open();
+            device->set_auto_acknowledge_writes(false);
+            REQUIRE(server->add_connection(std::move(device)));
+            std::string error;
+            server->connection_error.connect(f.runtime.get(),
+                                             [&](jb::rpc::ConnectionId, Error const& value) { error = value.code; });
+            auto frame = jb::rpc::frame_message(
+                             serialize_json(jb::rpc::detail::encode_request(std::uint64_t{1}, "test.large")).value())
+                             .value();
+            raw->inject_input(frame);
+            CHECK(error.empty());
+            CHECK(raw->unacknowledged_bytes() > 700'000);
+            raw->inject_input(frame);
+            CHECK(error == "rpc.output_limit");
+            CHECK(server->connection_count() == 0);
+        }
+        CHECK(f.runtime->state() == RuntimeState::Serving);
+        f.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+}
+
 TEST_CASE("Statistics response budgets include measured fields and preserve read admission", "[jobud][statistics][rpc]")
 {
     RuntimeFixture fixture;
@@ -2028,15 +2343,11 @@ TEST_CASE("Daemon logs committed delays and completed sweeps through service sub
     auto waiting = f.seed(2);
     f.create_runtime();
     REQUIRE(f.run([&] {
-        auto* telemetry = RuntimeTestAccess::telemetry(*f.runtime);
-        REQUIRE(telemetry->start()); // Production activation remains Stage 9.20.
         RuntimeTestAccess::scheduler(*f.runtime)->request_rescan();
         jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
         f.time.advance(11s);
         RuntimeTestAccess::scheduler(*f.runtime)->request_rescan();
         jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
-        auto* retention = RuntimeTestAccess::retention(*f.runtime);
-        REQUIRE(retention->start());
         for (int step = 0; step < 20; ++step) {
             auto records = logs.capture->records();
             if (std::ranges::any_of(records,

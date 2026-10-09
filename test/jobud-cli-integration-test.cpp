@@ -979,17 +979,17 @@ TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls
     CHECK(counts.at("runs").as_object().at("total").as_uint() >= 1);
     CHECK(counts.at("attempts").as_object().at("total").as_uint() >= 2);
 
-    // Dormant telemetry leaves the completed run Unmeasured; API availability still requires an empty duration.
+    // New production work is measured from creation, including wait across both retry attempts.
     REQUIRE(counts.at("runnable_wait_ms").is_object());
     auto const& wait = counts.at("runnable_wait_ms").as_object();
-    CHECK(wait.at("samples").as_uint() == 0);
-    CHECK(wait.at("average").is_null());
-    CHECK(wait.at("maximum").is_null());
+    CHECK(wait.at("samples").as_uint() == counts.at("runs").as_object().at("total").as_uint());
+    CHECK(wait.at("average").is_double());
+    CHECK(wait.at("maximum").is_double());
 
     auto const& coverage = counts.at("runnable_wait_coverage").as_object();
-    CHECK(coverage.at("complete").as_uint() == 0);
+    CHECK(coverage.at("complete").as_uint() == counts.at("runs").as_object().at("total").as_uint());
     CHECK(coverage.at("partial").as_uint() == 0);
-    CHECK(coverage.at("unmeasured").as_uint() == counts.at("runs").as_object().at("total").as_uint());
+    CHECK(coverage.at("unmeasured").as_uint() == 0);
     CHECK(coverage.at("unfinished").as_uint() == 0);
     CHECK(stats.as_object().at("measurement").as_object().at("runnable_wait").as_string() == "monotonic_observed");
 

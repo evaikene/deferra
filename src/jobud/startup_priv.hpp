@@ -48,7 +48,7 @@ struct LoadedConfiguration {
     std::optional<std::filesystem::path> source_path;
 };
 
-/// Immutable resolved settings; consumers may be wired in later Phase 9 stages.
+/// Immutable resolved settings copied by runtime collaborators at startup.
 struct StartupOptions {
     std::filesystem::path                socket_path;
     std::filesystem::path                database_path;

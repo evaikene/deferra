@@ -259,7 +259,9 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
             return false;
         }
         state                      = RuntimeState::Recovering;
-        auto const recovery_policy = jb::jobu::RecoveryOptions{};
+        // New recovery successors have no online wait before the owner activates below.
+        // Existing unmeasured or abandoned intervals retain their recovery quality rules.
+        auto const recovery_policy = jb::jobu::RecoveryOptions{.telemetry_covers_creation = true};
         auto       recovered       = jb::jobu::detail::recover_startup(database,
                                                                        attributes,
                                                                        cron,
@@ -284,13 +286,22 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         using namespace jb::jobu;
 
         auto rpc_options                      = jb::rpc::ServerOptions{};
+        rpc_options.framing.max_header_bytes  = options.rpc_header_limit_bytes;
+        rpc_options.framing.max_body_bytes    = options.rpc_body_limit_bytes;
+        rpc_options.max_batch_entries         = options.rpc_max_batch_entries;
+        rpc_options.max_connections           = options.rpc_max_connections;
+        rpc_options.max_queued_output_bytes   = options.rpc_queued_output_bytes;
         rpc_options.response_limit_error_code = "jobu.response.too_large";
 
-        // Recovery is complete. Establish all failure receivers before start() can dispatch synchronously.
-        // Stage 9.20 activates configured telemetry. Establish its ownership and borrowed
-        // collaborators now, following the same dormant-service boundary as retention.
-        telemetry             = std::make_unique<ExecutionTelemetry>(database, attributes, time_source, uuid_generator);
-        auto scheduler_policy = scheduler_options(options);
+        // Scheduler construction registers the actual executor capabilities with the inactive
+        // telemetry owner. Every failure receiver is installed before activation or dispatch.
+        telemetry = std::make_unique<ExecutionTelemetry>(
+            database,
+            attributes,
+            time_source,
+            uuid_generator,
+            TelemetryOptions{.checkpoint_interval = options.telemetry_checkpoint_interval});
+        auto scheduler_policy      = scheduler_options(options);
         scheduler_policy.telemetry = telemetry.get();
         scheduler                  = std::make_unique<Scheduler>(database,
                                                                  attributes,
@@ -316,11 +327,16 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
                                                          time_source,
                                                          StatisticsServiceOptions{.runnable_wait_available = true});
         history    = std::make_unique<HistoryService>(database, attributes, uuid_generator, time_source);
-        // Stage 9.20 maps configuration and activates this service only after Serving.
-        // Establish ownership/failure/stop gates now; construction and dormant teardown perform no SQL.
-        retention  = std::make_unique<RetentionService>(database, attributes, time_source);
-        listener   = std::make_unique<jb::net::LocalServer>();
-        rpc        = std::make_unique<jb::rpc::Server>(std::move(rpc_options));
+        // Retention borrows the same database and starts asynchronously only after listening.
+        retention =
+            std::make_unique<RetentionService>(database,
+                                               attributes,
+                                               time_source,
+                                               RetentionOptions{.default_retention = options.default_retention,
+                                                                .sweep_interval    = options.history_sweep_interval,
+                                                                .batch_size        = options.history_batch_size});
+        listener = std::make_unique<jb::net::LocalServer>();
+        rpc      = std::make_unique<jb::rpc::Server>(std::move(rpc_options));
 
         scheduler->failed.connect(owner, [this](jb::core::Error const& error) { fail("scheduler", error); });
         management->failed.connect(owner, [this](jb::core::Error const& error) { fail("management", error); });
@@ -390,7 +406,16 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
             log_failure("jobud.rpc.connection_failed", "rpc", error.code);
         });
 
-        // Readiness requires successful scheduler startup; listening must not expose a partially started runtime.
+        // Activate accounting before the first scheduler pass and any executor start.
+        // Listening must not expose a partially started runtime.
+        if (poll_stop() || check_http_failure() || !check_endpoint()) {
+            return false;
+        }
+        auto measured = telemetry->start();
+        if (!measured) {
+            fail("telemetry_start", measured.error());
+            return false;
+        }
         if (poll_stop() || check_http_failure() || !check_endpoint()) {
             return false;
         }
@@ -404,12 +429,23 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         if (poll_stop() || check_http_failure() || !check_endpoint()) {
             return false;
         }
+        // The transport must accept a full configured frame. Preserve main's already
+        // authorized ownership and mode while replacing the independent buffer default.
+        listener_options.accepted_read_buffer_limit = options.rpc_read_buffer_capacity;
         if (!listener->listen(options.socket_path, listener_options)) {
             fail("listener", runtime_error("jobud.listen.failed"));
             return false;
         }
         state = RuntimeState::Serving;
         if (poll_stop()) {
+            return false;
+        }
+        auto maintained = retention->start();
+        if (!maintained) {
+            fail("retention_start", maintained.error());
+            return false;
+        }
+        if (poll_stop() || check_http_failure()) {
             return false;
         }
         jb::core::log_event(jb::core::LogLevel::Info, "jobud.ready");

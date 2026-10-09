@@ -179,7 +179,9 @@ TEST_CASE("jobuctl renders the same persisted measured statistics as the service
     using namespace jb::jobu;
     using namespace jb::test;
     RecoveryFixture storage;
-    auto            queue = recovery_queue(recovery_id(1));
+    auto            queue   = recovery_queue(recovery_id(1));
+    // Preserve the fixed historical cohort while the native daemon runs retention maintenance.
+    queue.history_retention = 0s;
     storage.insert_queue(queue);
     auto const qualities = std::array<std::string_view, 4>{"complete", "complete", "partial", "unmeasured"};
     auto const waits     = std::array<std::int64_t, 4>{0, 1'500, 9'000'000, 0};

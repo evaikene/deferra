@@ -4,15 +4,18 @@
 #include "client.hpp"
 #include "cron.hpp"
 #include "event_loop.hpp"
+#include "framing.hpp"
 #include "job_repository_priv.hpp"
 #include "json.hpp"
 #include "local_socket.hpp"
 #include "management_json.hpp"
 #include "process.hpp"
 #include "protocol.hpp"
+#include "protocol_priv.hpp"
 #include "query.hpp"
 #include "queue_repository_priv.hpp"
 #include "run_repository_priv.hpp"
+#include "statistics_json.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/http_test_server.hpp"
 #include "support/process_exit_watch.hpp"
@@ -351,6 +354,38 @@ public:
         return value;
     }
 
+    auto logged(std::string_view event) const -> bool { return log.find(event) != std::string::npos; }
+
+    void padded_info()
+    {
+        jb::net::LocalSocket socket;
+        bool                 connected = false;
+        socket.connected.connect(&app, [&] { connected = true; });
+        socket.connect_to_server(socket_path);
+        until([&] { return connected; });
+
+        // Whitespace enlarges the real frame without changing system.info's request contract.
+        auto request = serialize_json(jb::rpc::detail::encode_request(std::uint64_t{1}, "system.info"));
+        REQUIRE(request);
+        auto body   = std::string((std::size_t{2} * 1024U * 1024U) + 1U, ' ') + *request;
+        auto framed = jb::rpc::frame_message(body, {.max_body_bytes = std::size_t{3} * 1024U * 1024U});
+        REQUIRE(framed);
+        jb::rpc::StreamFramer    framer;
+        std::optional<JsonValue> reply;
+        socket.ready_read.connect(&app, [&] {
+            auto bodies = framer.append(socket.read_all());
+            REQUIRE(bodies);
+            for (auto const& response : *bodies) {
+                auto parsed = parse_json(response);
+                REQUIRE(parsed);
+                reply = std::move(*parsed);
+            }
+        });
+        REQUIRE(socket.write(*framed) == framed->size());
+        until([&] { return reply.has_value(); });
+        CHECK(reply->as_object().contains("result"));
+    }
+
     void running(JobType type, std::size_t http_request = 1)
     {
         if (type == JobType::Cli) {
@@ -461,8 +496,10 @@ void require_interrupted(CrashFixture& fixture, RecoveryRunFixture before, bool 
     last.attempt.outcome      = AttemptOutcome::Interrupted;
     last.attempt.completed_at = completed;
     last.attempt.result       = *document;
-    last.output      = AttemptOutput{.stdout_bytes = ByteBuffer{}, .stderr_bytes = ByteBuffer{}, .capture_lost = true};
-    before.run.state = retry ? RunState::RetryWait : RunState::Interrupted;
+    last.output               = jb::jobu::detail::AttemptOutput{.stdout_bytes = ByteBuffer{},
+                                                                .stderr_bytes = ByteBuffer{},
+                                                                .capture_lost = true};
+    before.run.state          = retry ? RunState::RetryWait : RunState::Interrupted;
     if (retry) {
         auto const clock_delay = std::chrono::duration_cast<UtcTimePoint::duration>(delay);
         REQUIRE(clock_delay == delay);
@@ -571,9 +608,10 @@ TEST_CASE("daemon restart executes the next attempt of the same immutable run", 
     expected.attempts.front().attempt.outcome      = AttemptOutcome::Interrupted;
     expected.attempts.front().attempt.completed_at = actual.attempts.front().attempt.completed_at;
     expected.attempts.front().attempt.result       = *document;
-    expected.attempts.front().output =
-        AttemptOutput{.stdout_bytes = ByteBuffer{}, .stderr_bytes = ByteBuffer{}, .capture_lost = true};
-    auto const& second = actual.attempts.back();
+    expected.attempts.front().output               = jb::jobu::detail::AttemptOutput{.stdout_bytes = ByteBuffer{},
+                                                                                     .stderr_bytes = ByteBuffer{},
+                                                                                     .capture_lost = true};
+    auto const& second                             = actual.attempts.back();
     CHECK(second.attempt.run_id == seed.run.id);
     CHECK(second.attempt.attempt_number == 2);
     CHECK(second.attempt.due_at == *actual.attempts.front().attempt.completed_at);
@@ -889,12 +927,139 @@ TEST_CASE("daemon schema rejection leaves recovery rows untouched and never list
     fixture.storage.require_run(running);
 }
 
+TEST_CASE("Configured foreground daemon measures mixed work maintains history and preserves replay across restart",
+          "[jobud][phase9][configuration][integration]")
+{
+    require_execution_environment(JobType::Cli);
+    CrashFixture f;
+    f.configuration = "schedule.default_timezone = Europe/Tallinn\n"
+                      "defaults.retry.max_attempts = 1\n"
+                      "history.default_retention = 1s\n"
+                      "history.sweep_interval = 1s\n"
+                      "history.batch_size = 1\n"
+                      "telemetry.checkpoint_interval = 1s\n"
+                      "rpc.header_limit_bytes = 1k\n"
+                      "rpc.body_limit_bytes = 3m\n"
+                      "rpc.queued_output_bytes = 4m\n"
+                      "rpc.max_batch_entries = 2\n"
+                      "rpc.max_connections = 4\n";
+
+    // Old inherited history must expire; a finite default must preserve an unlimited override.
+    auto queue                  = recovery_queue(recovery_id(1));
+    queue.concurrency_limit     = 2;
+    queue.runnable_wait_warning = 1ms;
+    f.storage.insert_queue(queue);
+    auto unlimited              = recovery_queue(recovery_id(2));
+    unlimited.history_retention = 0s;
+    f.storage.insert_queue(unlimited);
+    for (auto id : {1U, 2U}) {
+        auto job  = f.storage.make_job(recovery_id(id + 10), recovery_id(id));
+        job.state = JobState::Succeeded;
+        f.storage.insert_job(job);
+        f.storage.insert_run(f.storage.make_run(recovery_id(id + 100), job, RunState::Succeeded));
+    }
+    f.start(true);
+    f.padded_info();
+    f.until([&] { return f.count("SELECT count(*) FROM jobu_runs WHERE state='succeeded'") == 1; });
+    CHECK(f.count("SELECT count(*) FROM jobu_runs WHERE queue_id=x'00000000000070008000000000000002'") == 1);
+
+    // Keep newly completed work while checking its statistics and restart replay. The inherited
+    // finite policy above has already run through the production timer and repository.
+    auto updated = update_queue_request_to_json({.queue = queue.id, .history_retention = std::chrono::seconds{0}},
+                                                f.storage.registry);
+    REQUIRE(updated);
+    f.rpc("queue.update", *updated);
+
+    auto cli = CreateJobRequest{
+        .queue    = queue.id,
+        .schedule = OnceSchedule{.planned_at = UtcClock::now()},
+        .payload  = f.job(JobType::Cli).payload,
+    };
+    auto cli_request = create_job_request_to_json(cli, f.storage.registry);
+    REQUIRE(cli_request);
+    auto cli_created = f.rpc("job.create", *cli_request);
+    CHECK(cli_created.as_object().at("attributes").as_object().at("retry.max_attempts").as_uint() == 1);
+    std::optional<pid_t> target;
+    f.until([&] {
+        if (!target) {
+            target = f.report.ready_pid();
+        }
+        return target.has_value();
+    });
+
+    auto http = CreateJobRequest{
+        .queue    = queue.id,
+        .type     = JobType::Http,
+        .schedule = OnceSchedule{.planned_at = UtcClock::now()},
+        .payload  = f.job(JobType::Http).payload,
+    };
+    auto http_request = create_job_request_to_json(http, f.storage.registry);
+    REQUIRE(http_request);
+    f.rpc("job.create", *http_request);
+    f.until([&] { return f.server.requests().size() == 1; });
+    REQUIRE(f.count("SELECT count(*) FROM jobu_runs WHERE state='running'") == 2);
+    f.rpc("job.create", *http_request);
+
+    // Held CLI/HTTP operations occupy both queue slots. Warning delivery and a persisted
+    // checkpoint prove production observation also reaches the third, capacity-starved run.
+    f.until([&] {
+        return f.logged("jobud.run.delayed") &&
+               f.count("SELECT count(*) FROM jobu_run_timing WHERE open_epoch IS NOT NULL "
+                       "AND runnable_wait_us > 1000 AND delay_warned=1 AND measurement_status='complete'") == 1;
+    });
+    f.release.release();
+    f.server.enqueue_response({});
+    f.server.enqueue_response({});
+    f.server.release_responses();
+    f.until([&] { return f.count("SELECT count(*) FROM jobu_runs WHERE state='succeeded'") == 4; });
+
+    auto query = queue_statistics_request_to_json(QueueStatisticsQuery{.selector = queue.id});
+    REQUIRE(query);
+    auto        stats = f.rpc("queue.stats", *query);
+    auto const& group = stats.as_object().at("groups").as_array().front().as_object();
+    CHECK(group.at("runnable_wait_coverage").as_object().at("complete").as_uint() == 3);
+    CHECK(group.at("runnable_wait_ms").as_object().at("samples").as_uint() == 3);
+    CHECK(stats.as_object().at("measurement").as_object().at("runnable_wait").as_string() == "monotonic_observed");
+
+    auto cron = CreateJobRequest{
+        .queue           = queue.id,
+        .schedule        = CronScheduleInput{.expression = "@daily"},
+        .payload         = JsonValue{.data = JsonValue::Object{{"command", text("/true")}}},
+        .idempotency_key = "configured-cron-replay",
+    };
+    auto cron_request = create_job_request_to_json(cron, f.storage.registry);
+    REQUIRE(cron_request);
+    auto accepted = f.rpc("job.create", *cron_request);
+    CHECK(accepted.as_object().at("schedule").as_object().at("timezone").as_string() == "Europe/Tallinn");
+    CHECK(accepted.as_object().at("attributes").as_object().at("retry.max_attempts").as_uint() == 1);
+    f.until([&] { return f.logged("jobud.retention.completed"); });
+    auto output = f.stop_and_logs();
+    CHECK(output.find("jobud.ready") < output.find("jobud.retention.completed"));
+    CHECK(output.find("jobud.run.delayed") != std::string::npos);
+    CHECK(output.find("jobud.stopped") != std::string::npos);
+
+    f.configuration = "schedule.default_timezone = UTC\n"
+                      "defaults.retry.max_attempts = 2\n"
+                      "history.default_retention = 0\n";
+    f.start();
+    CHECK(f.rpc("job.create", *cron_request) == accepted);
+    cron.idempotency_key = "configured-cron-new-defaults";
+    auto new_request     = create_job_request_to_json(cron, f.storage.registry);
+    REQUIRE(new_request);
+    auto new_job = f.rpc("job.create", *new_request);
+    CHECK(new_job.as_object().at("schedule").as_object().at("timezone").as_string() == "UTC");
+    CHECK(new_job.as_object().at("attributes").as_object().at("retry.max_attempts").as_uint() == 2);
+    f.stop_and_logs();
+}
+
 TEST_CASE("Configured daemon logs readiness and final graceful exit in JSON and text", "[jobud][logging][integration]")
 {
     auto const   format = GENERATE(std::string{"json"}, std::string{"text"});
     CrashFixture fixture;
     fixture.configuration = "logging.format = " + format + "\nlogging.level = info\n";
     fixture.start();
+    // Wait for the asynchronous initial sweep so lifecycle ordering is independent of process speed.
+    fixture.until([&] { return fixture.logged("jobud.retention.completed"); });
     auto const               output    = fixture.stop_and_logs();
     auto                     remaining = std::string_view{output};
     std::vector<std::string> events;
@@ -925,7 +1090,8 @@ TEST_CASE("Configured daemon logs readiness and final graceful exit in JSON and 
         expected.emplace_back("jobud.unsafe.root_daemon");
     }
 #endif
-    expected.insert(expected.end(), {"jobud.recovery.completed", "jobud.ready", "jobud.stopped"});
+    expected.insert(expected.end(),
+                    {"jobud.recovery.completed", "jobud.ready", "jobud.retention.completed", "jobud.stopped"});
     REQUIRE(events == expected);
 }
 
