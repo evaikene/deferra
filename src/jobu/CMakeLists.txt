@@ -169,7 +169,7 @@ target_link_libraries(${TARGET}
         rpc
 )
 
-jobu_install_library(${TARGET} jobu HEADERS ${HDRS})
+jobu_install_library(${TARGET} jobu COMPONENT Jobu HEADERS ${HDRS})
 
 add_subdirectory(http)
 add_subdirectory(cli)

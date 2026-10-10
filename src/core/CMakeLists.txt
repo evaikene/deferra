@@ -105,8 +105,8 @@ target_compile_features(${TARGET} PUBLIC cxx_std_20)
 
 target_link_libraries(${TARGET}
     PUBLIC fmt::fmt
-    PRIVATE nlohmann_json::nlohmann_json
+    PRIVATE $<BUILD_INTERFACE:nlohmann_json::nlohmann_json>
 )
 
-jobu_install_library(${TARGET} core HEADERS ${HDRS}
+jobu_install_library(${TARGET} core COMPONENT Core HEADERS ${HDRS}
     SUPPORT_HEADERS event_loop_backend.hpp object_priv.hpp signal_priv.hpp thread_context.hpp timer_heap.hpp)

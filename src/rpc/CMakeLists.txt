@@ -30,4 +30,4 @@ target_compile_features(${TARGET} PUBLIC cxx_std_20)
 
 target_link_libraries(${TARGET} PUBLIC core)
 
-jobu_install_library(${TARGET} rpc HEADERS ${HDRS})
+jobu_install_library(${TARGET} rpc COMPONENT Rpc HEADERS ${HDRS})

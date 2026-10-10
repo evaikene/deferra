@@ -4,7 +4,7 @@ find_package(OpenSSL REQUIRED)
 enable_testing()
 
 # Installation is checked in a fresh private prefix. No deployment identities or
-# service-manager access are required; SDK exports are verified in the next stage.
+# service-manager access are required. The SDK gate uses independent consumers.
 get_property(JOBU_INSTALL_LIBRARIES GLOBAL PROPERTY JOBU_INSTALL_LIBRARIES)
 get_property(JOBU_INSTALL_MODULES GLOBAL PROPERTY JOBU_INSTALL_MODULES)
 get_property(JOBU_INSTALL_PUBLIC_HEADERS GLOBAL PROPERTY JOBU_INSTALL_PUBLIC_HEADERS)
@@ -17,6 +17,8 @@ add_test(NAME jobu-install-test COMMAND ${CMAKE_COMMAND}
     -P "${CMAKE_CURRENT_BINARY_DIR}/jobu-install-test.cmake")
 set_tests_properties(jobu-install-test PROPERTIES TIMEOUT 180
     SKIP_REGULAR_EXPRESSION "Unsupported install-test layout:")
+
+include(jobu-sdk-test.cmake)
 
 # Generic forwarding/fault support, independent of SQLite and JobU.
 add_executable(fault-database-driver-test

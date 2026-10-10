@@ -39,4 +39,4 @@ target_link_libraries(${TARGET}
         CURL::libcurl
 )
 
-jobu_install_library(${TARGET} net/http HEADERS ${HDRS})
+jobu_install_library(${TARGET} net/http COMPONENT HTTP HEADERS ${HDRS})
