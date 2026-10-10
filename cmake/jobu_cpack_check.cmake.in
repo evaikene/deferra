@@ -1,0 +1,30 @@
+cmake_minimum_required(VERSION 3.20)
+
+if(NOT CPACK_GENERATOR STREQUAL "TGZ")
+    message(FATAL_ERROR "JobU supports TGZ component artifacts in this phase")
+endif()
+if(CPACK_INSTALLED_DIRECTORIES)
+    message(FATAL_ERROR "Source-directory packaging is unsupported; use the installed component artifacts")
+endif()
+
+# Metadata captures CMAKE_BUILD_TYPE at configuration time. A CPack -C choice
+# cannot identify the compiled configuration in a multi-config producer.
+if("@JOBU_PACKAGE_MULTI_CONFIG@")
+    message(FATAL_ERROR "JobU TGZ packaging requires a single-config generator; multi-config producers are unsupported")
+endif()
+if("@CMAKE_BUILD_TYPE@" STREQUAL "")
+    message(FATAL_ERROR "JobU TGZ packaging requires an explicit CMAKE_BUILD_TYPE; configure a fresh Release producer")
+endif()
+
+if(NOT "@JB_PACKAGE_REMAP_PATHS@")
+    message(FATAL_ERROR "Configure a fresh producer with JB_PACKAGE_REMAP_PATHS=ON before packaging")
+endif()
+foreach(directory [==[@CMAKE_INSTALL_BINDIR@]==] [==[@CMAKE_INSTALL_LIBDIR@]==]
+    [==[@CMAKE_INSTALL_INCLUDEDIR@]==] [==[@CMAKE_INSTALL_DATADIR@]==] [==[@CMAKE_INSTALL_DOCDIR@]==])
+    if(IS_ABSOLUTE "${directory}" OR directory MATCHES "(^|/)[.][.](/|$)")
+        message(FATAL_ERROR "JobU TGZ destinations must remain within a prefix: ${directory}")
+    endif()
+endforeach()
+if("@CMAKE_CROSSCOMPILING@" OR NOT "@CMAKE_SYSTEM_NAME@" STREQUAL "Linux")
+    message(FATAL_ERROR "Native Linux dependency inspection is required; other artifact platforms remain unverified")
+endif()

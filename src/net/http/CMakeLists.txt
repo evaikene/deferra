@@ -1,4 +1,5 @@
 find_package(CURL 7.85 REQUIRED)
+set_property(GLOBAL PROPERTY JOBU_CURL_VERSION "${CURL_VERSION_STRING}")
 
 set(TARGET net-http)
 

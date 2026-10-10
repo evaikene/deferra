@@ -1,0 +1,64 @@
+cmake_minimum_required(VERSION 3.20)
+
+set(components Runtime Development Documentation)
+set(data_directory [==[@CMAKE_INSTALL_DATADIR@]==])
+set(binary_directory [==[@CMAKE_INSTALL_BINDIR@]==])
+set(applications [==[@JOBU_PACKAGE_APPLICATIONS@]==])
+set(forbidden_paths [==[@PROJECT_SOURCE_DIR@;@PROJECT_BINARY_DIR@]==])
+find_program(ldd_program ldd REQUIRED)
+find_program(strings_program strings REQUIRED)
+
+# Inspect the actual staged executables, including libcurl's transitive native
+# requirements. Record stable names rather than ASLR addresses or staging paths.
+set(runtime_root "${CPACK_TEMPORARY_DIRECTORY}/Runtime")
+set(dependency_report "Native runtime dependencies (external; shared-library files are not bundled)\n")
+foreach(application IN LISTS applications)
+    execute_process(COMMAND "${ldd_program}" "${runtime_root}/${binary_directory}/${application}"
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "Cannot inspect runtime dependencies of ${application}: ${output}${error}")
+    endif()
+    if("${output}${error}" MATCHES "not found|Error loading shared library")
+        message(FATAL_ERROR "Unresolved runtime dependency of ${application}: ${output}${error}")
+    endif()
+    string(REGEX REPLACE "[ \t]+\\(0x[0-9a-fA-F]+\\)" "" output "${output}")
+    string(APPEND dependency_report "\n${application}:\n${output}")
+endforeach()
+# CPack has already captured the installed entry list. Update an existing entry
+# so native dependency details are included in the Runtime archive.
+file(APPEND "${runtime_root}/${data_directory}/jobu/package/build-info-runtime.txt" "\n${dependency_report}")
+
+file(MAKE_DIRECTORY "${CPACK_PACKAGE_DIRECTORY}")
+foreach(component IN LISTS components)
+    set(root "${CPACK_TEMPORARY_DIRECTORY}/${component}")
+    string(TOUPPER "${component}" component_upper)
+    set(archive_name "${CPACK_ARCHIVE_${component_upper}_FILE_NAME}.tar.gz")
+    # Enumerating only CPack's staged install is an inventory operation; package
+    # inputs continue to come exclusively from explicit install rules.
+    file(GLOB_RECURSE files LIST_DIRECTORIES FALSE RELATIVE "${root}" "${root}/*")
+    list(SORT files)
+    set(manifest "")
+    foreach(file IN LISTS files)
+        if(IS_SYMLINK "${root}/${file}" OR file MATCHES "(^|/)[.][.](/|$)")
+            message(FATAL_ERROR "Unexpected symlink or escaping package entry: ${file}")
+        endif()
+        execute_process(COMMAND "${strings_program}" -a "${root}/${file}"
+            RESULT_VARIABLE result OUTPUT_VARIABLE contents ERROR_VARIABLE error)
+        if(NOT result EQUAL 0)
+            message(FATAL_ERROR "Cannot inspect package entry ${file}: ${error}")
+        endif()
+        foreach(forbidden IN LISTS forbidden_paths)
+            string(FIND "${contents}" "${forbidden}" position)
+            if(NOT position EQUAL -1)
+                message(FATAL_ERROR "Package entry ${file} contains a producer path: ${forbidden}")
+            endif()
+        endforeach()
+        file(SHA256 "${root}/${file}" hash)
+        string(APPEND manifest "${hash}  ${file}\n")
+    endforeach()
+    # A sidecar covers every payload file and is delivered beside the archive.
+    # New entries written into staging here would be absent from CPack's list.
+    set(inventory "${CPACK_PACKAGE_DIRECTORY}/${archive_name}.files.sha256")
+    file(WRITE "${inventory}" "${manifest}")
+    file(CHMOD "${inventory}" PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
+endforeach()

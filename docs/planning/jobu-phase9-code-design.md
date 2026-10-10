@@ -633,6 +633,8 @@ Disable CMake user/system package registries in these checks. Prevent source/bui
 
 Use CPack TGZ component packaging for the first supported distributable artifacts: runtime, development, and documentation, with a documented way to produce the complete set. Package names include project version, OS and architecture; build metadata records compiler/runtime, external library dependencies, source commit and build options. Generate manifests/checksums locally. Signing, uploading and release creation are separate user-authorized actions.
 
+Release packaging uses a fresh, clean checkout of the selected revision and a fresh build directory. Keep source contents and revision unchanged from CMake configuration through compilation and packaging; after a change, start again with a fresh checkout and build directory. Source revision/state are a configuration-time snapshot, with no build-time refresh or later source-change detection. Package producers use a single-config generator with an explicit `CMAKE_BUILD_TYPE` (Release for the documented workflow). Reject multi-config producers and an empty build type at packaging preflight; these restrictions do not disable ordinary developer multi-config builds.
+
 Include LICENSE and relevant third-party notices; do not claim bundled dependencies that are merely dynamically linked on the build host. State minimum tested OS/runtime and how fmt/libcurl/SQLite runtime requirements are satisfied. Check dynamic dependencies on the native host. An archive is not automatically portable across Linux distributions or macOS deployment targets.
 
 No package contains a development database, secret values, developer config, `.bld*` trees, handoff evidence, test logs, source checkout paths or temporary certificates/private keys. Use explicit install manifests rather than broad repository globs. Extraction and CMake installation do not create users, change existing data, enable services or start a daemon.
@@ -929,7 +931,7 @@ Update existing daemon integration fixtures that intentionally run in a root tes
 
 **Depends:** 9.22–9.23. **Implement:** Runtime/development/documentation TGZ generators, manifests, metadata and notices. No release publication or automatic activation.
 
-**Verify:** Extract into fresh staging directories, inspect contents/dependencies, install/run artifact smoke tests, repeated package generation, no development data/secrets/test artifacts, and actual project/RPC version distinction.
+**Verify:** Extract into fresh staging directories, inspect contents/dependencies, install/run artifact smoke tests, repeated package generation, no development data/secrets/test artifacts, and actual project/RPC version distinction. Verify explicit Release metadata from the unchanged-checkout workflow and reject multi-config or unspecified-configuration producers before packaging.
 
 **Exit:** Reviewable artifacts have truthful platform/dependency requirements and usable contents.
 

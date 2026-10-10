@@ -1,4 +1,5 @@
 find_package(SQLite3 REQUIRED)
+set_property(GLOBAL PROPERTY JOBU_SQLITE_VERSION "${SQLite3_VERSION}")
 
 if(NOT TARGET SQLite3::SQLite3)
     add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)

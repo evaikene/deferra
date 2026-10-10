@@ -7,6 +7,13 @@ JobU JSON headers do not expose its types. Actual versions and link/runtime
 requirements depend on the build environment. Catch2 and test-only OpenSSL
 are not installed JobU assets. These notices do not imply self-contained binaries.
 
+Every component includes these direct-dependency notices and the JobU LICENSE.
+Package build information records the concrete producer's dependency versions;
+the Runtime archive also records its native dynamic-library requirements.
+Header-only implementation code is compiled into JobU. A custom static-link
+configuration can embed additional dependency code and requires the corresponding
+notices; no dependency shared-library files are copied into these archives.
+
 ## fmt
 
 Copyright (c) 2012 - present, Victor Zverovich and {fmt} contributors

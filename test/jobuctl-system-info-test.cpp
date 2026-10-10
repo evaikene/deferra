@@ -160,6 +160,7 @@ auto spawn_jobud(std::filesystem::path const& executable,
     if (pid == 0) {
         ::execl(executable.c_str(),
                 executable.c_str(),
+                "--no-config",
                 "--socket",
                 socket_path.c_str(),
                 "--database",

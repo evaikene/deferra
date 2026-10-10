@@ -11,6 +11,7 @@ get_property(JOBU_INSTALL_PUBLIC_HEADERS GLOBAL PROPERTY JOBU_INSTALL_PUBLIC_HEA
 get_property(JOBU_INSTALL_HEADERS GLOBAL PROPERTY JOBU_INSTALL_HEADERS)
 get_property(JOBU_INSTALL_APPLICATIONS GLOBAL PROPERTY JOBU_INSTALL_APPLICATIONS)
 include(jobu-installed-header-probe.cmake)
+configure_file(jobu-install-manifest.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-install-manifest.cmake" @ONLY)
 configure_file(jobu-install-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-install-test.cmake" @ONLY)
 add_test(NAME jobu-install-test COMMAND ${CMAKE_COMMAND}
     "-Dtest_configuration=$<CONFIG>"
@@ -19,6 +20,12 @@ set_tests_properties(jobu-install-test PROPERTIES TIMEOUT 180
     SKIP_REGULAR_EXPRESSION "Unsupported install-test layout:")
 
 include(jobu-sdk-test.cmake)
+configure_file(jobu-package-cache.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-package-cache.cmake" @ONLY)
+configure_file(jobu-package-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-package-test.cmake" @ONLY)
+add_test(NAME jobu-package-test COMMAND ${CMAKE_COMMAND}
+    "-Dtest_configuration=$<CONFIG>" -P "${CMAKE_CURRENT_BINARY_DIR}/jobu-package-test.cmake")
+set_tests_properties(jobu-package-test PROPERTIES TIMEOUT 1800
+    SKIP_REGULAR_EXPRESSION "Unsupported package-test layout:")
 
 # Generic forwarding/fault support, independent of SQLite and JobU.
 add_executable(fault-database-driver-test

@@ -1,0 +1,3 @@
+# Reuse only the concrete toolchain/dependency hints, without the SDK fixture's
+# producer-dependency prohibitions. The package producer still builds JsonValue.
+@JOBU_SDK_CONSUMER_CACHE@
