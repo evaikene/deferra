@@ -46,3 +46,5 @@ target_link_libraries(${TARGET}
         jobu-cli
         net-http
 )
+
+jobu_install_application(${TARGET})

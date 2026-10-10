@@ -44,16 +44,10 @@ endif()
 
 add_library(${TARGET} STATIC)
 
-target_include_directories(${TARGET}
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
 target_sources(${TARGET}
     PRIVATE
         ${SRCS}
         ${PRIV_HDRS}
-    PUBLIC
         ${HDRS}
 )
 
@@ -65,5 +59,7 @@ target_compile_definitions(${TARGET}
 )
 
 target_link_libraries(${TARGET} PUBLIC core)
+
+jobu_install_library(${TARGET} net HEADERS ${HDRS})
 
 add_subdirectory(http)

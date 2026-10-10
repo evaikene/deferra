@@ -35,7 +35,7 @@ set(HDRS
     uuid.hpp
 )
 
-# Private headers not exposed to library users
+# Implementation headers; selected inline/template support is also installed.
 set(PRIV_HDRS
     application_priv.hpp
     event_loop_backend.hpp
@@ -94,16 +94,10 @@ endif()
 
 add_library(${TARGET} STATIC)
 
-target_include_directories(${TARGET}
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
 target_sources(${TARGET}
     PRIVATE
         ${SRCS}
         ${PRIV_HDRS}
-    PUBLIC
         ${HDRS}
 )
 
@@ -113,3 +107,6 @@ target_link_libraries(${TARGET}
     PUBLIC fmt::fmt
     PRIVATE nlohmann_json::nlohmann_json
 )
+
+jobu_install_library(${TARGET} core HEADERS ${HDRS}
+    SUPPORT_HEADERS event_loop_backend.hpp object_priv.hpp signal_priv.hpp thread_context.hpp timer_heap.hpp)

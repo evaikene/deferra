@@ -32,6 +32,35 @@ constexpr std::size_t kDefaultHeaderBytes{std::size_t{16} * 1024U};
 constexpr std::size_t kDefaultBodyBytes{std::size_t{1024} * 1024U};
 constexpr std::size_t kDefaultQueuedOutputBytes{std::size_t{2} * 1024U * 1024U};
 
+constexpr auto kFixedConfigurationKeys = std::to_array<std::string_view>({
+    "database.backend",
+    "database.path",
+    "socket.path",
+    "socket.owner",
+    "socket.mode",
+    "socket.group",
+    "daemon.run_as_user",
+    "daemon.run_as_group",
+    "daemon.allow_root",
+    "cli.allow_root",
+    "cli.concurrency",
+    "http.concurrency",
+    "http.proxy",
+    "http.ca_bundle",
+    "schedule.default_timezone",
+    "history.default_retention",
+    "history.sweep_interval",
+    "history.batch_size",
+    "telemetry.checkpoint_interval",
+    "rpc.header_limit_bytes",
+    "rpc.body_limit_bytes",
+    "rpc.max_batch_entries",
+    "rpc.max_connections",
+    "rpc.queued_output_bytes",
+    "logging.level",
+    "logging.format",
+});
+
 auto invalid(std::optional<std::string> key = std::nullopt) -> StartupError
 {
     return {.code = "jobud.config.invalid", .key = std::move(key), .message = "Daemon configuration is invalid"};
@@ -235,6 +264,13 @@ auto parse_setting(ConfigurationInput& config, std::string_view key, std::string
 {
     using Status = SettingStatus;
 
+    // Admission uses the same fixed-key inventory as the installed sample audit.
+    // Adding a converter alone cannot silently extend the accepted configuration surface.
+    auto const keys = fixed_configuration_keys();
+    if (std::ranges::find(keys, key) == keys.end()) {
+        return Status::Unknown;
+    }
+
     if (key == "database.backend") {
         if (value != "sqlite") {
             return Status::Invalid;
@@ -407,6 +443,11 @@ auto validate_rpc_budgets(ConfigurationInput& config) -> std::optional<StartupEr
 }
 
 } // anonymous namespace
+
+auto fixed_configuration_keys() -> std::span<std::string_view const>
+{
+    return kFixedConfigurationKeys;
+}
 
 auto parse_configuration_text(std::string_view text) -> ConfigurationResult
 {

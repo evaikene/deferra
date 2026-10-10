@@ -2,12 +2,47 @@ set(TARGET jobu)
 
 message("** Setting up ${TARGET}")
 
-add_library(${TARGET} STATIC)
-
-target_include_directories(${TARGET}
-    PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}
+# Public headers and the explicit installed-header manifest.
+set(HDRS
+    attempt.hpp
+    attempt_executor.hpp
+    attempt_executor_group.hpp
+    attribute.hpp
+    attribute_registry.hpp
+    control_json.hpp
+    control_rpc.hpp
+    cron.hpp
+    execution_telemetry.hpp
+    history.hpp
+    history_json.hpp
+    history_rpc.hpp
+    history_service.hpp
+    job.hpp
+    jobu.hpp
+    management.hpp
+    management_json.hpp
+    management_rpc.hpp
+    queue.hpp
+    recovery.hpp
+    retention.hpp
+    run.hpp
+    schedule_input.hpp
+    scheduler.hpp
+    secret.hpp
+    secret_json.hpp
+    secret_provider.hpp
+    secret_rpc.hpp
+    secret_service.hpp
+    statistics.hpp
+    statistics_json.hpp
+    statistics_rpc.hpp
+    statistics_service.hpp
+    system_info.hpp
+    system_info_rpc.hpp
+    utc_timestamp.hpp
 )
+
+add_library(${TARGET} STATIC)
 
 target_sources(${TARGET}
     PRIVATE
@@ -121,43 +156,7 @@ target_sources(${TARGET}
         utc_timestamp.cpp
         wait_repository_priv.cpp
         wait_repository_priv.hpp
-    PUBLIC
-        attempt.hpp
-        attempt_executor.hpp
-        attempt_executor_group.hpp
-        attribute.hpp
-        attribute_registry.hpp
-        control_json.hpp
-        control_rpc.hpp
-        cron.hpp
-        execution_telemetry.hpp
-        history.hpp
-        history_json.hpp
-        history_rpc.hpp
-        history_service.hpp
-        job.hpp
-        jobu.hpp
-        management.hpp
-        management_json.hpp
-        management_rpc.hpp
-        queue.hpp
-        recovery.hpp
-        retention.hpp
-        run.hpp
-        schedule_input.hpp
-        scheduler.hpp
-        secret.hpp
-        secret_json.hpp
-        secret_provider.hpp
-        secret_rpc.hpp
-        secret_service.hpp
-        statistics.hpp
-        statistics_json.hpp
-        statistics_rpc.hpp
-        statistics_service.hpp
-        system_info.hpp
-        system_info_rpc.hpp
-        utc_timestamp.hpp
+        ${HDRS}
 )
 
 target_compile_features(${TARGET} PUBLIC cxx_std_20)
@@ -169,6 +168,8 @@ target_link_libraries(${TARGET}
         db
         rpc
 )
+
+jobu_install_library(${TARGET} jobu HEADERS ${HDRS})
 
 add_subdirectory(http)
 add_subdirectory(cli)

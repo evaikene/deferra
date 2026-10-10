@@ -1,0 +1,166 @@
+cmake_minimum_required(VERSION 3.20)
+
+set(build_directory [==[@CMAKE_BINARY_DIR@]==])
+set(header_probe_prefix [==[@JOBU_HEADER_PROBE_PREFIX@]==])
+set(header_probe_sources [==[@JOBU_HEADER_PROBE_SOURCES@]==])
+set(binary_directory [==[@CMAKE_INSTALL_BINDIR@]==])
+set(library_directory [==[@CMAKE_INSTALL_LIBDIR@]==])
+set(include_directory [==[@CMAKE_INSTALL_INCLUDEDIR@]==])
+set(data_directory [==[@CMAKE_INSTALL_DATADIR@]==])
+set(documentation_directory [==[@CMAKE_INSTALL_DOCDIR@]==])
+set(public_headers [==[@JOBU_INSTALL_PUBLIC_HEADERS@]==])
+set(installed_headers [==[@JOBU_INSTALL_HEADERS@]==])
+set(libraries [==[@JOBU_INSTALL_LIBRARIES@]==])
+set(applications [==[@JOBU_INSTALL_APPLICATIONS@]==])
+set(protocol_manuals [==[@JOBU_PROTOCOL_MANUALS@]==])
+set(manuals [==[@JOBU_MANUALS@]==])
+set(source_sample [==[@JOBU_CONFIG_EXAMPLE@]==])
+
+# This regression covers the normal prefix-relative GNUInstallDirs layout.
+# Absolute destination overrides are legitimate operator policy, but must never
+# cause this fixture to install outside its private staging leaf.
+foreach(directory binary_directory library_directory include_directory data_directory documentation_directory)
+    if(IS_ABSOLUTE "${${directory}}" OR "${${directory}}" MATCHES "(^|/)[.][.](/|$)")
+        message(STATUS "Unsupported install-test layout: ${directory} is not prefix-relative")
+        return()
+    endif()
+endforeach()
+execute_process(COMMAND mktemp -d /tmp/jobu-install.XXXXXX
+    RESULT_VARIABLE status OUTPUT_VARIABLE fixture OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT status EQUAL 0 OR fixture STREQUAL "")
+    message(FATAL_ERROR "private install fixture creation failed")
+endif()
+file(CHMOD "${fixture}" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+set(prefix "${fixture}/prefix")
+
+function(install_to destination component)
+    set(arguments --install "${build_directory}" --prefix "${destination}")
+    if(NOT "${test_configuration}" STREQUAL "")
+        list(APPEND arguments --config "${test_configuration}")
+    endif()
+    if(NOT component STREQUAL "")
+        list(APPEND arguments --component "${component}")
+    endif()
+    execute_process(COMMAND "@CMAKE_COMMAND@" ${arguments}
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "install failed in ${fixture}: ${result}\n${output}\n${error}")
+    endif()
+endfunction()
+
+set(runtime_files
+    "${data_directory}/jobu/jobud.ini.example"
+    "${data_directory}/jobu/LICENSE" "${data_directory}/jobu/THIRD_PARTY_NOTICES.md"
+    "${data_directory}/jobu/services/jobud.service.in" "${data_directory}/jobu/services/README.md")
+foreach(application IN LISTS applications)
+    list(APPEND runtime_files "${binary_directory}/${application}@CMAKE_EXECUTABLE_SUFFIX@")
+endforeach()
+set(development_files
+    "${data_directory}/jobu/examples/jobu-client/CMakeLists.txt"
+    "${data_directory}/jobu/examples/jobu-client/main.cpp"
+    "${data_directory}/jobu/examples/jobu-client/idempotent_creation.cpp")
+foreach(library IN LISTS libraries)
+    list(APPEND development_files "${library_directory}/@CMAKE_STATIC_LIBRARY_PREFIX@${library}@CMAKE_STATIC_LIBRARY_SUFFIX@")
+endforeach()
+foreach(header IN LISTS installed_headers)
+    list(APPEND development_files "${include_directory}/jb/${header}")
+endforeach()
+set(documentation_files)
+foreach(manual IN LISTS manuals)
+    list(APPEND documentation_files "${documentation_directory}/${manual}")
+endforeach()
+foreach(manual IN LISTS protocol_manuals)
+    list(APPEND documentation_files "${documentation_directory}/protocol/${manual}")
+endforeach()
+
+function(check_manifest destination expected)
+    file(GLOB_RECURSE actual LIST_DIRECTORIES FALSE RELATIVE "${destination}" "${destination}/*")
+    list(SORT actual)
+    list(SORT expected)
+    if(NOT actual STREQUAL expected)
+        message(FATAL_ERROR "unexpected installed files in ${destination}\nactual=${actual}\nexpected=${expected}")
+    endif()
+endfunction()
+
+# Operator-owned files must survive both initial and repeated installation.
+set(operator_files etc/jobud.ini var/lib/operator.sqlite3 var/run/operator.lock)
+foreach(file IN LISTS operator_files)
+    get_filename_component(parent "${prefix}/${file}" DIRECTORY)
+    file(MAKE_DIRECTORY "${parent}")
+    file(WRITE "${prefix}/${file}" "operator-owned sentinel\n")
+endforeach()
+install_to("${prefix}" "")
+install_to("${prefix}" "")
+foreach(file IN LISTS operator_files)
+    file(READ "${prefix}/${file}" contents)
+    if(NOT contents STREQUAL "operator-owned sentinel\n")
+        message(FATAL_ERROR "installation changed operator file ${file}")
+    endif()
+endforeach()
+set(all_files ${runtime_files} ${development_files} ${documentation_files})
+check_manifest("${prefix}" "${all_files};${operator_files}")
+file(READ "${source_sample}" expected_sample)
+file(READ "${prefix}/${data_directory}/jobu/jobud.ini.example" installed_sample)
+if(NOT installed_sample STREQUAL expected_sample)
+    message(FATAL_ERROR "installation changed configured operational paths")
+endif()
+
+# Use a fresh installed Development component at the probe's configured include
+# roots. Touch the sources so each test audits the current installation, even
+# when an earlier probe build left reusable object files behind.
+file(REMOVE_RECURSE "${header_probe_prefix}")
+install_to("${header_probe_prefix}" "Development")
+check_manifest("${header_probe_prefix}" "${development_files}")
+file(TOUCH ${header_probe_sources})
+set(probe_arguments --build "${build_directory}" --target jobu-installed-header-probe --parallel 2)
+if(NOT "${test_configuration}" STREQUAL "")
+    list(APPEND probe_arguments --config "${test_configuration}")
+endif()
+execute_process(COMMAND "@CMAKE_COMMAND@" ${probe_arguments}
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "installed-header CMake probe failed: ${output}\n${error}")
+endif()
+file(REMOVE_RECURSE "${header_probe_prefix}")
+
+# Check the actual installed executable/sample without opening daemon resources.
+if("jobud" IN_LIST applications)
+    execute_process(COMMAND "${prefix}/${binary_directory}/jobud" --check-config
+        --config "${prefix}/${data_directory}/jobu/jobud.ini.example"
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(NOT result EQUAL 0 OR NOT output MATCHES "Configuration valid:" OR NOT error STREQUAL "")
+        message(FATAL_ERROR "installed sample check failed: ${result}\n${output}\n${error}")
+    endif()
+    check_manifest("${prefix}" "${all_files};${operator_files}")
+endif()
+
+foreach(component Runtime Development Documentation)
+    string(TOLOWER "${component}" component_name)
+    set(component_prefix "${fixture}/${component_name}")
+    install_to("${component_prefix}" "${component}")
+    check_manifest("${component_prefix}" "${${component_name}_files}")
+endforeach()
+
+# DESTDIR changes only staging. --prefix changes destinations, not the generated
+# sample or compiled application defaults. All configured files still match.
+set(staging_arguments --install "${build_directory}" --prefix /opt/jobu-install-fixture)
+if(NOT "${test_configuration}" STREQUAL "")
+    list(APPEND staging_arguments --config "${test_configuration}")
+endif()
+execute_process(COMMAND "@CMAKE_COMMAND@" -E env "DESTDIR=${fixture}/destdir"
+    "@CMAKE_COMMAND@" ${staging_arguments}
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "DESTDIR install failed: ${output}\n${error}")
+endif()
+set(staged_prefix "${fixture}/destdir/opt/jobu-install-fixture")
+check_manifest("${staged_prefix}" "${all_files}")
+file(READ "${staged_prefix}/${data_directory}/jobu/jobud.ini.example" staged_sample)
+if(NOT staged_sample STREQUAL expected_sample)
+    message(FATAL_ERROR "DESTDIR leaked into configuration defaults")
+endif()
+
+list(LENGTH public_headers header_count)
+message(STATUS "Installed-header audit: ${header_count} public headers and Object/Signal template passed")
+message(STATUS "Complete/component/repeated/DESTDIR installs and protected sample check passed")
+file(REMOVE_RECURSE "${fixture}")

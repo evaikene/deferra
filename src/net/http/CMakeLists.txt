@@ -4,6 +4,12 @@ set(TARGET net-http)
 
 message("** Setting up ${TARGET}")
 
+# Public headers and the explicit installed-header manifest.
+set(HDRS
+    system_http_client.hpp
+    url_validation.hpp
+)
+
 add_library(${TARGET} STATIC)
 
 target_sources(${TARGET}
@@ -21,9 +27,7 @@ target_sources(${TARGET}
         http_url_priv.hpp
         system_http_client.cpp
         url_validation.cpp
-    PUBLIC
-        system_http_client.hpp
-        url_validation.hpp
+        ${HDRS}
 )
 
 target_compile_features(${TARGET} PUBLIC cxx_std_20)
@@ -34,3 +38,5 @@ target_link_libraries(${TARGET}
     PRIVATE
         CURL::libcurl
 )
+
+jobu_install_library(${TARGET} net/http HEADERS ${HDRS})
