@@ -112,6 +112,14 @@ external; archives are specific to the producer platform and toolchain. Building
 on another distribution or libc produces a distinct artifact, not evidence that
 the original archive is portable there. Native macOS artifacts remain unverified.
 
+The `jobu-package-test` and `jobu-sdk-test` gates keep scratch work in private
+`/tmp` directories. The package gate owns its nested SDK work too. Completed SDK
+consumer builds are removed after their audits; on success or normal test failure,
+the runner saves the latest logs in `<build>/jobu-test-logs/<test-name>` and removes
+the scratch tree. Passing package archives and sidecars remain in
+`<build>/jobu-artifacts`. A killed runner or CTest timeout can leave scratch until
+it is removed or the machine restarts.
+
 The Linux package gate uses these x86_64 baseline producers; older OS/runtime
 versions are not established by this evidence:
 

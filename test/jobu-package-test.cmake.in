@@ -19,10 +19,8 @@ if("@JOBU_PACKAGE_MULTI_CONFIG@")
     return()
 endif()
 
-execute_process(COMMAND mktemp -d /tmp/jobu-package.XXXXXX
-    RESULT_VARIABLE result OUTPUT_VARIABLE fixture OUTPUT_STRIP_TRAILING_WHITESPACE)
-if(NOT result EQUAL 0 OR fixture STREQUAL "")
-    message(FATAL_ERROR "Private package fixture creation failed")
+if(NOT DEFINED fixture OR NOT DEFINED test_logs)
+    message(FATAL_ERROR "Run the package gate through jobu-test-runner.cmake")
 endif()
 set(producer "${fixture}/producer")
 set(output "${fixture}/artifacts")
@@ -30,7 +28,7 @@ set(repeated_output "${fixture}/artifacts-repeated")
 
 function(run_checked label)
     execute_process(COMMAND ${ARGN} RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
-    file(WRITE "${fixture}/${label}.log" "${output}\n${error}")
+    file(WRITE "${test_logs}/${label}.log" "${output}\n${error}")
     if(NOT result EQUAL 0)
         message(FATAL_ERROR "${label} failed (${result}); evidence: ${fixture}\n${output}\n${error}")
     endif()
@@ -177,11 +175,12 @@ if("jobud" IN_LIST applications)
 endif()
 run_checked(archive-sdk "@CMAKE_COMMAND@" "-Dsdk_archive_prefix=${fixture}/development"
     "-Dsdk_archive_producer=${producer}" -Dtest_configuration=Release
+    "-Dfixture=${fixture}/sdk" "-Dtest_logs=${test_logs}/archive-sdk"
     -P "@CMAKE_CURRENT_BINARY_DIR@/jobu-sdk-test.cmake")
 
 set(saved_artifacts "${parent_build}/jobu-artifacts")
 file(MAKE_DIRECTORY "${saved_artifacts}")
 file(GLOB deliverables "${output}/*.tar.gz" "${output}/*.tar.gz.sha256" "${output}/*.tar.gz.files.sha256")
 file(COPY ${deliverables} DESTINATION "${saved_artifacts}")
-message(STATUS "Three component archives, repeated payloads, packaged runtime and extracted SDK passed; evidence: ${fixture}")
+message(STATUS "Three component archives, repeated payloads, packaged runtime and extracted SDK passed")
 message(STATUS "Validated archives, checksums and inventories saved in ${saved_artifacts}")

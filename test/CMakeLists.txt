@@ -23,7 +23,10 @@ include(jobu-sdk-test.cmake)
 configure_file(jobu-package-cache.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-package-cache.cmake" @ONLY)
 configure_file(jobu-package-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-package-test.cmake" @ONLY)
 add_test(NAME jobu-package-test COMMAND ${CMAKE_COMMAND}
-    "-Dtest_configuration=$<CONFIG>" -P "${CMAKE_CURRENT_BINARY_DIR}/jobu-package-test.cmake")
+    "-Dtest_configuration=$<CONFIG>" -Dtest_name=jobu-package-test
+    "-Dtest_script=${CMAKE_CURRENT_BINARY_DIR}/jobu-package-test.cmake"
+    "-Devidence_directory=${PROJECT_BINARY_DIR}/jobu-test-logs/jobu-package-test"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/jobu-test-runner.cmake")
 set_tests_properties(jobu-package-test PROPERTIES TIMEOUT 1800
     SKIP_REGULAR_EXPRESSION "Unsupported package-test layout:")
 
