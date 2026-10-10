@@ -18,7 +18,10 @@ endforeach()
 configure_file(jobu-sdk-cache.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-sdk-cache.cmake" @ONLY)
 configure_file(jobu-sdk-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-sdk-test.cmake" @ONLY)
 add_test(NAME jobu-sdk-test COMMAND ${CMAKE_COMMAND}
-    "-Dtest_configuration=$<CONFIG>" -P "${CMAKE_CURRENT_BINARY_DIR}/jobu-sdk-test.cmake")
+    "-Dtest_configuration=$<CONFIG>" -Dtest_name=jobu-sdk-test
+    "-Dtest_script=${CMAKE_CURRENT_BINARY_DIR}/jobu-sdk-test.cmake"
+    "-Devidence_directory=${PROJECT_BINARY_DIR}/jobu-test-logs/jobu-sdk-test"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/jobu-test-runner.cmake")
 set_tests_properties(jobu-sdk-test PROPERTIES TIMEOUT 600
     SKIP_REGULAR_EXPRESSION "Unsupported SDK-test layout:")
 
