@@ -18,6 +18,8 @@ function(jobu_package_build_options)
 endfunction()
 
 function(jobu_package_source_identity)
+    # Provenance describes configuration time. Release producers keep the
+    # checkout unchanged through compilation and packaging; no refresh occurs.
     set(revision "${JB_PACKAGE_SOURCE_REVISION}")
     set(state "${JB_PACKAGE_SOURCE_STATE}")
     if(state AND NOT state MATCHES "^(clean|modified|unknown)$")
@@ -137,6 +139,7 @@ function(jobu_configure_packaging)
     endforeach()
 
     get_property(JOBU_PACKAGE_APPLICATIONS GLOBAL PROPERTY JOBU_INSTALL_APPLICATIONS)
+    get_property(JOBU_PACKAGE_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
     configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/jobu_cpack_check.cmake.in"
         "${PROJECT_BINARY_DIR}/jobu-generated/cpack-check.cmake" @ONLY)
     configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/jobu_cpack_inventory.cmake.in"
@@ -174,4 +177,5 @@ function(jobu_configure_packaging)
     endforeach()
     include(CPack)
     set(JOBU_PACKAGE_STEM "${JOBU_PACKAGE_STEM}" PARENT_SCOPE)
+    set(JOBU_PACKAGE_MULTI_CONFIG "${JOBU_PACKAGE_MULTI_CONFIG}" PARENT_SCOPE)
 endfunction()

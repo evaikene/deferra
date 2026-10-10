@@ -56,14 +56,24 @@ is not a generated or validated unit.
 
 ## Producing and extracting TGZ artifacts
 
-Use a fresh Release producer with compiler path mapping enabled. Ordinary
-developer builds leave this option off; CPack refuses those builds rather than
+Start from a fresh, clean checkout of the selected release revision and a fresh
+build directory. Keep the checkout unchanged from CMake configuration through
+compilation and packaging. After a source or revision change, start again with
+a fresh checkout and build directory.
+
+Use a single-config generator, such as Ninja or Unix Makefiles, with an explicit
+`CMAKE_BUILD_TYPE=Release` and compiler path mapping enabled. CPack rejects
+multi-config producers (including Ninja Multi-Config) and an empty build type;
+`cpack -C Release` does not choose the configuration of a single-config build.
+These restrictions apply to packaging; ordinary multi-config builds remain
+available. Ordinary developer builds leave `JB_PACKAGE_REMAP_PATHS` off;
+CPack refuses those builds rather than
 publishing checkout/build paths from diagnostics or debug information. The
 native Linux packaging inspection uses `ldd` and `strings` from the host's
 runtime/compiler tools. The compiler must support `-ffile-prefix-map`.
 
 ```sh
-cmake -S . -B .bld-package -DCMAKE_BUILD_TYPE=Release \
+cmake -S . -B .bld-package -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DJB_JOBU_SYSCONFDIR=/etc/jobu -DJB_JOBU_STATEDIR=/var/lib/jobu \
     -DJB_JOBU_RUNDIR=/run/jobu \
@@ -115,8 +125,11 @@ and the C/C++ runtime, including libcurl's transitive dependencies. Use the
 archive's native dependency report to check the actual shared-library names;
 SDK consumers additionally need compatible development headers/libraries.
 
-The source revision is a read-only Git HEAD lookup and the source state records
-whether that checkout differs. In a colocated jj working copy, a modified build
+Source revision and state are captured during CMake configuration, using a
+read-only Git HEAD lookup and whether that checkout differs. They are not
+refreshed during rebuilding or packaging, and later source changes are not
+detected. Their validity relies on the unchanged-checkout workflow above.
+In a colocated jj working copy, a modified build
 is identified as a base revision plus `modified`, not as a clean landed revision.
 For an exported source tree, supply `JB_PACKAGE_SOURCE_REVISION` and
 `JB_PACKAGE_SOURCE_STATE` (`clean`, `modified`, or `unknown`) explicitly; absent

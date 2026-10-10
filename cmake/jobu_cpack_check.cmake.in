@@ -6,6 +6,16 @@ endif()
 if(CPACK_INSTALLED_DIRECTORIES)
     message(FATAL_ERROR "Source-directory packaging is unsupported; use the installed component artifacts")
 endif()
+
+# Metadata captures CMAKE_BUILD_TYPE at configuration time. A CPack -C choice
+# cannot identify the compiled configuration in a multi-config producer.
+if("@JOBU_PACKAGE_MULTI_CONFIG@")
+    message(FATAL_ERROR "JobU TGZ packaging requires a single-config generator; multi-config producers are unsupported")
+endif()
+if("@CMAKE_BUILD_TYPE@" STREQUAL "")
+    message(FATAL_ERROR "JobU TGZ packaging requires an explicit CMAKE_BUILD_TYPE; configure a fresh Release producer")
+endif()
+
 if(NOT "@JB_PACKAGE_REMAP_PATHS@")
     message(FATAL_ERROR "Configure a fresh producer with JB_PACKAGE_REMAP_PATHS=ON before packaging")
 endif()
