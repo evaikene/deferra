@@ -5,6 +5,8 @@ message("** Setting up ${TARGET}")
 # Find {fmt}
 find_package(fmt CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+set_property(GLOBAL PROPERTY JOBU_FMT_VERSION "${fmt_VERSION}")
+set_property(GLOBAL PROPERTY JOBU_JSON_VERSION "${nlohmann_json_VERSION}")
 
 # Public headers exposed to library users
 set(HDRS

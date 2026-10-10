@@ -50,49 +50,7 @@ function(install_to destination component)
     endif()
 endfunction()
 
-set(runtime_files
-    "${data_directory}/jobu/jobud.ini.example"
-    "${data_directory}/jobu/LICENSE" "${data_directory}/jobu/THIRD_PARTY_NOTICES.md"
-    "${data_directory}/jobu/services/jobud.service.in" "${data_directory}/jobu/services/README.md")
-foreach(application IN LISTS applications)
-    list(APPEND runtime_files "${binary_directory}/${application}@CMAKE_EXECUTABLE_SUFFIX@")
-endforeach()
-set(development_files
-    "${sdk_directory}/JobUConfig.cmake"
-    "${sdk_directory}/JobUConfigVersion.cmake"
-    "${data_directory}/jobu/examples/jobu-client/CMakeLists.txt"
-    "${data_directory}/jobu/examples/jobu-client/main.cpp"
-    "${data_directory}/jobu/examples/jobu-client/idempotent_creation.cpp")
-string(TOLOWER "${test_configuration}" sdk_configuration)
-if(sdk_configuration STREQUAL "")
-    set(sdk_configuration noconfig)
-endif()
-foreach(component IN LISTS sdk_components)
-    list(APPEND development_files "${sdk_directory}/JobU${component}Targets.cmake"
-        "${sdk_directory}/JobU${component}Targets-${sdk_configuration}.cmake")
-endforeach()
-foreach(library IN LISTS libraries)
-    list(APPEND development_files "${library_directory}/@CMAKE_STATIC_LIBRARY_PREFIX@${library}@CMAKE_STATIC_LIBRARY_SUFFIX@")
-endforeach()
-foreach(header IN LISTS installed_headers)
-    list(APPEND development_files "${include_directory}/jb/${header}")
-endforeach()
-set(documentation_files)
-foreach(manual IN LISTS manuals)
-    list(APPEND documentation_files "${documentation_directory}/${manual}")
-endforeach()
-foreach(manual IN LISTS protocol_manuals)
-    list(APPEND documentation_files "${documentation_directory}/protocol/${manual}")
-endforeach()
-
-function(check_manifest destination expected)
-    file(GLOB_RECURSE actual LIST_DIRECTORIES FALSE RELATIVE "${destination}" "${destination}/*")
-    list(SORT actual)
-    list(SORT expected)
-    if(NOT actual STREQUAL expected)
-        message(FATAL_ERROR "unexpected installed files in ${destination}\nactual=${actual}\nexpected=${expected}")
-    endif()
-endfunction()
+include("@CMAKE_CURRENT_BINARY_DIR@/jobu-install-manifest.cmake")
 
 # Operator-owned files must survive both initial and repeated installation.
 set(operator_files etc/jobud.ini var/lib/operator.sqlite3 var/run/operator.lock)

@@ -9,9 +9,12 @@ configure_file("${CMAKE_CURRENT_LIST_DIR}/../packaging/jobud.ini.in"
 
 # Examples are data. Installing them never creates an active config or daemon
 # state, provisions identities, or installs/enables a service in its manager.
-install(FILES "${JOBU_CONFIG_EXAMPLE}" "${PROJECT_SOURCE_DIR}/LICENSE"
-    "${PROJECT_SOURCE_DIR}/packaging/THIRD_PARTY_NOTICES.md"
+install(FILES "${JOBU_CONFIG_EXAMPLE}"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/jobu" COMPONENT Runtime)
+foreach(component Runtime Development Documentation)
+    install(FILES "${PROJECT_SOURCE_DIR}/LICENSE" "${PROJECT_SOURCE_DIR}/packaging/THIRD_PARTY_NOTICES.md"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/jobu" COMPONENT ${component})
+endforeach()
 install(FILES "${PROJECT_SOURCE_DIR}/packaging/systemd/jobud.service.in"
     "${PROJECT_SOURCE_DIR}/packaging/systemd/README.md"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/jobu/services" COMPONENT Runtime)
