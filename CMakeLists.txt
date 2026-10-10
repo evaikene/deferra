@@ -17,6 +17,7 @@ include(cmake/JobUPaths.cmake)
 include(cmake/JobUAssets.cmake)
 
 add_subdirectory(src)
+include(cmake/JobUSDK.cmake)
 if(BUILD_TESTING)
     add_subdirectory(test)
 endif()

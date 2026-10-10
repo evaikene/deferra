@@ -1,4 +1,4 @@
-#include "control_client.hpp"
+#include <jb/jobu/client/control_client.hpp>
 
 #include <string>
 #include <utility>

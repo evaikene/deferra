@@ -21,4 +21,4 @@ target_sources(${TARGET}
 target_compile_features(${TARGET} PUBLIC cxx_std_20)
 target_link_libraries(${TARGET} PUBLIC jobu rpc)
 
-jobu_install_library(${TARGET} jobu/client HEADERS ${HDRS})
+jobu_install_library(${TARGET} jobu/client COMPONENT Client HEADERS ${HDRS})

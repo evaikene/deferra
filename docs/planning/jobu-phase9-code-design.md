@@ -622,7 +622,7 @@ Install to a fresh staging prefix and configure small consumers outside the repo
 
 1. Core-only executable using JsonValue plus Object/Signal public headers; no SQLite/CURL/Catch2 discovery.
 2. Shared library linked against Core, proving PIC and public transitive headers.
-3. Typed ControlClient executable linked only through `JobU::client` and its exported dependencies.
+3. Typed ControlClient executable linked only through `JobU::jobu-client` and its exported dependencies.
 4. Optional installed SQLite/HTTP/CLI component smoke builds for components included in the full package.
 
 Disable CMake user/system package registries in these checks. Prevent source/build include paths and build-tree exports from satisfying missing files. Inspect generated target properties for checkout paths and verify a copied/moved SDK prefix can still be found; compiled application operational defaults retain the separately documented absolute-path behavior. Do not confuse SDK relocation with daemon data-directory relocation.

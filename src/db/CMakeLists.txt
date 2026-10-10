@@ -36,7 +36,7 @@ target_compile_features(${TARGET} PUBLIC cxx_std_20)
 
 target_link_libraries(${TARGET} PUBLIC core)
 
-jobu_install_library(${TARGET} db HEADERS ${HDRS})
+jobu_install_library(${TARGET} db COMPONENT Db HEADERS ${HDRS})
 
 if(JB_BUILD_SQLITE_DRIVER)
     add_subdirectory(sqlite)

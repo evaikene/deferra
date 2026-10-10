@@ -30,7 +30,7 @@ dependencies appropriate to the build host and toolchain.
 | Component | Default destination relative to the installation prefix |
 | --- | --- |
 | Runtime | `bin/jobud`, `bin/jobuctl`; `share/jobu/jobud.ini.example`, LICENSE and third-party notices; inactive systemd template sources in `share/jobu/services` |
-| Development | Static libraries in the configured library directory; headers in `include/jb/<module>`; C++ example sources in `share/jobu/examples/jobu-client` |
+| Development | Static libraries and `cmake/JobU` package metadata in the configured library directory; headers in `include/jb/<module>`; buildable C++ example sources in `share/jobu/examples/jobu-client` |
 | Documentation | This guide, CLI/client/cron/secret guides, and protocol references/examples in the configured documentation directory |
 
 GNUInstallDirs controls the binary, library, include, data and documentation
@@ -46,11 +46,60 @@ installs `event_loop_backend.hpp`, `object_priv.hpp`, `signal_priv.hpp`,
 transitively. These are implementation support, not independently supported APIs;
 include their owning public headers. Static reusable libraries are built with PIC.
 
-Stage 9.22 stages the libraries, headers and example sources. `JobU` package
-configuration/imported targets and installed example adaptation arrive in Stage
-9.23. The installed example's current CMake file still describes its build-tree
-target. CPack archives and deployable service profiles have separate later gates.
-The `.service.in` source is not a generated or validated unit.
+CPack archives and deployable service profiles have separate later gates. The
+`.service.in` source is not a generated or validated unit.
+
+## Using the installed SDK
+
+Install the Development component and select the required package components:
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(my_application LANGUAGES CXX)
+find_package(JobU CONFIG REQUIRED COMPONENTS Core)
+add_executable(my_application main.cpp)
+target_link_libraries(my_application PRIVATE JobU::core)
+```
+
+Configure with `-DCMAKE_PREFIX_PATH=/opt/jobu` (or the actual staged SDK prefix).
+Use namespaced headers such as `<jb/core/json.hpp>` and
+`<jb/jobu/client/control_client.hpp>`. Targets supply C++20, include directories
+and transitive link dependencies; do not add checkout paths or individual
+archives to the consumer. The libraries are static and PIC, including Core for
+use in another shared library. No PHP bindings or stable binary ABI are promised.
+
+| Package component | Imported targets | Additional requirements |
+| --- | --- | --- |
+| Core (default when omitted) | `JobU::core` | fmt |
+| Net | `JobU::net` | Core |
+| Db | `JobU::db` | Core |
+| Rpc | `JobU::rpc` | Core |
+| Jobu | `JobU::jobu` | Core, Net, Db, Rpc |
+| Client | `JobU::jobu-client` | Jobu, Rpc |
+| SQLite | `JobU::db-sqlite`, `JobU::jobu-sqlite` | Db, Jobu, SQLite3; built with `JB_BUILD_SQLITE_DRIVER=ON` |
+| HTTP | `JobU::net-http`, `JobU::jobu-http` | Net, Jobu, CURL 7.85+ |
+| CLI | `JobU::jobu-cli` | Jobu, Core |
+
+Package components select dependency discovery; they are distinct from the
+Runtime/Development/Documentation installation components. Core and Client do
+not discover SQLite, CURL, Catch2 or nlohmann_json. The producer still needs its
+documented build dependencies. HTTP consumers using the system client link both
+HTTP targets; the executor's generic HTTP-client interface does not itself
+require libcurl. Unknown or unavailable required components reject the package
+lookup. Optional components expose `JobU_<Component>_FOUND` without rejecting
+otherwise satisfied required components. Repeated lookups can request additional
+components.
+
+Metadata uses project version `0.1.0`, independently of RPC API 1.4. An explicit
+version request must match exactly; compiled archives retain CMake's architecture
+check. Consumers also need a compatible compiler, C++ runtime and external
+libraries. The SDK does not bundle these dependencies.
+
+The default prefix-relative SDK layout can be copied or moved and discovered
+from its new prefix. Absolute GNUInstallDirs destinations outside that prefix
+are not relocatable. SDK relocation does not rewrite compiled daemon/client
+operational defaults. See [the client guide](cpp-client.md) to build the installed
+example and supply its endpoint explicitly.
 
 ## Operational paths
 

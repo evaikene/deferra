@@ -1,7 +1,8 @@
 # JobU C++ control client
 
 `jb::jobu::ControlClient` provides typed asynchronous calls for the JobU 1.x
-control protocol. Include `control_client.hpp` and link `jobu-client`. The
+control protocol. Include `<jb/jobu/client/control_client.hpp>` and link
+`JobU::jobu-client` from `find_package(JobU CONFIG REQUIRED COMPONENTS Client)`. The
 library needs no SQLite driver or job runner in the client process. In a source
 checkout, `examples/jobu-client/main.cpp` provides a buildable local-socket
 example. The same typed client can wrap another already-connected
@@ -14,6 +15,22 @@ describe the attributes that the daemon may return. `ControlClient` does not
 open a socket or run an event loop.
 
 ## Read-only example
+
+With the Development component installed at `/opt/jobu`, build the installed
+example as a standalone project:
+
+```sh
+cmake -S /opt/jobu/share/jobu/examples/jobu-client -B /tmp/jobu-client-build \
+    -DCMAKE_PREFIX_PATH=/opt/jobu
+cmake --build /tmp/jobu-client-build
+/tmp/jobu-client-build/jobu-client-example /path/to/jobud.sock
+```
+
+Use the actual installation data directory if GNUInstallDirs was overridden.
+The Client component supplies its transitive JobU libraries and fmt dependency;
+it needs no SQLite, CURL, Catch2 or nlohmann_json package discovery. See the
+[installation guide](installation.md#using-the-installed-sdk) for all components,
+version matching and SDK relocation.
 
 In a source checkout, build the `jobu-client-example` CMake target, then run:
 
@@ -132,5 +149,6 @@ never invokes it. The key and complete request must be retained by the
 application until it has reconciled a possible lost response; the client does
 not generate keys or repeat calls automatically.
 
-`jobu-client` and its example are source-tree CMake targets. This repository
-does not provide an installed C++ package export.
+The same example sources build in the checkout and through the installed SDK.
+Library clients always supply their endpoint explicitly; SDK relocation does
+not change the daemon or command-line client's compiled operational defaults.

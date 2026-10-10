@@ -19,4 +19,4 @@ target_compile_features(${TARGET} PUBLIC cxx_std_20)
 
 target_link_libraries(${TARGET} PUBLIC jobu)
 
-jobu_install_library(${TARGET} jobu/http HEADERS ${HDRS})
+jobu_install_library(${TARGET} jobu/http COMPONENT HTTP HEADERS ${HDRS})

@@ -1,9 +1,9 @@
-#include "application.hpp"
-#include "attribute_registry.hpp"
-#include "client.hpp"
-#include "control_client.hpp"
-#include "local_socket.hpp"
-#include "object.hpp"
+#include <jb/core/application.hpp>
+#include <jb/core/object.hpp>
+#include <jb/jobu/attribute_registry.hpp>
+#include <jb/jobu/client/control_client.hpp>
+#include <jb/net/local_socket.hpp>
+#include <jb/rpc/client.hpp>
 
 #include <iostream>
 #include <memory>

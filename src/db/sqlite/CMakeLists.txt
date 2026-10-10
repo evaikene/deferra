@@ -35,4 +35,4 @@ target_link_libraries(${TARGET}
         SQLite3::SQLite3
 )
 
-jobu_install_library(${TARGET} db/sqlite HEADERS ${HDRS})
+jobu_install_library(${TARGET} db/sqlite COMPONENT SQLite HEADERS ${HDRS})

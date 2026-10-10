@@ -24,4 +24,4 @@ target_link_libraries(${TARGET}
         db-sqlite
 )
 
-jobu_install_library(${TARGET} jobu/sqlite HEADERS ${HDRS})
+jobu_install_library(${TARGET} jobu/sqlite COMPONENT SQLite HEADERS ${HDRS})

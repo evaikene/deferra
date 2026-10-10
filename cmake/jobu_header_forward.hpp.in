@@ -1,0 +1,2 @@
+// Build-only forwarding header; the SDK installs the original header instead.
+#include "@JOBU_HEADER_SOURCE_CXX@" // IWYU pragma: export

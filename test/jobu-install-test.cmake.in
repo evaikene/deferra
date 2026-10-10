@@ -15,11 +15,13 @@ set(applications [==[@JOBU_INSTALL_APPLICATIONS@]==])
 set(protocol_manuals [==[@JOBU_PROTOCOL_MANUALS@]==])
 set(manuals [==[@JOBU_MANUALS@]==])
 set(source_sample [==[@JOBU_CONFIG_EXAMPLE@]==])
+set(sdk_directory [==[@JOBU_INSTALL_CMAKEDIR@]==])
+set(sdk_components [==[@JOBU_SDK_COMPONENTS@]==])
 
 # This regression covers the normal prefix-relative GNUInstallDirs layout.
 # Absolute destination overrides are legitimate operator policy, but must never
 # cause this fixture to install outside its private staging leaf.
-foreach(directory binary_directory library_directory include_directory data_directory documentation_directory)
+foreach(directory binary_directory library_directory include_directory data_directory documentation_directory sdk_directory)
     if(IS_ABSOLUTE "${${directory}}" OR "${${directory}}" MATCHES "(^|/)[.][.](/|$)")
         message(STATUS "Unsupported install-test layout: ${directory} is not prefix-relative")
         return()
@@ -56,9 +58,19 @@ foreach(application IN LISTS applications)
     list(APPEND runtime_files "${binary_directory}/${application}@CMAKE_EXECUTABLE_SUFFIX@")
 endforeach()
 set(development_files
+    "${sdk_directory}/JobUConfig.cmake"
+    "${sdk_directory}/JobUConfigVersion.cmake"
     "${data_directory}/jobu/examples/jobu-client/CMakeLists.txt"
     "${data_directory}/jobu/examples/jobu-client/main.cpp"
     "${data_directory}/jobu/examples/jobu-client/idempotent_creation.cpp")
+string(TOLOWER "${test_configuration}" sdk_configuration)
+if(sdk_configuration STREQUAL "")
+    set(sdk_configuration noconfig)
+endif()
+foreach(component IN LISTS sdk_components)
+    list(APPEND development_files "${sdk_directory}/JobU${component}Targets.cmake"
+        "${sdk_directory}/JobU${component}Targets-${sdk_configuration}.cmake")
+endforeach()
 foreach(library IN LISTS libraries)
     list(APPEND development_files "${library_directory}/@CMAKE_STATIC_LIBRARY_PREFIX@${library}@CMAKE_STATIC_LIBRARY_SUFFIX@")
 endforeach()

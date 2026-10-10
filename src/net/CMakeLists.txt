@@ -60,6 +60,6 @@ target_compile_definitions(${TARGET}
 
 target_link_libraries(${TARGET} PUBLIC core)
 
-jobu_install_library(${TARGET} net HEADERS ${HDRS})
+jobu_install_library(${TARGET} net COMPONENT Net HEADERS ${HDRS})
 
 add_subdirectory(http)
