@@ -308,7 +308,7 @@ logging.format = json
 
 # Longest permitted retry delay.
 # Built-in default: 86400000 milliseconds (24 hours).
-# Allowed: a whole number from 0 to 86400000 milliseconds.
+# Allowed: a whole number from 0 to 2592000000 milliseconds (30 days).
 # Must be at least retry.initial_delay. Also caps accepted HTTP Retry-After delays.
 # defaults.retry.max_delay = 86400000
 

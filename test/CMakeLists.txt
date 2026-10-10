@@ -10,8 +10,10 @@ get_property(JOBU_INSTALL_MODULES GLOBAL PROPERTY JOBU_INSTALL_MODULES)
 get_property(JOBU_INSTALL_PUBLIC_HEADERS GLOBAL PROPERTY JOBU_INSTALL_PUBLIC_HEADERS)
 get_property(JOBU_INSTALL_HEADERS GLOBAL PROPERTY JOBU_INSTALL_HEADERS)
 get_property(JOBU_INSTALL_APPLICATIONS GLOBAL PROPERTY JOBU_INSTALL_APPLICATIONS)
+include(jobu-installed-header-probe.cmake)
 configure_file(jobu-install-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-install-test.cmake" @ONLY)
 add_test(NAME jobu-install-test COMMAND ${CMAKE_COMMAND}
+    "-Dtest_configuration=$<CONFIG>"
     -P "${CMAKE_CURRENT_BINARY_DIR}/jobu-install-test.cmake")
 set_tests_properties(jobu-install-test PROPERTIES TIMEOUT 180
     SKIP_REGULAR_EXPRESSION "Unsupported install-test layout:")

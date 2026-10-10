@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
 set(build_directory [==[@CMAKE_BINARY_DIR@]==])
-set(compiler [==[@CMAKE_CXX_COMPILER@]==])
+set(header_probe_prefix [==[@JOBU_HEADER_PROBE_PREFIX@]==])
+set(header_probe_sources [==[@JOBU_HEADER_PROBE_SOURCES@]==])
 set(binary_directory [==[@CMAKE_INSTALL_BINDIR@]==])
 set(library_directory [==[@CMAKE_INSTALL_LIBDIR@]==])
 set(include_directory [==[@CMAKE_INSTALL_INCLUDEDIR@]==])
@@ -9,7 +10,6 @@ set(data_directory [==[@CMAKE_INSTALL_DATADIR@]==])
 set(documentation_directory [==[@CMAKE_INSTALL_DOCDIR@]==])
 set(public_headers [==[@JOBU_INSTALL_PUBLIC_HEADERS@]==])
 set(installed_headers [==[@JOBU_INSTALL_HEADERS@]==])
-set(modules [==[@JOBU_INSTALL_MODULES@]==])
 set(libraries [==[@JOBU_INSTALL_LIBRARIES@]==])
 set(applications [==[@JOBU_INSTALL_APPLICATIONS@]==])
 set(protocol_manuals [==[@JOBU_PROTOCOL_MANUALS@]==])
@@ -35,6 +35,9 @@ set(prefix "${fixture}/prefix")
 
 function(install_to destination component)
     set(arguments --install "${build_directory}" --prefix "${destination}")
+    if(NOT "${test_configuration}" STREQUAL "")
+        list(APPEND arguments --config "${test_configuration}")
+    endif()
     if(NOT component STREQUAL "")
         list(APPEND arguments --component "${component}")
     endif()
@@ -102,27 +105,23 @@ if(NOT installed_sample STREQUAL expected_sample)
     message(FATAL_ERROR "installation changed configured operational paths")
 endif()
 
-# Compile every public installed header using only installed module roots.
-# signal_priv.hpp is intentionally non-standalone and is checked via object.hpp.
-set(include_flags "-I${prefix}/${include_directory}")
-foreach(module IN LISTS modules)
-    list(APPEND include_flags "-I${prefix}/${include_directory}/jb/${module}")
-endforeach()
-foreach(header IN LISTS public_headers)
-    file(WRITE "${fixture}/header.cpp" "#include <jb/${header}>\n")
-    execute_process(COMMAND "${compiler}" -std=c++20 -fsyntax-only ${include_flags} "${fixture}/header.cpp"
-        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
-    if(NOT result EQUAL 0)
-        message(FATAL_ERROR "installed header ${header} failed: ${output}\n${error}")
-    endif()
-endforeach()
-file(WRITE "${fixture}/signal.cpp"
-    "#include <jb/core/object.hpp>\nvoid check() { jb::core::Object receiver; jb::core::Signal<int> signal; signal.connect(&receiver, [](int) {}); }\n")
-execute_process(COMMAND "${compiler}" -std=c++20 -fsyntax-only ${include_flags} "${fixture}/signal.cpp"
+# Use a fresh installed Development component at the probe's configured include
+# roots. Touch the sources so each test audits the current installation, even
+# when an earlier probe build left reusable object files behind.
+file(REMOVE_RECURSE "${header_probe_prefix}")
+install_to("${header_probe_prefix}" "Development")
+check_manifest("${header_probe_prefix}" "${development_files}")
+file(TOUCH ${header_probe_sources})
+set(probe_arguments --build "${build_directory}" --target jobu-installed-header-probe --parallel 2)
+if(NOT "${test_configuration}" STREQUAL "")
+    list(APPEND probe_arguments --config "${test_configuration}")
+endif()
+execute_process(COMMAND "@CMAKE_COMMAND@" ${probe_arguments}
     RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
 if(NOT result EQUAL 0)
-    message(FATAL_ERROR "installed Object/Signal template failed: ${output}\n${error}")
+    message(FATAL_ERROR "installed-header CMake probe failed: ${output}\n${error}")
 endif()
+file(REMOVE_RECURSE "${header_probe_prefix}")
 
 # Check the actual installed executable/sample without opening daemon resources.
 if("jobud" IN_LIST applications)
@@ -144,8 +143,12 @@ endforeach()
 
 # DESTDIR changes only staging. --prefix changes destinations, not the generated
 # sample or compiled application defaults. All configured files still match.
+set(staging_arguments --install "${build_directory}" --prefix /opt/jobu-install-fixture)
+if(NOT "${test_configuration}" STREQUAL "")
+    list(APPEND staging_arguments --config "${test_configuration}")
+endif()
 execute_process(COMMAND "@CMAKE_COMMAND@" -E env "DESTDIR=${fixture}/destdir"
-    "@CMAKE_COMMAND@" --install "${build_directory}" --prefix /opt/jobu-install-fixture
+    "@CMAKE_COMMAND@" ${staging_arguments}
     RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
 if(NOT result EQUAL 0)
     message(FATAL_ERROR "DESTDIR install failed: ${output}\n${error}")
