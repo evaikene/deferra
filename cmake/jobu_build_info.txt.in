@@ -25,4 +25,5 @@ configured-install-prefix=@CMAKE_INSTALL_PREFIX@
 configured-config-directory=@JB_JOBU_SYSCONFDIR@
 configured-state-directory=@JB_JOBU_STATEDIR@
 configured-runtime-directory=@JB_JOBU_RUNDIR@
+systemd-profile=@JB_JOBU_SYSTEMD_PROFILE@
 portability=producer platform/toolchain only; this metadata is not deployment verification

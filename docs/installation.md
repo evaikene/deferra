@@ -29,7 +29,7 @@ dependencies appropriate to the build host and toolchain.
 
 | Component | Default destination relative to the installation prefix |
 | --- | --- |
-| Runtime | `bin/jobud`, `bin/jobuctl`; `share/jobu/jobud.ini.example`; inactive systemd template sources in `share/jobu/services` |
+| Runtime | `bin/jobud`, `bin/jobuctl`; `share/jobu/jobud.ini.example`; systemd assets and readiness probe in `share/jobu/services`; selected system profile also stages `lib/systemd/system/jobud.service` |
 | Development | Static libraries and `cmake/JobU` package metadata in the configured library directory; headers in `include/jb/<module>`; buildable C++ example sources in `share/jobu/examples/jobu-client` |
 | Documentation | This guide, CLI/client/cron/secret guides, and protocol references/examples in the configured documentation directory |
 
@@ -51,8 +51,10 @@ installs `event_loop_backend.hpp`, `object_priv.hpp`, `signal_priv.hpp`,
 transitively. These are implementation support, not independently supported APIs;
 include their owning public headers. Static reusable libraries are built with PIC.
 
-Deployable service profiles have a separate later gate. The `.service.in` source
-is not a generated or validated unit.
+Select `JB_JOBU_SYSTEMD_PROFILE=system` or `custom` to generate a matching Linux
+unit. The default `none` installs source data and setup/probe instructions only.
+The `.service.in` source retains placeholders; use the generated `.service`.
+Native managed-service acceptance has a separate gate.
 
 ## Producing and extracting TGZ artifacts
 
@@ -75,6 +77,7 @@ runtime/compiler tools. The compiler must support `-ffile-prefix-map`.
 ```sh
 cmake -S . -B .bld-package -G Ninja -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr \
+    -DJB_JOBU_SYSTEMD_PROFILE=system \
     -DJB_JOBU_SYSCONFDIR=/etc/jobu -DJB_JOBU_STATEDIR=/var/lib/jobu \
     -DJB_JOBU_RUNDIR=/run/jobu \
     -DBUILD_TESTING=OFF -DJB_BUILD_EXAMPLES=OFF -DJB_PACKAGE_REMAP_PATHS=ON
@@ -228,9 +231,11 @@ defaults or the paths inside that sample. Reconfiguring an existing build with
 a different prefix retains initialized operational cache values. Use a fresh
 build or explicitly reset all three `JB_JOBU_*DIR` variables.
 
-A future Linux system profile uses `/usr` with explicit `/etc/jobu`,
-`/var/lib/jobu` and `/run/jobu` overrides. A private foreground deployment can
-use a short writable prefix. Provision protected parents and final-user-owned
+A selected Linux `system` profile requires `/usr` and initializes fresh operational
+cache values to `/etc/jobu`, `/var/lib/jobu` and `/run/jobu`, rejecting conflicts.
+The `custom` profile generates a matching unit without systemd directory
+directives; the default `none` preserves the generic path defaults. A private
+foreground deployment can use a short writable prefix. Provision protected parents and final-user-owned
 state/runtime leaves with mode 0700. A mode-0660 socket needs a matching trusted
 group, a mode-0750 runtime leaf and safe traversal; that group has full daemon
 authority. Do not use raw database/socket paths in shared `/tmp`.
@@ -246,6 +251,10 @@ resources; successful validation does not prove later resource access succeeds.
 
 Use [the CLI guide](jobuctl.md) for shared default endpoint behavior and explicit
 `--socket` overrides, and [the client guide](cpp-client.md) for borrowed lifetimes
-and the caller-supplied endpoint. Managed-service activation, privileged
-deployment evidence and the complete operations/configuration reference remain
-their designated Phase 9 stages.
+and the caller-supplied endpoint. For account/configuration setup, system/custom
+unit placement, administrative socket groups, deliberate activation, bounded RPC
+readiness and shutdown, see [the systemd setup guide](../packaging/systemd/README.md).
+Installed Runtime files carry it at `<data-directory>/jobu/services/README.md` and
+the probe at `wait-ready.sh`. The system profile stages a vendor unit; installation
+never reloads, enables, starts or restarts it. Native privileged/service evidence
+and the complete operations/configuration reference remain their designated gates.
