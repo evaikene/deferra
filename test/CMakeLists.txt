@@ -30,6 +30,24 @@ add_test(NAME jobu-package-test COMMAND ${CMAKE_COMMAND}
 set_tests_properties(jobu-package-test PROPERTIES TIMEOUT 1800
     SKIP_REGULAR_EXPRESSION "Unsupported package-test layout:")
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    configure_file(jobu-systemd-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-systemd-test.cmake" @ONLY)
+    add_test(NAME jobu-systemd-test COMMAND ${CMAKE_COMMAND} -Dtest_name=jobu-systemd-test
+        "-Dtest_script=${CMAKE_CURRENT_BINARY_DIR}/jobu-systemd-test.cmake"
+        "-Devidence_directory=${PROJECT_BINARY_DIR}/jobu-test-logs/jobu-systemd-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/jobu-test-runner.cmake")
+    set_tests_properties(jobu-systemd-test PROPERTIES TIMEOUT 180)
+    # Keep the runner's cleanup/log contract without adding source parameters to
+    # its shared interface; the readiness worker supplies its own source root.
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/jobu-readiness-test.cmake"
+        "set(jobu_source [==[${PROJECT_SOURCE_DIR}]==])\ninclude([==[${CMAKE_CURRENT_SOURCE_DIR}/jobu-readiness-test.cmake]==])\n")
+    add_test(NAME jobu-readiness-test COMMAND ${CMAKE_COMMAND} -Dtest_name=jobu-readiness-test
+        "-Dtest_script=${CMAKE_CURRENT_BINARY_DIR}/jobu-readiness-test.cmake"
+        "-Devidence_directory=${PROJECT_BINARY_DIR}/jobu-test-logs/jobu-readiness-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/jobu-test-runner.cmake")
+    set_tests_properties(jobu-readiness-test PROPERTIES TIMEOUT 60)
+endif()
+
 # Generic forwarding/fault support, independent of SQLite and JobU.
 add_executable(fault-database-driver-test
     fault-database-driver-test.cpp support/fault_database_driver.cpp support/fake_database_driver.cpp)

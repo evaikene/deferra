@@ -8,7 +8,7 @@ configure_file("${CMAKE_CURRENT_LIST_DIR}/../packaging/jobud.ini.in"
     "${JOBU_CONFIG_EXAMPLE}" @ONLY)
 
 # Examples are data. Installing them never creates an active config or daemon
-# state, provisions identities, or installs/enables a service in its manager.
+# state, provisions identities, or activates a service in its manager.
 install(FILES "${JOBU_CONFIG_EXAMPLE}"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/jobu" COMPONENT Runtime)
 foreach(component Runtime Development Documentation)
@@ -17,7 +17,9 @@ foreach(component Runtime Development Documentation)
 endforeach()
 install(FILES "${PROJECT_SOURCE_DIR}/packaging/systemd/jobud.service.in"
     "${PROJECT_SOURCE_DIR}/packaging/systemd/README.md"
+    "${PROJECT_SOURCE_DIR}/packaging/systemd/wait-ready.sh"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/jobu/services" COMPONENT Runtime)
+jobu_configure_systemd_assets()
 install(FILES
     "${PROJECT_SOURCE_DIR}/examples/jobu-client/CMakeLists.txt"
     "${PROJECT_SOURCE_DIR}/examples/jobu-client/main.cpp"

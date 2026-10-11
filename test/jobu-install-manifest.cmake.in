@@ -12,12 +12,22 @@ set(applications [==[@JOBU_INSTALL_APPLICATIONS@]==])
 set(protocol_manuals [==[@JOBU_PROTOCOL_MANUALS@]==])
 set(manuals [==[@JOBU_MANUALS@]==])
 set(sdk_components [==[@JOBU_SDK_COMPONENTS@]==])
+if(NOT DEFINED systemd_profile)
+    set(systemd_profile [==[@JB_JOBU_SYSTEMD_PROFILE@]==])
+endif()
 
 set(common_files "${data_directory}/jobu/LICENSE" "${data_directory}/jobu/THIRD_PARTY_NOTICES.md")
 set(runtime_files ${common_files}
     "${data_directory}/jobu/jobud.ini.example"
     "${data_directory}/jobu/services/jobud.service.in" "${data_directory}/jobu/services/README.md"
+    "${data_directory}/jobu/services/wait-ready.sh"
     "${data_directory}/jobu/package/build-info-runtime.txt")
+if(NOT systemd_profile STREQUAL "none")
+    list(APPEND runtime_files "${data_directory}/jobu/services/jobud.service")
+endif()
+if(systemd_profile STREQUAL "system")
+    list(APPEND runtime_files "lib/systemd/system/jobud.service")
+endif()
 foreach(application IN LISTS applications)
     list(APPEND runtime_files "${binary_directory}/${application}@CMAKE_EXECUTABLE_SUFFIX@")
 endforeach()

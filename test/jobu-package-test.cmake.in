@@ -3,6 +3,13 @@ cmake_minimum_required(VERSION 3.20)
 set(producer_source [==[@PROJECT_SOURCE_DIR@]==])
 set(parent_build [==[@PROJECT_BINARY_DIR@]==])
 set(test_configuration Release)
+# Exercise the custom service when the daemon is built. An SDK/client-only
+# producer retains its valid none profile; no SQLite-OFF matrix is required.
+# Expected payloads remain independent of the generated package inventory.
+set(systemd_profile none)
+if("@JB_BUILD_SQLITE_DRIVER@")
+    set(systemd_profile custom)
+endif()
 include("@CMAKE_CURRENT_BINARY_DIR@/jobu-install-manifest.cmake")
 foreach(directory binary_directory library_directory include_directory data_directory documentation_directory sdk_directory)
     if(IS_ABSOLUTE "${${directory}}" OR "${${directory}}" MATCHES "(^|/)[.][.](/|$)")
@@ -40,6 +47,7 @@ set(configure_arguments -S "${producer_source}" -B "${producer}" -G "@CMAKE_GENE
     -C "@CMAKE_CURRENT_BINARY_DIR@/jobu-package-cache.cmake"
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/jobu
     -DJB_JOBU_SYSCONFDIR=/opt/jobu/etc -DJB_JOBU_STATEDIR=/opt/jobu/var/lib -DJB_JOBU_RUNDIR=/opt/jobu/var/run
+    "-DJB_JOBU_SYSTEMD_PROFILE=${systemd_profile}"
     -DBUILD_TESTING=OFF -DJB_BUILD_EXAMPLES=OFF -DJB_PACKAGE_REMAP_PATHS=ON
     "-DJB_BUILD_SQLITE_DRIVER=@JB_BUILD_SQLITE_DRIVER@"
     "-DCMAKE_INSTALL_BINDIR=${binary_directory}" "-DCMAKE_INSTALL_LIBDIR=${library_directory}"
@@ -105,6 +113,10 @@ foreach(component runtime development documentation)
             message(FATAL_ERROR "Missing build metadata: ${required}")
         endif()
     endforeach()
+    string(FIND "${metadata}" "systemd-profile=${systemd_profile}" profile_position)
+    if(profile_position EQUAL -1)
+        message(FATAL_ERROR "Package metadata lost the selected systemd profile")
+    endif()
     if(component STREQUAL "runtime")
         foreach(required "Native runtime dependencies (external; shared-library files are not bundled)" ${applications})
             string(FIND "${metadata}" "${required}" position)
@@ -142,6 +154,13 @@ endforeach()
 # Extraction refreshes examples; neither it nor the package carries active
 # operator policy/data. Keep sentinels across two overlays of the Runtime archive.
 set(runtime "${fixture}/runtime")
+if(NOT systemd_profile STREQUAL "none")
+    file(READ "${producer}/jobu-generated/jobud.service" generated_unit)
+    file(READ "${runtime}/${data_directory}/jobu/services/jobud.service" packaged_unit)
+    if(NOT generated_unit STREQUAL packaged_unit)
+        message(FATAL_ERROR "Packaging changed the configured service unit")
+    endif()
+endif()
 foreach(path etc/jobud.ini var/lib/operator.sqlite3 var/run/operator.lock)
     get_filename_component(parent "${runtime}/${path}" DIRECTORY)
     file(MAKE_DIRECTORY "${parent}")
