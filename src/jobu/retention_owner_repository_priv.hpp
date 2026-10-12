@@ -32,6 +32,7 @@ class RetentionOwnerRepository final {
 public:
     explicit RetentionOwnerRepository(jb::db::Database& database) noexcept;
 
+    /// FinishedOnce selects only definitions with remaining replay references; it never deletes those definitions.
     [[nodiscard]] auto list_candidates(RetentionOwnerKind kind, std::size_t limit, std::optional<jb::core::Uuid> after)
         -> jb::core::Result<std::vector<jb::core::Uuid>, jb::core::Error>;
     [[nodiscard]] auto has_job(jb::core::Uuid const& id) -> jb::core::Result<bool, jb::core::Error>;

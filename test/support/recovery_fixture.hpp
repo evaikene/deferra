@@ -47,7 +47,9 @@ struct RecoveryRunFixture {
 class RecoveryFixture final {
 public:
     /// Optionally decorates the closed SQLite driver; the wrapper must preserve exclusive ownership and file identity.
-    explicit RecoveryFixture(std::function<std::unique_ptr<db::Driver>(std::unique_ptr<db::Driver>)> wrap_driver = {});
+    /// An optional file belongs to the caller's isolated fixture; it permits subprocess crash/reopen checks.
+    explicit RecoveryFixture(std::function<std::unique_ptr<db::Driver>(std::unique_ptr<db::Driver>)> wrap_driver = {},
+                             std::optional<std::filesystem::path> const& database_path = std::nullopt);
 
     /// Builds an active one-time definition with three allowed attempts; callers may edit the returned value.
     [[nodiscard]] auto make_job(core::Uuid id, core::Uuid queue_id, jobu::JobType type = jobu::JobType::Cli) const

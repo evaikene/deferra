@@ -81,8 +81,10 @@ auto recovery_queue(core::Uuid id, QueueState state, RecoveryPolicy policy) -> Q
             .deleted_at      = state == QueueState::Deleted ? std::optional{at(2)} : std::nullopt};
 }
 
-RecoveryFixture::RecoveryFixture(std::function<std::unique_ptr<db::Driver>(std::unique_ptr<db::Driver>)> wrap_driver)
-    : database{[&]() -> std::unique_ptr<db::Driver> {
+RecoveryFixture::RecoveryFixture(std::function<std::unique_ptr<db::Driver>(std::unique_ptr<db::Driver>)> wrap_driver,
+                                 std::optional<std::filesystem::path> const&                             database_path)
+    : database_file{database_path.value_or(directory.path() / "recovery.sqlite")}
+    , database{[&]() -> std::unique_ptr<db::Driver> {
         auto driver =
             std::make_unique<db::sqlite::Driver>(db::sqlite::Options{.database_file = database_file,
                                                                      .busy_timeout  = 1000ms,

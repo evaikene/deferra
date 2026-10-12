@@ -406,6 +406,15 @@ if(TARGET jobu-sqlite)
     target_link_libraries(jobu-scheduler-telemetry-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME jobu-scheduler-telemetry-test COMMAND $<TARGET_FILE:jobu-scheduler-telemetry-test>)
 
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(jobu-scale-test
+            jobu-scale-test.cpp support/jobu_scale_fixture.cpp support/fake_attempt_executor.cpp
+            support/fault_database_driver.cpp support/recovery_fixture.cpp support/temporary_directory.cpp)
+        target_link_libraries(jobu-scale-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+        add_test(NAME jobu-scale-test COMMAND $<TARGET_FILE:jobu-scale-test> "[scale]")
+        set_tests_properties(jobu-scale-test PROPERTIES TIMEOUT 120)
+    endif()
+
     add_executable(secret-service-test
         secret-service-test.cpp support/fault_database_driver.cpp
         support/recovery_fixture.cpp support/temporary_directory.cpp)
