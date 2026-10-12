@@ -54,6 +54,10 @@ struct DatabaseFaultState {
     std::function<std::string(std::string_view)> classify;
     std::vector<DatabaseFault>                   faults;
     std::vector<DatabaseCall>                    calls;
+    /// Disable the owning trace for scale measurements; faults and the synchronous observer still run.
+    bool                                         record_calls{true};
+    /// Borrowed only during checkpoint(). Must not reenter the database; may implement a subprocess barrier.
+    std::function<void(DatabaseCall const&)>     observe;
 
     /// Records a checkpoint and consumes the first matching unconsumed fault, if any.
     [[nodiscard]] auto checkpoint(std::string_view boundary, DatabaseOperation operation, DatabaseFaultPhase phase)

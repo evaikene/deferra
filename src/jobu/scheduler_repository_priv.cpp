@@ -162,6 +162,7 @@ auto scheduler_run_columns() -> std::string
 {
     // Owner states and aggregate attempt counts let every scheduler validate cross-table lifecycle invariants
     // before using a run for selection, capacity accounting, cancellation, or completion.
+    // Keep Completed predicates inside run-local aggregates so SQLite cannot scan all Completed history per run.
     return std::string{job_run_columns()} +
            ", jobu_jobs.queue_id AS job_queue_id, jobu_jobs.state AS job_state, "
            "jobu_jobs.schedule_kind AS job_schedule_kind, "
@@ -172,12 +173,13 @@ auto scheduler_run_columns() -> std::string
            "(SELECT COUNT(*) FROM jobu_attempts AS running_attempts "
            "WHERE running_attempts.run_id = jobu_runs.id AND running_attempts.state = 'running') "
            "AS running_attempt_count, "
-           "(SELECT COUNT(*) FROM jobu_attempts AS completed_attempts "
-           "WHERE completed_attempts.run_id = jobu_runs.id AND completed_attempts.state = 'completed') "
+           "COALESCE((SELECT SUM(CASE WHEN completed_attempts.state = 'completed' THEN 1 ELSE 0 END) "
+           "FROM jobu_attempts AS completed_attempts WHERE completed_attempts.run_id = jobu_runs.id), 0) "
            "AS completed_attempt_count, "
-           "(SELECT COUNT(*) FROM jobu_attempts AS retry_history_attempts "
-           "WHERE retry_history_attempts.run_id = jobu_runs.id AND retry_history_attempts.state = 'completed' "
-           "AND retry_history_attempts.outcome IN ('failed', 'interrupted')) AS retry_history_attempt_count, "
+           "COALESCE((SELECT SUM(CASE WHEN retry_history_attempts.state = 'completed' "
+           "AND retry_history_attempts.outcome IN ('failed', 'interrupted') THEN 1 ELSE 0 END) "
+           "FROM jobu_attempts AS retry_history_attempts "
+           "WHERE retry_history_attempts.run_id = jobu_runs.id), 0) AS retry_history_attempt_count, "
            "(SELECT COUNT(*) FROM jobu_attempts AS all_attempts WHERE all_attempts.run_id = jobu_runs.id) "
            "AS total_attempt_count";
 }

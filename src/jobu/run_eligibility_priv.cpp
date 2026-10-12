@@ -140,6 +140,8 @@ auto list_eligibility(jb::db::Database& database, EligibilityScope scope, std::o
 {
     // Left joins expose missing owners instead of filtering corruption out. The fixed projection
     // and UUID keyset bound memory; traversing an affected scope still costs proportional work.
+    // Filter retry outcomes inside the aggregate so both attempt projections seek by run_id.
+    // A state predicate in WHERE can instead rescan all Completed history for each pending row.
     std::string sql =
         "SELECT r.id, r.job_id, r.queue_id, r.state, r.origin, r.schedule_owned, r.type, r.runnable_at_us, "
         "j.queue_id AS job_queue_id, j.state AS job_state, j.schedule_kind, q.state AS queue_state, "
@@ -151,8 +153,8 @@ auto list_eligibility(jb::db::Database& database, EligibilityScope scope, std::o
         "(SELECT COUNT(*) FROM jobu_runs l WHERE l.job_id = r.job_id "
         "AND l.state IN ('scheduled', 'running', 'retry_wait')) AS live_count, "
         "(SELECT COUNT(*) FROM jobu_attempts a WHERE a.run_id = r.id) AS attempt_count, "
-        "(SELECT COUNT(*) FROM jobu_attempts a WHERE a.run_id = r.id AND a.state = 'completed' "
-        "AND a.outcome IN ('failed', 'interrupted')) AS retry_history_count "
+        "COALESCE((SELECT SUM(CASE WHEN a.state = 'completed' AND a.outcome IN ('failed', 'interrupted') "
+        "THEN 1 ELSE 0 END) FROM jobu_attempts a WHERE a.run_id = r.id), 0) AS retry_history_count "
         "FROM jobu_runs r LEFT JOIN jobu_jobs j ON j.id = r.job_id "
         "LEFT JOIN jobu_queues q ON q.id = r.queue_id LEFT JOIN jobu_run_timing t ON t.run_id = r.id "
         "WHERE (r.state IN ('scheduled', 'retry_wait') OR t.open_epoch IS NOT NULL) ";

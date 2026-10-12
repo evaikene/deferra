@@ -62,7 +62,7 @@ struct LifetimeFixture {
             if (text.starts_with("SELECT method AS idempotency_method")) {
                 return std::string{"replay.page"};
             }
-            if (text.starts_with("SELECT id AS owner_id")) {
+            if (text.starts_with("SELECT id AS owner_id") || text.starts_with("SELECT resource_id AS owner_id")) {
                 return std::string{"owner.page"};
             }
             if (text.starts_with("DELETE FROM jobu_idempotency")) {

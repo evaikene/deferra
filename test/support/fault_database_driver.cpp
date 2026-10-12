@@ -86,7 +86,12 @@ auto DatabaseFaultState::checkpoint(std::string_view boundary, DatabaseOperation
     -> std::optional<core::Error>
 {
     auto call = DatabaseCall{.boundary = std::string{boundary}, .operation = operation, .phase = phase};
-    calls.push_back(call);
+    if (record_calls) {
+        calls.push_back(call);
+    }
+    if (observe) {
+        observe(call);
+    }
     for (auto& fault : faults) {
         if (!fault.fired && fault.at == call) {
             fault.fired = true;

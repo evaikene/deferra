@@ -79,11 +79,23 @@ auto RetentionOwnerRepository::list_candidates(RetentionOwnerKind            kin
     // separately so eligible creation keys can be retired with their owner.
     auto sql = std::string{};
     switch (kind) {
-        case RetentionOwnerKind::FinishedOnce:
-            sql  = "SELECT id AS owner_id FROM jobu_jobs WHERE schedule_kind = 'once' "
-                   "AND state IN ('succeeded', 'failed', 'cancelled') AND ";
-            sql += kNoJobRuns;
+        case RetentionOwnerKind::FinishedOnce: {
+            // Finished definitions remain after their keys retire. Drive this phase
+            // from both replay owner indexes so later sweeps do not revisit keyless
+            // definitions. UNION deduplicates owners; ORDER BY merges indexed ranges.
+            // Include every method so scope-only and malformed references still reach validation.
+            auto const* lower_bound = after ? "> :after" : ">= :after";
+            auto const  guards      = std::string{" AND jobu_jobs.schedule_kind = 'once' "
+                                                  "AND jobu_jobs.state IN ('succeeded', 'failed', 'cancelled') AND "} +
+                                      kNoJobRuns;
+            sql                     = "SELECT resource_id AS owner_id FROM jobu_idempotency "
+                                      "JOIN jobu_jobs ON jobu_jobs.id = resource_id WHERE resource_id " +
+                                      std::string{lower_bound} + guards +
+                                      " UNION SELECT scope_id AS owner_id FROM jobu_idempotency "
+                                      "JOIN jobu_jobs ON jobu_jobs.id = scope_id WHERE scope_id " +
+                                      lower_bound + guards + " ORDER BY owner_id LIMIT :limit";
             break;
+        }
         case RetentionOwnerKind::DeletedJob:
             sql  = "SELECT id AS owner_id FROM jobu_jobs WHERE state = 'deleted' AND ";
             sql += kNoJobRuns;
@@ -93,11 +105,13 @@ auto RetentionOwnerRepository::list_candidates(RetentionOwnerKind            kin
             sql += kNoQueueOwners;
             break;
     }
-    // An explicit first-page lower bound also selects the UUID index instead
-    // of sorting every candidate owner through a different covering index.
-    // Nil is included on the first page; continuation excludes its last UUID.
-    sql += after ? " AND id > :after" : " AND id >= :after";
-    sql += " ORDER BY id LIMIT :limit";
+    if (kind != RetentionOwnerKind::FinishedOnce) {
+        // An explicit first-page lower bound selects the UUID index instead
+        // of sorting every tombstone through a different covering index.
+        // Nil is included on the first page; continuation excludes its last UUID.
+        sql += after ? " AND id > :after" : " AND id >= :after";
+        sql += " ORDER BY id LIMIT :limit";
+    }
 
     jb::db::Query query{_database};
     auto          result = query.prepare(sql);
