@@ -1,4 +1,5 @@
-FROM alpine:3.22
+ARG BASE_VERSION
+FROM alpine:${BASE_VERSION}
 
 RUN apk add --no-cache \
     catch2-3 \
