@@ -16,8 +16,11 @@ usage()
         "  debug      Run a command with SYS_PTRACE available." \
         "" \
         "Environments:" \
-        "  ubuntu, ubuntu-24.04" \
-        "  alpine, alpine-3.22"
+        "  ubuntu, ubuntu-2604, ubuntu-26.04 (default Ubuntu)" \
+        "  ubuntu-2404, ubuntu-24.04" \
+        "  alpine, alpine-324, alpine-3.24 (default Alpine)" \
+        "  alpine-323, alpine-3.23" \
+        "  alpine-322, alpine-3.22"
 }
 
 fail()
@@ -38,15 +41,31 @@ shift 2
 script_directory=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd -P)
 
+# Keep defaults explicit so adding a release does not silently move existing aliases.
 case "$environment" in
-    ubuntu | ubuntu-24.04)
-        image=deferra-dev:ubuntu-24.04
-        dockerfile=$repository_root/containers/Dockerfile.ubuntu-24.04
+    ubuntu | ubuntu-2604 | ubuntu-26.04)
+        distribution=ubuntu
+        version=26.04
+        build_directory=.bld-ubuntu-2604
+        ;;
+    ubuntu-2404 | ubuntu-24.04)
+        distribution=ubuntu
+        version=24.04
         build_directory=.bld-ubuntu-2404
         ;;
-    alpine | alpine-3.22)
-        image=deferra-dev:alpine-3.22
-        dockerfile=$repository_root/containers/Dockerfile.alpine-3.22
+    alpine | alpine-324 | alpine-3.24)
+        distribution=alpine
+        version=3.24
+        build_directory=.bld-alpine-324
+        ;;
+    alpine-323 | alpine-3.23)
+        distribution=alpine
+        version=3.23
+        build_directory=.bld-alpine-323
+        ;;
+    alpine-322 | alpine-3.22)
+        distribution=alpine
+        version=3.22
         build_directory=.bld-alpine-322
         ;;
     *)
@@ -54,8 +73,12 @@ case "$environment" in
         ;;
 esac
 
+image=deferra-dev:$distribution-$version
+dockerfile=$repository_root/containers/Dockerfile.$distribution
+
 if [[ $action == image ]]; then
-    exec docker build --file "$dockerfile" --tag "$image" "$@" "$repository_root/containers"
+    exec docker build --file "$dockerfile" --tag "$image" "$@" \
+        --build-arg "BASE_VERSION=$version" "$repository_root/containers"
 fi
 
 if ! docker image inspect "$image" >/dev/null 2>&1; then

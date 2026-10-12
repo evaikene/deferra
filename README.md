@@ -19,8 +19,9 @@ persistence.
 
 ## Supported platforms
 
-- Ubuntu 24.04
-- Alpine Linux 3.22
+- Arch Linux (rolling release; primary development platform)
+- Ubuntu 24.04 and 26.04
+- Alpine Linux 3.22, 3.23, and 3.24
 - macOS with Apple Clang and Homebrew dependencies
 
 Windows is not a runtime target.
@@ -35,7 +36,7 @@ Linux command execution requires a libc providing `_Fork()`, kernel pidfd
 support, and `PR_SET_NO_NEW_PRIVS`. macOS command execution uses kqueue process
 watches and public `fork()`.
 
-### Ubuntu 24.04
+### Ubuntu 24.04 and 26.04
 
 ```sh
 sudo apt-get update
@@ -44,7 +45,7 @@ sudo apt-get install --yes --no-install-recommends \
     ninja-build nlohmann-json3-dev
 ```
 
-### Alpine Linux 3.22
+### Alpine Linux 3.22, 3.23, and 3.24
 
 Alpine does not ship `sudo` by default, so run the following as root (or
 install `sudo` first):
