@@ -11,8 +11,8 @@ permissions:
 
 jobs:
   ubuntu:
-    name: Ubuntu 24.04
-    runs-on: ubuntu-24.04
+    name: Ubuntu
+    runs-on: ubuntu-latest
 
     steps:
       - name: Check out sources
@@ -42,9 +42,9 @@ jobs:
         run: ctest --test-dir .bld/test --output-on-failure
 
   alpine:
-    name: Alpine 3.22
-    runs-on: ubuntu-24.04
-    container: alpine:3.22
+    name: Alpine
+    runs-on: ubuntu-latest
+    container: alpine:latest
     env:
       # This disposable root container explicitly exercises unsafe root CLI execution.
       # The fixture also launches a separate daemon without the override to prove denial.
