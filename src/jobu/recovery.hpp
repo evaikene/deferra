@@ -59,6 +59,7 @@ struct RecoveryReport {
 /// daemon database ownership. Dependencies are borrowed only for this call. No executor is invoked,
 /// and no listener, event loop, or scheduler is started. Recovery uses current queue policy and
 /// immutable run retry attributes; interrupted external outcomes remain unknown.
+/// Page bounds limit each scan, not total synchronous validation/repair work or startup latency.
 ///
 /// Each repair unit commits independently. Failure can leave earlier units committed; close
 /// and reopen after storage failure and rerun recovery before serving. A commit error can also

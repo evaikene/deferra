@@ -33,7 +33,7 @@ enum class StatisticsScope : std::uint8_t {
 /// Initial retained-run query. The planned window is half-open and may omit either bound.
 /// The service resolves omitted bounds once: upper to server UTC now, lower to 24 hours before upper.
 /// The resolved window must be increasing and no longer than 31 days. Queue scope requires queue_id;
-/// a future queue.stats adapter resolves its selector to that stable ID before calling the service.
+/// the queue.stats adapter resolves its selector to that stable ID before calling the service.
 struct StatisticsRequest {
     std::optional<jb::core::Uuid> queue_id;
     std::optional<jb::core::Uuid> job_id;

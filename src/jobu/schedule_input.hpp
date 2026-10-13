@@ -17,6 +17,7 @@ struct CronScheduleInput {
     std::string                expression;
     /// Explicit nonempty timezone, or no value to use the receiving daemon's default.
     /// Explicit UTC remains UTC regardless of that default.
+    /// Preserve omission when replaying keyed creation: a retained response keeps its original resolved zone.
     std::optional<std::string> timezone;
 };
 

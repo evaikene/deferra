@@ -16,9 +16,10 @@ foreach(component Runtime Development Documentation)
         DESTINATION "${CMAKE_INSTALL_DATADIR}/jobu" COMPONENT ${component})
 endforeach()
 install(FILES "${PROJECT_SOURCE_DIR}/packaging/systemd/jobud.service.in"
-    "${PROJECT_SOURCE_DIR}/packaging/systemd/README.md"
     "${PROJECT_SOURCE_DIR}/packaging/systemd/wait-ready.sh"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/jobu/services" COMPONENT Runtime)
+install(FILES "${PROJECT_SOURCE_DIR}/docs/services/systemd.md"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/jobu/services" RENAME README.md COMPONENT Runtime)
 jobu_configure_systemd_assets()
 install(FILES
     "${PROJECT_SOURCE_DIR}/examples/jobu-client/CMakeLists.txt"
@@ -27,10 +28,12 @@ install(FILES
     DESTINATION "${CMAKE_INSTALL_DATADIR}/jobu/examples/jobu-client" COMPONENT Development)
 
 # User manuals only: planning and shared verification records are not package assets.
-set(JOBU_MANUALS installation.md cpp-client.md jobuctl.md cron.md secrets.md)
+set(JOBU_MANUALS README.md installation.md configuration.md operations.md observability.md
+    cpp-client.md jobuctl.md cron.md secrets.md services/systemd.md)
 foreach(manual IN LISTS JOBU_MANUALS)
+    get_filename_component(manual_directory "${manual}" DIRECTORY)
     install(FILES "${PROJECT_SOURCE_DIR}/docs/${manual}"
-        DESTINATION "${CMAKE_INSTALL_DOCDIR}" COMPONENT Documentation)
+        DESTINATION "${CMAKE_INSTALL_DOCDIR}/${manual_directory}" COMPONENT Documentation)
 endforeach()
 set(JOBU_PROTOCOL_MANUALS
     README.md errors.md transport.md types.md

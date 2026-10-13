@@ -102,6 +102,10 @@ null average/maximum; Partial and unfinished runs are excluded. See the
 [statistics types](protocol/types.md#statistics-page) for provenance and
 retained-history semantics.
 
+The [observability guide](observability.md#runnable-wait-and-coverage) explains
+coverage after crashes and late instrumentation; the [operations guide](operations.md#retention-and-replay-lifetimes)
+explains when retained history and replay records disappear.
+
 Cron requests use `CronScheduleInput{expression, optional_timezone}`.
 Since API 1.4, omitting timezone uses the daemon's configured default; supplying `"UTC"`
 keeps UTC explicit. `CreateJobRequest`, `UpdateJobRequest`, `validate_schedule`,

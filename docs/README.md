@@ -31,13 +31,21 @@ value that JobU resolves just before each attempt.
 
 ## Try a command-line job
 
-Start the daemon with a socket and database path in one terminal:
+As an ordinary non-root user, create a disposable private directory and start
+the daemon in one terminal. Keep the printed directory path for the client:
 
 ```sh
-jobud --socket /tmp/jobu.sock --database ./jobu.sqlite
+umask 077
+jobu_demo=$(mktemp -d /tmp/jobu-demo.XXXXXX)
+printf 'Demo directory: %s\n' "$jobu_demo"
+jobud --no-config --socket "$jobu_demo/jobud.sock" --database "$jobu_demo/jobu.sqlite3"
 ```
 
-The daemon creates the current SQLite format (version 3) in an empty database
+Wait for `jobud.ready` on stderr. The directory is mode 0700, owned by you;
+database and socket files are owner-only. Raw paths in shared `/tmp` are unsafe.
+This temporary location is for a demo, not persistent deployment or backups.
+
+The daemon creates the current SQLite format (version 4) in an empty database
 and validates it on later starts. It rejects older and newer formats without
 changing them. If you have an earlier test database, keep it separately and
 point the daemon at a fresh database file; changing its version marker does not
@@ -63,19 +71,24 @@ directory to have the matching group and mode `0750`, with traversal through
 its ancestors. Group access is an administrative trust boundary; it supplies
 neither read-only monitoring nor per-user authorization.
 
-In another terminal, create a queue and a job due immediately:
+In another terminal, set `jobu_demo` to the printed directory (replace the
+example suffix below), then create a queue and a job due immediately:
 
 ```sh
-jobuctl --socket /tmp/jobu.sock queue create examples
-jobuctl --socket /tmp/jobu.sock job create \
+jobu_demo=/tmp/jobu-demo.REPLACE
+jobuctl --socket "$jobu_demo/jobud.sock" system info
+jobuctl --socket "$jobu_demo/jobud.sock" queue create examples
+jobuctl --socket "$jobu_demo/jobud.sock" job create \
     --queue-name examples --type cli --now \
     --command /bin/echo --arg='hello from JobU'
-jobuctl --socket /tmp/jobu.sock job list --all
-jobuctl --socket /tmp/jobu.sock run list
+jobuctl --socket "$jobu_demo/jobud.sock" job list --all
+jobuctl --socket "$jobu_demo/jobud.sock" run list
 ```
 
-Use paths appropriate for your machine. `jobud` must be running for remote
-`jobuctl` commands, and each command must use the daemon's socket path.
+`jobud` must be running for remote `jobuctl` commands. This demo overrides the
+endpoint, so its client commands use the same override. For an installation
+using matching compiled defaults, `jobuctl system info` needs no `--socket`.
+Stop the foreground daemon with Ctrl-C before removing its disposable directory.
 `job list` alone shows only active definitions; `--all` also shows a one-time
 job after it has finished.
 Successful output is not retained by the default `output.capture=on_error`
@@ -90,6 +103,10 @@ running daemon.
 
 | Guide | Use it for |
 | --- | --- |
+| [Installation and SDK](installation.md) | Installing components and packages, provisioning accounts, and activating systemd deliberately |
+| [Configuration](configuration.md) | Startup keys, defaults, units, precedence, and local validation |
+| [Operations](operations.md) | Lifecycle, retention, backup/restore, recovery, and troubleshooting |
+| [Observability](observability.md) | Logs, warning guarantees, timing quality, and retained statistics |
 | [jobuctl command guide](jobuctl.md) | Creating and changing queues and jobs; inspecting runs, attempts, output, statistics, and cron previews |
 | [Cron schedules](cron.md) | Writing recurring schedules, understanding aliases and timezones, and previewing occurrences |
 | [Named secrets](secrets.md) | Supplying sensitive values and understanding storage, process, and output exposure |
@@ -98,6 +115,7 @@ running daemon.
 
 JobU stores secret values as plaintext in its SQLite database. Protect the
 database and its copies, and review the [secret guide](secrets.md) before
-putting sensitive values into jobs. Queue retention and runnable-wait warning
-settings are stored, but the daemon does not automatically purge history or
-emit runnable-wait warnings.
+putting sensitive values into jobs. Retention automatically deletes eligible
+terminal history, with a 30-day inherited default. Runnable-wait warnings are
+active, with a 10-second default threshold and at-most-once delivery semantics;
+see the operations and observability guides for their limits.

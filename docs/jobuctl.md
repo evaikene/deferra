@@ -130,8 +130,12 @@ following the raw `job.list` API. Request-file input cannot be combined with
 
 Queue create/update accept `--recovery-policy fail_interrupted|retry_interrupted`, `--history-retention-seconds N`, `--runnable-wait-warning-ms N`, and `--defaults-file FILE`. Retention `0` means unlimited. Omit retention at creation to inherit the daemon policy; use `--inherit-history-retention` on update to restore inheritance. These two update options are mutually exclusive. The warning delay is nonnegative milliseconds. A defaults file contains a JSON object of registered queue default attributes; `{}` clears all queue defaults on update. Omitted update fields stay unchanged.
 
-The daemon stores retention and warning settings. It does not currently
-automatically purge retained history or emit runnable-wait warnings.
+The daemon automatically purges eligible terminal history and emits runnable-wait
+warnings. Retention inherits 30 days unless configured otherwise; zero is
+unlimited. The default warning threshold is 10,000 ms; zero disables warnings
+without disabling measurement. See [retention and replay lifetimes](operations.md#retention-and-replay-lifetimes)
+and the [warning guarantee](observability.md#delay-warning-guarantee) before
+changing these settings.
 
 ```sh
 printf '{"retry.max_attempts":2}\n' > queue-defaults.json

@@ -36,8 +36,12 @@ unambiguous historical name.
 | `idempotency_key` | string | No | — | 1.1 | 1–128 UTF-8 bytes for durable replay |
 
 The result is a full [queue object](../types.md#queue-and-job-definition-results).
-The daemon stores retention and warning settings, but this version does not
-automatically purge retained history or emit runnable-wait warnings.
+The daemon automatically purges eligible terminal history using the queue's
+effective policy and observes eligible wait even when capacity is full.
+Zero warning threshold disables warnings without disabling measurement;
+a positive threshold must be strictly exceeded. See
+[retention](../../operations.md#retention-and-replay-lifetimes) and
+[warning delivery](../../observability.md#delay-warning-guarantee).
 Create commits the queue and any idempotency record before replying. The same
 key and equivalent canonical request replay the original result while that
 record remains; a different request with that key conflicts. A lost reply

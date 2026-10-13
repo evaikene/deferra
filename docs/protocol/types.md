@@ -113,9 +113,10 @@ recurring definition cannot have one of these states. A terminal definition has
 no deletion timestamp; `deleted` remains the separate soft-deletion state. The
 stored job outcome remains authoritative even if its old run history is removed.
 
-Retention and runnable-wait warning settings are stored configuration. The
-current daemon does not automatically purge retained history or emit
-runnable-wait warnings.
+The daemon applies retention and runnable-wait warning settings automatically.
+See [operations](../operations.md#retention-and-replay-lifetimes) for terminal
+history deletion and replay lifetime, and [observability](../observability.md#delay-warning-guarantee)
+for the strict threshold, zero-off and at-most-once warning contract.
 
 `queue.list` and `job.list` return the corresponding full objects, ordered by
 ascending ID bytes. Their page members are:
@@ -283,6 +284,8 @@ fixed. Counts and measurements apply only to history still retained.
 ## Attributes and defaults
 
 Queue `defaults` are a partial layer applied to subsequently created jobs.
+The daemon's startup `defaults.*` layer sits between built-in and queue defaults;
+see the [configuration reference](../configuration.md#default-job-attributes).
 The job's `attributes` result is complete and materialized. On `job.create`,
 an omitted attribute inherits the applicable default. On `job.update`, the
 supplied object patches named values; omitted names stay unchanged. JSON null
