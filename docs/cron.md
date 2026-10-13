@@ -88,14 +88,15 @@ instant once. For example, in `Europe/Tallinn` in 2024:
 Ask the daemon to validate the expression and preview its next occurrences:
 
 ```sh
-jobuctl --socket /run/jobu.sock schedule validate '0 9 * * MON-FRI' \
+jobuctl schedule validate '0 9 * * MON-FRI' \
     --timezone Europe/Tallinn
-jobuctl --socket /run/jobu.sock schedule next '@daily' \
+jobuctl schedule next '@daily' \
     --timezone UTC --after 2030-01-01T00:00:00Z --count 3 --json
 ```
 
-Replace the socket path and `--after` time with your own. `--after` is a UTC
-instant ending in `Z`; the preview returns occurrences **strictly later**
+These commands use the compiled socket default. Add `--socket PATH` if your
+daemon uses a different endpoint. Choose the `--after` time for your preview;
+it is a UTC instant ending in `Z`. The preview returns occurrences **strictly later**
 than it. The default preview count is 5, and the accepted range is 1–200.
 The preview above returns January 2, 3, and 4 at 00:00 UTC. Validation checks
 the expression and timezone; preview also checks that matching occurrences
@@ -104,8 +105,8 @@ can actually be found. Neither command creates or changes a job.
 After checking the schedule, create a queue and a recurring job:
 
 ```sh
-jobuctl --socket /run/jobu.sock queue create reports
-jobuctl --socket /run/jobu.sock job create \
+jobuctl queue create reports
+jobuctl job create \
     --queue-name reports --type cli --cron '@daily' \
     --timezone Europe/Tallinn --command /bin/echo --arg=ready
 ```

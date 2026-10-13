@@ -31,7 +31,7 @@ dependencies appropriate to the build host and toolchain.
 | --- | --- |
 | Runtime | `bin/jobud`, `bin/jobuctl`; `share/jobu/jobud.ini.example`; systemd assets and readiness probe in `share/jobu/services`; selected system profile also stages `lib/systemd/system/jobud.service` |
 | Development | Static libraries and `cmake/JobU` package metadata in the configured library directory; headers in `include/jb/<module>`; buildable C++ example sources in `share/jobu/examples/jobu-client` |
-| Documentation | This guide, CLI/client/cron/secret guides, and protocol references/examples in the configured documentation directory |
+| Documentation | Manual entry point, installation/configuration/operations/observability/CLI/client/cron/secret guides, systemd setup, and protocol references/examples in the configured documentation directory |
 
 GNUInstallDirs controls the binary, library, include, data and documentation
 destinations. Explicit manifests exclude planning documents, shared evidence,
@@ -123,8 +123,9 @@ the scratch tree. Passing package archives and sidecars remain in
 `<build>/jobu-artifacts`. A killed runner or CTest timeout can leave scratch until
 it is removed or the machine restarts.
 
-The Linux package gate uses these x86_64 baseline producers; older OS/runtime
-versions are not established by this evidence:
+Retained Linux package evidence used these x86_64 producers; older OS/runtime
+versions are not established by that evidence. This table records those runs,
+not a version pin for today's CI (`ubuntu-latest` and `alpine:latest`):
 
 | Producer | C / C++ runtime | fmt / libcurl / SQLite |
 | --- | --- | --- |
@@ -253,8 +254,12 @@ Use [the CLI guide](jobuctl.md) for shared default endpoint behavior and explici
 `--socket` overrides, and [the client guide](cpp-client.md) for borrowed lifetimes
 and the caller-supplied endpoint. For account/configuration setup, system/custom
 unit placement, administrative socket groups, deliberate activation, bounded RPC
-readiness and shutdown, see [the systemd setup guide](../packaging/systemd/README.md).
+readiness and shutdown, see [the systemd setup guide](services/systemd.md).
 Installed Runtime files carry it at `<data-directory>/jobu/services/README.md` and
 the probe at `wait-ready.sh`. The system profile stages a vendor unit; installation
-never reloads, enables, starts or restarts it. Native privileged/service evidence
-and the complete operations/configuration reference remain their designated gates.
+never reloads, enables, starts or restarts it. The native Stage 9.26 Linux gate
+established managed-service behavior in its recorded Ubuntu/systemd environment;
+unit syntax alone is not deployment evidence. Use the [configuration reference](configuration.md),
+[operations guide](operations.md) and [observability guide](observability.md)
+for ongoing administration. Native macOS identity adaptation, launchd assets and
+deployment validation remain separate stages; no launchd activation is claimed here.

@@ -51,6 +51,11 @@ callers can configure their own options. Result pages may stop before their
 item limit to remain within the daemon's response budget. See the relevant
 method for its per-field limits.
 
+Daemon `rpc.*` settings can change frame, batch, connection and queued-output
+limits within the [configuration reference](../configuration.md#rpc-and-logs)
+ranges. The default connection limit is 128. Narrower method/result budgets
+still apply; raising the body limit does not enlarge every method response.
+
 ## Request and response envelopes
 
 For a request that needs a reply, send `jsonrpc`, `id`, `method`, and an object

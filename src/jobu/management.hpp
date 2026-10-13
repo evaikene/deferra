@@ -75,7 +75,8 @@ struct CreateQueueRequest {
     AttributeSet                        defaults;
     /// Retention override, zero for unlimited, or no value to inherit daemon policy.
     std::optional<std::chrono::seconds> history_retention;
-    /// Nonnegative delay before runnable-work warnings.
+    /// Nonnegative observed runnable-wait threshold in milliseconds; zero disables warnings, not measurement.
+    /// An eligible run warns only strictly beyond the threshold, at most once across retries and restarts.
     std::chrono::milliseconds           runnable_wait_warning{10000};
     /// Optional 1-through-128-byte UTF-8 key reserved for durable create replay.
     std::optional<std::string>          idempotency_key;
@@ -101,7 +102,7 @@ struct UpdateQueueRequest {
     std::optional<AttributeSet>                        defaults;
     /// Unchanged, inherit daemon policy, or a concrete retention duration.
     std::optional<std::optional<std::chrono::seconds>> history_retention;
-    /// Replacement nonnegative runnable-work warning delay.
+    /// Replacement nonnegative observed-wait threshold; zero disables warnings without clearing a prior claim.
     std::optional<std::chrono::milliseconds>           runnable_wait_warning;
 };
 
