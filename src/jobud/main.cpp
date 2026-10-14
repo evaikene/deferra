@@ -239,6 +239,11 @@ auto main(int argc, char* argv[]) -> int
             return EXIT_SUCCESS;
         }
 #else
+#  ifdef __APPLE__
+        // Foreground developer runs inherit the shell's umask. Protect newly created
+        // SQLite state and sidecars before constructing any runtime resources.
+        ::umask(0077);
+#  endif
         auto const& effective_startup = startup;
 #endif
         auto                                    listener_options = jb::net::LocalServerOptions{};

@@ -907,6 +907,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TARGET jobud)
     set_tests_properties(jobud-identity-integration-test PROPERTIES TIMEOUT 60)
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND TARGET jobud)
+    add_executable(jobud-macos-startup-test jobud-macos-startup-test.cpp support/temporary_directory.cpp)
+    target_link_libraries(jobud-macos-startup-test PRIVATE core Catch2::Catch2WithMain)
+    target_compile_definitions(jobud-macos-startup-test PRIVATE JOBUD_EXECUTABLE="$<TARGET_FILE:jobud>")
+    add_dependencies(jobud-macos-startup-test jobud)
+    add_test(NAME jobud-macos-startup-test COMMAND $<TARGET_FILE:jobud-macos-startup-test>)
+    set_tests_properties(jobud-macos-startup-test PROPERTIES TIMEOUT 30 ENVIRONMENT "TMPDIR=/tmp")
+endif()
+
 if(TARGET jobud-signal)
     # Compile the same relay with deterministic handler checkpoints only in this isolated helper.
     # The production jobud-signal library contains neither hooks nor runtime test switches.
