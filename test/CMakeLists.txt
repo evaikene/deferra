@@ -38,6 +38,32 @@ add_test(NAME jobu-runtime-layout-test COMMAND ${CMAKE_COMMAND}
 set_tests_properties(jobu-runtime-layout-test PROPERTIES TIMEOUT 180)
 
 include(jobu-sdk-test.cmake)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING AND TARGET jobud)
+    # This producer compiles the actual temporary prefix into both applications.
+    # Reuse toolchain hints only; never inherit operational paths or install staging.
+    set(fresh_install_cache "${JOBU_SDK_CONSUMER_CACHE}")
+    foreach(variable CMAKE_PREFIX_PATH nlohmann_json_DIR nlohmann_json_ROOT OPENSSL_ROOT_DIR)
+        if(DEFINED ${variable} AND NOT "${${variable}}" MATCHES "-NOTFOUND$")
+            string(APPEND fresh_install_cache "set(${variable} [==[${${variable}}]==] CACHE STRING \"\" FORCE)\n")
+        endif()
+    endforeach()
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/jobu-fresh-install-cache.cmake" "${fresh_install_cache}")
+
+    add_executable(jobu-fresh-install-lifecycle jobu-fresh-install-lifecycle.cpp)
+    target_link_libraries(jobu-fresh-install-lifecycle PRIVATE core)
+    configure_file(jobu-fresh-install-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-fresh-install-test.cmake" @ONLY)
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/jobu-fresh-install-worker-$<CONFIG>.cmake"
+        CONTENT "set(lifecycle_helper [==[$<TARGET_FILE:jobu-fresh-install-lifecycle>]==])\ninclude([==[${CMAKE_CURRENT_BINARY_DIR}/jobu-fresh-install-test.cmake]==])\n")
+    add_test(NAME jobu-fresh-install-test COMMAND ${CMAKE_COMMAND}
+        -Dtest_name=jobu-fresh-install-test
+        "-Dtest_script=${CMAKE_CURRENT_BINARY_DIR}/jobu-fresh-install-worker-$<CONFIG>.cmake"
+        "-Devidence_directory=${PROJECT_BINARY_DIR}/jobu-test-logs/jobu-fresh-install-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/jobu-test-runner.cmake")
+    set_tests_properties(jobu-fresh-install-test PROPERTIES TIMEOUT 1200
+        SKIP_REGULAR_EXPRESSION "Fresh installed startup skipped: ordinary user required")
+endif()
+
 configure_file(jobu-package-cache.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-package-cache.cmake" @ONLY)
 configure_file(jobu-package-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-package-test.cmake" @ONLY)
 add_test(NAME jobu-package-test COMMAND ${CMAKE_COMMAND}
