@@ -45,6 +45,33 @@ function(run_checked label)
     endif()
 endfunction()
 
+function(select_upgrade_tar_policy program_output options_output)
+    find_program(upgrade_tar_program tar REQUIRED)
+    execute_process(COMMAND "${upgrade_tar_program}" --help
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(NOT result STREQUAL "0")
+        message(FATAL_ERROR "Cannot inspect upgrade extractor: ${output}${error}")
+    endif()
+    set(help "${output}${error}")
+    if(help MATCHES "--no-overwrite-dir")
+        set(options --no-overwrite-dir)
+    elseif(help MATCHES "BusyBox" AND help MATCHES "--no-same-permissions")
+        # BusyBox preserves existing permissions with this option while creating
+        # new entries with archived modes. -o also suppresses owner/group restore.
+        set(options -o --no-same-permissions)
+    else()
+        message(FATAL_ERROR "Upgrade extraction requires a supported GNU or BusyBox tar preservation policy")
+    endif()
+
+    file(WRITE "${test_logs}/upgrade-tar-policy.log" "Extractor: ${upgrade_tar_program}\nOptions: ${options}\n${help}")
+    set(${program_output} "${upgrade_tar_program}" PARENT_SCOPE)
+    set(${options_output} "${options}" PARENT_SCOPE)
+endfunction()
+
+# Select a supported policy before the expensive producer build. GNU and BusyBox
+# spell this differently; the same preservation assertions apply to both below.
+select_upgrade_tar_policy(upgrade_tar upgrade_tar_options)
+
 # The artifact producer never requires Catch2 or builds examples/test helpers.
 # Reuse configured GNUInstallDirs so the independent expected manifest matches.
 set(configure_arguments -S "${producer_source}" -B "${producer}" -G "@CMAKE_GENERATOR@"
@@ -216,8 +243,8 @@ foreach(component runtime development documentation)
     endforeach()
 endforeach()
 
-# Upgrade extraction refreshes examples while --no-overwrite-dir preserves the
-# operator's metadata. Plain archive extraction does not provide that guarantee.
+# Upgrade extraction refreshes examples with the selected preservation policy.
+# Plain archive extraction does not preserve the operator's directory metadata.
 set(runtime "${fixture}/runtime")
 if(NOT systemd_profile STREQUAL "none")
     file(READ "${producer}/jobu-generated/jobud.service" generated_unit)
@@ -239,8 +266,8 @@ foreach(path "${runtime}" "${runtime}/etc" "${runtime}/var" "${runtime}/var/lib"
 endforeach()
 file(GLOB runtime_archive "${output}/*-runtime.tar.gz")
 foreach(pass RANGE 1 2)
-    run_checked("upgrade-extraction-${pass}" tar --extract --gzip --file "${runtime_archive}"
-        --directory "${runtime}" --no-overwrite-dir)
+    run_checked("upgrade-extraction-${pass}" "${upgrade_tar}" --extract --gzip --file "${runtime_archive}"
+        --directory "${runtime}" ${upgrade_tar_options})
 endforeach()
 foreach(path etc/jobud.ini var/lib/operator.sqlite3 var/run/operator.lock)
     file(READ "${runtime}/${path}" contents)

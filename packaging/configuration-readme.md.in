@@ -71,8 +71,20 @@ tar --extract --gzip --file /path/to/runtime.tar.gz \
     --directory /path/to/existing-prefix --no-overwrite-dir
 ```
 
-This preserves existing directory metadata, including an administrative 0750
-runtime directory. Ordinary tar extraction can reapply archived directory modes;
-arbitrary extraction commands do not carry this preservation guarantee. Archives
+For BusyBox tar, as supplied by Alpine, use:
+
+```sh
+tar --extract --gzip --file /path/to/runtime.tar.gz \
+    --directory /path/to/existing-prefix -o --no-same-permissions
+```
+
+BusyBox's `-o` suppresses owner/group restoration, and `--no-same-permissions`
+preserves existing permissions. New entries use archived modes subject to the
+caller's umask.
+
+These commands preserve existing directory ownership and permissions, including
+an administrative 0750 runtime directory. Ordinary tar extraction can reapply
+archived directory modes; arbitrary extraction commands do not carry this
+preservation guarantee. Archives
 contain the example/guide and empty private layout, never an active INI or live
 database. Installation/extraction does not activate services or start a daemon.
