@@ -56,7 +56,50 @@ unit. The default `none` installs source data and setup/probe instructions only.
 The `.service.in` source retains placeholders; use the generated `.service`.
 Native managed-service acceptance has a separate gate.
 
-## Producing and extracting TGZ artifacts
+## macOS developer installation
+
+macOS supports ordinary-user development, installation under `$HOME/jobu`, and
+temporary foreground execution. Linux is the deployment target. macOS service
+deployment and packaging are excluded by user decision; they are not pending
+installation steps. This workflow requires no sudo, account creation, privilege
+drop, launchd plist, or login/boot job.
+
+Use the prerequisites above plus Ninja, with dependencies already available to
+CMake. Supply `CMAKE_PREFIX_PATH` or package-specific locations such as
+`Catch2_DIR` for your environment when needed; another developer's absolute
+dependency paths are not portable. Start with a fresh build directory:
+
+```sh
+cmake -S . -B .bld-macos -G Ninja \
+    -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX="$HOME/jobu" \
+    -DJB_BUILD_SQLITE_DRIVER=ON -DBUILD_TESTING=ON -DJB_BUILD_EXAMPLES=ON \
+    -DJB_JOBU_SYSTEMD_PROFILE=none
+ninja -C .bld-macos -j 6
+ninja -C .bld-macos install
+```
+
+If `.bld-macos` already exists, inspect its cached prefix and all three
+`JB_JOBU_*DIR` values before reuse, or choose a new build directory. An older
+`.bld` configured for `/usr/local` is not a home-prefix build. Installation uses
+the configured prefix directly, without `DESTDIR` or an install-time override.
+
+The executables are `$HOME/jobu/bin/jobud` and `$HOME/jobu/bin/jobuctl`; the
+sample is `$HOME/jobu/share/jobu/jobud.ini.example`. With the default directory
+layout, manuals are under `$HOME/jobu/share/doc/deferra`, headers under `include/jb`,
+and SDK metadata under `lib/cmake/JobU`. Use `-DCMAKE_PREFIX_PATH="$HOME/jobu"`
+for an external SDK consumer. Inspect the install manifest for the actual
+configured destinations. Installed binaries still require compatible native
+libraries; this installation is not a self-contained distributable package.
+
+The compiled operational defaults are `$HOME/jobu/etc/jobud.ini`,
+`$HOME/jobu/var/lib/jobu.sqlite3`, and `$HOME/jobu/var/run/jobud.sock`, with the
+home directory expanded at configure time. Installation creates no active
+configuration or state. Inert systemd examples under `share/jobu/services`
+are data only and need no action on macOS. Follow
+[macOS foreground operation](operations.md#macos-foreground-operation) to
+provision private directories and start and stop the daemon manually.
+
+## Producing and extracting Linux TGZ artifacts
 
 Start from a fresh, clean checkout of the selected release revision and a fresh
 build directory. Keep the checkout unchanged from CMake configuration through
@@ -113,7 +156,8 @@ payload file; run `sha256sum -c` on it from the extraction root. Runtime's
 Required shared libraries, the C/C++ runtime, and any SDK dependency headers/libraries remain
 external; archives are specific to the producer platform and toolchain. Building
 on another distribution or libc produces a distinct artifact, not evidence that
-the original archive is portable there. Native macOS artifacts remain unverified.
+the original archive is portable there. macOS packaging is excluded from the
+developer workflow and is not tested or claimed.
 
 The `jobu-package-test` and `jobu-sdk-test` gates keep scratch work in private
 `/tmp` directories. The package gate owns its nested SDK work too. Completed SDK
@@ -236,8 +280,8 @@ A selected Linux `system` profile requires `/usr` and initializes fresh operatio
 cache values to `/etc/jobu`, `/var/lib/jobu` and `/run/jobu`, rejecting conflicts.
 The `custom` profile generates a matching unit without systemd directory
 directives; the default `none` preserves the generic path defaults. A private
-foreground deployment can use a short writable prefix. Provision protected parents and final-user-owned
-state/runtime leaves with mode 0700. A mode-0660 socket needs a matching trusted
+foreground deployment can use a short writable prefix. On Linux, provision
+protected parents and final-user-owned state/runtime leaves with mode 0700. A mode-0660 socket needs a matching trusted
 group, a mode-0750 runtime leaf and safe traversal; that group has full daemon
 authority. Do not use raw database/socket paths in shared `/tmp`.
 
@@ -261,5 +305,6 @@ never reloads, enables, starts or restarts it. The native Stage 9.26 Linux gate
 established managed-service behavior in its recorded Ubuntu/systemd environment;
 unit syntax alone is not deployment evidence. Use the [configuration reference](configuration.md),
 [operations guide](operations.md) and [observability guide](observability.md)
-for ongoing administration. Native macOS identity adaptation, launchd assets and
-deployment validation remain separate stages; no launchd activation is claimed here.
+for ongoing administration. On macOS, use the ordinary-user
+[developer installation](#macos-developer-installation) and foreground workflow;
+Linux service and security acceptance does not establish macOS deployment support.

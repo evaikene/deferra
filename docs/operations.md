@@ -1,15 +1,16 @@
-# Operating JobU on Linux
+# Operating JobU
 
-Use a dedicated non-root account for a managed deployment. The
+On Linux, use a dedicated non-root account for a managed deployment. The
 [installation guide](installation.md) covers the package layout and systemd
 setup; the [configuration reference](configuration.md) covers startup policy.
 The [quick start](README.md#try-a-command-line-job) uses disposable private paths
-for foreground operation as your ordinary user.
+for foreground operation as your ordinary user. macOS is a development host;
+use the [foreground workflow below](#macos-foreground-operation).
 
 ## Startup, readiness and shutdown
 
-Startup resolves arguments/configuration and validates the final identity before
-constructing worker-capable objects. It prepares only permitted state/runtime
+On Linux, startup resolves arguments/configuration and validates the final
+identity before constructing worker-capable objects. It prepares only permitted state/runtime
 leaves, finalizes identity, acquires endpoint/database ownership, validates
 format 4 and recovers interrupted work before admitting requests. Telemetry
 activates before dispatch; retention starts after listening. `jobud.ready`
@@ -48,7 +49,79 @@ before backup, replacement or restore. Do not use a missing socket pathname as
 proof that no process owns the database. Restart deliberately after changing
 configuration or binaries; installation does not activate or restart services.
 
+## macOS foreground operation
+
+First follow the [home-prefix installation](installation.md#macos-developer-installation).
+Run as your ordinary user, with the default mode-0600 socket. Leave run-as and
+socket-owner/group overrides unset and both unsafe root permissions false.
+No service manager starts, restarts or stops this developer instance for you.
+
+For a new installation, provision private directories explicitly:
+
+```sh
+umask 077
+mkdir -m 0700 "$HOME/jobu/etc" "$HOME/jobu/var"
+mkdir -m 0700 "$HOME/jobu/var/lib" "$HOME/jobu/var/run"
+```
+
+These commands assume the directories do not yet exist. If they exist, inspect
+their ownership, modes and contents first; preserve existing configuration and
+data. Do not recursively repair an existing tree. Darwin sets umask 0077 before
+creating runtime resources, protecting newly created files; it does not repair
+existing permissions or provide Linux's runtime-path admission checks.
+
+An active config is optional. For a fresh setup without an existing active file,
+copy the generated sample and validate it locally:
+
+```sh
+install -m 0600 "$HOME/jobu/share/jobu/jobud.ini.example" "$HOME/jobu/etc/jobud.ini"
+"$HOME/jobu/bin/jobud" --check-config --config "$HOME/jobu/etc/jobud.ini"
+```
+
+Review the sample before use. Its absolute paths were set during configuration;
+the INI parser does not expand `$HOME` or `~`. Config reading checks the file and
+protected parents on Darwin. A successful check or account-name lookup does not
+establish privilege-transition or Linux runtime-path enforcement on macOS.
+
+Start in one terminal, leaving it in the foreground:
+
+```sh
+"$HOME/jobu/bin/jobud"
+```
+
+It reads the compiled config path when present; a missing default config is
+allowed. To deliberately ignore configuration, use `--no-config`. Wait for
+`jobud.ready` on stderr, then confirm readiness from another terminal:
+
+```sh
+"$HOME/jobu/bin/jobuctl" --timeout 1000 system info
+```
+
+The two installed binaries share the compiled endpoint. If you override
+`socket.path` or daemon `--socket`, give the client the same `--socket` path.
+For disposable work, the [quick start](README.md#try-a-command-line-job) uses
+a short private leaf beneath `/tmp`; substitute the installed executable paths.
+Darwin's usual temporary-directory path can exceed the Unix socket length limit.
+Never use a raw shared `/tmp` socket or delete an existing endpoint blindly.
+
+Stop with Ctrl-C in the daemon terminal, or send SIGTERM to the known daemon
+PID. Wait for process exit and ensure test-owned children have stopped before
+restart, backup or fixture removal. Logs go to stderr; no managed log file or
+rotation is installed. Normal shutdown/restart is supported within this workflow.
+Darwin does not use Linux's separate endpoint guard or proven-stale socket
+recovery. After a crash, preserve the old endpoint and establish that its owner
+has stopped; use a new private socket path for a deliberate restart, with the
+same explicit client override. A missing endpoint alone never proves that a
+database has no owner.
+
+macOS service deployment and packaging are excluded by user decision; not tested
+or claimed. The Linux identity, group-access and endpoint guarantees below apply
+to Linux. Retention, configuration semantics and the stopped-database backup
+procedure also apply to the macOS foreground workflow.
+
 ## Identity and protected paths
+
+This section describes Linux runtime enforcement and administrative setup.
 
 The state directory must belong to the final daemon user and have mode 0700.
 The database, WAL, SHM and lock artifacts are owner-only regular files. The
@@ -79,8 +152,8 @@ prevention; these Linux checks are not claims about macOS kernel facilities.
 
 ## Endpoint ownership and crash restart
 
-The daemon holds a database lock and a separate `${socket.path}.lock` for the
-listener lifetime. Different databases cannot compete for the same endpoint.
+On Linux, the daemon holds a database lock and a separate `${socket.path}.lock`
+for the listener lifetime. Different databases cannot compete for the same endpoint.
 Lock files can remain after exit; their presence alone does not mean a daemon
 is running. Never unlink a held lock to obtain another inode with the same name.
 
@@ -220,9 +293,9 @@ retain checkpointed wait and become partial; downtime is not charged. See
 | --- | --- |
 | `jobud.config.invalid`, `unknown_key`, `duplicate_key` | Check the selected file against the reference for spelling, grammar, ranges and cross-field constraints. Current command-line diagnostics report a fixed message/code, not rejected values or a full configuration dump. |
 | `jobud.config.read_failed` | Check the selected file exists, is readable under the invocation identity, and has protected owners/parents. Explicit config is required to exist. |
-| `jobud.privilege.root_disallowed`, `drop_failed` | Use the dedicated account or a valid non-root run-as target; privilege verification must finish before resources are admitted. |
-| `jobud.path.unsafe`, `jobud.path.inspect_failed` | Use the fixed `reason` to inspect the configured state/runtime path and its ancestors against the owner/type/mode rules above. Logs omit raw path values. Provision only the intended leaf; do not recursively chmod/chown a supplied tree. |
-| `jobud.socket.in_use`, `jobud.socket.inspect_failed` | Find the endpoint owner or ambiguous collision. Preserve other resources and held lock files. |
+| Linux `jobud.privilege.root_disallowed`, `drop_failed` | Use the dedicated account or a valid non-root run-as target; privilege verification must finish before resources are admitted. |
+| Linux `jobud.path.unsafe`, `jobud.path.inspect_failed` | Use the fixed `reason` to inspect the configured state/runtime path and its ancestors against the owner/type/mode rules above. Logs omit raw path values. Provision only the intended leaf; do not recursively chmod/chown a supplied tree. |
+| Linux `jobud.socket.in_use`, `jobud.socket.inspect_failed` | Find the endpoint owner or ambiguous collision. Preserve other resources and held lock files. |
 | Schema/recovery failure before `jobud.ready` | Preserve database and sidecars; check package/format compatibility and sanitized failure code. Do not change the marker or attempt repair SQL. |
 | Client cannot connect | Compare its attempted endpoint with daemon config, readiness and runtime traversal/socket permissions. Override with `--socket` when necessary. |
 | Runtime `jobud.failed` | Inspect `subsystem` and stable `code`, storage capacity/availability and preceding events. Admission closes on fatal state; do not assume partial cleanup repaired it. |
@@ -236,6 +309,6 @@ success, unit syntax validation and a passing unprivileged fixture are different
 evidence from a verified managed deployment.
 
 The existing `run.list` membership/filtering and pending-run update/move behavior
-remain unchanged; issue #230 is deliberately deferred. Native macOS deployment,
-launchd setup and final Phase 9 closure have separate gates. These Linux
-instructions do not establish those results.
+remain unchanged; issue #230 is deliberately deferred. Native macOS developer
+acceptance and final Linux Phase 9 closure have separate gates. Documentation
+and earlier focused checks do not establish a new full acceptance run.

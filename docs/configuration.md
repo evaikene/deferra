@@ -62,7 +62,15 @@ empty required paths, backend, timezone and user overrides are invalid.
 ## Fixed configuration keys
 
 These are all 26 fixed keys. Omitted settings use the defaults shown. Account
-and path checks also apply after explicit CLI overrides are resolved.
+and path checks also apply after explicit CLI overrides are resolved. The
+identity, administrative group and runtime-path enforcement described below is
+the Linux deployment contract. On macOS, use the
+[ordinary-user foreground workflow](operations.md#macos-foreground-operation):
+provision private directories yourself, keep socket mode 0600, leave run-as and
+socket-owner/group overrides unset, and keep root permissions false. Parsing
+these settings or resolving account names in check mode does not implement
+Linux privilege-drop, runtime-path admission or stale-endpoint guarantees on
+Darwin. Protected configuration-file reading does apply on Darwin.
 
 ### Storage, identity and socket
 
