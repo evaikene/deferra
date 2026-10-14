@@ -1,0 +1,78 @@
+# JobU configuration
+
+`jobud` works without an INI file, using its compiled defaults. The installed
+example is guidance; it is **not loaded automatically**. Installation never
+creates an active configuration.
+
+This build uses these paths:
+
+- Example: `@CMAKE_INSTALL_FULL_DATADIR@/jobu/jobud.ini.example`
+- Active configuration: `@JB_JOBU_SYSCONFDIR@/jobud.ini`
+- State directory: `@JB_JOBU_STATEDIR@`
+- Runtime directory: `@JB_JOBU_RUNDIR@`
+
+The Runtime component creates missing normal prefix directories: `etc` and
+`var` with mode 0755, `var/lib` and `var/run` with mode 0700. Each operational
+directory is created only when its configured path equals that normal default.
+Existing directories retain their ownership, permissions and contents. Custom
+paths require explicit provisioning. A root install does not choose a daemon
+account; dedicated-account and Linux systemd deployments still need their
+documented account/directory provisioning. macOS uses an ordinary user and
+foreground operation.
+
+To create an optional initial configuration, run the following command. It
+refuses an existing destination, including a symlink, and creates the new file
+with owner-only permissions. The restrictive umask applies only inside this
+subshell. Provision the configuration directory first if it is external.
+
+```sh
+(
+    example=@JOBU_README_EXAMPLE_SHELL@
+    active=@JOBU_README_CONFIG_SHELL@
+    if [ -e "$active" ] || [ -L "$active" ]; then
+        printf '%s\n' "Configuration already exists: $active" >&2
+        exit 1
+    fi
+
+    umask 077
+    set -C
+    cat "$example" > "$active"
+)
+```
+
+Edit the copy, then validate it with the installed daemon:
+
+```sh
+@JOBU_README_DAEMON_SHELL@ --check-config --config @JOBU_README_CONFIG_SHELL@
+```
+
+Explicit `--config` requires its file. Checking configuration does not create
+runtime resources and does not prove that every later startup operation will
+succeed. After validation, start normally at the configured prefix:
+
+```sh
+@JOBU_README_DAEMON_SHELL@
+```
+
+Reinstallation updates this guide and the example, but never opens, replaces or
+changes the active INI, database/sidecars, endpoint locks or sockets. Review new
+example settings manually; there is no automatic configuration merge.
+
+`DESTDIR` stages installation only. `cmake --install --prefix` and relocating a
+TGZ change installation destinations; they do not rewrite compiled defaults or
+the paths above. No-argument startup applies at the configured prefix. At a
+different location, explicitly configure the intended protected resources.
+
+For a Linux Runtime TGZ upgrade, stop the daemon and verify the archive checksum
+first. Use GNU tar's directory-preserving extraction policy:
+
+```sh
+tar --extract --gzip --file /path/to/runtime.tar.gz \
+    --directory /path/to/existing-prefix --no-overwrite-dir
+```
+
+This preserves existing directory metadata, including an administrative 0750
+runtime directory. Ordinary tar extraction can reapply archived directory modes;
+arbitrary extraction commands do not carry this preservation guarantee. Archives
+contain the example/guide and empty private layout, never an active INI or live
+database. Installation/extraction does not activate services or start a daemon.

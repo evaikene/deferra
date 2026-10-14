@@ -1,3 +1,7 @@
+# Provision the private layout before any Runtime file installation can create
+# its parents. Existing directory metadata belongs to the operator.
+include("${CMAKE_CURRENT_LIST_DIR}/JobURuntimeLayout.cmake")
+
 # INI strips one outer quote pair; it does not interpret C++ backslash escapes.
 # Absolute paths start with '/', so surrounding them with quotes preserves spaces
 # and every interior quote/backslash without changing the generic INI grammar.
@@ -8,7 +12,7 @@ configure_file("${CMAKE_CURRENT_LIST_DIR}/../packaging/jobud.ini.in"
     "${JOBU_CONFIG_EXAMPLE}" @ONLY)
 
 # Examples are data. Installing them never creates an active config or daemon
-# state, provisions identities, or activates a service in its manager.
+# resources, provisions identities, or activates a service in its manager.
 install(FILES "${JOBU_CONFIG_EXAMPLE}"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/jobu" COMPONENT Runtime)
 foreach(component Runtime Development Documentation)

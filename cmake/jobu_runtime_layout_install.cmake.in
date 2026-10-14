@@ -1,0 +1,44 @@
+cmake_minimum_required(VERSION 3.20)
+
+set(layout_directories [==[@JOBU_RUNTIME_LAYOUT_DIRECTORIES@]==])
+set(layout_root "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}")
+
+# Inspect the whole known layout before installing any assets. Check symlinks
+# first so a dangling link is also a collision, and a var link is never followed.
+foreach(directory IN LISTS layout_directories)
+    set(path "${layout_root}/${directory}")
+    if(IS_SYMLINK "${path}" OR (EXISTS "${path}" AND NOT IS_DIRECTORY "${path}"))
+        message(FATAL_ERROR "JobU runtime layout collision at '${path}': expected a directory; the existing entry was preserved")
+    endif()
+endforeach()
+
+function(jobu_install_new_layout_directory directory)
+    # file(INSTALL) also creates an absent prefix. Its implicit parents must
+    # remain safe under umask 000, without chmod of any pre-existing ancestor.
+    # Keep an explicit installer policy when one has been supplied.
+    if(NOT DEFINED CMAKE_INSTALL_DEFAULT_DIRECTORY_PERMISSIONS)
+        set(CMAKE_INSTALL_DEFAULT_DIRECTORY_PERMISSIONS
+            OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+    endif()
+    set(permissions OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+    if(directory STREQUAL "etc" OR directory STREQUAL "var")
+        list(APPEND permissions GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+    endif()
+
+    # file(INSTALL) reports failures, applies explicit permissions independently
+    # of umask, and records empty directories for CPack. DESTDIR is applied by
+    # file(INSTALL), so its destination is the unstaged path.
+    file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/${directory}"
+        TYPE DIRECTORY FILES "" DIR_PERMISSIONS ${permissions})
+endfunction()
+
+foreach(directory IN LISTS layout_directories)
+    set(path "${layout_root}/${directory}")
+    if(IS_DIRECTORY "${path}")
+        # Reinstall must not repair operator metadata, including an admin 0750
+        # runtime leaf. Runtime trust checks remain responsible for suitability.
+        continue()
+    endif()
+
+    jobu_install_new_layout_directory("${directory}")
+endforeach()
