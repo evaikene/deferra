@@ -7,6 +7,7 @@ set(applications [==[@JOBU_PACKAGE_APPLICATIONS@]==])
 set(forbidden_paths [==[@PROJECT_SOURCE_DIR@;@PROJECT_BINARY_DIR@]==])
 find_program(ldd_program ldd REQUIRED)
 find_program(strings_program strings REQUIRED)
+find_program(stat_program stat REQUIRED)
 
 # Inspect the actual staged executables, including libcurl's transitive native
 # requirements. Record stable names rather than ASLR addresses or staging paths.
@@ -61,4 +62,30 @@ foreach(component IN LISTS components)
     set(inventory "${CPACK_PACKAGE_DIRECTORY}/${archive_name}.files.sha256")
     file(WRITE "${inventory}" "${manifest}")
     file(CHMOD "${inventory}" PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
+
+    # Keep the sha256sum-compatible file inventory intact. A second sidecar
+    # records directories, including empty private leaves and their modes.
+    file(GLOB_RECURSE entries LIST_DIRECTORIES TRUE RELATIVE "${root}" "${root}/*")
+    list(SORT entries)
+    set(directory_manifest "")
+    foreach(entry IN LISTS entries)
+        if(IS_SYMLINK "${root}/${entry}")
+            message(FATAL_ERROR "Unexpected package symlink: ${entry}")
+        endif()
+        if(NOT IS_DIRECTORY "${root}/${entry}")
+            continue()
+        endif()
+        execute_process(COMMAND "${stat_program}" -c %a "${root}/${entry}"
+            RESULT_VARIABLE result OUTPUT_VARIABLE mode OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_VARIABLE error)
+        if(NOT result STREQUAL "0" OR NOT mode MATCHES "^[0-7][0-7][0-7][0-7]?$")
+            message(FATAL_ERROR "Cannot inspect package directory ${entry}: ${error}")
+        endif()
+        if(mode MATCHES "^[0-7][0-7][0-7]$")
+            set(mode "0${mode}")
+        endif()
+        string(APPEND directory_manifest "${mode}  ${entry}\n")
+    endforeach()
+    set(directory_inventory "${CPACK_PACKAGE_DIRECTORY}/${archive_name}.directories.txt")
+    file(WRITE "${directory_inventory}" "${directory_manifest}")
+    file(CHMOD "${directory_inventory}" PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
 endforeach()

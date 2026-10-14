@@ -19,6 +19,24 @@ add_test(NAME jobu-install-test COMMAND ${CMAKE_COMMAND}
 set_tests_properties(jobu-install-test PROPERTIES TIMEOUT 180
     SKIP_REGULAR_EXPRESSION "Unsupported install-test layout:")
 
+configure_file(jobu-runtime-layout-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-runtime-layout-test.cmake" @ONLY)
+set(runtime_layout_daemon "")
+if(TARGET jobud)
+    # The worker uses a copied installed executable only for the README's
+    # read-only check command. It never starts the daemon in this stage.
+    set(runtime_layout_daemon "$<TARGET_FILE:jobud>")
+endif()
+# The shared runner intentionally has a small interface. Supply the optional
+# executable via a generated wrapper rather than extend that interface.
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/jobu-runtime-layout-worker-$<CONFIG>.cmake"
+    CONTENT "set(jobud [==[${runtime_layout_daemon}]==])\ninclude([==[${CMAKE_CURRENT_BINARY_DIR}/jobu-runtime-layout-test.cmake]==])\n")
+add_test(NAME jobu-runtime-layout-test COMMAND ${CMAKE_COMMAND}
+    -Dtest_name=jobu-runtime-layout-test
+    "-Dtest_script=${CMAKE_CURRENT_BINARY_DIR}/jobu-runtime-layout-worker-$<CONFIG>.cmake"
+    "-Devidence_directory=${PROJECT_BINARY_DIR}/jobu-test-logs/jobu-runtime-layout-test"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/jobu-test-runner.cmake")
+set_tests_properties(jobu-runtime-layout-test PROPERTIES TIMEOUT 180)
+
 include(jobu-sdk-test.cmake)
 configure_file(jobu-package-cache.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-package-cache.cmake" @ONLY)
 configure_file(jobu-package-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-package-test.cmake" @ONLY)
