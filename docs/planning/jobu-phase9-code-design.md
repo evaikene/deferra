@@ -2,7 +2,8 @@
 
 - Revision: **3**
 - Date: 2026-09-28
-- Status: proposed implementation contract; no implementation is claimed by this document
+- Status: implementation contract; stage results are recorded separately
+- Scope amendment: 2026-10-14, Stage 9.30, applying the user decision of 2026-10-13
 - Repository: <https://github.com/evaikene/deferra>
 - Baseline: [`cebb4cb278942eb5eb939d2dc64ab9129e035841`](https://github.com/evaikene/deferra/commit/cebb4cb278942eb5eb939d2dc64ab9129e035841)
 - Download: `jobu-phase9-code-design-r3.md`
@@ -23,6 +24,15 @@ The original v1 technical plan defines the broad scope. This document supplies t
 - Installation now owns a shared default socket path. Explicit `--socket` remains an override. Do not add socket half-close support, socket activation, remote transports, JWT, or RBAC.
 - Statistics stay based on retained rows. No persisted rollups, percentiles, Prometheus/OTel endpoint, or broad logging framework rewrite is required without measured evidence.
 
+The user narrowed macOS scope on 2026-10-13: Linux is the deployment target;
+macOS is for ordinary-user development, CMake/Ninja installation under
+`$HOME/jobu`, and temporary manually started foreground execution. This decision
+supersedes earlier macOS service/package requirements here and in the original
+v1 technical plan. No sudo/root runs, privilege transitions, account creation,
+system-wide installation, launchd/plists/login jobs, CPack/TGZ production or
+macOS distribution work is required. These are exclusions, not pending acceptance
+defects. Preserve Linux security, package and service requirements.
+
 ### 1.1 Deliverables
 
 | Area | Phase 9 result |
@@ -30,16 +40,17 @@ The original v1 technical plan defines the broad scope. This document supplies t
 | Retention | Incremental terminal-run cleanup, per-queue/inherited/unlimited policies, safe idempotency retirement, and deleted-owner purge. |
 | Timing | Monotonic observed runnable-wait accumulation, persisted quality information, aggregate statistics, and one warning per run. |
 | Configuration | Strict startup-only flat INI, safe defaults, CLI precedence, validated materialized defaults, and local help/check mode. |
-| Security | Dedicated-account operation; checked root-to-user drop; separate unsafe daemon/CLI switches; protected database, config, and socket paths. |
+| Security | Linux dedicated-account operation; checked root-to-user drop; separate unsafe daemon/CLI switches; protected database, config, and socket paths. |
 | Installation | CMake install target, DESTDIR staging, explicit public-header closure, reusable component exports, and external consumer builds. |
-| Packaging | CPack runtime/development TGZ artifacts, Linux systemd assets, macOS launchd assets, and explicit activation instructions. |
+| Packaging | Linux CPack component TGZ artifacts, systemd assets, and explicit activation instructions. |
+| macOS development | Ordinary-user home-prefix installation, installed SDK use, and manual foreground execution; no managed-service or package claim. |
 | Operations | Installation, configuration, retention, observability, backup/restore, failure recovery, and troubleshooting documents under `docs/`. |
 
-Distro-specific DEB/RPM maintenance, Homebrew formula publication, signed/notarized macOS installers, Windows service implementation, automatic account creation during CMake installation, and release publication are outside this phase. TGZ artifacts must be described honestly as platform/toolchain-specific packages with external runtime dependencies, not self-contained binaries.
+Distro-specific DEB/RPM maintenance, Homebrew formula publication, macOS packages/installers, signing/notarization, Windows service implementation, automatic account creation during CMake installation, and release publication are outside this phase. TGZ artifacts must be described honestly as platform/toolchain-specific packages with external runtime dependencies, not self-contained binaries.
 
 ### 1.2 Implementation discipline
 
-Implement one approved stage at a time. Small intermediate gaps are acceptable; each stage must have a focused verification boundary. Linux delivery precedes macOS-specific work. The final Linux gate follows the optional native macOS gate.
+Implement one approved stage at a time. Small intermediate gaps are acceptable; each stage must have a focused verification boundary. Linux delivery precedes macOS-specific work. The final Linux gate follows the separately approved native macOS developer gate.
 
 Apply repository `AGENTS.md`: useful public Doxygen; comments explaining ownership, ordering, transactions and failure behavior; clear logical sections; selective `[[nodiscard]]`; no routine catches or `@throws` for allocation failure. Every stateful Object subclass extends the single ObjectPrivate block, with owner binding after base construction. Reusable observable events use receiver-aware signals. Transaction strategies and one-operation completion callbacks remain appropriate.
 
@@ -71,13 +82,13 @@ Do not repeat a full SQLite-disabled test matrix. Use an SDK consumer check to p
 | Public statistics | `statistics.*`, `statistics_repository_priv.*`, result codecs, CLI statistics renderer, typed client tests. |
 | INI parsing primitive | `src/core/ini_file.*`: small text-input entry point; existing file constructor remains available. |
 | Daemon configuration | `src/jobud/configuration_priv.*`, `startup_priv.*`, generated `jobu_paths_priv.hpp`, `main.cpp`. |
-| Process identity | `src/jobud/privileges_priv.hpp`, `privileges_posix.cpp`, Linux/macOS verification helpers. |
+| Process identity | `src/jobud/privileges_priv.hpp`, `privileges_posix.cpp`, Linux identity verification helpers. |
 | Runtime filesystem | `src/jobud/runtime_paths_priv.*`, platform helpers where native APIs differ. |
 | Runtime composition | `src/jobud/runtime_priv.*`: maintenance/timing ownership, signals, startup and shutdown order. |
 | Logging | Small structured-field addition to `core/logging.*`; `src/jobud/daemon_logger_priv.*` for JSON/text stderr formatting. |
 | Local listener | `src/net/local_server.*`: optional checked group assignment before listen; same ObjectPrivate allocation. |
 | Installation | `cmake/JobUPaths.cmake`, `cmake/JobUConfig.cmake.in`, export/install helpers, target CMake files. |
-| Service/package assets | `packaging/systemd/`, `packaging/launchd/`, `packaging/jobud.ini.in`, `cmake/JobUPackaging.cmake`. |
+| Service/package assets | `packaging/systemd/`, `packaging/jobud.ini.in`, `cmake/JobUPackaging.cmake`. |
 | Documentation | `docs/installation.md`, `configuration.md`, `operations.md`, `observability.md`, plus existing CLI/protocol/client guides. |
 
 Private repository code uses `jb::db`; DDL and SQLite PRAGMAs remain in `jobu-sqlite`. POSIX account/path policy stays in `jobud`, not in generic core or database contracts. No timer or service reads raw secret values for observability.
@@ -366,7 +377,7 @@ Use fixed envelope keys for time, level, event/message and thread identity, with
 
 Events include startup/ready/stop, unsafe overrides, recovery summary, delayed run, retention sweep summary, and fatal subsystem/code. Use severity Info for lifecycle/summary, Warning for delays/unsafe choices, Error for failures; keep Debug diagnostic detail sanitized. Avoid one Info record per purged run or per scheduler scan. IDs are useful correlations; arbitrary request values are not trusted event names or fields.
 
-Default format is JSON and level Info. Development can choose text. Service managers or administrator-configured logging own rotation and retention; do not add a daemon log-file/rotation subsystem. In particular, launchd file redirection alone does not provide rotation. No secret values, full config dump, backend SQL/error detail or unsanitized HTTP credentials enter logs. Peer UID/GID/PID already captured by runtime may be included in connection audit events where available, but do not add per-user authorization.
+Default format is JSON and level Info. Development can choose text. Service managers or administrator-configured logging own rotation and retention; do not add a daemon log-file/rotation subsystem. macOS foreground execution writes to stderr without installing managed log retention. No secret values, full config dump, backend SQL/error detail or unsanitized HTTP credentials enter logs. Peer UID/GID/PID already captured by runtime may be included in connection audit events where available, but do not add per-user authorization.
 
 ## 8. Configuration and defaults
 
@@ -481,6 +492,22 @@ Preserve the current ordering that also resolves replay before materializing tod
 
 ## 9. Identity, filesystem ownership and startup order
 
+The privilege-finalization, state/runtime-path admission, administrative socket
+group and endpoint-guard requirements in this section apply to Linux. Shared
+configuration parsing and protected configuration-file reading also apply on
+Darwin. macOS uses the current ordinary user, explicitly provisioned private
+directories and a mode-0600 socket. It sets umask 0077 before runtime resource
+construction; this protects new files but does not repair existing modes.
+Parsing identity settings or resolving names does not establish Linux runtime
+security enforcement on Darwin. Privilege transitions and administrative group
+setup are outside the macOS workflow.
+
+Darwin does not use Linux's separate endpoint guard or proven-stale socket
+recovery. Normal foreground stop/restart is supported; after a crash, establish
+that the owner has stopped and use a new private socket path rather than
+unconditionally unlinking the old endpoint. Shared recovery, telemetry,
+retention and shutdown semantics remain applicable.
+
 ### 9.1 Final process identity
 
 All account resolution and privilege changes happen before Application, HTTP/libcurl worker facilities, database open, recovery, RPC admission or CLI spawn. POSIX identity policy is a daemon concern; no job-level `uid`, `gid`, `sudo` or impersonation feature is added.
@@ -496,7 +523,7 @@ All account resolution and privilege changes happen before Application, HTTP/lib
 
 Reject setuid/setgid-style mixed real/effective startup identities; binaries are not installed with such bits. If a run-as target is supplied, it takes precedence as the requested final identity even when the unsafe daemon flag is set. Reject a target resolving to UID 0 unless the explicit unsafe daemon override is also present.
 
-Resolve names and copy NSS results before changes. For root-to-user drop, use target-group initialization followed by permanent GID then UID changes, with platform-specific checked calls. Linux must verify real/effective/saved IDs, supplementary groups and absence of retained effective/permitted/ambient capabilities capable of undoing the drop. Do not set keep-caps. macOS verifies the strongest native equivalent and permanent-drop behavior in its native test. Failure exits before resources; do not continue partially dropped.
+Resolve names and copy NSS results before changes. For root-to-user drop, use target-group initialization followed by permanent GID then UID changes, with platform-specific checked calls. Linux must verify real/effective/saved IDs, supplementary groups and absence of retained effective/permitted/ambient capabilities capable of undoing the drop. Do not set keep-caps. Failure exits before resources; do not continue partially dropped.
 
 Test inability to regain root in an isolated helper process. Do not implement a production best-effort privilege regain/repair path. Keep Linux Process `prevent_privilege_gain` checks in the CLI runner and the managed service's `NoNewPrivileges` setting. macOS documentation must not claim `PR_SET_NO_NEW_PRIVS` support.
 
@@ -556,7 +583,7 @@ Use GNUInstallDirs for binaries, libraries, headers, package metadata and docume
 
 Generate a private `jobu_paths_priv.hpp` consumed by both applications through a small common build interface. Generate service/config templates from the same values. Do not place daemon installation policy in `jb::core` or the generic ControlClient constructor.
 
-A Linux system-service profile explicitly uses prefix `/usr`, config `/etc/jobu`, state `/var/lib/jobu`, runtime `/run/jobu`. The flat generic defaults avoid repeating `jobu` under a dedicated prefix such as `/opt/jobu` or `$HOME/jobu`. State and runtime directories still require the protected ownership and modes in §9.2; a shared prefix needs explicit operational-path overrides or administrator-provisioned private directories.
+A Linux system-service profile explicitly uses prefix `/usr`, config `/etc/jobu`, state `/var/lib/jobu`, runtime `/run/jobu`. The flat generic defaults avoid repeating `jobu` under a dedicated prefix such as `/opt/jobu` or `$HOME/jobu`. State and runtime directories require the protected ownership and modes in §9.2 (operator-provisioned on macOS); a shared prefix needs explicit operational-path overrides or administrator-provisioned private directories.
 
 Native socket length is checked at configuration/startup; reject unusable paths rather than truncate them. Escape generated C++ strings, INI paths and service syntax correctly; reject newline/NUL and service-profile paths that cannot be represented safely.
 
@@ -627,7 +654,7 @@ Install to a fresh staging prefix and configure small consumers outside the repo
 
 Disable CMake user/system package registries in these checks. Prevent source/build include paths and build-tree exports from satisfying missing files. Inspect generated target properties for checkout paths and verify a copied/moved SDK prefix can still be found; compiled application operational defaults retain the separately documented absolute-path behavior. Do not confuse SDK relocation with daemon data-directory relocation.
 
-## 12. Packages and managed services
+## 12. Linux packages/services and macOS development
 
 ### 12.1 Artifact contract
 
@@ -635,7 +662,7 @@ Use CPack TGZ component packaging for the first supported distributable artifact
 
 Release packaging uses a fresh, clean checkout of the selected revision and a fresh build directory. Keep source contents and revision unchanged from CMake configuration through compilation and packaging; after a change, start again with a fresh checkout and build directory. Source revision/state are a configuration-time snapshot, with no build-time refresh or later source-change detection. Package producers use a single-config generator with an explicit `CMAKE_BUILD_TYPE` (Release for the documented workflow). Reject multi-config producers and an empty build type at packaging preflight; these restrictions do not disable ordinary developer multi-config builds.
 
-Include LICENSE and relevant third-party notices; do not claim bundled dependencies that are merely dynamically linked on the build host. State minimum tested OS/runtime and how fmt/libcurl/SQLite runtime requirements are satisfied. Check dynamic dependencies on the native host. An archive is not automatically portable across Linux distributions or macOS deployment targets.
+Include LICENSE and relevant third-party notices; do not claim bundled dependencies that are merely dynamically linked on the build host. State minimum tested OS/runtime and how fmt/libcurl/SQLite runtime requirements are satisfied. Check dynamic dependencies on the native host. An archive is not automatically portable across Linux distributions; macOS packaging is outside scope.
 
 No package contains a development database, secret values, developer config, `.bld*` trees, handoff evidence, test logs, source checkout paths or temporary certificates/private keys. Use explicit install manifests rather than broad repository globs. Extraction and CMake installation do not create users, change existing data, enable services or start a daemon.
 
@@ -697,17 +724,37 @@ Inspect ownership/modes of database/WAL/SHM/lock/socket, actual process/child ID
 
 Generic unit tests with injected syscall results remain useful for failure branches, but they do not replace this native privileged evidence. If the environment cannot run it, mark the gate pending; do not describe root/security or managed-service deployment as verified.
 
-### 12.4 macOS launchd profile
+### 12.4 macOS developer workflow
 
-Implement after Linux acceptance. Reuse portable policy and isolate native account/path/identity details. Generate `org.jobu.jobud.plist` using an XML/plist-safe generator or escaping helper, with an absolute executable and separate `ProgramArguments` entries for `--config` and its absolute path.
+Use a fresh native Debug/Ninja build configured with `CMAKE_INSTALL_PREFIX=$HOME/jobu`
+and `JB_JOBU_SYSTEMD_PROFILE=none`, with SQLite, developer tests and examples
+available. Dependencies remain external and are not installed automatically.
+Run `ninja install` at the configured prefix; install-time relocation does not
+rewrite compiled config/database/socket defaults. Existing CMake caches retain
+initialized operational paths. See [installation](../installation.md#macos-developer-installation)
+for the commands and installed SDK layout.
 
-Use a dedicated non-root `jobu` user/group, `RunAtLoad`, `KeepAlive` with `SuccessfulExit=false`, `ThrottleInterval=5`, `ExitTimeOut=15`, and umask 0077 represented correctly for plist integer semantics. Verify supported key spelling/behavior against native `launchd.plist(5)` during the macOS stage. Do not set `AbandonProcessGroup=true`; do not daemonize or use a PID file. Confirm shutdown/process-group behavior on the supported macOS release rather than assuming systemd equivalence.
+Installation creates no active config or state. Provision owner-only user-owned
+config/state/runtime directories deliberately. Use the generated sample only
+when an active config is wanted, preserve any existing configuration, and run
+local `--check-config`. Start the installed daemon manually in a terminal and
+probe readiness with installed `jobuctl`; explicit endpoint changes require the
+same client override. Use short private temporary leaves for fixtures. Stop all
+test-owned processes, and confirm complete stop before backup or restart.
+See [operations](../operations.md#macos-foreground-operation) for the workflow
+and Darwin limitations in §9.
 
-The account, protected state/runtime directories, active config and `/Library/LaunchDaemons` placement are explicit administrator setup. A plist installed there is root-owned and not group/world-writable. No fixed free UID/GID is assumed. Package the reviewed template under the installation data directory; bootstrap/enable/start are documented operator actions, never CMake side effects.
+Stage 9.29 completed focused native development/install/foreground checks;
+retain their precise revision, commands, totals and skips in the shared record.
+Stage 9.31 separately verifies the current native developer workflow. Exclude
+package, systemd and privileged gates and report internal skips explicitly.
+No full SQLite-disabled matrix is required. Do not infer a full-suite pass from
+focused checks or a Linux deployment result from macOS evidence.
 
-Route stderr to an explicitly provisioned owner-only service log, by default `jobud.log` in the protected state directory, or to an administrator-supplied native logging arrangement. Plist redirection has no automatic rotation guarantee. Document a bounded retention/rotation procedure, including a safe stop/rotate/restart option; do not claim journald semantics or add a daemon file-rotation subsystem. The runtime itself continues to log only to stderr.
-
-Run native plist validation, installation/SDK consumer tests, service bootstrap/readiness/stop/restart, permissions, account handling and process cleanup. Linux cross-compilation or XML parsing does not count as native launchd evidence. The optional native macOS verification stage may be explicitly skipped, but then the release record says **macOS service deployment unverified** rather than claiming full two-platform deployment acceptance.
+State the result with its tested scope: **macOS development/home-prefix install
+and foreground execution verified**. State separately: **macOS service deployment
+and packaging excluded by user decision; not tested or claimed**. No two-platform
+production-deployment claim is authorized.
 
 ## 13. Documentation and public API audit
 
@@ -716,7 +763,7 @@ All protocol and operational documents live under `docs/`. Update existing docum
 | Document | Required content |
 | --- | --- |
 | `docs/configuration.md` | Exact keys/defaults/units, precedence, text grammar, omitted timezone, boolean strictness, immutable materialized defaults, check mode, examples. |
-| `docs/installation.md` | Build prerequisites, install components, prefix/cache/DESTDIR semantics, external dependencies, SDK consumption, accounts, systemd/launchd activation and verification. |
+| `docs/installation.md` | Build prerequisites, install components, prefix/cache/DESTDIR semantics, external dependencies, SDK consumption, Linux accounts/systemd activation and verification; macOS home-prefix developer workflow. |
 | `docs/operations.md` | Lifecycle, identity/filesystem trust, stale endpoint handling, retention/idempotency boundary, offline backup/restore, old-format rejection, recovery and troubleshooting. |
 | `docs/observability.md` | Structured event fields, safe values, logs, measurement units/provenance, complete/partial/unmeasured coverage, crash limitations, warning guarantee and retained statistics. |
 | Existing JSON-RPC reference | API 1.4, optional input timezone, statistics coverage/provenance, idempotency lifetime, unchanged method list and current `run.list` behavior. |
@@ -737,7 +784,7 @@ Audit each Object-derived type for one ObjectPrivate allocation and receiver-awa
 
 ## 14. Staged implementation plan
 
-Stages 9.1–9.28 deliver the portable/Linux implementation. Stages 9.29–9.30 add macOS-specific deployment work; 9.31 is optional native macOS verification. Stage 9.32 is the final clean Linux and closure gate. These are review boundaries, not permission to land all work in one change. Temporary incompleteness between them is acceptable.
+Stages 9.1–9.28 deliver the portable/Linux implementation. Stages 9.29–9.30 cover macOS developer adaptation and documentation; 9.31 is separately approved native developer verification. Stage 9.32 is the final clean Linux and closure gate. These are review boundaries, not permission to land all work in one change. Temporary incompleteness between them is acceptable.
 
 Every stage updates a single `jobu-phase9-verification.md` record with scope, commit, commands/results, and any explicit deferral in user specified shared folder. Tests below are focused requirements, not instructions to rerun the entire matrix after every edit. A stage with new public APIs also includes its Doxygen/include-boundary check in that stage.
 
@@ -967,33 +1014,54 @@ Update existing daemon integration fixtures that intentionally run in a root tes
 
 **Exit:** Linux behavior and documentation agree before macOS-specific work begins.
 
-### Stage 9.29 — macOS identity and filesystem adaptation
+### Stage 9.29 — macOS developer adaptation (complete)
 
-**Depends:** 9.28. **Implement:** Native permanent-drop verification, account/group/path differences, socket ownership checks and platform conditionals. Keep shared policy and one Private state layout; do not simulate Linux capability/no-new-privileges APIs.
+**Depends:** 9.28. **Delivered:** Native developer build and focused tests,
+Darwin umask 0077 before runtime resource construction, CMake/Ninja installation
+under `$HOME/jobu`, installed SDK consumers and manual foreground execution.
+Merged in `77a3adaf` (PR #265); shared records 9.29a–9.29c retain source/evidence
+provenance, actual commands, totals and limitations.
 
-**Verify:** Compile and focused native tests when available; otherwise document the unverified branch. Include safe `/var` alias handling, protected temporary paths, socket group and all failure cleanup.
+**Exit:** Focused macOS development/home-prefix install and foreground execution
+verified. No privilege-drop, launchd, packaging or full-suite 9.31 result claimed.
+Linux startup ordering is unchanged.
 
-**Exit:** macOS-specific source is isolated and testable, with limitations stated. No change to accepted Linux policy.
+### Stage 9.30 — macOS developer documentation
 
-### Stage 9.30 — launchd/package documentation
+**Depends:** 9.29. **Implement:** Update existing installation, configuration,
+operations and manual-entry documents for ordinary-user home-prefix installation
+and foreground operation. Reconcile this design with the narrowed platform scope.
+Explain Darwin limitations without implying Linux security enforcement from
+successful parsing. Preserve Linux deployment requirements and historical evidence.
 
-**Depends:** 9.29. **Implement:** Generated plist, safe substitutions, account/directory/config/log setup, explicit bootstrap/bootout steps, package dependencies and administrator log retention procedure.
+**Verify:** Links and platform wording; documented flags, paths and sample keys
+against installed help/configuration; changed runnable examples in disposable
+private fixtures with complete process cleanup. Record actual commands/results.
+No package generation, service activation or full native acceptance matrix.
 
-**Verify:** Native plist/key checks where available; XML correctness, absolute ProgramArguments, identity/path agreement, no daemonization/PID file, no automatic service activation and no promise of automatic launchd log rotation.
+**Exit:** Existing installed-manual sources describe the supported macOS workflow
+accurately. Stop before separately approved 9.31.
 
-**Exit:** Reviewed macOS deployment assets and instructions exist; native runtime verification is tracked separately.
+### Stage 9.31 — Native macOS developer acceptance
 
-### Stage 9.31 — Optional native macOS verification
+**Depends:** 9.30 and separate approval. **Verify:** Current-revision clean native
+build and applicable tests, installed SDK consumers and home-prefix installation,
+local help/check mode, default and explicit endpoints, foreground CLI/local HTTP
+work, normal shutdown/restart, persisted state, owner-only new artifacts and
+complete test-owned process cleanup. Record OS/architecture/toolchain, commands,
+executed totals and internal skips. Exclude package, systemd and privileged gates;
+no full SQLite-disabled matrix or same-endpoint crash recovery claim.
 
-**Depends:** 9.30. **Verify:** Clean native build/tests, installed SDK consumers, artifacts, privileged identity tests, launchd bootstrap/readiness/normal stop/crash restart, stale socket, logging, filesystem ownership and child cleanup. Record OS/architecture/toolchain and actual commands.
-
-**Exit:** Either a complete native pass, or an explicit user-accepted skip with `macOS service deployment unverified`. Do not infer a pass from Linux or from Phase 8's earlier macOS evidence.
+**Exit:** Scope-qualified native developer evidence, or explicitly recorded
+incomplete coverage. macOS service deployment and packaging excluded by user
+decision; not tested or claimed. Do not infer a pass from Linux or earlier focused
+macOS evidence.
 
 ### Stage 9.32 — Final clean Linux and Phase 9 closure
 
 **Depends:** 9.28 and documented disposition of 9.29–9.31. **Verify:** Fresh default SQLite-enabled full build/test run, final installed/package consumers, same-revision deployment evidence, CLI/help/protocol/config audit and retained Phase 7/8 regression gates. Recheck only relevant ownership/lifetime paths under sanitizers where changed.
 
-**Exit:** Produce final handoff with exact commit, commands/results, all staged evidence, package manifests, remaining documented limitations and #230 deferral. No mandatory full SQLite-OFF rerun. A claimed Linux deployment pass requires 9.26 evidence; a claimed two-platform v1 deployment pass additionally requires native macOS evidence. Do not publish artifacts or begin additional product work automatically.
+**Exit:** Produce final handoff with exact commit, commands/results, all staged evidence, package manifests, remaining documented limitations and #230 deferral. No mandatory full SQLite-OFF rerun. A claimed Linux deployment pass requires 9.26 evidence; macOS evidence establishes only the separately scoped developer workflow, not two-platform production deployment. Do not publish artifacts or begin additional product work automatically.
 
 ## 15. Verification commands and closure checklist
 
@@ -1012,7 +1080,7 @@ ctest --test-dir .bld-phase9-final/test --output-on-failure
 
 When `include(CTest)` is introduced at the root, verify whether root discovery now includes the existing test subtree. If it does, `ctest --test-dir .bld-phase9-final` is also valid; do not accidentally run an empty suite and report success. Record test count and intentional skips.
 
-For a system-layout package, configure the real deployment paths but stage the install under an isolated directory:
+For a Linux system-layout package, configure the real deployment paths but stage the install under an isolated directory:
 
 ```bash
 cmake -S . -B .bld-phase9-package \
@@ -1055,21 +1123,21 @@ The imported target supplies C++20 and real transitive usage requirements. Confi
 | Warning delivery | Strict threshold, zero-off, at most once durably claimed, safe post-commit emission, no equality spin or duplicate on restart. |
 | Measurement quality | Complete from birth, partial on lost open tail or late instrumentation, unmeasured embedded runs, clean restart and complete-only statistics. |
 | Configuration | Strict typed grammar, default layering, safe diagnostics, readonly check mode, no implicit timezone override of explicit UTC, replay across default changes. |
-| Identity/filesystem | Native permanent drop, separate root switches, safe file ownership/modes, no symlink replacement, no worker/external effect before identity finalized. |
-| Socket ownership | Only proven stale owned sockets removed, live/ambiguous endpoints refused, endpoint lock survives pathname reuse attempts. |
+| Linux identity/filesystem | Native permanent drop, separate root switches, safe file ownership/modes, no symlink replacement, no worker/external effect before identity finalized. |
+| Linux socket ownership | Only proven stale owned sockets removed, live/ambiguous endpoints refused, endpoint lock survives pathname reuse attempts. |
 | Runtime stop | Maintenance/timing stop without reentrant SQL, healthy final settle, fatal no writes, dependencies outlive borrowers. |
 | SDK/package | No checkout path dependency; Core needs no SQLite/CURL/Catch2; PIC shared consumer; explicit config preservation and no install side effects. |
-| Managed service | Native readiness/stop/restart/crash evidence, restrictive identity/paths, expected child cleanup, actual installed binaries. |
+| Linux managed service | Native readiness/stop/restart/crash evidence, restrictive identity/paths, expected child cleanup, actual installed binaries. |
 
 Use existing fault drivers, fake TimeSource, fake executors, local HTTP fixtures and process helpers wherever they exercise the real boundary. Do not replace production repository logic with a mock that merely repeats the expected result. Native timing/performance tests supplement deterministic arithmetic tests; avoid assertions that depend on arbitrary host scheduling speed.
 
 ### 15.3 Closure decision
 
-Phase 9 can close for Linux when its implemented behavior, final clean tests, installed consumers, privileged service evidence and operational documentation all match this contract. The final record must state the separate macOS result or accepted skip. Keep prior v1 guarantees covered by regression evidence: durable Running before external start; bounded runners/no queue threads; no cron catch-up backlog; suspension draining; manual-run barriers; terminal-once immutability; retry/cancellation/recovery; snapshot materialization; output limits; secret isolation; RPC/CLI/client behavior.
+Phase 9 can close for Linux when its implemented behavior, final clean tests, installed consumers, privileged service evidence and operational documentation all match this contract. The final record must state the separate macOS developer result and any incomplete coverage, with service deployment and packaging explicitly excluded by user decision. Keep prior v1 guarantees covered by regression evidence: durable Running before external start; bounded runners/no queue threads; no cron catch-up backlog; suspension draining; manual-run barriers; terminal-once immutability; retry/cancellation/recovery; snapshot materialization; output limits; secret isolation; RPC/CLI/client behavior.
 
 Explicit limitations are part of the delivered contract: observations begin at scheduler detection; crashes can lose an open timing tail and produce partial coverage; delayed warnings are at-most-once rather than guaranteed delivery; retained statistics are a live view; batch bounds count parent deletions rather than cascade bytes; synchronous affected-set reconciliation has measured size-dependent cost; packages depend on a documented host runtime; older database formats are rejected; and #230 remains deferred.
 
-No incomplete mandatory gate is silently converted into success. Distinguish a design artifact, a compiled implementation, a verified Linux deployment, and a verified two-platform deployment in handoffs.
+No incomplete mandatory gate is silently converted into success. Distinguish a design artifact, a compiled implementation, a verified Linux deployment, and verified macOS developer operation in handoffs. Do not claim two-platform production deployment.
 
 ## 16. Evidence and technical references
 
@@ -1085,7 +1153,6 @@ Primary platform references used for the deployment design:
 
 - [CMake GNUInstallDirs](https://cmake.org/cmake/help/latest/module/GNUInstallDirs.html), [Importing and Exporting Guide](https://cmake.org/cmake/help/latest/guide/importing-exporting/index.html), and [CPack](https://cmake.org/cmake/help/latest/module/CPack.html). Use features available with the project's CMake 3.20 minimum or explicitly justify a minimum-version change; this plan requires no such change.
 - [systemd execution settings, official source](https://github.com/systemd/systemd/blob/main/man/systemd.exec.xml) and [service settings, official source](https://github.com/systemd/systemd/blob/main/man/systemd.service.xml). Native installed-version verification governs supported directives.
-- [Apple: Creating Launch Daemons and Agents](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html), supplemented by native `launchd.plist(5)` and `launchctl(1)` during macOS implementation.
 - [Linux kernel no_new_privs documentation](https://www.kernel.org/doc/html/latest/userspace-api/no_new_privs.html).
 
 The operational choices and proposed C++/SQL contracts above are project design decisions derived from the current code and roadmap. They are not claims that the cited platform documentation already implements JobU policy.

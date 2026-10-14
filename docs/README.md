@@ -9,6 +9,12 @@ Use `jobuctl` to manage JobU from a shell. It talks to `jobud` through a local
 Unix-domain socket. Applications can use the same JSON-RPC protocol directly or
 through the C++ control client.
 
+Linux is the deployment target. For macOS development, use the
+[home-prefix installation](installation.md#macos-developer-installation) and
+[manual foreground workflow](operations.md#macos-foreground-operation), without
+sudo or a service manager. Use `$HOME/jobu/bin/jobud` and
+`$HOME/jobu/bin/jobuctl` in the quick start below if they are not on your PATH.
+
 ## The basic model
 
 | Term | What it means |
@@ -64,7 +70,7 @@ both locks and proving that the unchanged, daemon-owned socket refuses a
 connection. Live or ambiguous endpoints, symlinks and other file types are
 preserved; deleting a lock pathname does not safely bypass another owner.
 
-Socket mode defaults to `0600`. Configuring `socket.mode = 0660` and an
+Socket mode defaults to `0600`. On Linux, configuring `socket.mode = 0660` and an
 authorized `socket.group` grants that group's members full daemon authority,
 including CLI work and secret management. This requires the protected runtime
 directory to have the matching group and mode `0750`, with traversal through
@@ -103,7 +109,7 @@ running daemon.
 
 | Guide | Use it for |
 | --- | --- |
-| [Installation and SDK](installation.md) | Installing components and packages, provisioning accounts, and activating systemd deliberately |
+| [Installation and SDK](installation.md) | macOS developer installation, installed SDKs, and Linux packages/systemd setup |
 | [Configuration](configuration.md) | Startup keys, defaults, units, precedence, and local validation |
 | [Operations](operations.md) | Lifecycle, retention, backup/restore, recovery, and troubleshooting |
 | [Observability](observability.md) | Logs, warning guarantees, timing quality, and retained statistics |
