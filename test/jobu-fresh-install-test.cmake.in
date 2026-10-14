@@ -1,0 +1,158 @@
+cmake_minimum_required(VERSION 3.20)
+
+foreach(required fixture test_logs lifecycle_helper)
+    if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")
+        message(FATAL_ERROR "Run through jobu-test-runner.cmake: ${required} is required")
+    endif()
+endforeach()
+execute_process(COMMAND id -u OUTPUT_VARIABLE installer_uid OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+execute_process(COMMAND id -g OUTPUT_VARIABLE installer_gid OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+if(installer_uid STREQUAL "0")
+    message(STATUS "Fresh installed startup skipped: ordinary user required")
+    return()
+endif()
+
+set(producer "${fixture}/producer")
+# Short enough for sockaddr_un, while exercising the README's shell quoting.
+set(prefix "${fixture}/prefix 'space")
+if(EXISTS "${producer}" OR EXISTS "${prefix}" OR IS_SYMLINK "${prefix}")
+    message(FATAL_ERROR "Fresh producer and installation prefix must be absent")
+endif()
+
+function(run_checked label timeout)
+    # PARSE_ARGV preserves semicolons inside shell scripts as part of one argument;
+    # expanding raw ARGN would split the script into separate command arguments.
+    cmake_parse_arguments(PARSE_ARGV 2 invocation "" "" "")
+    execute_process(COMMAND ${invocation_UNPARSED_ARGUMENTS}
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT ${timeout})
+    file(WRITE "${test_logs}/${label}.log" "result=${result}\n${output}\n${error}")
+    if(NOT result STREQUAL "0")
+        message(FATAL_ERROR "${label} failed (${result}): ${output}\n${error}")
+    endif()
+endfunction()
+
+function(read_metadata output path)
+    execute_process(COMMAND stat -c "%a:%u:%g" "${path}"
+        RESULT_VARIABLE result OUTPUT_VARIABLE metadata OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_VARIABLE error)
+    if(NOT result STREQUAL "0" OR IS_SYMLINK "${path}")
+        message(FATAL_ERROR "Cannot inspect regular fixture entry ${path}: ${error}")
+    endif()
+    set(${output} "${metadata}" PARENT_SCOPE)
+endfunction()
+
+function(require_directory path mode)
+    if(NOT IS_DIRECTORY "${path}")
+        message(FATAL_ERROR "Installer did not create directory ${path}")
+    endif()
+    read_metadata(metadata "${path}")
+    if(NOT metadata STREQUAL "${mode}:${installer_uid}:${installer_gid}")
+        message(FATAL_ERROR "Wrong installer-owned metadata for ${path}: ${metadata}")
+    endif()
+    file(APPEND "${test_logs}/installed-metadata.log" "${path}: ${metadata}\n")
+endfunction()
+
+function(install_producer label)
+    # Passing argv through "$@" preserves quotes/spaces without shell interpolation.
+    # An empty DESTDIR prevents the caller's staging environment from relocating us.
+    run_checked("${label}" 60 "@CMAKE_COMMAND@" -E env "DESTDIR="
+        /bin/sh -c "umask 000; exec \"$@\"" sh "@CMAKE_COMMAND@"
+        --install "${producer}" --config Release)
+endfunction()
+
+set(configure_arguments -S "@PROJECT_SOURCE_DIR@" -B "${producer}" -G "@CMAKE_GENERATOR@"
+    -C "@CMAKE_CURRENT_BINARY_DIR@/jobu-fresh-install-cache.cmake"
+    -DCMAKE_BUILD_TYPE=Release "-DCMAKE_INSTALL_PREFIX=${prefix}"
+    -DCMAKE_INSTALL_BINDIR=bin -DCMAKE_INSTALL_DATADIR=share
+    -DJB_JOBU_SYSTEMD_PROFILE=none -DBUILD_TESTING=OFF -DJB_BUILD_EXAMPLES=OFF -DJB_BUILD_SQLITE_DRIVER=ON)
+if(NOT "@CMAKE_GENERATOR_PLATFORM@" STREQUAL "")
+    list(APPEND configure_arguments -A "@CMAKE_GENERATOR_PLATFORM@")
+endif()
+if(NOT "@CMAKE_GENERATOR_TOOLSET@" STREQUAL "")
+    list(APPEND configure_arguments -T "@CMAKE_GENERATOR_TOOLSET@")
+endif()
+run_checked(producer-configure 60 "@CMAKE_COMMAND@" ${configure_arguments})
+run_checked(producer-build 600 "@CMAKE_COMMAND@" --build "${producer}" --config Release --parallel 2)
+install_producer(first-install)
+
+# Only installation may provision the operational layout. These checks precede
+# every daemon invocation, configuration copy and database write in this gate.
+require_directory("${prefix}" 755)
+require_directory("${prefix}/etc" 755)
+require_directory("${prefix}/var" 755)
+require_directory("${prefix}/var/lib" 700)
+require_directory("${prefix}/var/run" 700)
+foreach(asset etc/README.md share/jobu/jobud.ini.example bin/jobud bin/jobuctl)
+    if(NOT EXISTS "${prefix}/${asset}" OR IS_DIRECTORY "${prefix}/${asset}" OR IS_SYMLINK "${prefix}/${asset}")
+        message(FATAL_ERROR "Fresh installation is missing regular asset ${asset}")
+    endif()
+endforeach()
+foreach(path etc/jobud.ini var/lib/jobu.sqlite3 var/run/jobud.sock var/run/jobud.sock.lock)
+    if(EXISTS "${prefix}/${path}" OR IS_SYMLINK "${prefix}/${path}")
+        message(FATAL_ERROR "Installation created live resource ${path}")
+    endif()
+endforeach()
+
+run_checked(fresh-lifecycle 60 "${lifecycle_helper}" "${prefix}" "${test_logs}" fresh "@PROJECT_VERSION@")
+run_checked(restart-lifecycle 60 "${lifecycle_helper}" "${prefix}" "${test_logs}" restart "@PROJECT_VERSION@")
+
+# The no-INI proof is finished. Now execute the installed guide's commands
+# verbatim, using the freshly built installed daemon for read-only validation.
+file(READ "${prefix}/etc/README.md" guide)
+string(REGEX MATCH "```sh\n([^`]+)```" copy_block "${guide}")
+if(copy_block STREQUAL "")
+    message(FATAL_ERROR "Configuration README has no initial-copy command")
+endif()
+set(copy_command "${CMAKE_MATCH_1}")
+run_checked(readme-copy 10 /bin/sh -c
+    "umask 022; ${copy_command}\nresult=$?; [ \"$result\" = 0 ] && [ \"$(umask)\" = 0022 ]")
+read_metadata(config_metadata "${prefix}/etc/jobud.ini")
+if(NOT config_metadata STREQUAL "600:${installer_uid}:${installer_gid}")
+    message(FATAL_ERROR "README copy did not create an installer-owned private INI: ${config_metadata}")
+endif()
+file(SHA256 "${prefix}/etc/jobud.ini" config_hash)
+file(SHA256 "${prefix}/share/jobu/jobud.ini.example" sample_hash)
+if(NOT config_hash STREQUAL sample_hash)
+    message(FATAL_ERROR "README copy changed sample bytes")
+endif()
+execute_process(COMMAND /bin/sh -c "${copy_command}" RESULT_VARIABLE repeat_result
+    OUTPUT_VARIABLE repeat_output ERROR_VARIABLE repeat_error TIMEOUT 10)
+file(WRITE "${test_logs}/readme-repeat.log" "result=${repeat_result}\n${repeat_output}\n${repeat_error}")
+file(SHA256 "${prefix}/etc/jobud.ini" repeated_hash)
+if(NOT repeat_result STREQUAL "1" OR NOT repeated_hash STREQUAL config_hash)
+    message(FATAL_ERROR "README copy did not preserve and refuse an existing INI")
+endif()
+string(REGEX MATCH "```sh\n([^`]+--check-config[^`]+)```" check_block "${guide}")
+if(check_block STREQUAL "")
+    message(FATAL_ERROR "Configuration README has no validation command")
+endif()
+set(check_command "${CMAKE_MATCH_1}")
+run_checked(readme-check 10 /bin/sh -c "${check_command}")
+
+# Make a real operator edit, so reinstall preservation cannot pass by copying
+# the original sample back over the active configuration. No resource paths change.
+file(APPEND "${prefix}/etc/jobud.ini" "\n# Stage 9.34 operator edit retained across reinstall.\n")
+file(GLOB state_files RELATIVE "${prefix}" "${prefix}/var/lib/*")
+set(preserved_files etc/jobud.ini var/run/jobud.sock.lock ${state_files})
+set(metadata_paths "" etc var var/lib var/run ${preserved_files})
+foreach(path IN LISTS metadata_paths)
+    read_metadata("before_metadata_${path}" "${prefix}/${path}")
+endforeach()
+foreach(path IN LISTS preserved_files)
+    file(SHA256 "${prefix}/${path}" "before_hash_${path}")
+endforeach()
+install_producer(reinstall)
+foreach(path IN LISTS metadata_paths)
+    read_metadata(metadata "${prefix}/${path}")
+    if(NOT metadata STREQUAL "${before_metadata_${path}}")
+        message(FATAL_ERROR "Reinstall changed metadata for ${path}")
+    endif()
+endforeach()
+foreach(path IN LISTS preserved_files)
+    file(SHA256 "${prefix}/${path}" hash)
+    if(NOT hash STREQUAL "${before_hash_${path}}")
+        message(FATAL_ERROR "Reinstall changed operator bytes for ${path}")
+    endif()
+endforeach()
+run_checked(readme-recheck 10 /bin/sh -c "${check_command}")
+run_checked(configured-lifecycle 60 "${lifecycle_helper}" "${prefix}" "${test_logs}" configured "@PROJECT_VERSION@")
+message(STATUS "Fresh ordinary-user zero-argument startup, default client, restart and README/reinstall passed")
