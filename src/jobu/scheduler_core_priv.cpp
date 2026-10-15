@@ -489,7 +489,7 @@ auto process_completion(jb::db::Database&                        database,
                         jb::core::TimeSource&                    time_source,
                         ExecutionTelemetry*                      telemetry,
                         std::optional<TelemetryFailure>&         accounting_failure,
-                        std::map<jb::core::Uuid, std::uint64_t>& active_attempts,
+                        std::map<jb::core::Uuid, ActiveAttempt>& active_attempts,
                         std::set<jb::core::Uuid>&                cancellation_requests,
                         jb::core::Uuid const&                    expected_run_id,
                         AttemptCompletion const&                 completion) -> CoreResult<CompletionEffect>
@@ -500,7 +500,7 @@ auto process_completion(jb::db::Database&                        database,
     if (active == active_attempts.end()) {
         return CoreResult<CompletionEffect>::failure(invalid_completion("unexpected_callback"));
     }
-    if (completion.key.run_id != expected_run_id || completion.key.attempt_number != active->second) {
+    if (completion.key.run_id != expected_run_id || completion.key.attempt_number != active->second.attempt_number) {
         return CoreResult<CompletionEffect>::failure(invalid_completion("key_mismatch"));
     }
     auto serialized = validate_completion(completion);
@@ -757,25 +757,26 @@ auto type_available(AttemptExecutor const& executor, SchedulerCoreOptions const&
     return CoreResult<bool>::success(types->contains(type));
 }
 
-auto dispatch_visit(jb::db::Database&                        database,
-                    AttributeRegistry const&                 attributes,
-                    AttemptExecutor&                         executor,
-                    SecretProvider&                          secrets,
-                    jb::core::TimeSource&                    clock,
-                    std::optional<TelemetryFailure>&         accounting_failure,
-                    SchedulerRepository&                     repository,
-                    std::vector<QueueRuntime> const&         queues,
-                    JobType                                  type,
-                    jb::core::UtcTimePoint                   now,
-                    SchedulerCoreOptions const&              options,
-                    CapacityState&                           capacity,
-                    std::map<jb::core::Uuid, std::int64_t>&  credits,
-                    CandidateCache&                          candidate_cache,
-                    std::map<jb::core::Uuid, std::uint64_t>& active_attempts,
-                    std::set<jb::core::Uuid>&                attempted_blocking_retries,
-                    CompletionProcessor const&               completion_processor,
-                    std::function<bool(DelayedRun)> const&   delayed_delivery,
-                    bool const&                              terminal) -> CoreResult<bool>
+auto dispatch_visit(jb::db::Database&                          database,
+                    AttributeRegistry const&                   attributes,
+                    AttemptExecutor&                           executor,
+                    SecretProvider&                            secrets,
+                    jb::core::TimeSource&                      clock,
+                    std::optional<TelemetryFailure>&           accounting_failure,
+                    SchedulerRepository&                       repository,
+                    std::vector<QueueRuntime> const&           queues,
+                    JobType                                    type,
+                    jb::core::UtcTimePoint                     now,
+                    SchedulerCoreOptions const&                options,
+                    CapacityState&                             capacity,
+                    std::map<jb::core::Uuid, std::int64_t>&    credits,
+                    CandidateCache&                            candidate_cache,
+                    std::map<jb::core::Uuid, ActiveAttempt>&   active_attempts,
+                    std::set<jb::core::Uuid>&                  attempted_blocking_retries,
+                    CompletionProcessor const&                 completion_processor,
+                    std::function<void(AttemptStarted)> const& started_delivery,
+                    std::function<bool(DelayedRun)> const&     delayed_delivery,
+                    bool const&                                terminal) -> CoreResult<bool>
 {
     if (terminal || running_for(capacity, type) >= global_limit_for(options, type)) {
         return CoreResult<bool>::success(false);
@@ -874,8 +875,14 @@ auto dispatch_visit(jb::db::Database&                        database,
                 accounting_failure = std::move(sampled).error();
                 return CoreResult<bool>::failure(accounting_failure->error);
             }
-            auto dispatched =
-                dispatch_selected(database, attributes, executor, secrets, run_id, *sampled, std::move(completion));
+            auto dispatched = dispatch_selected(database,
+                                                attributes,
+                                                executor,
+                                                secrets,
+                                                run_id,
+                                                *sampled,
+                                                std::move(completion),
+                                                &clock);
             if (!dispatched) {
                 auto failure = std::move(dispatched).error();
                 if (options.telemetry || failure.error.code.starts_with("jobu.telemetry.")) {
@@ -894,7 +901,14 @@ auto dispatch_visit(jb::db::Database&                        database,
             if (dispatched->value().key.run_id != run_id || dispatched->value().key.attempt_number == 0) {
                 return CoreResult<bool>::failure(invalid_completion("dispatch_key_mismatch"));
             }
-            auto const [active, inserted] = active_attempts.emplace(run_id, dispatched->value().key.attempt_number);
+            auto const& start             = dispatched->value();
+            auto const [active, inserted] = active_attempts.emplace(run_id,
+                                                                    ActiveAttempt{
+                                                                        .attempt_number = start.key.attempt_number,
+                                                                        .execution      = start.execution,
+                                                                        .start_phase    = start.start_phase,
+                                                                        .accepted_at    = start.accepted_at,
+                                                                    });
             (void)active;
             if (!inserted) {
                 return CoreResult<bool>::failure(invalid_completion("duplicate_active_attempt"));
@@ -903,8 +917,16 @@ auto dispatch_visit(jb::db::Database&                        database,
             if (!recorded) {
                 return CoreResult<bool>::failure(std::move(recorded).error());
             }
-            // Correlation and capacity are established before a warning receiver may request
-            // shutdown or complete an attempt. The claim transaction and all its queries are gone.
+            // Announce acceptance only after SQL cleanup and checked correlation/capacity bookkeeping. A delay
+            // receiver may complete work synchronously, so the start must precede that existing notification.
+            if (start.start_phase == AttemptStartPhase::Accepted && started_delivery) {
+                started_delivery({.execution      = start.execution,
+                                  .attempt_number = start.key.attempt_number,
+                                  .started_at     = start.started_at});
+                if (terminal) {
+                    return CoreResult<bool>::success(true);
+                }
+            }
             if (dispatched->value().delayed && !delayed_delivery(*dispatched->value().delayed)) {
                 return CoreResult<bool>::success(true);
             }
@@ -1135,12 +1157,12 @@ auto SchedulerCore::cancel_run_impl(jb::core::Uuid const& run_id) -> jb::core::R
         if (!durable_attempt) {
             return CancellationResult::failure(std::move(durable_attempt).error());
         }
-        if (!durable_attempt->has_value() || **durable_attempt != active->second) {
+        if (!durable_attempt->has_value() || **durable_attempt != active->second.attempt_number) {
             return CancellationResult::failure(scheduler_invariant("active_attempt_mismatch"));
         }
         // Record only accepted requests. The marker makes repeats idempotent while an executor error remains retryable.
         if (!_cancellation_requests.contains(run_id)) {
-            auto cancelled = _executor.cancel({.run_id = run_id, .attempt_number = active->second});
+            auto cancelled = _executor.cancel({.run_id = run_id, .attempt_number = active->second.attempt_number});
             if (!cancelled) {
                 return CancellationResult::failure(std::move(cancelled).error());
             }
@@ -1379,6 +1401,7 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
                                     _active_attempts,
                                     first_blocking,
                                     completion_processor,
+                                    _callbacks.attempt_started,
                                     delayed_delivery,
                                     _completion_token->terminal);
         if (!first) {
@@ -1407,6 +1430,7 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
                                      _active_attempts,
                                      second_blocking,
                                      completion_processor,
+                                     _callbacks.attempt_started,
                                      delayed_delivery,
                                      _completion_token->terminal);
         if (!second) {

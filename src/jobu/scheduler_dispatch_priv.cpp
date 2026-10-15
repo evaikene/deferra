@@ -8,6 +8,7 @@
 #include "storage_failure_priv.hpp"
 #include "transaction.hpp"
 
+#include <chrono>
 #include <utility>
 
 namespace jb::jobu::detail {
@@ -52,7 +53,8 @@ auto dispatch_selected_impl(jb::db::Database&                database,
                             jb::core::Uuid const&            run_id,
                             MutationTiming const&            timing,
                             std::optional<TelemetryFailure>& accounting_failure,
-                            AttemptCompletionHandler         completion)
+                            AttemptCompletionHandler         completion,
+                            jb::core::TimeSource*            acceptance_clock)
     -> jb::core::Result<std::optional<DispatchStart>, jb::core::Error>
 {
     auto const started_at  = timing.utc_now;
@@ -116,14 +118,23 @@ auto dispatch_selected_impl(jb::db::Database&                database,
         return DispatchResult<std::optional<DispatchStart>>::failure(std::move(committed).error());
     }
 
-    auto const key = AttemptKey{.run_id = selected.run.id, .attempt_number = selected.next_attempt};
+    auto const key      = AttemptKey{.run_id = selected.run.id, .attempt_number = selected.next_attempt};
+    auto       dispatch = DispatchStart{
+        .key         = key,
+        .execution   = {.queue_id = selected.run.queue_id,
+                        .job_id   = selected.run.job_id,
+                        .run_id   = selected.run.id,
+                        .type     = selected.run.type,
+                        .origin   = selected.run.origin},
+        .start_phase = AttemptStartPhase::PreparationFailed,
+        // Storage floors UTC timestamps to microseconds; observers must receive that same durable value.
+        .started_at  = std::chrono::floor<std::chrono::microseconds>(started_at),
+        .delayed     = *claimed,
+    };
     if (!prepared) {
         // The core must record correlation and capacity before accepting this terminal preparation outcome.
-        return DispatchResult<std::optional<DispatchStart>>::success(DispatchStart{
-            .key                  = key,
-            .immediate_completion = terminal_start_failure(key, prepared.error().error),
-            .delayed              = *claimed,
-        });
+        dispatch.immediate_completion = terminal_start_failure(key, prepared.error().error);
+        return DispatchResult<std::optional<DispatchStart>>::success(std::move(dispatch));
     }
 
     auto request = AttemptStartRequest{
@@ -138,13 +149,17 @@ auto dispatch_selected_impl(jb::db::Database&                database,
     auto started = executor.start(std::move(request), std::move(completion));
     if (!started) {
         // The durable start cannot be rolled back now; route executor start failure through the normal completion path.
-        return DispatchResult<std::optional<DispatchStart>>::success(DispatchStart{
-            .key                  = key,
-            .immediate_completion = terminal_start_failure(key, started.error()),
-            .delayed              = *claimed,
-        });
+        dispatch.start_phase          = AttemptStartPhase::ExecutorRejected;
+        dispatch.immediate_completion = terminal_start_failure(key, started.error());
+        return DispatchResult<std::optional<DispatchStart>>::success(std::move(dispatch));
     }
-    return DispatchResult<std::optional<DispatchStart>>::success(DispatchStart{.key = key, .delayed = *claimed});
+
+    // Execution elapsed time starts at acceptance, not the earlier durable claim or runnable-wait sample.
+    if (acceptance_clock) {
+        dispatch.accepted_at = acceptance_clock->monotonic_now();
+    }
+    dispatch.start_phase = AttemptStartPhase::Accepted;
+    return DispatchResult<std::optional<DispatchStart>>::success(std::move(dispatch));
 }
 
 } // anonymous namespace
@@ -155,11 +170,19 @@ auto dispatch_selected(jb::db::Database&        database,
                        SecretProvider&          secrets,
                        jb::core::Uuid const&    run_id,
                        jb::core::UtcTimePoint   started_at,
-                       AttemptCompletionHandler completion)
+                       AttemptCompletionHandler completion,
+                       jb::core::TimeSource*    acceptance_clock)
     -> jb::core::Result<std::optional<DispatchStart>, jb::core::Error>
 {
     MutationTiming const timing{.database = &database, .utc_now = started_at};
-    auto dispatched = dispatch_selected(database, attributes, executor, secrets, run_id, timing, std::move(completion));
+    auto                 dispatched = dispatch_selected(database,
+                                                        attributes,
+                                                        executor,
+                                                        secrets,
+                                                        run_id,
+                                                        timing,
+                                                        std::move(completion),
+                                                        acceptance_clock);
     if (!dispatched) {
         return DispatchResult<std::optional<DispatchStart>>::failure(std::move(dispatched).error().error);
     }
@@ -172,7 +195,8 @@ auto dispatch_selected(jb::db::Database&        database,
                        SecretProvider&          secrets,
                        jb::core::Uuid const&    run_id,
                        MutationTiming const&    timing,
-                       AttemptCompletionHandler completion) -> TelemetryResult<std::optional<DispatchStart>>
+                       AttemptCompletionHandler completion,
+                       jb::core::TimeSource*    acceptance_clock) -> TelemetryResult<std::optional<DispatchStart>>
 {
     std::optional<TelemetryFailure> accounting_failure;
     auto                            dispatched = dispatch_selected_impl(database,
@@ -182,7 +206,8 @@ auto dispatch_selected(jb::db::Database&        database,
                                                                         run_id,
                                                                         timing,
                                                                         accounting_failure,
-                                                                        std::move(completion));
+                                                                        std::move(completion),
+                                                                        acceptance_clock);
 
     // Inspect cleanup only after the transaction guard has unwound. Preserve a first fatal storage/provider error;
     // an otherwise ordinary result cannot hide a rollback failure that made the connection unusable.

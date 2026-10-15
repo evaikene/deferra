@@ -7,6 +7,7 @@
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_attempt_executor.hpp"
 #include "support/fake_database_driver.hpp"
+#include "support/fake_time_source.hpp"
 #include "support/rejecting_secret_provider.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -15,6 +16,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -186,7 +188,8 @@ public:
         : _state{std::move(state)}
     {}
 
-    FakeAttemptExecutor fake;
+    FakeAttemptExecutor   fake;
+    std::function<void()> on_start;
 
     [[nodiscard]] auto is_available(JobType type) const noexcept -> bool override { return fake.is_available(type); }
 
@@ -194,6 +197,9 @@ public:
         -> Result<void, Error> override
     {
         _state->calls.emplace_back("executor.start");
+        if (on_start) {
+            on_start();
+        }
         return fake.start(std::move(request), std::move(completion));
     }
 
@@ -218,16 +224,18 @@ struct DispatchFixture {
     }
 };
 
-auto dispatch(DispatchFixture& fixture, SecretProvider* provider = nullptr)
+auto dispatch(DispatchFixture& fixture, SecretProvider* provider = nullptr, TimeSource* acceptance_clock = nullptr)
     -> Result<std::optional<DispatchStart>, Error>
 {
-    return dispatch_selected(fixture.database,
-                             fixture.registry,
-                             fixture.executor,
-                             provider ? *provider : fixture.secrets,
-                             id(1),
-                             at(120),
-                             [](auto const&) { FAIL("Dispatch must return immediate completion to the core"); });
+    return dispatch_selected(
+        fixture.database,
+        fixture.registry,
+        fixture.executor,
+        provider ? *provider : fixture.secrets,
+        id(1),
+        at(120),
+        [](auto const&) { FAIL("Dispatch must return immediate completion to the core"); },
+        acceptance_clock);
 }
 
 class PreparingProvider final : public SecretProvider {
@@ -280,6 +288,14 @@ TEST_CASE("Atomic dispatch commits before invoking the executor", "[jobu][schedu
     REQUIRE(result->has_value());
     CHECK(result->value().key == AttemptKey{.run_id = id(1), .attempt_number = 1});
     CHECK_FALSE(result->value().immediate_completion);
+    CHECK(result->value().execution.queue_id == id(3));
+    CHECK(result->value().execution.job_id == id(2));
+    CHECK(result->value().execution.run_id == id(1));
+    CHECK(result->value().execution.type == JobType::Cli);
+    CHECK(result->value().execution.origin == RunOrigin::Scheduled);
+    CHECK(result->value().start_phase == AttemptStartPhase::Accepted);
+    CHECK(result->value().started_at == at(120));
+    CHECK_FALSE(result->value().accepted_at);
 
     REQUIRE(fixture.executor.fake.start_requests().size() == 1U);
     auto const& request = fixture.executor.fake.start_requests().front();
@@ -293,16 +309,39 @@ TEST_CASE("Atomic dispatch commits before invoking the executor", "[jobu][schedu
     CHECK(fixture.state->last_transaction_mode == TransactionMode::Immediate);
 }
 
+TEST_CASE("Dispatch samples monotonic acceptance after executor start independently of durable UTC",
+          "[jobu][scheduler][dispatch][execution]")
+{
+    DispatchFixture fixture;
+    FakeTimeSource  time;
+    time.set_monotonic(TimePoint{std::chrono::seconds{10}});
+    fixture.executor.on_start = [&]() {
+        time.set_monotonic(TimePoint{std::chrono::seconds{12}});
+        time.set_utc(at(-100));
+    };
+
+    auto result = dispatch(fixture, nullptr, &time);
+    REQUIRE(result);
+    REQUIRE(result->has_value());
+    CHECK(result->value().start_phase == AttemptStartPhase::Accepted);
+    CHECK(result->value().accepted_at == TimePoint{std::chrono::seconds{12}});
+    CHECK(result->value().started_at == at(120));
+}
+
 TEST_CASE("Atomic dispatch returns a safe synthetic completion for executor start failure",
           "[jobu][scheduler][dispatch]")
 {
     DispatchFixture fixture;
     fixture.executor.fake.set_start_error(test_error("test.executor.start_failed"));
 
-    auto result = dispatch(fixture);
+    FakeTimeSource time;
+    auto           result = dispatch(fixture, nullptr, &time);
     REQUIRE(result);
     REQUIRE(result->has_value());
     REQUIRE(result->value().immediate_completion);
+    CHECK(result->value().start_phase == AttemptStartPhase::ExecutorRejected);
+    CHECK(result->value().started_at == at(120));
+    CHECK_FALSE(result->value().accepted_at);
     auto const& completion = *result->value().immediate_completion;
     CHECK(completion.key == result->value().key);
     CHECK(completion.outcome == AttemptOutcome::Failed);
@@ -469,10 +508,14 @@ TEST_CASE("Atomic dispatch commits ordinary preparation failures without startin
                     R"({"command":"/test","arguments":[{"secret":"token"},{"secret":"token"},{"secret":"token"},{"secret":"token"},{"secret":"token"}]})");
                 expected = "jobu.secret.resolved_payload_too_large";
             }
-            auto result = dispatch(fixture, &provider);
+            FakeTimeSource time;
+            auto           result = dispatch(fixture, &provider, &time);
             REQUIRE(result);
             REQUIRE(result->has_value());
             REQUIRE(result->value().immediate_completion);
+            CHECK(result->value().start_phase == AttemptStartPhase::PreparationFailed);
+            CHECK(result->value().started_at == at(120));
+            CHECK_FALSE(result->value().accepted_at);
             auto const& completion = *result->value().immediate_completion;
             CHECK(completion.outcome == AttemptOutcome::Failed);
             CHECK(completion.failure_disposition == FailureDisposition::Terminal);

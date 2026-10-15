@@ -106,6 +106,8 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
                {
                    .rescan_requested = [this]() -> void { request_rescan(); },
                    .failure_reported = [this](jb::core::Error const& error) -> void { fail(error); },
+                   // bind_owner() supplies the public owner after Object has taken ownership of this block.
+                   .attempt_started  = [this](AttemptStarted value) { owner->emit(owner->attempt_started, value); },
                }}
     {
         if (!valid_options(options)) {

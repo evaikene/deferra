@@ -225,7 +225,7 @@ public:
     /// stack; post such work to the owner loop. Terminal shutdown may discard remaining diagnostics for the transition.
     /// These are live diagnostics, with no replay or durable subscription guarantee. Recovery reports and management
     /// deletion/suspension are outside this stream. Ordinary stop retains the existing accepted-completion contract.
-    /// @note These declarations establish the contract; execution lifecycle delivery is not yet implemented.
+    /// @note Accepted starts are delivered. Completion, retry and terminal-run delivery are not yet implemented.
     /// @{
 
     /// Executor acceptance after durable start, SQL cleanup and active correlation/capacity bookkeeping.

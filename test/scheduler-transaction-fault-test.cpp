@@ -67,7 +67,7 @@ auto successor_error() -> Error
 
 // Match logical SQL shapes, never a global query ordinal. Every injected test asserts that its named fault fired,
 // so a repository rewrite cannot silently turn a rollback case into a successful control.
-auto boundary(std::string_view sql) -> std::string
+auto boundary(std::string_view sql) -> std::string_view
 {
     if (sql.starts_with("SELECT value_blob FROM jobu_secrets")) {
         return "dispatch.secret";
@@ -222,22 +222,23 @@ struct Fixture {
     SequenceUuidGenerator                  generator{
         {recovery_id(100), recovery_id(101)}
     };
-    RejectingSecretProvider    secrets;
-    DatabaseSecretProvider     database_secrets{store.database};
-    FakeTimeSource             time;
-    ObservingExecutor          executor{faults};
-    std::vector<Error>         failures;
-    std::unique_ptr<Scheduler> scheduler;
-    Queue                      queue{recovery_queue(recovery_id(1))};
-    JobDefinition              job;
-    RecoveryRunFixture         original;
+    RejectingSecretProvider     secrets;
+    DatabaseSecretProvider      database_secrets{store.database};
+    FakeTimeSource              time;
+    ObservingExecutor           executor{faults};
+    std::vector<Error>          failures;
+    std::vector<AttemptStarted> starts;
+    std::unique_ptr<Scheduler>  scheduler;
+    Queue                       queue{recovery_queue(recovery_id(1))};
+    JobDefinition               job;
+    RecoveryRunFixture          original;
 
     explicit Fixture(Scenario      scenario   = Scenario::Terminal,
                      RunState      initial    = RunState::Scheduled,
                      std::uint32_t capacity   = 1,
                      bool          references = false)
     {
-        faults->classify = boundary;
+        faults->classify = [](std::string_view sql) { return std::string{boundary(sql)}; };
         time.set_utc(at(100));
         queue.concurrency_limit = capacity;
         store.insert_queue(queue);
@@ -272,6 +273,8 @@ struct Fixture {
         scheduler =
             std::make_unique<Scheduler>(store.database, store.registry, cron, generator, time, executor, provider);
         scheduler->failed.connect(scheduler.get(), [this](Error const& error) { failures.push_back(error); });
+        scheduler->attempt_started.connect(scheduler.get(),
+                                           [this](AttemptStarted const& value) { starts.push_back(value); });
     }
 
     void arm(DatabaseCall call, std::string code = "db.io")
@@ -340,8 +343,9 @@ struct Fixture {
 
     void require_closed_gate()
     {
-        auto const calls  = faults->calls.size();
-        auto const starts = executor.fake.start_requests().size();
+        auto const calls        = faults->calls.size();
+        auto const starts       = executor.fake.start_requests().size();
+        auto const start_events = this->starts.size();
         scheduler->request_rescan();
         auto restarted = scheduler->start();
         REQUIRE_FALSE(restarted);
@@ -349,6 +353,7 @@ struct Fixture {
         CHECK(loop.loop->process_events(EventFlag::All) == ProcessEventsResult::Stopped);
         CHECK(faults->calls.size() == calls);
         CHECK(executor.fake.start_requests().size() == starts);
+        CHECK(this->starts.size() == start_events);
         CHECK(failures.size() == 1U);
     }
 
@@ -568,6 +573,7 @@ TEST_CASE("Dispatch transaction faults never launch and restore the full SQLite 
                 REQUIRE_FALSE(started);
                 fixture.require_failure();
                 CHECK(fixture.executor.fake.start_requests().empty());
+                CHECK(fixture.starts.empty());
                 fixture.require_closed_gate();
                 fixture.reopen();
                 CHECK(snapshot(fixture.store.database) == before);
@@ -583,9 +589,13 @@ TEST_CASE("Acknowledged dispatch commits the first or retry attempt before launc
         Fixture fixture{Scenario::Terminal, initial};
         REQUIRE(fixture.scheduler->start());
         REQUIRE(fixture.executor.fake.start_requests().size() == 1U);
-        auto const key      = fixture.executor.fake.pending_keys().front();
-        auto       expected = fixture.original;
-        expected.run.state  = RunState::Running;
+        auto const key = fixture.executor.fake.pending_keys().front();
+        REQUIRE(fixture.starts.size() == 1);
+        CHECK(fixture.starts.front().execution.run_id == key.run_id);
+        CHECK(fixture.starts.front().attempt_number == key.attempt_number);
+        CHECK(fixture.starts.front().started_at == at(100));
+        auto expected      = fixture.original;
+        expected.run.state = RunState::Running;
         if (!expected.run.started_at) {
             expected.run.started_at = at(100);
         }
@@ -657,6 +667,7 @@ TEST_CASE("Lost dispatch commit acknowledgement leaves running rows without an e
     REQUIRE_FALSE(fixture.scheduler->start());
     fixture.require_failure();
     CHECK(fixture.executor.fake.start_requests().empty());
+    CHECK(fixture.starts.empty());
     fixture.require_closed_gate();
     fixture.reopen();
     auto expected           = fixture.original;
@@ -1055,6 +1066,7 @@ TEST_CASE("Secret dispatch faults preserve the durable snapshot and close schedu
                 fixture.require_failure();
                 CHECK(fixture.failures.front().detail == "operation=dispatch reason=state_operation_failed");
                 CHECK(fixture.executor.fake.start_requests().empty());
+                CHECK(fixture.starts.empty());
                 fixture.require_closed_gate();
                 fixture.reopen();
                 CHECK(snapshot(fixture.store.database) == before);
@@ -1087,6 +1099,7 @@ TEST_CASE("Secret preparation cannot bypass commit acknowledgement or poisoned r
                 REQUIRE_FALSE(started);
                 fixture.require_failure();
                 CHECK(fixture.executor.fake.start_requests().empty());
+                CHECK(fixture.starts.empty());
                 if (!lost_acknowledgement) {
                     CHECK(fixture.store.database.is_poisoned());
                 }
