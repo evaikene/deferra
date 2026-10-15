@@ -179,7 +179,14 @@ struct Fixture {
             executor,
             secrets,
             SchedulerCoreOptions{.cli_concurrency = concurrency, .http_concurrency = concurrency, .telemetry = owner},
-            SchedulerCoreCallbacks{.failure_reported = [this](Error const& error) { failures.push_back(error); }});
+            SchedulerCoreCallbacks{.failure_reported = [this](Error const& error) { failures.push_back(error); },
+                                   .attempt_started =
+                                       [this](AttemptStarted value) {
+                                           starts.push_back(value);
+                                           if (on_started) {
+                                               on_started(value);
+                                           }
+                                       }});
         faults->classify = [](std::string_view sql) { return std::string{classify(sql)}; };
         telemetry->failed.connect(&receiver, [this](Error const& error) {
             timing_failures.push_back(error);
@@ -274,26 +281,28 @@ struct Fixture {
         storage.reopen();
     }
 
-    jb::core::priv::FakeEventLoop          loop{jb::core::priv::make_fake_event_loop()};
-    jb::core::priv::ScopedCurrentEventLoop current{loop.loop.get()};
-    std::shared_ptr<DatabaseFaultState>    faults{std::make_shared<DatabaseFaultState>()};
-    RecoveryFixture                        storage{[this](std::unique_ptr<jb::db::Driver> driver) {
+    jb::core::priv::FakeEventLoop              loop{jb::core::priv::make_fake_event_loop()};
+    jb::core::priv::ScopedCurrentEventLoop     current{loop.loop.get()};
+    std::shared_ptr<DatabaseFaultState>        faults{std::make_shared<DatabaseFaultState>()};
+    RecoveryFixture                            storage{[this](std::unique_ptr<jb::db::Driver> driver) {
         return std::make_unique<FaultDatabaseDriver>(std::move(driver), faults);
     }};
-    FakeCronEngine                         cron;
-    FakeTimeSource                         time;
-    SequenceUuidGenerator                  generator{identities()};
-    ObservingExecutor                      executor{storage.database, *faults};
-    DatabaseSecretProvider                 secrets{storage.database};
-    Object                                 receiver;
-    std::vector<Error>                     failures;
-    std::vector<Error>                     timing_failures;
-    std::vector<DelayedRun>                warnings;
-    std::size_t                            calls_at_failure{0};
-    std::unique_ptr<ExecutionTelemetry>    telemetry;
-    std::unique_ptr<Scheduler>             registrar;
-    std::unique_ptr<ManagementService>     service;
-    std::unique_ptr<SchedulerCore>         core;
+    FakeCronEngine                             cron;
+    FakeTimeSource                             time;
+    SequenceUuidGenerator                      generator{identities()};
+    ObservingExecutor                          executor{storage.database, *faults};
+    DatabaseSecretProvider                     secrets{storage.database};
+    Object                                     receiver;
+    std::vector<Error>                         failures;
+    std::vector<Error>                         timing_failures;
+    std::vector<DelayedRun>                    warnings;
+    std::vector<AttemptStarted>                starts;
+    std::function<void(AttemptStarted const&)> on_started;
+    std::size_t                                calls_at_failure{0};
+    std::unique_ptr<ExecutionTelemetry>        telemetry;
+    std::unique_ptr<Scheduler>                 registrar;
+    std::unique_ptr<ManagementService>         service;
+    std::unique_ptr<SchedulerCore>             core;
 };
 
 auto retry_attributes(std::string mode, std::string strategy = "fixed", Duration delay = 10s) -> AttributeSet
@@ -1110,7 +1119,7 @@ TEST_CASE("Moving eligible work changes threshold ownership without resetting th
     CHECK(f.warnings.size() == 1);
 }
 
-TEST_CASE("A dispatch crossing after observation claims its warning in the Running transaction",
+TEST_CASE("A dispatch crossing announces acceptance before its warning receiver completes the attempt",
           "[jobu][telemetry][scheduler][warning][dispatch]")
 {
     Fixture f;
@@ -1130,6 +1139,9 @@ TEST_CASE("A dispatch crossing after observation claims its warning in the Runni
         auto transaction = jb::db::Transaction::begin(f.storage.database);
         REQUIRE(transaction);
         REQUIRE(transaction->rollback());
+        REQUIRE(f.starts.size() == 1);
+        CHECK(f.starts.front().execution.run_id == id);
+        f.finish();
     });
     f.time.advance(10ms);
     REQUIRE(f.core->process_cycle());
@@ -1137,6 +1149,35 @@ TEST_CASE("A dispatch crossing after observation claims its warning in the Runni
     CHECK(f.warnings.front().runnable_wait == 10001us);
     CHECK(f.timing(run.id).runnable_wait_us == 10001);
     CHECK(f.executor.fake.start_requests().size() == 1);
+    CHECK(f.run(run.id).state == RunState::Succeeded);
+}
+
+TEST_CASE("Shutdown from accepted-start delivery suppresses the claimed dispatch warning and completion",
+          "[jobu][telemetry][scheduler][execution][shutdown]")
+{
+    Fixture f;
+    auto    queue = f.queue(2, 10ms);
+    auto    run   = f.scheduled(f.job(queue).id);
+    f.job(queue, {}, OnceSchedule{UtcTimePoint{200s}});
+    bool crossed       = false;
+    f.faults->classify = [&f, &crossed](std::string_view sql) {
+        if (!crossed && sql.find("ORDER BY jobu_runs.priority DESC") != std::string_view::npos) {
+            crossed = true;
+            f.time.advance(1us);
+        }
+        return std::string{classify(sql)};
+    };
+    f.on_started = [&f](AttemptStarted const&) { f.core->shutdown(); };
+
+    f.time.advance(10ms);
+    auto cycle = f.core->process_cycle();
+    REQUIRE(cycle);
+    CHECK(cycle->shutdown_requested);
+    REQUIRE(f.starts.size() == 1);
+    CHECK(f.warnings.empty());
+    CHECK(f.timing(run.id).delay_warned);
+    f.finish();
+    CHECK(f.run(run.id).state == RunState::Running);
 }
 
 TEST_CASE("Observation warning failures roll back the page and emit no diagnostic",

@@ -29,6 +29,15 @@ struct DelayedRun;
 
 namespace detail {
 
+/// Sole in-process correlation for a claimed attempt; retired only with its committed completion or core reset.
+/// Contains no payload or result data. Acceptance timing is diagnostic and independent of runnable-wait accounting.
+struct ActiveAttempt {
+    AttemptNumber                      attempt_number;
+    ExecutionContext                   execution;
+    AttemptStartPhase                  start_phase;
+    std::optional<jb::core::TimePoint> accepted_at;
+};
+
 struct SchedulerCoreOptions {
     std::uint32_t       cli_concurrency{4};
     std::uint32_t       http_concurrency{16};
@@ -50,6 +59,7 @@ struct SchedulerCycleResult {
 struct SchedulerCoreCallbacks {
     std::function<void()>                       rescan_requested;
     std::function<void(jb::core::Error const&)> failure_reported;
+    std::function<void(AttemptStarted)>         attempt_started;
 };
 
 class SchedulerCore final {
@@ -111,7 +121,7 @@ private:
     std::map<jb::core::Uuid, std::uint32_t> _queue_weights;
     std::map<jb::core::Uuid, std::int64_t>  _cli_credits;
     std::map<jb::core::Uuid, std::int64_t>  _http_credits;
-    std::map<jb::core::Uuid, std::uint64_t> _active_attempts;
+    std::map<jb::core::Uuid, ActiveAttempt> _active_attempts;
     std::set<jb::core::Uuid>                _cancellation_requests;
     std::optional<jb::core::Error>          _failure;
     std::optional<TelemetryFailure>         _telemetry_failure;

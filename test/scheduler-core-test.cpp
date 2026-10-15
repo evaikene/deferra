@@ -86,21 +86,30 @@ struct CoreFixture {
 
     [[nodiscard]] auto process(SchedulerCoreOptions options) -> Result<SchedulerCycleResult, Error>
     {
-        SchedulerCore core{database, registry, cron, generator, time, executor, secrets, options};
+        SchedulerCore core{database,
+                           registry,
+                           cron,
+                           generator,
+                           time,
+                           executor,
+                           secrets,
+                           options,
+                           {.attempt_started = [this](AttemptStarted value) { starts.push_back(value); }}};
         return core.process_cycle();
     }
 
-    TemporaryDirectory        directory;
-    std::filesystem::path     database_file{directory.path() / "jobu.sqlite"};
-    Database                  database{make_database(database_file)};
-    RejectingSecretProvider   secrets;
-    StandardAttributeRegistry registry;
-    FakeCronEngine            cron;
-    SequenceUuidGenerator     generator;
-    FakeTimeSource            time;
-    FakeAttemptExecutor       executor;
-    AttemptRepository         attempts;
-    RunRepository             runs;
+    TemporaryDirectory          directory;
+    std::filesystem::path       database_file{directory.path() / "jobu.sqlite"};
+    Database                    database{make_database(database_file)};
+    RejectingSecretProvider     secrets;
+    StandardAttributeRegistry   registry;
+    FakeCronEngine              cron;
+    SequenceUuidGenerator       generator;
+    FakeTimeSource              time;
+    FakeAttemptExecutor         executor;
+    AttemptRepository           attempts;
+    RunRepository               runs;
+    std::vector<AttemptStarted> starts;
 };
 
 class CountingSecretProvider final : public SecretProvider {
@@ -1164,6 +1173,9 @@ TEST_CASE("Single-queue scheduler core leaves unavailable work pending", "[jobu]
     REQUIRE(fixture.process({.cli_concurrency = 2, .http_concurrency = 2, .candidate_batch_size = 1}));
     REQUIRE(fixture.executor.start_requests().size() == 1U);
     CHECK(fixture.executor.start_requests().front().key.run_id == id(82));
+    REQUIRE(fixture.starts.size() == 1);
+    CHECK(fixture.starts.front().execution.run_id == id(82));
+    CHECK(fixture.starts.front().execution.type == JobType::Http);
 }
 
 TEST_CASE("Single-queue scheduler core treats dispatch revalidation loss as a normal skip",
@@ -1184,11 +1196,13 @@ TEST_CASE("Single-queue scheduler core treats dispatch revalidation loss as a no
         fixture.time,
         executor,
         fixture.secrets,
-        {.cli_concurrency = 2, .http_concurrency = 2, .candidate_batch_size = 2}
+        {.cli_concurrency = 2, .http_concurrency = 2, .candidate_batch_size = 2},
+        {.attempt_started = [&](AttemptStarted value) { fixture.starts.push_back(value); }}
     };
     REQUIRE(core.process_cycle());
     CHECK(executor.mutation_ok());
     CHECK(executor.fake.start_requests().empty());
+    CHECK(fixture.starts.empty());
 }
 
 TEST_CASE("Scheduler core falls through when the selected queue loses eligibility",
@@ -2131,12 +2145,14 @@ TEST_CASE("Scheduler core completes executor start errors through the normal ter
         fixture.time,
         fixture.executor,
         fixture.secrets,
-        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2}
+        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 2},
+        {.attempt_started = [&](AttemptStarted value) { fixture.starts.push_back(value); }}
     };
 
     REQUIRE(core.process_cycle());
     REQUIRE(fixture.executor.start_requests().size() == 2U);
     CHECK(fixture.executor.pending_keys().empty());
+    CHECK(fixture.starts.empty());
     for (auto const run_id : {id(121), id(122)}) {
         auto run = fixture.runs.find_by_id(run_id);
         REQUIRE(run);
@@ -2182,12 +2198,15 @@ TEST_CASE("A one-time secret preparation failure finishes its definition without
                                 fixture.generator,
                                 fixture.time,
                                 fixture.executor,
-                                provider};
+                                provider,
+                                {},
+                                {.attempt_started = [&](AttemptStarted value) { fixture.starts.push_back(value); }}};
     JobRepository          jobs{fixture.database, fixture.registry};
 
     fixture.time.set_utc(at(200));
     REQUIRE(core.process_cycle());
     CHECK(fixture.executor.start_requests().empty());
+    CHECK(fixture.starts.empty());
     auto finished_run = fixture.runs.find_by_id(run_id);
     REQUIRE(finished_run);
     REQUIRE(finished_run->has_value());
@@ -2543,12 +2562,14 @@ TEST_CASE("Scheduler core rejects completion invoked synchronously from start",
         fixture.time,
         executor,
         fixture.secrets,
-        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1}
+        {.cli_concurrency = 1, .http_concurrency = 1, .candidate_batch_size = 1},
+        {.attempt_started = [&](AttemptStarted value) { fixture.starts.push_back(value); }}
     };
 
     auto failed = core.process_cycle();
     REQUIRE_FALSE(failed);
     CHECK(failed.error().code == "jobu.executor.invalid_completion");
+    CHECK(fixture.starts.empty());
     auto attempt = fixture.attempts.find(id(136), 1);
     REQUIRE(attempt);
     REQUIRE(attempt->has_value());
@@ -4200,10 +4221,14 @@ TEST_CASE("Scheduler resolves immutable templates afresh for each retry", "[jobu
                                fixture.generator,
                                fixture.time,
                                fixture.executor,
-                               provider};
+                               provider,
+                               {},
+                               {.attempt_started = [&](AttemptStarted value) { fixture.starts.push_back(value); }}};
 
             REQUIRE(core.process_cycle());
             REQUIRE(fixture.executor.start_requests().size() == 1);
+            REQUIRE(fixture.starts.size() == 1);
+            CHECK(fixture.starts.front().attempt_number == 1);
             CHECK(provider.names == std::vector<std::string>{"token"});
             auto const  first    = fixture.executor.pending_keys().front();
             auto const& concrete = fixture.executor.start_requests().front().payload.as_object();
@@ -4215,6 +4240,14 @@ TEST_CASE("Scheduler resolves immutable templates afresh for each retry", "[jobu
             REQUIRE(secrets.set("token", as_bytes("rotated-secret-sentinel"), at(120)));
             REQUIRE(core.process_cycle());
             REQUIRE(fixture.executor.start_requests().size() == 2);
+            REQUIRE(fixture.starts.size() == 2);
+            CHECK(fixture.starts.back().execution.queue_id == queue_id);
+            CHECK(fixture.starts.back().execution.job_id == job_id);
+            CHECK(fixture.starts.back().execution.run_id == run_id);
+            CHECK(fixture.starts.back().execution.type == JobType::Cli);
+            CHECK(fixture.starts.back().execution.origin == RunOrigin::Scheduled);
+            CHECK(fixture.starts.back().attempt_number == 2);
+            CHECK(fixture.starts.back().started_at == at(120));
             CHECK(provider.names == std::vector<std::string>{"token", "token"});
             auto const second = fixture.executor.pending_keys().front();
             CHECK(second == AttemptKey{.run_id = run_id, .attempt_number = 2});
@@ -4225,6 +4258,8 @@ TEST_CASE("Scheduler resolves immutable templates afresh for each retry", "[jobu
                       .as_array()[0]
                       .as_string() == "rotated-secret-sentinel");
             REQUIRE(fixture.executor.complete(second, success(second)));
+            REQUIRE(core.process_cycle());
+            CHECK(fixture.starts.size() == 2);
 
             // Only executor requests carry resolved data. Durable definitions, snapshots and generated results
             // retain references or safe outcome metadata after both attempts have completed.
@@ -4356,7 +4391,9 @@ TEST_CASE("Scheduler fails closed for storage persisted-data and unexpected prov
                                fixture.generator,
                                fixture.time,
                                fixture.executor,
-                               provider};
+                               provider,
+                               {},
+                               {.attempt_started = [&](AttemptStarted value) { fixture.starts.push_back(value); }}};
             auto          result = core.process_cycle();
             REQUIRE_FALSE(result);
             CHECK(result.error().code ==
@@ -4364,6 +4401,7 @@ TEST_CASE("Scheduler fails closed for storage persisted-data and unexpected prov
             CHECK(result.error().message.find("private-secret-sentinel") == std::string::npos);
             CHECK(result.error().detail.find("private-secret-sentinel") == std::string::npos);
             CHECK(fixture.executor.start_requests().empty());
+            CHECK(fixture.starts.empty());
             auto attempts = fixture.attempts.list_for_run(id(3), 10);
             REQUIRE(attempts);
             CHECK(attempts->empty());

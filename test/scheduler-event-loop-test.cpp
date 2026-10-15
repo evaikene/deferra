@@ -1,5 +1,6 @@
 #include "scheduler.hpp"
 
+#include "attempt_repository_priv.hpp"
 #include "attribute_registry.hpp"
 #include "database.hpp"
 #include "event_loop.hpp"
@@ -17,6 +18,7 @@
 #include "support/rejecting_secret_provider.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
+#include "transaction.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -25,6 +27,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -120,6 +123,8 @@ struct SchedulerFixture {
         time.set_utc(at_seconds(100));
         management = std::make_unique<ManagementService>(database, registry, cron, generator, time);
         scheduler  = std::make_unique<Scheduler>(database, registry, cron, generator, time, executor, secrets, options);
+        scheduler->attempt_started.connect(scheduler.get(),
+                                           [this](AttemptStarted const& value) { starts.push_back(value); });
     }
 
     auto create_queue(std::string name = "queue", std::uint32_t concurrency = 1) const -> Queue
@@ -156,6 +161,7 @@ struct SchedulerFixture {
     FakeTimeSource                         time;
     FakeAttemptExecutor                    executor;
     RunRepository                          runs;
+    std::vector<AttemptStarted>            starts;
     std::unique_ptr<ManagementService>     management;
     std::unique_ptr<Scheduler>             scheduler;
 };
@@ -209,6 +215,146 @@ TEST_CASE("Scheduler start performs one immediate cycle and is idempotent",
     REQUIRE(fixture.scheduler->start());
     CHECK(fixture.scheduler->state() == SchedulerState::Running);
     CHECK(fixture.executor.start_requests().size() == 2U);
+}
+
+TEST_CASE("Scheduler start observers see accepted committed attempts once for both origins and runner families",
+          "[jobu][scheduler][event-loop][execution][sqlite]")
+{
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        for (bool manual : {false, true}) {
+            DYNAMIC_SECTION("type " << static_cast<int>(type) << " manual " << manual)
+            {
+                SchedulerFixture fixture;
+                // Real clocks can carry sub-microsecond ticks that storage does not retain.
+                fixture.time.set_utc(at_seconds(100) + 321ns);
+                auto const queue = fixture.create_queue();
+                auto       run   = fixture.create_job(queue, type, at_seconds(manual ? 200 : 90));
+                if (manual) {
+                    auto requested = fixture.management->run_now({.job_id = run.job_id});
+                    REQUIRE(requested);
+                    run = *requested;
+                }
+                fixture.executor.set_available(type, true);
+                Object receiver;
+                fixture.scheduler->attempt_started.connect(&receiver, [&](AttemptStarted const& value) {
+                    CHECK(value.execution.queue_id == queue.id);
+                    CHECK(value.execution.job_id == run.job_id);
+                    CHECK(value.execution.run_id == run.id);
+                    CHECK(value.execution.type == type);
+                    CHECK(value.execution.origin == (manual ? RunOrigin::Manual : RunOrigin::Scheduled));
+                    CHECK(value.attempt_number == 1);
+                    CHECK(value.started_at == at_seconds(100));
+                    CHECK(fixture.scheduler->state() == SchedulerState::Running);
+                    CHECK(fixture.executor.pending_keys().size() == 1);
+
+                    auto durable_run = fixture.runs.find_by_id(run.id);
+                    REQUIRE(durable_run);
+                    REQUIRE(durable_run->has_value());
+                    CHECK(durable_run->value().state == RunState::Running);
+                    AttemptRepository attempts{fixture.database};
+                    auto              attempt = attempts.find(run.id, value.attempt_number);
+                    REQUIRE(attempt);
+                    REQUIRE(attempt->has_value());
+                    CHECK(attempt->value().state == AttemptState::Running);
+                    CHECK(attempt->value().started_at == value.started_at);
+
+                    // A new transaction proves the claim helper has released its transaction and queries.
+                    auto transaction = Transaction::begin(fixture.database);
+                    REQUIRE(transaction);
+                    REQUIRE(transaction->rollback());
+                    fixture.scheduler->request_rescan();
+                });
+
+                REQUIRE(fixture.scheduler->start());
+                REQUIRE(fixture.starts.size() == 1);
+                REQUIRE(fixture.scheduler->start());
+                CHECK(fixture.event_loop.loop->process_events(EventFlag::Timers) == ProcessEventsResult::Stopped);
+                CHECK(fixture.starts.size() == 1);
+                CHECK(fixture.executor.start_requests().size() == 1);
+            }
+        }
+    }
+}
+
+TEST_CASE("Queued attempt starts retain their values after completion and skip destroyed receivers",
+          "[jobu][scheduler][event-loop][execution][lifetime][sqlite]")
+{
+    SchedulerFixture fixture;
+    auto const       queue = fixture.create_queue();
+    auto const       run   = fixture.create_job(queue, JobType::Cli, at_seconds(90));
+    fixture.executor.set_available(JobType::Cli, true);
+    Object                        receiver;
+    auto                          destroyed_receiver = std::make_unique<Object>();
+    std::optional<AttemptStarted> delivered;
+    unsigned                      destroyed_deliveries = 0;
+    fixture.scheduler->attempt_started.connect(
+        &receiver,
+        [&](AttemptStarted const& value) { delivered = value; },
+        ConnectionType::Queued);
+    fixture.scheduler->attempt_started.connect(
+        destroyed_receiver.get(),
+        [&](AttemptStarted const&) { ++destroyed_deliveries; },
+        ConnectionType::Queued);
+
+    REQUIRE(fixture.scheduler->start());
+    CHECK_FALSE(delivered);
+    auto const key = fixture.executor.pending_keys().front();
+    REQUIRE(fixture.executor.complete(key, success(key)));
+    fixture.scheduler->shutdown();
+    destroyed_receiver.reset();
+
+    // The dispatch return and active correlation are gone before queued delivery runs.
+    fixture.time.advance(10s);
+    CHECK(fixture.event_loop.loop->process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
+    REQUIRE(delivered);
+    CHECK(delivered->execution.queue_id == queue.id);
+    CHECK(delivered->execution.job_id == run.job_id);
+    CHECK(delivered->execution.run_id == run.id);
+    CHECK(delivered->execution.type == JobType::Cli);
+    CHECK(delivered->execution.origin == RunOrigin::Scheduled);
+    CHECK(delivered->attempt_number == key.attempt_number);
+    CHECK(delivered->started_at == at_seconds(100));
+    CHECK(destroyed_deliveries == 0);
+}
+
+TEST_CASE("Shutdown from an accepted-start signal prevents later work and wake arming",
+          "[jobu][scheduler][event-loop][execution][shutdown][sqlite]")
+{
+    SchedulerFixture fixture;
+    auto const       queue = fixture.create_queue("mixed", 3);
+    fixture.create_job(queue, JobType::Cli, at_seconds(90));
+    fixture.create_job(queue, JobType::Http, at_seconds(90));
+    fixture.create_job(queue, JobType::Cli, at_seconds(200));
+    fixture.executor.set_available(JobType::Cli, true);
+    fixture.executor.set_available(JobType::Http, true);
+    fixture.scheduler->attempt_started.connect(fixture.scheduler.get(),
+                                               [&](AttemptStarted const&) { fixture.scheduler->shutdown(); });
+
+    auto started = fixture.scheduler->start();
+    REQUIRE_FALSE(started);
+    CHECK(started.error().code == "jobu.scheduler.stopping");
+    CHECK(fixture.scheduler->state() == SchedulerState::Shutdown);
+    CHECK_FALSE(fixture.scheduler->failure());
+    REQUIRE(fixture.starts.size() == 1);
+    CHECK(fixture.executor.start_requests().size() == 1);
+    CHECK(fixture.executor.cancel_calls().empty());
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop) == 0);
+
+    // A legitimate executor callback delivered later must leave unresolved Running work for recovery.
+    auto const key = fixture.executor.pending_keys().front();
+    REQUIRE(fixture.event_loop.loop->post([&]() { REQUIRE(fixture.executor.complete(key, success(key))); }));
+    CHECK(fixture.event_loop.loop->process_events(EventFlag::All) == ProcessEventsResult::Stopped);
+    auto run = fixture.runs.find_by_id(key.run_id);
+    REQUIRE(run);
+    REQUIRE(run->has_value());
+    CHECK(run->value().state == RunState::Running);
+    AttemptRepository attempts{fixture.database};
+    auto              attempt = attempts.find(key.run_id, key.attempt_number);
+    REQUIRE(attempt);
+    REQUIRE(attempt->has_value());
+    CHECK(attempt->value().state == AttemptState::Running);
+    CHECK(fixture.starts.size() == 1);
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop) == 0);
 }
 
 TEST_CASE("Scheduler start rejects invalid construction and startup recovery state",
