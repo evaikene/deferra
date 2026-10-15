@@ -1133,6 +1133,16 @@ TEST_CASE("Configured daemon filters maintenance and preserves lifecycle logs in
                 CHECK(count.as_uint() == (repaired ? 1U : 0U));
             }
         }
+        else if (events.back() == "jobud.inventory.loaded") {
+            CHECK(envelope.at("level").as_string() == "INFO");
+            CHECK(envelope.at("message").as_string() ==
+                  (changed ? "Loaded 1 queue, 0 active job definitions and 0 scheduled runs."
+                           : "Loaded 0 queues, 0 active job definitions and 0 scheduled runs."));
+            REQUIRE(fields.size() == 8);
+            for (auto const& [name, count] : fields) {
+                CHECK(count.as_uint() == (changed && name == "queues_active" ? 1U : 0U));
+            }
+        }
         else if (events.back() == "jobud.retention.completed") {
             std::string_view const expected_message = changed ? "Retention sweep removed eligible records."
                                                               : "Retention sweep completed; no records were removed.";
@@ -1157,12 +1167,66 @@ TEST_CASE("Configured daemon filters maintenance and preserves lifecycle logs in
     if (maintenance_visible) {
         expected.emplace_back("jobud.recovery.completed");
     }
+    expected.emplace_back("jobud.inventory.loaded");
     expected.emplace_back("jobud.ready");
     if (maintenance_visible) {
         expected.emplace_back("jobud.retention.completed");
     }
     expected.emplace_back("jobud.stopped");
     REQUIRE(events == expected);
+}
+
+TEST_CASE("Configured daemon reports one queue and two future jobs before readiness", "[jobud][inventory][integration]")
+{
+    auto const   format = GENERATE(std::string{"json"}, std::string{"text"});
+    CrashFixture fixture;
+    fixture.configuration = "logging.format = " + format + "\nlogging.level = info\n";
+    fixture.storage.insert_queue(recovery_queue(recovery_id(1)));
+    auto const future = UtcClock::now() + 24h;
+    for (std::uint32_t i = 0; i < 2; ++i) {
+        auto job     = fixture.storage.make_job(recovery_id(10 + i), recovery_id(1), JobType::Http);
+        job.schedule = OnceSchedule{future};
+        fixture.storage.insert_job(job);
+        auto run            = fixture.storage.make_run(recovery_id(100 + i), job);
+        run.run.planned_at  = future;
+        run.run.runnable_at = future;
+        fixture.storage.insert_run(run);
+    }
+    fixture.start();
+    CHECK(fixture.count("SELECT COUNT(*) FROM jobu_attempts") == 0);
+    auto const output          = fixture.stop_and_logs();
+    auto       remaining       = std::string_view{output};
+    unsigned   inventory_count = 0;
+    bool       ready           = false;
+    while (!remaining.empty()) {
+        auto const end = remaining.find('\n');
+        REQUIRE(end != std::string_view::npos);
+        auto const  value    = rendered_log_record(remaining.substr(0, end), format);
+        auto const& envelope = value.as_object();
+        auto const& event    = envelope.at("event").as_string();
+        if (event == "jobud.inventory.loaded") {
+            ++inventory_count;
+            CHECK_FALSE(ready);
+            CHECK(envelope.at("message").as_string() ==
+                  "Loaded 1 queue, 2 active job definitions and 2 scheduled runs.");
+            auto const& fields = envelope.at("fields").as_object();
+            REQUIRE(fields.size() == 8);
+            for (auto const& [name, count] : fields) {
+                auto expected = name == "queues_active" ? 1U : 0U;
+                if (name == "jobs_active" || name == "runs_scheduled") {
+                    expected = 2;
+                }
+                CHECK(count.as_uint() == expected);
+            }
+        }
+        if (event == "jobud.ready") {
+            ready = true;
+            CHECK(inventory_count == 1);
+        }
+        remaining.remove_prefix(end + 1);
+    }
+    CHECK(ready);
+    CHECK(inventory_count == 1);
 }
 
 TEST_CASE("Configured daemon filters lifecycle output without changing readiness", "[jobud][logging][integration]")

@@ -24,10 +24,13 @@
 #include "secret_rpc.hpp"
 #include "secret_service.hpp"
 #include "server.hpp"
+#include "startup_inventory_priv.hpp"
 #include "statistics_rpc.hpp"
 #include "statistics_service.hpp"
 #include "system_info.hpp"
 #include "system_info_rpc.hpp"
+
+#include <fmt/format.h>
 
 #include <array>
 #include <cstdlib>
@@ -78,6 +81,42 @@ void log_recovery(jb::jobu::RecoveryReport const& report)
         jb::core::LogField{.name = "repaired_timing_rows", .value = report.repaired_timing_rows}
     };
     jb::core::log_event_message(level, "jobud.recovery.completed", message, fields);
+}
+
+void log_inventory(jb::jobu::detail::StartupInventory const& inventory)
+{
+    // The repository checked totals before returning. These counts describe persisted work, not eligibility.
+    auto const queues  = inventory.queues_active + inventory.queues_suspending + inventory.queues_suspended;
+    auto       message = fmt::format("Loaded {} {}, {} active job {} and {} scheduled {}",
+                                     queues,
+                                     queues == 1 ? "queue" : "queues",
+                                     inventory.jobs_active,
+                                     inventory.jobs_active == 1 ? "definition" : "definitions",
+                                     inventory.runs_scheduled,
+                                     inventory.runs_scheduled == 1 ? "run" : "runs");
+    auto       append  = [&message](std::uint64_t count, std::string_view singular, std::string_view plural) {
+        if (count != 0) {
+            message += fmt::format("; {} {}", count, count == 1 ? singular : plural);
+        }
+    };
+    append(inventory.queues_suspending, "suspending queue", "suspending queues");
+    append(inventory.queues_suspended, "suspended queue", "suspended queues");
+    append(inventory.jobs_suspending, "suspending job definition", "suspending job definitions");
+    append(inventory.jobs_suspended, "suspended job definition", "suspended job definitions");
+    append(inventory.runs_retry_wait, "run waiting to retry", "runs waiting to retry");
+    message += '.';
+
+    auto const fields = std::array{
+        jb::core::LogField{.name = "queues_active",     .value = inventory.queues_active    },
+        jb::core::LogField{.name = "queues_suspending", .value = inventory.queues_suspending},
+        jb::core::LogField{.name = "queues_suspended",  .value = inventory.queues_suspended },
+        jb::core::LogField{.name = "jobs_active",       .value = inventory.jobs_active      },
+        jb::core::LogField{.name = "jobs_suspending",   .value = inventory.jobs_suspending  },
+        jb::core::LogField{.name = "jobs_suspended",    .value = inventory.jobs_suspended   },
+        jb::core::LogField{.name = "runs_scheduled",    .value = inventory.runs_scheduled   },
+        jb::core::LogField{.name = "runs_retry_wait",   .value = inventory.runs_retry_wait  }
+    };
+    jb::core::log_event_message(jb::core::LogLevel::Info, "jobud.inventory.loaded", message, fields);
 }
 
 void log_delayed(jb::jobu::DelayedRun const& delayed)
@@ -300,6 +339,24 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
             return false;
         }
         log_recovery(*recovered);
+        return !poll_stop();
+    }
+
+    auto load_inventory() -> bool
+    {
+        if (poll_stop()) {
+            return false;
+        }
+        auto inventory = jb::jobu::detail::read_startup_inventory(database);
+        if (!inventory) {
+            // A storage/cleanup failure remains fatal even when a stop arrived during the snapshot.
+            fail("inventory", inventory.error());
+            return false;
+        }
+        if (poll_stop()) {
+            return false;
+        }
+        log_inventory(*inventory);
         return !poll_stop();
     }
 
@@ -577,7 +634,7 @@ auto DaemonRuntime::run(std::function<jb::core::Result<RuntimeRunners, jb::core:
                         std::function<int()> const&                                               execute) -> int
 {
     auto& data = *d_ptr<Private>();
-    if (data.state == RuntimeState::Starting && data.recover()) {
+    if (data.state == RuntimeState::Starting && data.recover() && data.load_inventory()) {
         auto runners = make_runners();
         if (!runners) {
             data.fail("runners", runners.error());

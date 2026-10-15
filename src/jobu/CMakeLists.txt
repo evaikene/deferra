@@ -149,6 +149,8 @@ target_sources(${TARGET}
         statistics_result_json.cpp
         statistics_rpc.cpp
         statistics_service.cpp
+        startup_inventory_priv.cpp
+        startup_inventory_priv.hpp
         storage_failure_priv.cpp
         storage_failure_priv.hpp
         system_info.cpp
