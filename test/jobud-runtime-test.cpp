@@ -649,7 +649,10 @@ TEST_CASE("Daemon telemetry failure gates admission before the notifying receive
 
 TEST_CASE("Daemon activates configured retention with inherited finite and unlimited policies", "[jobud][retention]")
 {
-    auto           inherited_retention = GENERATE(0s, 5s);
+    auto                inherited_retention = GENERATE(0s, 5s);
+    auto const          level               = GENERATE(LogLevel::Info, LogLevel::Debug1, LogLevel::Debug2);
+    OperationalLogGuard logs;
+    logs.capture->set_level(level);
     RuntimeFixture f;
     auto           inherited                = f.seed(1, JobType::Cli, RunState::Succeeded);
     f.options.default_retention             = inherited_retention;
@@ -701,6 +704,18 @@ TEST_CASE("Daemon activates configured retention with inherited finite and unlim
         return EXIT_SUCCESS;
     }) == EXIT_SUCCESS);
     CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
+
+    auto const records = logs.capture->records();
+    auto const swept =
+        std::ranges::find_if(records, [](auto const& message) { return message.event == "jobud.retention.completed"; });
+    REQUIRE(swept != records.end());
+    CHECK(swept->level == LogLevel::Info);
+    CHECK(swept->message == "Retention sweep removed eligible records.");
+    REQUIRE(swept->fields.size() == 4);
+    CHECK(swept->fields.at("runs").as_uint() == (inherited_retention == 0s ? 1U : 2U));
+    CHECK(swept->fields.at("idempotency_records").as_uint() == 0);
+    CHECK(swept->fields.at("jobs").as_uint() == 0);
+    CHECK(swept->fields.at("queues").as_uint() == 0);
 }
 
 TEST_CASE("Daemon retention batch receivers may synchronously request a non-SQL stop")
@@ -2283,24 +2298,138 @@ TEST_CASE("Configured timezone and daemon attributes reach management and schedu
     }) == EXIT_SUCCESS);
 }
 
-TEST_CASE("Daemon operational recovery summary precedes readiness", "[jobud][logging]")
+TEST_CASE("Daemon empty recovery is visible only at DEBUG2 before readiness", "[jobud][logging]")
 {
+    auto const          level = GENERATE(LogLevel::Info, LogLevel::Debug1, LogLevel::Debug2);
     OperationalLogGuard logs;
-    RuntimeFixture      f;
+    logs.capture->set_level(level);
+    RuntimeFixture f;
     f.create_runtime();
     REQUIRE(f.run([&] {
         f.runtime->request_stop();
         return EXIT_SUCCESS;
     }) == EXIT_SUCCESS);
     auto records = logs.capture->records();
+    REQUIRE(records.size() == (level == LogLevel::Debug2 ? 2U : 1U));
+    CHECK(records.back().event == "jobud.ready");
+    if (level != LogLevel::Debug2) {
+        return;
+    }
+
+    CHECK(records.front().event == "jobud.recovery.completed");
+    CHECK(records.front().level == LogLevel::Debug2);
+    CHECK(records.front().message == "Startup recovery completed; no repairs were needed.");
+    REQUIRE(records.front().fields.size() == 8);
+    for (auto const& [name, value] : records.front().fields) {
+        CHECK(value.as_uint() == 0);
+    }
+}
+
+TEST_CASE("Daemon committed recovery repairs remain visible at INFO", "[jobud][logging][recovery]")
+{
+    auto const          level   = GENERATE(LogLevel::Info, LogLevel::Debug1, LogLevel::Debug2);
+    auto const          counter = GENERATE(std::string_view{"interrupted_attempts"},
+                                           std::string_view{"suspended_queues"},
+                                           std::string_view{"repaired_timing_rows"});
+    OperationalLogGuard logs;
+    logs.capture->set_level(level);
+    RuntimeFixture f;
+    if (counter == "interrupted_attempts") {
+        f.seed(1, JobType::Cli, RunState::Running);
+    }
+    else if (counter == "suspended_queues") {
+        f.storage.insert_queue(recovery_queue(recovery_id(2), QueueState::Suspending));
+    }
+    else {
+        // An abandoned observation needs repair even when no attempt was interrupted.
+        auto waiting     = f.seed(1);
+        auto transaction = jb::db::Transaction::begin(f.storage.database);
+        REQUIRE(transaction);
+        detail::WaitRepository timing{f.storage.database};
+        REQUIRE(timing.open_interval(waiting.run.id, {.utc_now = f.time.utc_now(), .epoch = recovery_id(900)}));
+        REQUIRE(transaction->commit());
+    }
+
+    f.create_runtime();
+    REQUIRE(f.run([&] {
+        f.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+    auto const records = logs.capture->records();
     REQUIRE(records.size() == 2);
     CHECK(records[0].event == "jobud.recovery.completed");
     CHECK(records[0].level == LogLevel::Info);
+    CHECK(records[0].message == "Startup recovery repaired persisted state.");
     REQUIRE(records[0].fields.size() == 8);
-    for (auto const& [name, value] : records[0].fields) {
-        CHECK(value.as_uint() == 0);
-    }
+    CHECK(records[0].fields.at(std::string{counter}).as_uint() == 1);
     CHECK(records[1].event == "jobud.ready");
+}
+
+TEST_CASE("Daemon idle sweeps keep notifications and cadence at every log threshold", "[jobud][logging][retention]")
+{
+    auto const          level = GENERATE(LogLevel::Info, LogLevel::Debug1, LogLevel::Debug2);
+    OperationalLogGuard logs;
+    logs.capture->set_level(level);
+    RuntimeFixture f;
+    f.options.history_sweep_interval        = 37s;
+    f.options.telemetry_checkpoint_interval = 86400s;
+    f.create_runtime();
+    REQUIRE(f.run([&] {
+        auto* retention = RuntimeTestAccess::retention(*f.runtime);
+        REQUIRE(retention != nullptr);
+        std::size_t batches = 0;
+        std::size_t sweeps  = 0;
+        retention->batch_completed.connect(f.runtime.get(), [&](RetentionPurgeCounts const& counts) {
+            ++batches;
+            CHECK(counts.runs == 0);
+            CHECK(counts.idempotency_records == 0);
+            CHECK(counts.jobs == 0);
+            CHECK(counts.queues == 0);
+        });
+        retention->sweep_completed.connect(f.runtime.get(), [&](RetentionPurgeCounts const& counts) {
+            ++sweeps;
+            CHECK(counts.runs == 0);
+            CHECK(counts.idempotency_records == 0);
+            CHECK(counts.jobs == 0);
+            CHECK(counts.queues == 0);
+        });
+
+        // Timer delivery, rather than log visibility, proves that every idle sweep ran.
+        for (std::size_t expected = 1; expected <= 3; ++expected) {
+            auto const previous_batches = batches;
+            auto const before           = Clock::now();
+            for (int step = 0; sweeps < expected && step < 20; ++step) {
+                jb::core::priv::EventLoopTestAccess::fire_next_timer(*f.loop.loop);
+            }
+            auto const after = Clock::now();
+            REQUIRE(sweeps == expected);
+            CHECK(batches > previous_batches);
+            auto const deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*f.loop.loop);
+            REQUIRE(deadline);
+            CHECK(*deadline >= before + 37s);
+            CHECK(*deadline <= after + 37s);
+        }
+        f.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+
+    auto const records  = logs.capture->records();
+    auto const expected = level == LogLevel::Debug2 ? 3 : 0;
+    CHECK(std::ranges::count_if(records, [](auto const& message) {
+              return message.event == "jobud.retention.completed";
+          }) == expected);
+    for (auto const& record : records) {
+        if (record.event != "jobud.retention.completed") {
+            continue;
+        }
+        CHECK(record.level == LogLevel::Debug2);
+        CHECK(record.message == "Retention sweep completed; no records were removed.");
+        REQUIRE(record.fields.size() == 4);
+        for (auto const& [name, value] : record.fields) {
+            CHECK(value.as_uint() == 0);
+        }
+    }
+    CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*f.loop.loop) == 0);
 }
 
 TEST_CASE("Daemon failure events retain only the first subsystem and stable code", "[jobud][logging]")
@@ -2323,6 +2452,7 @@ TEST_CASE("Daemon failure events retain only the first subsystem and stable code
     auto records = logs.capture->records();
     REQUIRE(records.size() == 2);
     CHECK(records.front().event == "jobud.recovery.completed");
+    CHECK(records.front().level == LogLevel::Debug2);
     CHECK(records.back().event == "jobud.failed");
     CHECK(records.back().level == LogLevel::Error);
     REQUIRE(records.back().fields.size() == 2);
@@ -2407,7 +2537,8 @@ TEST_CASE("Daemon logs committed delays and completed sweeps through service sub
     auto swept =
         std::ranges::find_if(records, [](auto const& message) { return message.event == "jobud.retention.completed"; });
     REQUIRE(swept != records.end());
-    CHECK(swept->level == LogLevel::Info);
+    CHECK(swept->level == LogLevel::Debug2);
+    CHECK(swept->message == "Retention sweep completed; no records were removed.");
     REQUIRE(swept->fields.size() == 4);
     for (auto const& [name, value] : swept->fields) {
         CHECK(value.as_uint() == 0);

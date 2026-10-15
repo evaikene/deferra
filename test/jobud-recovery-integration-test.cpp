@@ -75,6 +75,36 @@ auto json(std::string_view value) -> JsonValue
     return std::move(*parsed);
 }
 
+/// Normalize the text sink's JSON-escaped parts so both formats share the same assertions.
+auto rendered_log_record(std::string_view line, std::string_view format) -> JsonValue
+{
+    if (format == "json") {
+        return json(line);
+    }
+
+    auto const level_start   = line.find('[');
+    auto const level_end     = line.find(']');
+    auto const event_start   = line.find(" event=");
+    auto const message_start = line.find(" message=");
+    auto const fields_start  = line.find(" fields=");
+    REQUIRE(level_start != std::string_view::npos);
+    REQUIRE(level_end != std::string_view::npos);
+    REQUIRE(event_start != std::string_view::npos);
+    REQUIRE(message_start != std::string_view::npos);
+    REQUIRE(fields_start != std::string_view::npos);
+    REQUIRE(level_start < level_end);
+    REQUIRE(event_start < message_start);
+    REQUIRE(message_start < fields_start);
+
+    JsonValue::Object record{
+        {"level", text(std::string{line.substr(level_start + 1, level_end - level_start - 1)})},
+        {"event", json(line.substr(event_start + 7, message_start - event_start - 7))},
+        {"message", json(line.substr(message_start + 9, fields_start - message_start - 9))},
+        {"fields", json(line.substr(fields_start + 8))},
+    };
+    return {.data = std::move(record)};
+}
+
 /// Separate FIFOs prevent the helper from consuming its own readiness report.
 class Channel final {
 public:
@@ -1052,35 +1082,69 @@ TEST_CASE("Configured foreground daemon measures mixed work maintains history an
     f.stop_and_logs();
 }
 
-TEST_CASE("Configured daemon logs readiness and final graceful exit in JSON and text", "[jobud][logging][integration]")
+TEST_CASE("Configured daemon filters maintenance and preserves lifecycle logs in JSON and text",
+          "[jobud][logging][integration]")
 {
-    auto const   format = GENERATE(std::string{"json"}, std::string{"text"});
+    auto const   format  = GENERATE(std::string{"json"}, std::string{"text"});
+    auto const   level   = GENERATE(std::string{"info"}, std::string{"debug1"}, std::string{"debug2"});
+    auto const   changed = GENERATE(false, true);
     CrashFixture fixture;
-    fixture.configuration = "logging.format = " + format + "\nlogging.level = info\n";
+    fixture.configuration = "logging.format = " + format + "\nlogging.level = " + level + "\n";
+    if (changed) {
+        // Recovery repairs the abandoned attempt; retention independently purges old terminal history.
+        auto queue = recovery_queue(recovery_id(1));
+        fixture.storage.insert_queue(queue);
+        auto interrupted = fixture.storage.make_job(recovery_id(2), queue.id, JobType::Http);
+        fixture.storage.insert_job(interrupted);
+        fixture.storage.insert_run(fixture.storage.make_run(recovery_id(3), interrupted, RunState::Running));
+        auto finished  = fixture.storage.make_job(recovery_id(4), queue.id, JobType::Http);
+        finished.state = JobState::Succeeded;
+        fixture.storage.insert_job(finished);
+        fixture.storage.insert_run(fixture.storage.make_run(recovery_id(5), finished, RunState::Succeeded));
+        fixture.configuration += "history.default_retention = 1s\n";
+    }
+
     fixture.start();
-    // Wait for the asynchronous initial sweep so lifecycle ordering is independent of process speed.
-    fixture.until([&] { return fixture.logged("jobud.retention.completed"); });
+    auto const maintenance_visible = changed || level == "debug2";
+    if (maintenance_visible) {
+        fixture.until([&] { return fixture.logged("jobud.retention.completed"); });
+    }
+    // start() already proved readiness with a client round trip when empty maintenance is filtered.
     auto const               output    = fixture.stop_and_logs();
     auto                     remaining = std::string_view{output};
     std::vector<std::string> events;
     while (!remaining.empty()) {
         auto const end = remaining.find('\n');
         REQUIRE(end != std::string_view::npos);
-        auto const line = remaining.substr(0, end);
-        if (format == "json") {
-            auto value = parse_json(line);
-            REQUIRE(value);
-            auto const& fields = value->as_object();
-            events.push_back(fields.at("event").as_string());
-            if (events.back() == "jobud.stopped") {
-                CHECK(fields.at("fields").as_object().at("exit_status").as_uint() == 0);
+        auto const  line     = remaining.substr(0, end);
+        auto const  value    = rendered_log_record(line, format);
+        auto const& envelope = value.as_object();
+        auto const& fields   = envelope.at("fields").as_object();
+        events.push_back(envelope.at("event").as_string());
+        if (events.back() == "jobud.recovery.completed") {
+            std::string_view const expected_message = changed ? "Startup recovery repaired persisted state."
+                                                              : "Startup recovery completed; no repairs were needed.";
+            CHECK(envelope.at("level").as_string() == (changed ? "INFO" : "DBG2"));
+            CHECK(envelope.at("message").as_string() == expected_message);
+            REQUIRE(fields.size() == 8);
+            for (auto const& [name, count] : fields) {
+                auto const repaired =
+                    changed && (name == "interrupted_attempts" || name == "terminal_runs" || name == "finished_jobs");
+                CHECK(count.as_uint() == (repaired ? 1U : 0U));
             }
         }
-        else {
-            auto const start = line.find("event=\"");
-            REQUIRE(start != std::string_view::npos);
-            auto const event = line.substr(start + 7);
-            events.emplace_back(event.substr(0, event.find('"')));
+        else if (events.back() == "jobud.retention.completed") {
+            std::string_view const expected_message = changed ? "Retention sweep removed eligible records."
+                                                              : "Retention sweep completed; no records were removed.";
+            CHECK(envelope.at("level").as_string() == (changed ? "INFO" : "DBG2"));
+            CHECK(envelope.at("message").as_string() == expected_message);
+            REQUIRE(fields.size() == 4);
+            for (auto const& [name, count] : fields) {
+                CHECK(count.as_uint() == (changed && name == "runs" ? 1U : 0U));
+            }
+        }
+        else if (events.back() == "jobud.stopped") {
+            CHECK(fields.at("exit_status").as_uint() == 0);
         }
         remaining.remove_prefix(end + 1);
     }
@@ -1090,8 +1154,14 @@ TEST_CASE("Configured daemon logs readiness and final graceful exit in JSON and 
         expected.emplace_back("jobud.unsafe.root_daemon");
     }
 #endif
-    expected.insert(expected.end(),
-                    {"jobud.recovery.completed", "jobud.ready", "jobud.retention.completed", "jobud.stopped"});
+    if (maintenance_visible) {
+        expected.emplace_back("jobud.recovery.completed");
+    }
+    expected.emplace_back("jobud.ready");
+    if (maintenance_visible) {
+        expected.emplace_back("jobud.retention.completed");
+    }
+    expected.emplace_back("jobud.stopped");
     REQUIRE(events == expected);
 }
 
