@@ -987,6 +987,10 @@ endif()
 
 if(TARGET jobud)
     if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
+        add_executable(jobud-path-diagnostic-test jobud-path-diagnostic-test.cpp)
+        target_link_libraries(jobud-path-diagnostic-test PRIVATE jobud-runtime Catch2::Catch2WithMain)
+        add_test(NAME jobud-path-diagnostic-test COMMAND $<TARGET_FILE:jobud-path-diagnostic-test>)
+
         add_executable(jobud-runtime-test
             jobud-runtime-test.cpp
             support/fault_database_driver.cpp

@@ -3,6 +3,7 @@
 #include "attribute.hpp"
 #include "error.hpp"
 #include "logging.hpp"
+#include "path_diagnostic_priv.hpp"
 #include "result.hpp"
 
 #include <chrono>
@@ -16,13 +17,15 @@
 
 namespace jb::jobud::detail {
 
-/// Startup diagnostics own only fixed text and recognized key names, never input values.
+/// Syntax diagnostics own only fixed text and recognized keys. Filesystem failures may additionally
+/// own approved path/metadata context, never configuration contents or rejected values.
 struct StartupError {
     std::string                code;
     std::optional<std::string> key;
     std::optional<std::size_t> line;
     std::string                message;
     jb::core::ErrorCategory    category{jb::core::ErrorCategory::InvalidArgument};
+    std::optional<PathFailure> path_failure;
 };
 
 enum class LoggingFormat : std::uint8_t {

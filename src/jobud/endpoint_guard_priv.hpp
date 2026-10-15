@@ -1,6 +1,5 @@
 #pragma once
 
-#include "error.hpp"
 #include "result.hpp"
 #include "runtime_paths_priv.hpp"
 
@@ -27,17 +26,16 @@ public:
     /// Call after permanent identity verification and before opening the database. Existing unsafe
     /// entries are preserved; neither acquisition failure nor destruction removes the lock file.
     [[nodiscard]] static auto acquire(TrustedParent const& parent, uid_t user)
-        -> jb::core::Result<EndpointGuard, jb::core::Error>;
+        -> jb::core::Result<EndpointGuard, PathFailure>;
 
     /// Rechecks the lock's named inode and the protected parent before admission.
-    [[nodiscard]] auto verify() const -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto verify() const -> jb::core::Result<void, PathFailure>;
 
     /// Call only after exclusive database ownership succeeds, before recovery or dispatch.
     /// Removes only an unchanged, final-user-owned socket whose nonblocking connect definitively
     /// refuses. Live, in-progress, interrupted, backlog-full and unexpected outcomes preserve it.
     /// The optional connect strategy is a synchronous test seam; production uses the native syscall.
-    [[nodiscard]] auto prepare_socket(EndpointConnect const& connect = {}) const
-        -> jb::core::Result<void, jb::core::Error>;
+    [[nodiscard]] auto prepare_socket(EndpointConnect const& connect = {}) const -> jb::core::Result<void, PathFailure>;
 
 private:
     EndpointGuard(TrustedParent const& parent, uid_t user, PathDescriptor lock, dev_t device, ino_t inode);

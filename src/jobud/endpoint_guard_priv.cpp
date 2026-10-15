@@ -14,30 +14,36 @@
 namespace jb::jobud::detail {
 namespace {
 
-using VoidResult = jb::core::Result<void, jb::core::Error>;
+using VoidResult = jb::core::Result<void, PathFailure>;
 
-auto unsafe(char const* reason) -> jb::core::Error
+auto unsafe(char const* reason) -> PathFailure
 {
-    return {.category = jb::core::ErrorCategory::PermissionDenied,
-            .code     = "jobud.path.unsafe",
-            .message  = "Daemon endpoint violates the protected filesystem policy",
-            .detail   = reason};
+    return {
+        .error = {.category = jb::core::ErrorCategory::PermissionDenied,
+                  .code     = "jobud.path.unsafe",
+                  .message  = "Daemon endpoint violates the protected filesystem policy",
+                  .detail   = reason}
+    };
 }
 
-auto inspect_failed(char const* reason) -> jb::core::Error
+auto inspect_failed(char const* reason) -> PathFailure
 {
-    return {.category = jb::core::ErrorCategory::Io,
-            .code     = "jobud.socket.inspect_failed",
-            .message  = "Unable to establish safe daemon endpoint ownership",
-            .detail   = reason};
+    return {
+        .error = {.category = jb::core::ErrorCategory::Io,
+                  .code     = "jobud.socket.inspect_failed",
+                  .message  = "Unable to establish safe daemon endpoint ownership",
+                  .detail   = reason}
+    };
 }
 
-auto in_use(char const* reason) -> jb::core::Error
+auto in_use(char const* reason) -> PathFailure
 {
-    return {.category = jb::core::ErrorCategory::Conflict,
-            .code     = "jobud.socket.in_use",
-            .message  = "Daemon endpoint is already owned or may still be live",
-            .detail   = reason};
+    return {
+        .error = {.category = jb::core::ErrorCategory::Conflict,
+                  .code     = "jobud.socket.in_use",
+                  .message  = "Daemon endpoint is already owned or may still be live",
+                  .detail   = reason}
+    };
 }
 
 auto valid_lock(struct stat const& metadata, uid_t user) -> bool
@@ -53,14 +59,24 @@ auto same_socket(struct stat const& before, struct stat const& after) -> bool
 
 auto verify_parent(TrustedParent const& parent, uid_t user) -> VoidResult
 {
+    auto        diagnostic = PathDiagnostic{.role            = PathRole::RuntimeDirectory,
+                                            .configured_path = parent.configured_path,
+                                            .failing_path    = parent.path,
+                                            .required_uid    = user};
     struct stat held{};
     struct stat named{};
     if (::fstat(parent.directory.get(), &held) != 0 || ::lstat(parent.path.c_str(), &named) != 0) {
-        return VoidResult::failure(inspect_failed("runtime_parent_inspect"));
+        diagnostic.system_errno = errno;
+        auto failure            = inspect_failed("runtime_parent_inspect");
+        failure.diagnostic      = std::move(diagnostic);
+        return VoidResult::failure(std::move(failure));
     }
     if (!S_ISDIR(named.st_mode) || held.st_dev != named.st_dev || held.st_ino != named.st_ino || held.st_uid != user ||
         ((held.st_mode & 07777) != 0700 && (held.st_mode & 07777) != 0750)) {
-        return VoidResult::failure(unsafe("endpoint_runtime_parent_changed"));
+        set_path_metadata(diagnostic, held.st_mode, held.st_uid, held.st_gid);
+        auto failure       = unsafe("endpoint_runtime_parent_changed");
+        failure.diagnostic = std::move(diagnostic);
+        return VoidResult::failure(std::move(failure));
     }
     return VoidResult::success();
 }
@@ -110,9 +126,9 @@ EndpointGuard::EndpointGuard(TrustedParent const& parent, uid_t user, PathDescri
     , _inode{inode}
 {}
 
-auto EndpointGuard::acquire(TrustedParent const& parent, uid_t user) -> jb::core::Result<EndpointGuard, jb::core::Error>
+auto EndpointGuard::acquire(TrustedParent const& parent, uid_t user) -> jb::core::Result<EndpointGuard, PathFailure>
 {
-    using GuardResult    = jb::core::Result<EndpointGuard, jb::core::Error>;
+    using GuardResult    = jb::core::Result<EndpointGuard, PathFailure>;
     auto parent_verified = verify_parent(parent, user);
     if (!parent_verified) {
         return GuardResult::failure(std::move(parent_verified).error());

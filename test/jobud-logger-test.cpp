@@ -2,6 +2,7 @@
 
 #include "json.hpp"
 #include "logging.hpp"
+#include "path_diagnostic_priv.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/operational_log_capture.hpp"
 #include "text_validation.hpp"
@@ -20,6 +21,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -118,6 +120,39 @@ auto record(std::string_view message, std::span<LogField const> fields = {}) -> 
 }
 
 } // namespace
+
+TEST_CASE("Path failures retain messages and typed facts in both daemon formats", "[jobud][logging][paths]")
+{
+    auto const  format = GENERATE(LoggingFormat::Json, LoggingFormat::Text);
+    PathFailure failure{
+        .error      = {.code = "jobud.path.unsafe", .message = "private-path-backend", .detail = "leaf_owner_or_mode"},
+        .diagnostic = PathDiagnostic{.role            = PathRole::StateDirectory,
+                       .configured_path = "/prefix with 'quotes'/var/lib/database.sqlite",
+                       .failing_path    = "/prefix with 'quotes'/var/lib",
+                       .required_mode   = 0700,
+                       .required_uid    = 1001}
+    };
+    set_path_metadata(*failure.diagnostic, S_IFDIR | 0755U, 1001, 1002);
+    DaemonLogScope logging{format, LogLevel::Info};
+    StderrCapture  capture;
+    log_path_failure("paths", failure);
+    auto const output  = capture.text();
+    auto const records = json_lines(output, format);
+    REQUIRE(records.size() == 1);
+    auto const& fields = records.front().as_object().at("fields").as_object();
+    CHECK(fields.at("code").as_string() == "jobud.path.unsafe");
+    CHECK(fields.at("reason").as_string() == "leaf_owner_or_mode");
+    CHECK(fields.at("resource").as_string() == "state_directory");
+    CHECK(fields.at("path").as_string() == failure.diagnostic->failing_path.string());
+    CHECK(fields.at("actual_mode").as_string() == "0755");
+    CHECK(fields.at("required_mode").as_string() == "0700");
+    CHECK(fields.at("actual_uid").as_uint() == 1001);
+    CHECK(fields.at("required_uid").as_uint() == 1001);
+    CHECK_FALSE(fields.contains("errno"));
+    CHECK_FALSE(fields.contains("required_gid"));
+    CHECK(output.find("required permissions are 0700") != std::string::npos);
+    CHECK(output.find("private-path-backend") == std::string::npos);
+}
 
 TEST_CASE("ConsoleLogger renders the independent event message", "[core][logging]")
 {

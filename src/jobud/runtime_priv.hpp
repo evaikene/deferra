@@ -4,6 +4,7 @@
 #include "http_client.hpp"
 #include "local_server.hpp"
 #include "object.hpp"
+#include "path_diagnostic_priv.hpp"
 #include "startup_priv.hpp"
 
 #include <cstdint>
@@ -97,6 +98,9 @@ public:
     /// Latches failure even after an ordinary stop. Logs the first subsystem and stable code only; never logs
     /// borrowed error messages/details. subsystem must be a daemon-owned token, not request or database data.
     void fail(std::string_view subsystem, jb::core::Error const& error);
+
+    /// Same failure/teardown boundary, with captured and reviewed filesystem context only.
+    void fail(std::string_view subsystem, PathFailure const& failure);
 
     [[nodiscard]] auto state() const noexcept -> RuntimeState;
     [[nodiscard]] auto exit_code() const noexcept -> int;
