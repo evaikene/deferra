@@ -10,6 +10,13 @@ static_assert(std::is_copy_constructible_v<jb::jobu::CancelRunResult>);
 static_assert(std::is_move_constructible_v<jb::jobu::CancelRunResult>);
 static_assert(std::is_default_constructible_v<jb::jobu::SchedulerOptions>);
 static_assert(std::is_base_of_v<jb::core::Object, jb::jobu::Scheduler>);
+static_assert(
+    std::is_same_v<decltype(jb::jobu::Scheduler::attempt_started), jb::core::Signal<jb::jobu::AttemptStarted>>);
+static_assert(
+    std::is_same_v<decltype(jb::jobu::Scheduler::attempt_finished), jb::core::Signal<jb::jobu::AttemptFinished>>);
+static_assert(
+    std::is_same_v<decltype(jb::jobu::Scheduler::retry_scheduled), jb::core::Signal<jb::jobu::RetryScheduled>>);
+static_assert(std::is_same_v<decltype(jb::jobu::Scheduler::run_finished), jb::core::Signal<jb::jobu::RunFinished>>);
 static_assert(!std::is_copy_constructible_v<jb::jobu::Scheduler>);
 static_assert(!std::is_move_constructible_v<jb::jobu::Scheduler>);
 static_assert(std::is_constructible_v<jb::jobu::Scheduler,

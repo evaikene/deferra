@@ -6,6 +6,7 @@
 #include "attempt_executor.hpp"
 #include "cron.hpp"
 #include "error.hpp"
+#include "execution_events.hpp"
 #include "object.hpp"
 #include "result.hpp"
 #include "run.hpp"
@@ -213,6 +214,40 @@ public:
     /// @return An owning error copy in Failed state, including after shutdown(), or no value in any healthy state.
     ///
     [[nodiscard]] auto failure() const -> std::optional<jb::core::Error>;
+
+    /// @name Execution lifecycle diagnostics
+    /// Owning values are delivered on the scheduler owner thread after the relevant transactions and queries unwind
+    /// and in-memory correlation/capacity bookkeeping is stable. Queued receivers may retain independent copies.
+    /// Use receiver-aware connections for slots capturing Objects.
+    ///
+    /// Direct observers may inspect committed state, request_rescan() or shutdown(). They must not destroy the
+    /// scheduler, recursively start/cancel it, mutate management state or inject executor completions on the delivery
+    /// stack; post such work to the owner loop. Terminal shutdown may discard remaining diagnostics for the transition.
+    /// These are live diagnostics, with no replay or durable subscription guarantee. Recovery reports and management
+    /// deletion/suspension are outside this stream. Ordinary stop retains the existing accepted-completion contract.
+    /// @note These declarations establish the contract; execution lifecycle delivery is not yet implemented.
+    /// @{
+
+    /// Executor acceptance after durable start, SQL cleanup and active correlation/capacity bookkeeping.
+    /// Precedes completion diagnostics for that attempt; preparation failure and rejected starts emit no start.
+    /// Does not guarantee that the child has exec'd or a transport connection has opened.
+    jb::core::Signal<AttemptStarted> attempt_started;
+
+    /// Committed effective attempt outcome, including cancellation normalization and immediate start failures.
+    /// Delivered before retry_scheduled or run_finished while delivery remains enabled. A failed completion
+    /// transaction emits no completion diagnostics; a cancellation request alone is not a completed outcome.
+    jb::core::Signal<AttemptFinished> attempt_finished;
+
+    /// Committed retry decision following attempt_finished, using the persisted due time and chosen mode.
+    /// Mutually exclusive with a terminal run event for this completion; a later accepted retry has its own start.
+    jb::core::Signal<RetryScheduled> retry_scheduled;
+
+    /// Committed terminal run outcome following attempt_finished when an attempt completes the run.
+    /// Pending cancellation emits only this event after cancellation cleanup/rescan handling; an active cancellation
+    /// request waits for its normalized completion. Failed attempts with an approved retry are not terminal runs.
+    jb::core::Signal<RunFinished> run_finished;
+
+    /// @}
 
     /// Emitted exactly once when the scheduler first enters Failed.
     ///

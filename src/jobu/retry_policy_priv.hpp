@@ -4,6 +4,7 @@
 #include "attribute.hpp"
 #include "error.hpp"
 #include "result.hpp"
+#include "retry_mode.hpp"
 #include "time_source.hpp"
 #include "uuid.hpp"
 
@@ -15,11 +16,6 @@ namespace jb::jobu::detail {
 enum class RetryStrategy : std::uint8_t {
     Fixed,
     Exponential,
-};
-
-enum class RetryMode : std::uint8_t {
-    Blocking,
-    Reschedule,
 };
 
 struct RetryPolicy {
