@@ -2,7 +2,7 @@
 /// @file logging.hpp
 /// @brief Provides the `jb::core` logging facade and logger interfaces.
 ///
-/// The public `log_*` functions format messages with {fmt}, capture the source
+/// The formatted `log_*` functions format messages with {fmt}, capture the source
 /// location at the call site, and forward enabled records to the global
 /// `Logger`. A `ConsoleLogger` writing line-oriented output to `stderr` is
 /// created lazily on first use, so logging works before `main()` or
@@ -213,6 +213,25 @@ void log_event(LogLevel                  level,
                std::string_view          event_name,
                std::span<LogField const> fields   = {},
                std::source_location      location = std::source_location::current());
+
+/// Emit a structured event with independent human-readable text through one logger snapshot.
+/// @param level Event severity, using the same admission rule as formatted logs.
+/// @param event_name Stable event identifier for machine consumers.
+/// @param message Human-readable text, forwarded verbatim without formatting; may be empty.
+/// @param fields Borrowed named scalar values; an empty span is permitted.
+/// @param location Source location, captured at the call site by default.
+///
+/// Event/message text and all field storage must remain valid until this call
+/// returns, and must not be modified while the sink consumes them. Retaining
+/// sinks must copy all borrowed data. Disabled events skip metadata collection
+/// and field processing; caller argument evaluation still occurs.
+/// The sink is called without the global logger-slot lock. Logger replacement
+/// or threshold changes do not cancel a record already admitted to that sink.
+void log_event_message(LogLevel                  level,
+                       std::string_view          event_name,
+                       std::string_view          message,
+                       std::span<LogField const> fields   = {},
+                       std::source_location      location = std::source_location::current());
 
 //--- Internals: format-string + source-location capture at the call site
 

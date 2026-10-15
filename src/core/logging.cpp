@@ -50,6 +50,29 @@ auto default_logger() -> std::shared_ptr<Logger>
     return def;
 }
 
+void emit_structured_event(LogLevel                  level,
+                           std::string_view          event_name,
+                           std::string_view          message,
+                           std::span<LogField const> fields,
+                           std::source_location      location)
+{
+    // Keep the admitted sink alive across replacement, and collect no metadata for disabled events.
+    auto sink = logger();
+    if (!sink->is_enabled(level)) {
+        return;
+    }
+
+    // Both facades forward their caller's location and borrow all text/fields only until the sink returns.
+    LogMessage const record{.level      = level,
+                            .message    = message,
+                            .location   = location,
+                            .timestamp  = std::chrono::system_clock::now(),
+                            .thread_id  = ThreadCtx::current()->id(),
+                            .event_name = event_name,
+                            .fields     = fields};
+    sink->log(record);
+}
+
 } // anonymous namespace
 
 void ConsoleLogger::log(LogMessage const& msg)
@@ -105,21 +128,17 @@ void log_event(LogLevel                  level,
                std::span<LogField const> fields,
                std::source_location      location)
 {
-    // Keep the admitted sink alive across replacement, and collect no metadata for disabled events.
-    auto sink = logger();
-    if (!sink->is_enabled(level)) {
-        return;
-    }
+    // Preserve the identifier as message text for existing callers and legacy sinks.
+    emit_structured_event(level, event_name, event_name, fields, location);
+}
 
-    // Legacy sinks see the identifier as text. Structured sinks borrow the caller's fields until return.
-    LogMessage const message{.level      = level,
-                             .message    = event_name,
-                             .location   = location,
-                             .timestamp  = std::chrono::system_clock::now(),
-                             .thread_id  = ThreadCtx::current()->id(),
-                             .event_name = event_name,
-                             .fields     = fields};
-    sink->log(message);
+void log_event_message(LogLevel                  level,
+                       std::string_view          event_name,
+                       std::string_view          message,
+                       std::span<LogField const> fields,
+                       std::source_location      location)
+{
+    emit_structured_event(level, event_name, message, fields, location);
 }
 
 } // namespace jb::core

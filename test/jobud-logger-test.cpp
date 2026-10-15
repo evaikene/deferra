@@ -119,6 +119,61 @@ auto record(std::string_view message, std::span<LogField const> fields = {}) -> 
 
 } // namespace
 
+TEST_CASE("ConsoleLogger renders the independent event message", "[core][logging]")
+{
+    jb::test::OperationalLogGuard restore;
+    auto                          console = std::make_shared<ConsoleLogger>();
+    console->set_level(LogLevel::Info);
+    set_logger(console);
+
+    StderrCapture capture;
+    log_event_message(LogLevel::Info, "console.explained", "Work is ready.");
+    log_event(LogLevel::Info, "console.legacy");
+    auto const output = capture.text();
+    CHECK(output.find(" - Work is ready.\n") != std::string::npos);
+    CHECK(output.find("console.explained") == std::string::npos);
+    CHECK(output.find(" - console.legacy\n") != std::string::npos);
+}
+
+TEST_CASE("Daemon facade preserves independent messages in both formats", "[jobud][logging]")
+{
+    auto const       format = GENERATE(LoggingFormat::Json, LoggingFormat::Text);
+    std::string_view message{"Work {item}: \"ready\".\nNext\tline\\end"};
+    auto const       fields = std::array{
+        LogField{.name = "event",     .value = std::string_view{"nested event"}  },
+        LogField{.name = "message",   .value = std::string_view{"nested message"}},
+        LogField{.name = "count",     .value = std::uint64_t{42}                 },
+        LogField{.name = "duplicate", .value = std::int64_t{1}                   },
+        LogField{.name = "duplicate", .value = std::int64_t{2}                   }
+    };
+
+    StderrCapture capture;
+    {
+        DaemonLogScope installation{format, LogLevel::Info};
+        log_event_message(LogLevel::Info, "jobud.explained", message, fields);
+    }
+    auto const output = capture.text();
+    CHECK(output.find('\n') == output.size() - 1);
+    auto records = json_lines(output, format);
+    REQUIRE(records.size() == 1);
+    auto const& envelope = records.front().as_object();
+    auto const& values   = envelope.at("fields").as_object();
+    CHECK(values.at("event").as_string() == "nested event");
+    CHECK(values.at("message").as_string() == "nested message");
+    CHECK(values.at("count").as_uint() == 42);
+    CHECK(values.at("duplicate").as_uint() == 1);
+
+    if (format == LoggingFormat::Json) {
+        CHECK(envelope.at("event").as_string() == "jobud.explained");
+        CHECK(envelope.at("message").as_string() == message);
+        CHECK(envelope.at("level").as_string() == "INFO");
+    }
+    else {
+        CHECK(output.find(R"(event="jobud.explained")") != std::string::npos);
+        CHECK(output.find(R"(message="Work {item}: \"ready\".\nNext\tline\\end")") != std::string::npos);
+    }
+}
+
 TEST_CASE("Daemon JSON preserves scalar types and envelope boundaries", "[jobud][logging]")
 {
     auto const fields = std::array{
@@ -194,11 +249,13 @@ TEST_CASE("Daemon configuration controls admission and preserves legacy records"
         {
             DaemonLogScope installation{format, LogLevel::Warning};
             log_event(LogLevel::Info, "disabled");
+            log_event_message(LogLevel::Info, "disabled.message", "Suppressed human message.");
             log_warning("legacy {}", "quote\"\nnext");
         }
         CHECK(logger() == previous);
         auto const output = capture.text();
         CHECK(output.find("disabled") == std::string::npos);
+        CHECK(output.find("Suppressed human message.") == std::string::npos);
         CHECK(output.find("quote\\\"\\nnext") != std::string::npos);
         CHECK(output.find('\n') == output.size() - 1);
         if (format == LoggingFormat::Json) {
