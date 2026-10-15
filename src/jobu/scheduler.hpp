@@ -204,6 +204,8 @@ public:
     /// conflicts and executor cancellation refusals remain ordinary operation errors when cleanup succeeds.
     /// After fatal failure or shutdown(), rejects with `jobu.scheduler.stopping` without accessing storage or
     /// executors.
+    /// Completed pending cancellation emits run_finished after cleanup and rescan handling, without an attempt event.
+    /// Requested running cancellation emits no completion event until its normalized executor completion commits.
     ///
     [[nodiscard]] auto cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result<CancelRunResult, jb::core::Error>;
 
@@ -225,7 +227,6 @@ public:
     /// stack; post such work to the owner loop. Terminal shutdown may discard remaining diagnostics for the transition.
     /// These are live diagnostics, with no replay or durable subscription guarantee. Recovery reports and management
     /// deletion/suspension are outside this stream. Ordinary stop retains the existing accepted-completion contract.
-    /// @note Accepted starts are delivered. Completion, retry and terminal-run delivery are not yet implemented.
     /// @{
 
     /// Executor acceptance after durable start, SQL cleanup and active correlation/capacity bookkeeping.

@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -86,30 +87,51 @@ struct CoreFixture {
 
     [[nodiscard]] auto process(SchedulerCoreOptions options) -> Result<SchedulerCycleResult, Error>
     {
-        SchedulerCore core{database,
-                           registry,
-                           cron,
-                           generator,
-                           time,
-                           executor,
-                           secrets,
-                           options,
-                           {.attempt_started = [this](AttemptStarted value) { starts.push_back(value); }}};
+        SchedulerCore core{database, registry, cron, generator, time, executor, secrets, options, callbacks()};
         return core.process_cycle();
     }
 
-    TemporaryDirectory          directory;
-    std::filesystem::path       database_file{directory.path() / "jobu.sqlite"};
-    Database                    database{make_database(database_file)};
-    RejectingSecretProvider     secrets;
-    StandardAttributeRegistry   registry;
-    FakeCronEngine              cron;
-    SequenceUuidGenerator       generator;
-    FakeTimeSource              time;
-    FakeAttemptExecutor         executor;
-    AttemptRepository           attempts;
-    RunRepository               runs;
-    std::vector<AttemptStarted> starts;
+    auto callbacks() -> SchedulerCoreCallbacks
+    {
+        return {.rescan_requested = [this]() { events.emplace_back("rescan"); },
+                .attempt_started =
+                    [this](AttemptStarted value) {
+                        starts.push_back(value);
+                        events.emplace_back("start");
+                    },
+                .attempt_finished =
+                    [this](AttemptFinished value) {
+                        completions.push_back(value);
+                        events.emplace_back("attempt");
+                    },
+                .retry_scheduled =
+                    [this](RetryScheduled value) {
+                        retries.push_back(value);
+                        events.emplace_back("retry");
+                    },
+                .run_finished =
+                    [this](RunFinished value) {
+                        finishes.push_back(value);
+                        events.emplace_back("run");
+                    }};
+    }
+
+    TemporaryDirectory            directory;
+    std::filesystem::path         database_file{directory.path() / "jobu.sqlite"};
+    Database                      database{make_database(database_file)};
+    RejectingSecretProvider       secrets;
+    StandardAttributeRegistry     registry;
+    FakeCronEngine                cron;
+    SequenceUuidGenerator         generator;
+    FakeTimeSource                time;
+    FakeAttemptExecutor           executor;
+    AttemptRepository             attempts;
+    RunRepository                 runs;
+    std::vector<AttemptStarted>   starts;
+    std::vector<AttemptFinished>  completions;
+    std::vector<RetryScheduled>   retries;
+    std::vector<RunFinished>      finishes;
+    std::vector<std::string_view> events;
 };
 
 class CountingSecretProvider final : public SecretProvider {
@@ -231,7 +253,8 @@ auto attribute_document(StandardAttributeRegistry const& registry,
                         std::string                      retry_mode     = "reschedule",
                         std::int64_t                     max_attempts   = 3,
                         Duration                         initial_delay  = Duration::zero(),
-                        std::string                      output_capture = "on_error") -> std::string
+                        std::string                      output_capture = "on_error",
+                        double                           jitter         = 0.0) -> std::string
 {
     auto attributes = materialize_attributes(registry,
                                              {
@@ -241,6 +264,7 @@ auto attribute_document(StandardAttributeRegistry const& registry,
                                                  {"retry.initial_delay", {.data = initial_delay}},
                                                  {"retry.max_attempts", {.data = max_attempts}},
                                                  {"retry.mode", {.data = std::move(retry_mode)}},
+                                                 {"retry.jitter", {.data = jitter}},
                                                  {"output.capture", {.data = std::move(output_capture)}},
                                              });
     REQUIRE(attributes);
@@ -636,6 +660,331 @@ public:
 };
 
 } // anonymous namespace
+
+TEST_CASE("Completion events describe committed outcomes with bounded diagnostics and monotonic elapsed",
+          "[jobu][scheduler][core][execution][sqlite]")
+{
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        for (bool failed : {false, true}) {
+            for (auto clock_case : {0, 1, 2}) {
+                DYNAMIC_SECTION("type " << static_cast<int>(type) << " failed " << failed << " clock " << clock_case)
+                {
+                    CoreFixture fixture;
+                    insert_queue(fixture.database, id(1), 1);
+                    insert_scheduled(fixture, id(1), 2, type);
+                    fixture.executor.set_available(type, true);
+                    fixture.time.set_monotonic(clock_case == 2 ? TimePoint::min() : TimePoint{100ms});
+                    auto callbacks             = fixture.callbacks();
+                    auto collect               = callbacks.attempt_finished;
+                    callbacks.attempt_finished = [&, collect](AttemptFinished value) {
+                        collect(value);
+                        auto durable = fixture.attempts.find(value.execution.run_id, value.attempt_number);
+                        REQUIRE(durable);
+                        REQUIRE(durable->has_value());
+                        CHECK(durable->value().outcome == value.outcome);
+                        CHECK(durable->value().completed_at == value.completed_at);
+                        // Opening a new transaction proves completion's SQL/guard lifetime ended before delivery.
+                        auto transaction = Transaction::begin(fixture.database);
+                        REQUIRE(transaction);
+                        REQUIRE(transaction->rollback());
+                    };
+                    SchedulerCore core{fixture.database,
+                                       fixture.registry,
+                                       fixture.cron,
+                                       fixture.generator,
+                                       fixture.time,
+                                       fixture.executor,
+                                       fixture.secrets,
+                                       {},
+                                       callbacks};
+                    REQUIRE(core.process_cycle());
+                    auto const key = fixture.executor.pending_keys().front();
+
+                    // UTC jumps independently; a backwards or unrepresentable monotonic interval is diagnostic only.
+                    fixture.time.set_utc(at(1000000) + 987ns);
+                    fixture.time.set_monotonic(clock_case == 2 ? TimePoint::max()
+                                                               : TimePoint{clock_case == 1 ? 99ms : 175ms});
+                    auto completion   = failed ? failure(key, FailureDisposition::Terminal) : success(key);
+                    completion.result = {
+                        .data = JsonValue::Object{
+                                                  {"exit_code", {.data = std::int64_t{7}}},
+                                                  {"signal", {.data = std::int64_t{SIGTERM}}},
+                                                  {"status", {.data = std::uint64_t{418}}},
+                                                  {"message", {.data = std::string{"private-result-canary"}}},
+                                                  {"error_code", {.data = std::string{"private-error-canary"}}},
+                                                  }
+                    };
+                    REQUIRE(fixture.executor.complete(key, std::move(completion)));
+
+                    CHECK(fixture.events == std::vector<std::string_view>{"start", "rescan", "attempt", "run"});
+                    REQUIRE(fixture.completions.size() == 1);
+                    auto const& event = fixture.completions.front();
+                    CHECK(event.execution.queue_id == id(1));
+                    CHECK(event.execution.job_id == id(102));
+                    CHECK(event.execution.run_id == key.run_id);
+                    CHECK(event.execution.type == type);
+                    CHECK(event.execution.origin == RunOrigin::Scheduled);
+                    CHECK(event.attempt_number == key.attempt_number);
+                    CHECK(event.start_phase == AttemptStartPhase::Accepted);
+                    CHECK(event.completed_at == at(1000000));
+                    if (clock_case == 0) {
+                        CHECK(event.elapsed == 75ms);
+                    }
+                    else {
+                        CHECK_FALSE(event.elapsed);
+                    }
+                    CHECK(event.exit_code == (type == JobType::Cli ? std::optional{7} : std::nullopt));
+                    CHECK(event.signal_number == (type == JobType::Cli ? std::optional{SIGTERM} : std::nullopt));
+                    CHECK(event.http_status == (type == JobType::Http ? std::optional{418U} : std::nullopt));
+                    REQUIRE(fixture.finishes.size() == 1);
+                    CHECK(fixture.finishes.front().state == (failed ? RunState::Failed : RunState::Succeeded));
+                    CHECK(fixture.finishes.front().completed_at == event.completed_at);
+                    CHECK(fixture.finishes.front().completing_attempt == key.attempt_number);
+                    CHECK(fixture.retries.empty());
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Retry events preserve persisted jitter deadline and mode before success or exhaustion",
+          "[jobu][scheduler][core][execution][retry][sqlite]")
+{
+    for (auto const* mode : {"blocking", "reschedule"}) {
+        for (bool immediate : {false, true}) {
+            for (bool deadline : {false, true}) {
+                for (bool succeeds : {false, true}) {
+                    DYNAMIC_SECTION(mode << " immediate " << immediate << " deadline " << deadline << " success "
+                                         << succeeds)
+                    {
+                        CoreFixture fixture;
+                        insert_queue(fixture.database, id(1), 1);
+                        auto attributes = attribute_document(fixture.registry,
+                                                             mode,
+                                                             2,
+                                                             immediate ? Duration::zero() : Duration{10us},
+                                                             "on_error",
+                                                             immediate ? 0.0 : 0.5);
+                        insert_scheduled(fixture, id(1), 2, JobType::Cli, 0, 100, 100, attributes);
+                        fixture.executor.set_available(JobType::Cli, true);
+                        SchedulerCore core{fixture.database,
+                                           fixture.registry,
+                                           fixture.cron,
+                                           fixture.generator,
+                                           fixture.time,
+                                           fixture.executor,
+                                           fixture.secrets,
+                                           {},
+                                           fixture.callbacks()};
+                        REQUIRE(core.process_cycle());
+                        auto const first = fixture.executor.pending_keys().front();
+                        fixture.time.set_utc(at(200) + 789ns);
+                        REQUIRE(fixture.executor.complete(
+                            first,
+                            failure(first,
+                                    FailureDisposition::Retryable,
+                                    deadline ? std::optional{at(1000) + 777ns} : std::nullopt)));
+
+                        REQUIRE(fixture.retries.size() == 1);
+                        CHECK(fixture.finishes.empty());
+                        CHECK(fixture.events == std::vector<std::string_view>{"start", "rescan", "attempt", "retry"});
+                        auto waiting = fixture.runs.find_by_id(first.run_id);
+                        REQUIRE(waiting);
+                        REQUIRE(waiting->has_value());
+                        auto const& retry = fixture.retries.front();
+                        CHECK(retry.execution.run_id == first.run_id);
+                        CHECK(retry.completed_attempt == 1);
+                        CHECK(retry.next_attempt == 2);
+                        CHECK(retry.mode ==
+                              (std::string_view{mode} == "blocking" ? RetryMode::Blocking : RetryMode::Reschedule));
+                        CHECK(retry.runnable_at == waiting->value().runnable_at);
+                        if (deadline) {
+                            CHECK(retry.runnable_at == at(1000));
+                        }
+
+                        fixture.time.set_utc(waiting->value().runnable_at);
+                        REQUIRE(core.process_cycle());
+                        auto const second = fixture.executor.pending_keys().front();
+                        CHECK(second.attempt_number == retry.next_attempt);
+                        fixture.time.set_utc(at(2000));
+                        REQUIRE(fixture.executor.complete(second,
+                                                          succeeds ? success(second)
+                                                                   : failure(second, FailureDisposition::Retryable)));
+                        CHECK(fixture.retries.size() == 1);
+                        REQUIRE(fixture.finishes.size() == 1);
+                        CHECK(fixture.finishes.front().state == (succeeds ? RunState::Succeeded : RunState::Failed));
+                        CHECK(fixture.finishes.front().completing_attempt == 2);
+                        CHECK(fixture.events == std::vector<std::string_view>{"start",
+                                                                              "rescan",
+                                                                              "attempt",
+                                                                              "retry",
+                                                                              "start",
+                                                                              "rescan",
+                                                                              "attempt",
+                                                                              "run"});
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Accepted cancellation waits for normalized committed diagnostics",
+          "[jobu][scheduler][core][execution][cancellation][sqlite]")
+{
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        CoreFixture fixture;
+        insert_queue(fixture.database, id(1), 1);
+        insert_scheduled(fixture, id(1), 2, type);
+        fixture.executor.set_available(type, true);
+        SchedulerCore core{fixture.database,
+                           fixture.registry,
+                           fixture.cron,
+                           fixture.generator,
+                           fixture.time,
+                           fixture.executor,
+                           fixture.secrets,
+                           {},
+                           fixture.callbacks()};
+        REQUIRE(core.process_cycle());
+        auto const key       = fixture.executor.pending_keys().front();
+        auto       requested = core.cancel_run(key.run_id);
+        REQUIRE(requested);
+        CHECK(requested->disposition == CancelDisposition::Requested);
+        CHECK(fixture.completions.empty());
+        CHECK(fixture.finishes.empty());
+
+        auto completion   = success(key);
+        completion.result = {
+            .data = JsonValue::Object{{"exit_code", {.data = std::int64_t{7}}},
+                                      {"signal", {.data = std::int64_t{SIGTERM}}},
+                                      {"status", {.data = std::int64_t{418}}}}
+        };
+        REQUIRE(fixture.executor.complete(key, std::move(completion)));
+        REQUIRE(fixture.completions.size() == 1);
+        auto const& event = fixture.completions.front();
+        CHECK(event.outcome == AttemptOutcome::Cancelled);
+        CHECK_FALSE(event.exit_code);
+        CHECK_FALSE(event.signal_number);
+        CHECK_FALSE(event.http_status);
+        REQUIRE(fixture.finishes.size() == 1);
+        CHECK(fixture.finishes.front().state == RunState::Cancelled);
+        CHECK(fixture.finishes.front().completing_attempt == key.attempt_number);
+        CHECK(fixture.retries.empty());
+    }
+}
+
+TEST_CASE("Duplicate and stale executor callbacks cannot repeat committed events",
+          "[jobu][scheduler][core][execution][protocol][sqlite]")
+{
+    for (bool stale : {false, true}) {
+        CoreFixture        fixture;
+        RawAttemptExecutor executor;
+        insert_queue(fixture.database, id(1), 1);
+        insert_scheduled(fixture, id(1), 2, JobType::Cli);
+        auto callbacks             = fixture.callbacks();
+        auto failures              = std::vector<Error>{};
+        callbacks.failure_reported = [&](Error const& error) { failures.push_back(error); };
+        SchedulerCore core{fixture.database,
+                           fixture.registry,
+                           fixture.cron,
+                           fixture.generator,
+                           fixture.time,
+                           executor,
+                           fixture.secrets,
+                           {},
+                           callbacks};
+        REQUIRE(core.process_cycle());
+        auto       handler = executor.handler;
+        auto const key     = executor.requests.front().key;
+        handler(success(key));
+        auto repeated = key;
+        if (stale) {
+            ++repeated.attempt_number;
+        }
+        handler(success(repeated));
+        handler(success(key));
+        REQUIRE(fixture.completions.size() == 1);
+        CHECK(fixture.finishes.size() == 1);
+        REQUIRE(failures.size() == 1);
+        CHECK(failures.front().code == "jobu.executor.invalid_completion");
+    }
+}
+
+TEST_CASE("Immediate failure events preserve capacity and honor receiver shutdown",
+          "[jobu][scheduler][core][execution][capacity][shutdown][sqlite]")
+{
+    for (bool preparation : {false, true}) {
+        for (bool shutdown : {false, true}) {
+            DYNAMIC_SECTION("preparation " << preparation << " shutdown " << shutdown)
+            {
+                CoreFixture            fixture;
+                DatabaseSecretProvider secrets{fixture.database};
+                insert_queue(fixture.database, id(1), 1);
+                insert_job(fixture.database, id(102), id(1), JobType::Cli);
+                auto run = default_run(fixture, id(2), id(102), id(1), JobType::Cli);
+                if (preparation) {
+                    run.payload_json = R"({"command":"/test","arguments":[{"secret":"missing"}]})";
+                }
+                else {
+                    fixture.executor.set_start_error(Error{.category = ErrorCategory::Unavailable,
+                                                           .code     = "test.rejected",
+                                                           .message  = "Configured rejection"});
+                }
+                insert_run(fixture.database, run);
+                insert_scheduled(fixture, id(1), 3, JobType::Cli, -1);
+                fixture.executor.set_available(JobType::Cli, true);
+                auto  callbacks            = fixture.callbacks();
+                auto  collect              = callbacks.attempt_finished;
+                auto* owner                = static_cast<SchedulerCore*>(nullptr);
+                callbacks.attempt_finished = [&, collect](AttemptFinished value) {
+                    collect(value);
+                    CHECK(value.outcome == AttemptOutcome::Failed);
+                    CHECK(value.start_phase ==
+                          (preparation ? AttemptStartPhase::PreparationFailed : AttemptStartPhase::ExecutorRejected));
+                    CHECK_FALSE(value.elapsed);
+                    CHECK_FALSE(value.exit_code);
+                    CHECK_FALSE(value.http_status);
+                    if (shutdown) {
+                        owner->shutdown();
+                    }
+                };
+                SchedulerCore core{fixture.database,
+                                   fixture.registry,
+                                   fixture.cron,
+                                   fixture.generator,
+                                   fixture.time,
+                                   fixture.executor,
+                                   secrets,
+                                   {.cli_concurrency = 1},
+                                   callbacks};
+                owner      = &core;
+                auto cycle = core.process_cycle();
+                REQUIRE(cycle);
+                CHECK(cycle->shutdown_requested == shutdown);
+                REQUIRE_FALSE(fixture.completions.empty());
+                CHECK(fixture.completions.front().execution.run_id == id(2));
+                if (shutdown) {
+                    CHECK(fixture.completions.size() == 1);
+                    CHECK(fixture.finishes.empty());
+                    CHECK(fixture.starts.empty());
+                }
+                else if (preparation) {
+                    // The first completion releases the sole local slot before the next dispatch opportunity.
+                    CHECK(fixture.completions.size() == 1);
+                    REQUIRE(fixture.starts.size() == 1);
+                    CHECK(fixture.starts.front().execution.run_id == id(3));
+                    CHECK(fixture.finishes.size() == 1);
+                }
+                else {
+                    CHECK(fixture.starts.empty());
+                    CHECK(fixture.completions.size() == 2);
+                    CHECK(fixture.finishes.size() == 2);
+                }
+            }
+        }
+    }
+}
 
 TEST_CASE("Single-queue scheduler core preserves strict order across bounded batches",
           "[jobu][scheduler][core][sqlite]")
