@@ -157,6 +157,15 @@ struct RuntimeFixture {
         }}
     {
         faults->classify = [this](std::string_view sql) -> std::string {
+            if (sql.starts_with("SELECT state AS inventory_state")) {
+                if (sql.find("FROM jobu_queues") != std::string_view::npos) {
+                    return "inventory.queues";
+                }
+                if (sql.find("FROM jobu_jobs") != std::string_view::npos) {
+                    return "inventory.jobs";
+                }
+                return "inventory.runs";
+            }
             if (sql.starts_with("SELECT value_blob FROM jobu_secrets")) {
                 return "dispatch.secret";
             }
@@ -421,27 +430,164 @@ TEST_CASE("Daemon injected recovery failures never construct runners or enter se
 
 TEST_CASE("Daemon recovery precedes runner construction and scheduler startup")
 {
-    RuntimeFixture fixture;
-    auto           interrupted = fixture.seed(1, JobType::Cli, RunState::Running);
-    auto           runnable    = fixture.seed(2);
+    OperationalLogGuard logs;
+    RuntimeFixture      fixture;
+    auto                interrupted = fixture.seed(1, JobType::Cli, RunState::Running);
+    auto                runnable    = fixture.seed(2);
     fixture.create_runtime();
-    auto result = fixture.run([&] {
-        REQUIRE(fixture.runtime->state() == RuntimeState::Serving);
-        REQUIRE(std::filesystem::is_socket(fixture.options.socket_path));
-        REQUIRE(fixture.record.starts.size() == 1);
-        REQUIRE(fixture.record.starts.front().key.run_id == runnable.run.id);
-        detail::RunRepository runs{fixture.storage.database, fixture.storage.registry};
-        auto                  run = runs.find_by_id(interrupted.run.id);
-        REQUIRE(run);
-        REQUIRE(run->has_value());
-        REQUIRE(run->value().state == RunState::Interrupted);
-        fixture.runtime->request_stop();
-        return EXIT_SUCCESS;
-    });
+    fixture.record.on_start = [&] {
+        auto records = logs.capture->records();
+        REQUIRE(records.size() == 2);
+        CHECK(records[0].event == "jobud.recovery.completed");
+        CHECK(records[1].event == "jobud.inventory.loaded");
+        CHECK(records[1].fields.at("jobs_active").as_uint() == 1);
+        CHECK(records[1].fields.at("runs_scheduled").as_uint() == 1);
+    };
+    auto result = fixture.runtime->run(
+        [&] {
+            auto records = logs.capture->records();
+            REQUIRE(records.size() == 2);
+            CHECK(records.back().event == "jobud.inventory.loaded");
+            // Reading and beginning another transaction here proves snapshot queries and ownership have unwound.
+            auto transaction = jb::db::Transaction::begin(fixture.storage.database);
+            REQUIRE(transaction);
+            REQUIRE(transaction->rollback());
+            return fixture.make_runners();
+        },
+        [&] {
+            REQUIRE(fixture.runtime->state() == RuntimeState::Serving);
+            REQUIRE(std::filesystem::is_socket(fixture.options.socket_path));
+            REQUIRE(fixture.record.starts.size() == 1);
+            REQUIRE(fixture.record.starts.front().key.run_id == runnable.run.id);
+            detail::RunRepository runs{fixture.storage.database, fixture.storage.registry};
+            auto                  run = runs.find_by_id(interrupted.run.id);
+            REQUIRE(run);
+            REQUIRE(run->has_value());
+            REQUIRE(run->value().state == RunState::Interrupted);
+            fixture.runtime->request_stop();
+            return EXIT_SUCCESS;
+        });
     REQUIRE(result == EXIT_SUCCESS);
     REQUIRE(fixture.record.destruction == std::vector<std::string>{"executor", "http"});
     fixture.require_running(runnable);
     REQUIRE_FALSE(std::filesystem::exists(fixture.options.socket_path));
+}
+
+TEST_CASE("Daemon inventory failures stop startup before runner construction", "[jobud][inventory][fault]")
+{
+    auto const          operation   = GENERATE(DatabaseOperation::Prepare,
+                                               DatabaseOperation::Execute,
+                                               DatabaseOperation::Fetch,
+                                               DatabaseOperation::Finish,
+                                               DatabaseOperation::Commit);
+    auto const          phase       = GENERATE(DatabaseFaultPhase::Before, DatabaseFaultPhase::AfterSuccess);
+    auto const          signal_stop = GENERATE(false, true);
+    OperationalLogGuard logs;
+    RuntimeFixture      fixture;
+    fixture.seed();
+    auto const before       = storage_snapshot(fixture.storage.database);
+    bool       armed        = false;
+    bool       stop         = false;
+    fixture.faults->observe = [&](DatabaseCall const& call) {
+        // Arm only once inventory has started; a connection commit fault must never target recovery.
+        if (!armed && call == DatabaseCall{.boundary = "inventory.queues", .operation = DatabaseOperation::Prepare}) {
+            armed = true;
+            stop  = signal_stop;
+            fixture.faults->faults.push_back({
+                .at    = {.boundary  = operation == DatabaseOperation::Commit ? "connection" : "inventory.jobs",
+                          .operation = operation,
+                          .phase     = phase},
+                .error = fault_error()
+            });
+        }
+    };
+    fixture.create_runtime([&] { return stop; });
+    CHECK(fixture.run([] {
+        FAIL("inventory failure cannot serve");
+        return EXIT_SUCCESS;
+    }) == EXIT_FAILURE);
+    REQUIRE(armed);
+    require_consumed_faults(*fixture.faults);
+    CHECK(fixture.factory_calls == 0);
+    CHECK(fixture.record.starts.empty());
+    CHECK_FALSE(std::filesystem::exists(fixture.options.socket_path));
+    auto const records = logs.capture->records();
+    CHECK(std::ranges::none_of(records, [](auto const& record) {
+        return record.event == "jobud.inventory.loaded" || record.event == "jobud.ready";
+    }));
+    REQUIRE(records.back().event == "jobud.failed");
+    CHECK(records.back().fields.at("subsystem").as_string() == "inventory");
+    CHECK(records.back().fields.at("code").as_string() == "db.io");
+    for (auto const& record : records) {
+        CHECK(record.message.find("private-backend-marker") == std::string::npos);
+        auto fields = serialize_json({.data = record.fields});
+        REQUIRE(fields);
+        CHECK(fields->find("private-backend-marker") == std::string::npos);
+    }
+    fixture.storage.reopen(); // Commit acknowledgement failures may poison the old connection during cleanup.
+    CHECK(storage_snapshot(fixture.storage.database) == before);
+}
+
+TEST_CASE("Daemon cancelled startup never announces successful inventory", "[jobud][inventory][signal]")
+{
+    std::string_view const boundary = GENERATE("before", "during", "after");
+    OperationalLogGuard    logs;
+    RuntimeFixture         fixture;
+    bool                   stop               = false;
+    bool                   snapshot_started   = false;
+    bool                   snapshot_committed = false;
+    fixture.faults->observe                   = [&](DatabaseCall const& call) {
+        if (call == DatabaseCall{.boundary = "inventory.queues", .operation = DatabaseOperation::Prepare}) {
+            snapshot_started = true;
+            stop             = std::string_view{boundary} == "during";
+        }
+        if (snapshot_started && call == DatabaseCall{.boundary  = "connection",
+                                                     .operation = DatabaseOperation::Commit,
+                                                     .phase     = DatabaseFaultPhase::AfterSuccess}) {
+            snapshot_committed = true;
+            stop               = true;
+        }
+    };
+    fixture.create_runtime([&] {
+        auto const records = logs.capture->records();
+        bool       recovered =
+            std::ranges::any_of(records, [](auto const& record) { return record.event == "jobud.recovery.completed"; });
+        return stop || (std::string_view{boundary} == "before" && recovered);
+    });
+    CHECK(fixture.run([] {
+        FAIL("cancelled inventory startup cannot serve");
+        return EXIT_FAILURE;
+    }) == EXIT_SUCCESS);
+    CHECK(snapshot_started == (std::string_view{boundary} != "before"));
+    CHECK(snapshot_committed == snapshot_started);
+    CHECK(fixture.factory_calls == 0);
+    auto const records = logs.capture->records();
+    CHECK(std::ranges::none_of(records, [](auto const& record) {
+        return record.event == "jobud.inventory.loaded" || record.event == "jobud.ready" ||
+               record.event == "jobud.failed";
+    }));
+}
+
+TEST_CASE("Daemon recovery failure cannot emit inventory", "[jobud][inventory][recovery][fault]")
+{
+    OperationalLogGuard logs;
+    RuntimeFixture      fixture;
+    fixture.faults->calls.clear();
+    fixture.faults->faults.push_back({
+        .at    = {.boundary = "recovery.scan", .operation = DatabaseOperation::Execute},
+        .error = fault_error()
+    });
+    fixture.create_runtime();
+    CHECK(fixture.run([] {
+        FAIL("failed recovery cannot serve");
+        return EXIT_SUCCESS;
+    }) == EXIT_FAILURE);
+    require_consumed_faults(*fixture.faults);
+    CHECK(fixture.factory_calls == 0);
+    auto const records = logs.capture->records();
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().event == "jobud.failed");
+    CHECK(records.front().fields.at("subsystem").as_string() == "recovery");
 }
 
 TEST_CASE("Daemon activates configured checkpoints before dispatch and creates complete new work", "[jobud][telemetry]")
@@ -2310,8 +2456,16 @@ TEST_CASE("Daemon empty recovery is visible only at DEBUG2 before readiness", "[
         return EXIT_SUCCESS;
     }) == EXIT_SUCCESS);
     auto records = logs.capture->records();
-    REQUIRE(records.size() == (level == LogLevel::Debug2 ? 2U : 1U));
+    REQUIRE(records.size() == (level == LogLevel::Debug2 ? 3U : 2U));
     CHECK(records.back().event == "jobud.ready");
+    auto const& inventory = records[records.size() - 2];
+    CHECK(inventory.event == "jobud.inventory.loaded");
+    CHECK(inventory.level == LogLevel::Info);
+    CHECK(inventory.message == "Loaded 1 queue, 0 active job definitions and 0 scheduled runs.");
+    REQUIRE(inventory.fields.size() == 8);
+    for (auto const& [name, value] : inventory.fields) {
+        CHECK(value.as_uint() == (name == "queues_active" ? 1U : 0U));
+    }
     if (level != LogLevel::Debug2) {
         return;
     }
@@ -2356,13 +2510,66 @@ TEST_CASE("Daemon committed recovery repairs remain visible at INFO", "[jobud][l
         return EXIT_SUCCESS;
     }) == EXIT_SUCCESS);
     auto const records = logs.capture->records();
-    REQUIRE(records.size() == 2);
+    REQUIRE(records.size() == 3);
     CHECK(records[0].event == "jobud.recovery.completed");
     CHECK(records[0].level == LogLevel::Info);
     CHECK(records[0].message == "Startup recovery repaired persisted state.");
     REQUIRE(records[0].fields.size() == 8);
     CHECK(records[0].fields.at(std::string{counter}).as_uint() == 1);
-    CHECK(records[1].event == "jobud.ready");
+    CHECK(records[1].event == "jobud.inventory.loaded");
+    CHECK(records[2].event == "jobud.ready");
+}
+
+TEST_CASE("Daemon inventory reports future and suspended work independently of eligibility", "[jobud][inventory]")
+{
+    OperationalLogGuard logs;
+    logs.capture->set_level(LogLevel::Info);
+    RuntimeFixture fixture;
+    for (std::uint32_t i = 0; i < 2; ++i) {
+        auto job     = fixture.storage.make_job(recovery_id(10 + i), recovery_id(1));
+        job.schedule = OnceSchedule{UtcTimePoint{24h}};
+        fixture.storage.insert_job(job);
+        auto run            = fixture.storage.make_run(recovery_id(100 + i), job);
+        run.run.planned_at  = UtcTimePoint{24h};
+        run.run.runnable_at = UtcTimePoint{24h};
+        fixture.storage.insert_run(run);
+    }
+    bool mixed = false;
+    SECTION("one queue and two future jobs")
+    {}
+    SECTION("suspended owners and retries")
+    {
+        mixed = true;
+        fixture.storage.insert_queue(recovery_queue(recovery_id(2), QueueState::Suspended));
+        auto job  = fixture.storage.make_job(recovery_id(12), recovery_id(2), JobType::Http);
+        job.state = JobState::Suspended;
+        fixture.storage.insert_job(job);
+        fixture.storage.insert_run(fixture.storage.make_run(recovery_id(102), job));
+        auto retry = fixture.storage.make_job(recovery_id(13), recovery_id(2), JobType::Http);
+        fixture.storage.insert_job(retry);
+        fixture.storage.insert_run(fixture.storage.make_run(recovery_id(103), retry, RunState::RetryWait, 1));
+    }
+    fixture.create_runtime();
+    CHECK(fixture.run([&] {
+        fixture.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+    CHECK(fixture.record.starts.empty());
+    auto const records = logs.capture->records();
+    REQUIRE(records.size() == 2);
+    auto const& inventory = records.front();
+    CHECK(inventory.event == "jobud.inventory.loaded");
+    CHECK(inventory.level == LogLevel::Info);
+    CHECK(inventory.fields.at("queues_active").as_uint() == 1);
+    CHECK(inventory.fields.at("jobs_active").as_uint() == (mixed ? 3U : 2U));
+    CHECK(inventory.fields.at("runs_scheduled").as_uint() == (mixed ? 3U : 2U));
+    CHECK(inventory.fields.at("queues_suspended").as_uint() == (mixed ? 1U : 0U));
+    CHECK(inventory.fields.at("jobs_suspended").as_uint() == (mixed ? 1U : 0U));
+    CHECK(inventory.fields.at("runs_retry_wait").as_uint() == (mixed ? 1U : 0U));
+    CHECK(inventory.message == (mixed ? "Loaded 2 queues, 3 active job definitions and 3 scheduled runs; "
+                                        "1 suspended queue; 1 suspended job definition; 1 run waiting to retry."
+                                      : "Loaded 1 queue, 2 active job definitions and 2 scheduled runs."));
+    CHECK(records.back().event == "jobud.ready");
 }
 
 TEST_CASE("Daemon idle sweeps keep notifications and cadence at every log threshold", "[jobud][logging][retention]")
@@ -2450,9 +2657,10 @@ TEST_CASE("Daemon failure events retain only the first subsystem and stable code
                 }) == EXIT_FAILURE);
     f.runtime->fail("late", failure());
     auto records = logs.capture->records();
-    REQUIRE(records.size() == 2);
+    REQUIRE(records.size() == 3);
     CHECK(records.front().event == "jobud.recovery.completed");
     CHECK(records.front().level == LogLevel::Debug2);
+    CHECK(records[1].event == "jobud.inventory.loaded");
     CHECK(records.back().event == "jobud.failed");
     CHECK(records.back().level == LogLevel::Error);
     REQUIRE(records.back().fields.size() == 2);

@@ -406,6 +406,16 @@ if(TARGET jobu-sqlite)
     target_link_libraries(${TARGET} PRIVATE jobu-sqlite Catch2::Catch2WithMain)
     add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+    add_executable(jobu-startup-inventory-test
+        jobu-startup-inventory-test.cpp
+        support/fake_database_driver.cpp
+        support/fault_database_driver.cpp
+        support/recovery_fixture.cpp
+        support/temporary_directory.cpp
+    )
+    target_link_libraries(jobu-startup-inventory-test PRIVATE jobu-sqlite Catch2::Catch2WithMain)
+    add_test(NAME jobu-startup-inventory-test COMMAND $<TARGET_FILE:jobu-startup-inventory-test>)
+
     # JobU SQLite-backed idempotency, secret, and retention repository test
     set(TARGET "jobu-idempotency-secret-retention-test")
     add_executable(${TARGET}
