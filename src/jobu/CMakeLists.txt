@@ -12,6 +12,7 @@ set(HDRS
     control_json.hpp
     control_rpc.hpp
     cron.hpp
+    execution_events.hpp
     execution_telemetry.hpp
     history.hpp
     history_json.hpp
@@ -25,6 +26,7 @@ set(HDRS
     queue.hpp
     recovery.hpp
     retention.hpp
+    retry_mode.hpp
     run.hpp
     schedule_input.hpp
     scheduler.hpp
@@ -68,6 +70,8 @@ target_sources(${TARGET}
         cron_timezone_priv.hpp
         domain_storage_priv.cpp
         domain_storage_priv.hpp
+        execution_diagnostics_priv.cpp
+        execution_diagnostics_priv.hpp
         execution_telemetry.cpp
         execution_telemetry_priv.hpp
         run_eligibility_priv.cpp

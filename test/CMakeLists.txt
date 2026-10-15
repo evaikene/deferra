@@ -172,6 +172,11 @@ add_executable(recovery-retry-policy-test recovery-retry-policy-test.cpp)
 target_link_libraries(recovery-retry-policy-test PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME recovery-retry-policy-test COMMAND $<TARGET_FILE:recovery-retry-policy-test>)
 
+# Execution event values and bounded numeric diagnostics (no runner or backend required).
+add_executable(jobu-execution-events-test jobu-execution-events-test.cpp)
+target_link_libraries(jobu-execution-events-test PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME jobu-execution-events-test COMMAND $<TARGET_FILE:jobu-execution-events-test>)
+
 # JobU operation-context storage failure policy (no backend required).
 set(TARGET "storage-failure-test")
 add_executable(${TARGET} storage-failure-test.cpp)
@@ -734,6 +739,7 @@ foreach(JOBU_DOMAIN_HEADER IN ITEMS
         attempt-executor-group
         attribute-registry
         cron
+        execution-events
         execution-telemetry
         control-json
         control-rpc
@@ -748,6 +754,7 @@ foreach(JOBU_DOMAIN_HEADER IN ITEMS
         queue
         recovery
         retention
+        retry-mode
         run
         schedule-input
         scheduler
