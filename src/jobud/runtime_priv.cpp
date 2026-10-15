@@ -8,6 +8,7 @@
 #include "control_rpc.hpp"
 #include "database.hpp"
 #include "event_loop.hpp"
+#include "execution_logging_priv.hpp"
 #include "execution_telemetry.hpp"
 #include "history_rpc.hpp"
 #include "history_service.hpp"
@@ -418,6 +419,11 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         rpc      = std::make_unique<jb::rpc::Server>(std::move(rpc_options));
 
         scheduler->failed.connect(owner, [this](jb::core::Error const& error) { fail("scheduler", error); });
+        // The first start can dispatch synchronously. Observe accepted work before any activation.
+        scheduler->attempt_started.connect(owner, [](AttemptStarted const& event) { log_attempt_started(event); });
+        scheduler->attempt_finished.connect(owner, [](AttemptFinished const& event) { log_attempt_finished(event); });
+        scheduler->retry_scheduled.connect(owner, [](RetryScheduled const& event) { log_retry_scheduled(event); });
+        scheduler->run_finished.connect(owner, [](RunFinished const& event) { log_run_finished(event); });
         management->failed.connect(owner, [this](jb::core::Error const& error) { fail("management", error); });
         secrets->failed.connect(owner, [this](jb::core::Error const& error) { fail("secrets", error); });
         statistics->failed.connect(owner, [this](jb::core::Error const& error) { fail("statistics", error); });

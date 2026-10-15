@@ -112,6 +112,7 @@ struct ExecutionRecord {
     std::vector<std::string>              destruction;
     std::function<void()>                 on_start;
     std::function<void()>                 on_destroy;
+    bool                                  reject_start{false};
 };
 
 /// Probes retained completions during final drains and child teardown while the group and runtime still exist.
@@ -137,6 +138,11 @@ public:
     auto start(AttemptStartRequest request, AttemptCompletionHandler completion) -> Result<void, Error> override
     {
         _record.starts.push_back(std::move(request));
+        if (_record.reject_start) {
+            return Result<void, Error>::failure({.category = ErrorCategory::Unavailable,
+                                                 .code     = "jobu.executor.rejected",
+                                                 .message  = "stage942-private-rejection"});
+        }
         _record.completions.push_back(std::move(completion));
         if (_record.on_start) {
             _record.on_start();
@@ -295,6 +301,17 @@ auto request(std::string_view method, std::string_view name) -> std::string
     auto frame = jb::rpc::frame_message(*serialized);
     REQUIRE(frame);
     return std::move(*frame);
+}
+
+auto execution_records(OperationalLogCapture const& capture) -> std::vector<OperationalRecord>
+{
+    auto records = capture.records();
+    std::erase_if(records, [](auto const& record) {
+        return !record.event.starts_with("jobud.attempt.") && record.event != "jobud.run.retry_scheduled" &&
+               record.event != "jobud.run.succeeded" && record.event != "jobud.run.failed" &&
+               record.event != "jobud.run.cancelled";
+    });
+    return records;
 }
 
 class RuntimeRpcEndpoint {
@@ -2444,6 +2461,232 @@ TEST_CASE("Configured timezone and daemon attributes reach management and schedu
     }) == EXIT_SUCCESS);
 }
 
+TEST_CASE("Daemon execution subscriptions precede first dispatch and retain only safe diagnostics",
+          "[jobud][logging][execution]")
+{
+    auto const          level = GENERATE(LogLevel::Info, LogLevel::Debug1, LogLevel::Debug2, LogLevel::Debug3);
+    OperationalLogGuard logs;
+    logs.capture->set_level(level);
+    RuntimeFixture f;
+    auto           job = f.storage.make_job(recovery_id(11), recovery_id(1));
+    auto payload = parse_json(R"({"command":"/stage942-private-command","arguments":["stage942-private-argument"],
+        "environment":{"TOKEN":"stage942-private-environment"}})");
+    REQUIRE(payload);
+    job.payload                              = *payload;
+    job.attributes.at("output.capture").data = std::string{"always"};
+    f.storage.insert_job(job);
+    auto run = f.storage.make_run(recovery_id(101), job);
+    f.storage.insert_run(run);
+    f.create_runtime();
+    f.record.on_start = [&] {
+        // The executor hook runs before acceptance. Its return is the start-notification boundary.
+        CHECK(execution_records(*logs.capture).empty());
+    };
+    REQUIRE(f.run([&] {
+        auto records = logs.capture->records();
+        REQUIRE(records.back().event == "jobud.ready");
+        if (level >= LogLevel::Debug1) {
+            REQUIRE(records.size() >= 3);
+            CHECK(records[records.size() - 2].event == "jobud.attempt.started");
+        }
+        f.time.set_monotonic(TimePoint{125ms});
+        f.time.set_utc(UtcTimePoint{999s});
+        auto completed   = success(f.record.starts.front().key);
+        completed.result = {
+            .data = JsonValue::Object{
+                                      {"exit_code", {.data = std::int64_t{37}}},
+                                      {"message", {.data = std::string{"stage942-private-message"}}},
+                                      {"error_code", {.data = std::string{"stage942-private-error"}}},
+                                      }
+        };
+        auto const output = as_bytes("stage942-private-output");
+        completed.output  = AttemptOutput{
+            .primary =
+                AttemptOutputChannel{.bytes = ByteBuffer{output.begin(), output.end()}, .total_bytes = output.size()}
+        };
+        f.record.completions.front()(std::move(completed));
+        f.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+    f.runtime.reset();
+
+    auto const records = execution_records(*logs.capture);
+    if (level == LogLevel::Info) {
+        CHECK(records.empty());
+    }
+    else {
+        REQUIRE(records.size() == 3);
+        CHECK(records[0].event == "jobud.attempt.started");
+        CHECK(records[1].event == "jobud.attempt.succeeded");
+        CHECK(records[2].event == "jobud.run.succeeded");
+        CHECK(records[1].fields.at("exit_code").as_int() == 37);
+        CHECK(records[1].fields.at("elapsed_ms").as_int() == 125);
+        CHECK(records[1].fields.at("completed_at").as_string() == "1970-01-01T00:16:39.000000Z");
+        for (auto const& record : records) {
+            CHECK(record.fields.at("run_id").as_string() == run.run.id.to_string());
+            CHECK(record.level == LogLevel::Debug1);
+        }
+    }
+    for (auto const& record : logs.capture->records()) {
+        auto fields = serialize_json({.data = record.fields});
+        REQUIRE(fields);
+        CHECK(fields->find("stage942-private-") == std::string::npos);
+        CHECK(record.message.find("stage942-private-") == std::string::npos);
+    }
+}
+
+TEST_CASE("Daemon retry logs preserve committed deadline mode and terminal severity", "[jobud][logging][execution]")
+{
+    auto const          mode      = GENERATE(std::string{"blocking"}, std::string{"reschedule"});
+    auto const          exhausted = GENERATE(false, true);
+    OperationalLogGuard logs;
+    RuntimeFixture      f;
+    auto                job                       = f.storage.make_job(recovery_id(11), recovery_id(1));
+    job.attributes.at("retry.mode").data          = mode;
+    job.attributes.at("retry.max_attempts").data  = std::int64_t{2};
+    job.attributes.at("retry.initial_delay").data = Duration::zero();
+    job.attributes.at("retry.max_delay").data     = Duration::zero();
+    f.storage.insert_job(job);
+    auto run = f.storage.make_run(recovery_id(101), job);
+    f.storage.insert_run(run);
+    f.create_runtime();
+    REQUIRE(f.run([&] {
+        auto const due = f.time.utc_now() + 5s + 123us;
+        auto       failed =
+            AttemptCompletion{.key                 = f.record.starts.front().key,
+                              .outcome             = AttemptOutcome::Failed,
+                              .failure_disposition = FailureDisposition::Retryable,
+                              .retry_not_before    = due,
+                              .result = {.data = JsonValue::Object{{"exit_code", {.data = std::int64_t{7}}}}}};
+        f.record.completions.front()(std::move(failed));
+        auto records = execution_records(*logs.capture);
+        REQUIRE(records.size() == 3);
+        CHECK(records[1].event == "jobud.attempt.failed");
+        CHECK(records[1].level == LogLevel::Debug1);
+        CHECK(records[2].event == "jobud.run.retry_scheduled");
+        CHECK(records[2].fields.at("retry_mode").as_string() == mode);
+        CHECK(records[2].fields.at("runnable_at").as_string() == "1970-01-01T00:02:05.000123Z");
+        CHECK(records[2].fields.at("next_attempt").as_uint() == 2);
+
+        f.time.set_utc(due);
+        RuntimeTestAccess::scheduler(*f.runtime)->request_rescan();
+        static_cast<void>(f.loop.loop->process_events(EventFlag::All));
+        REQUIRE(f.record.starts.size() == 2);
+        auto completed = success(f.record.starts.back().key);
+        if (exhausted) {
+            completed.outcome             = AttemptOutcome::Failed;
+            completed.failure_disposition = FailureDisposition::Retryable;
+        }
+        f.record.completions.back()(std::move(completed));
+        records = execution_records(*logs.capture);
+        REQUIRE(records.size() == 6);
+        CHECK(records[3].event == "jobud.attempt.started");
+        CHECK(records[3].fields.at("attempt_number").as_uint() == 2);
+        CHECK(records[4].event == (exhausted ? "jobud.attempt.failed" : "jobud.attempt.succeeded"));
+        CHECK(records[4].level == LogLevel::Debug1);
+        CHECK(records[5].event == (exhausted ? "jobud.run.failed" : "jobud.run.succeeded"));
+        CHECK(records[5].level == (exhausted ? LogLevel::Warning : LogLevel::Debug1));
+        f.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+}
+
+TEST_CASE("Daemon logs immediate failures without announcing an accepted attempt", "[jobud][logging][execution]")
+{
+    auto const          rejected = GENERATE(false, true);
+    OperationalLogGuard logs;
+    RuntimeFixture      f;
+    auto                job = f.storage.make_job(recovery_id(11), recovery_id(1));
+    if (!rejected) {
+        auto payload = parse_json(R"({"command":"/bin/tool","arguments":[{"secret":"missing"}]})");
+        REQUIRE(payload);
+        job.payload = *payload;
+    }
+    f.storage.insert_job(job);
+    auto run = f.storage.make_run(recovery_id(101), job);
+    f.storage.insert_run(run);
+    f.record.reject_start = rejected;
+    f.create_runtime();
+    REQUIRE(f.run([&] {
+        auto const records = execution_records(*logs.capture);
+        REQUIRE(records.size() == 2);
+        CHECK(records[0].event == "jobud.attempt.failed");
+        CHECK(records[0].fields.at("start_phase").as_string() ==
+              (rejected ? "executor_rejected" : "preparation_failed"));
+        CHECK_FALSE(records[0].fields.contains("elapsed_ms"));
+        CHECK(records[1].event == "jobud.run.failed");
+        CHECK(records[1].level == LogLevel::Warning);
+        f.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+}
+
+TEST_CASE("Daemon logs pending cancellation separately from normalized active completion",
+          "[jobud][logging][execution]")
+{
+    auto const          pending = GENERATE(false, true);
+    OperationalLogGuard logs;
+    RuntimeFixture      f;
+    if (pending) {
+        f.time.set_utc(UtcTimePoint{1s});
+    }
+    auto seeded = f.seed();
+    f.create_runtime();
+    REQUIRE(f.run([&] {
+        auto cancelled = RuntimeTestAccess::scheduler(*f.runtime)->cancel_run(seeded.run.id);
+        REQUIRE(cancelled);
+        CHECK(cancelled->disposition == (pending ? CancelDisposition::Completed : CancelDisposition::Requested));
+        if (!pending) {
+            REQUIRE(execution_records(*logs.capture).size() == 1);
+            f.record.completions.front()(success(f.record.starts.front().key));
+        }
+        auto const records = execution_records(*logs.capture);
+        REQUIRE(records.size() == (pending ? 1U : 3U));
+        CHECK(records.back().event == "jobud.run.cancelled");
+        CHECK(records.back().fields.contains("completing_attempt") == !pending);
+        if (!pending) {
+            CHECK(records[1].event == "jobud.attempt.cancelled");
+            CHECK_FALSE(records[1].fields.contains("exit_code"));
+        }
+        f.runtime->request_stop();
+        return EXIT_SUCCESS;
+    }) == EXIT_SUCCESS);
+}
+
+TEST_CASE("Daemon suppresses execution completion logs across unconfirmed commits and shutdown",
+          "[jobud][logging][execution]")
+{
+    auto const          boundary = GENERATE(0, 1, 2);
+    OperationalLogGuard logs;
+    RuntimeFixture      f;
+    f.seed();
+    f.create_runtime();
+    auto result = f.run([&] {
+        if (boundary == 2) {
+            // Runner teardown deliberately replays a retained callback after the runtime gates persistence.
+            f.runtime->request_stop();
+        }
+        else {
+            f.faults->faults.push_back({
+                .at    = {.boundary  = "connection",
+                          .operation = DatabaseOperation::Commit,
+                          .phase     = boundary == 0 ? DatabaseFaultPhase::Before : DatabaseFaultPhase::AfterSuccess},
+                .error = fault_error(),
+            });
+        }
+        f.record.completions.front()(success(f.record.starts.front().key));
+        return EXIT_SUCCESS;
+    });
+    CHECK(result == (boundary == 2 ? EXIT_SUCCESS : EXIT_FAILURE));
+    if (boundary != 2) {
+        require_consumed_faults(*f.faults);
+    }
+    f.runtime.reset();
+    auto const records = execution_records(*logs.capture);
+    REQUIRE(records.size() == 1);
+    CHECK(records[0].event == "jobud.attempt.started");
+}
+
 TEST_CASE("Daemon empty recovery is visible only at DEBUG2 before readiness", "[jobud][logging]")
 {
     auto const          level = GENERATE(LogLevel::Info, LogLevel::Debug1, LogLevel::Debug2);
@@ -2509,15 +2752,19 @@ TEST_CASE("Daemon committed recovery repairs remain visible at INFO", "[jobud][l
         f.runtime->request_stop();
         return EXIT_SUCCESS;
     }) == EXIT_SUCCESS);
-    auto const records = logs.capture->records();
-    REQUIRE(records.size() == 3);
+    auto const records    = logs.capture->records();
+    auto const dispatched = counter == "repaired_timing_rows" && level >= LogLevel::Debug1;
+    REQUIRE(records.size() == (dispatched ? 4U : 3U));
     CHECK(records[0].event == "jobud.recovery.completed");
     CHECK(records[0].level == LogLevel::Info);
     CHECK(records[0].message == "Startup recovery repaired persisted state.");
     REQUIRE(records[0].fields.size() == 8);
     CHECK(records[0].fields.at(std::string{counter}).as_uint() == 1);
     CHECK(records[1].event == "jobud.inventory.loaded");
-    CHECK(records[2].event == "jobud.ready");
+    if (dispatched) {
+        CHECK(records[2].event == "jobud.attempt.started");
+    }
+    CHECK(records.back().event == "jobud.ready");
 }
 
 TEST_CASE("Daemon inventory reports future and suspended work independently of eligibility", "[jobud][inventory]")
