@@ -1,6 +1,6 @@
 #pragma once
 
-#include "error.hpp"
+#include "path_diagnostic_priv.hpp"
 #include "result.hpp"
 
 #include <filesystem>
@@ -34,13 +34,16 @@ struct TrustedParent {
     PathDescriptor        directory;
     std::filesystem::path path;
     std::filesystem::path leaf;
+    PathRole              role;
+    std::filesystem::path configured_path;
 };
 
 /// Resolves the original spelling, including symlink/.. traversal, through protected parents.
 /// Root and trusted_user may control ancestors; shared sticky parents require a protected child.
 /// allow_missing accepts absence only after the existing prefix has passed trust checks.
-[[nodiscard]] auto open_trusted_parent(std::filesystem::path const& path, uid_t trusted_user, bool allow_missing)
-    -> jb::core::Result<std::optional<TrustedParent>, jb::core::Error>;
+[[nodiscard]] auto
+open_trusted_parent(std::filesystem::path const& path, uid_t trusted_user, bool allow_missing, PathRole role)
+    -> jb::core::Result<std::optional<TrustedParent>, PathFailure>;
 
 /// Owns the verified directories until database and listener teardown. Paths have no unresolved aliases or dots.
 struct PreparedRuntimePaths {
@@ -57,15 +60,15 @@ struct PreparedRuntimePaths {
 /// Existing trees are validated, never repaired. Call before applying identity and before resource construction.
 [[nodiscard]] auto
 prepare_runtime_paths(StartupOptions const& options, FinalIdentity const& identity, PrivilegeOperations& operations)
-    -> jb::core::Result<PreparedRuntimePaths, jb::core::Error>;
+    -> jb::core::Result<PreparedRuntimePaths, PathFailure>;
 
 /// Reopens names under the verified final credentials and checks they still identify the retained directories.
 [[nodiscard]] auto verify_runtime_paths(PreparedRuntimePaths const& paths, uid_t user)
-    -> jb::core::Result<void, jb::core::Error>;
+    -> jb::core::Result<void, PathFailure>;
 
 /// Checks existing SQLite files without following leaf symlinks; absence permits later owner-only creation.
 /// Invoke before open and after open/schema setup, before recovery or worker admission.
 [[nodiscard]] auto validate_database_artifacts(PreparedRuntimePaths const& paths, uid_t user)
-    -> jb::core::Result<void, jb::core::Error>;
+    -> jb::core::Result<void, PathFailure>;
 
 } // namespace jb::jobud::detail

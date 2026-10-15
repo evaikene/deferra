@@ -29,7 +29,7 @@ struct EndpointFixture {
         , path{directory.path() / "daemon.sock"}
         , lock_path{path.string() + ".lock"}
     {
-        auto opened = open_trusted_parent(path, ::geteuid(), false);
+        auto opened = open_trusted_parent(path, ::geteuid(), false, PathRole::RuntimeDirectory);
         REQUIRE(opened);
         REQUIRE(*opened);
         parent = std::move(**opened);
@@ -104,7 +104,7 @@ TEST_CASE("Endpoint lock persists and excludes another owner until guard destruc
         CHECK(found_descriptor);
         auto competing = EndpointGuard::acquire(*fixture.parent, ::geteuid());
         REQUIRE_FALSE(competing);
-        CHECK(competing.error().code == "jobud.socket.in_use");
+        CHECK(competing.error().error.code == "jobud.socket.in_use");
         CHECK(metadata(fixture.lock_path).st_ino == inode);
         CHECK(guard.prepare_socket());
     }
@@ -138,7 +138,7 @@ TEST_CASE("Endpoint lock rejects unsafe existing entries without repair", "[jobu
     auto const before   = metadata(fixture.lock_path);
     auto       acquired = EndpointGuard::acquire(*fixture.parent, ::geteuid());
     REQUIRE_FALSE(acquired);
-    CHECK(acquired.error().code == "jobud.path.unsafe");
+    CHECK(acquired.error().error.code == "jobud.path.unsafe");
     auto const after = metadata(fixture.lock_path);
     CHECK(after.st_ino == before.st_ino);
     CHECK(after.st_mode == before.st_mode);
@@ -158,7 +158,7 @@ TEST_CASE("Endpoint lock preserves an existing foreign-owned file", "[jobud][end
     auto const before   = metadata(fixture.lock_path);
     auto       acquired = EndpointGuard::acquire(*fixture.parent, ::geteuid());
     REQUIRE_FALSE(acquired);
-    CHECK(acquired.error().code == "jobud.path.unsafe");
+    CHECK(acquired.error().error.code == "jobud.path.unsafe");
     auto const after = metadata(fixture.lock_path);
     CHECK(after.st_ino == before.st_ino);
     CHECK(after.st_mode == before.st_mode);
@@ -175,7 +175,7 @@ TEST_CASE("Endpoint admission refuses lock pathname or runtime-parent replacemen
         auto other    = fixture.acquire();
         auto verified = guard.verify();
         REQUIRE_FALSE(verified);
-        CHECK(verified.error().detail == "endpoint_lock_changed");
+        CHECK(verified.error().error.detail == "endpoint_lock_changed");
         CHECK(other.verify());
         CHECK_FALSE(guard.prepare_socket());
     }
@@ -237,7 +237,7 @@ TEST_CASE("Endpoint stale inspection preserves a foreign-owned socket", "[jobud]
     auto const before   = metadata(fixture.path);
     auto       prepared = guard.prepare_socket();
     REQUIRE_FALSE(prepared);
-    CHECK(prepared.error().code == "jobud.path.unsafe");
+    CHECK(prepared.error().error.code == "jobud.path.unsafe");
     auto const after = metadata(fixture.path);
     CHECK(after.st_ino == before.st_ino);
     CHECK(after.st_mode == before.st_mode);

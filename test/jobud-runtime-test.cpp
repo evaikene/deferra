@@ -14,6 +14,7 @@
 #include "local_socket.hpp"
 #include "management.hpp"
 #include "management_json.hpp"
+#include "path_diagnostic_priv.hpp"
 #include "protocol_priv.hpp"
 #include "query.hpp"
 #include "retention.hpp"
@@ -2333,6 +2334,37 @@ TEST_CASE("Daemon failure events retain only the first subsystem and stable code
         CHECK(encoded->find("stage916-private-") == std::string::npos);
         CHECK(message.message.find("stage916-private-") == std::string::npos);
     }
+}
+
+TEST_CASE("Daemon runtime failure preserves path context and the first failure boundary", "[jobud][logging][paths]")
+{
+    OperationalLogGuard logs;
+    RuntimeFixture      f;
+    f.create_runtime();
+    jb::jobud::detail::PathFailure path_failure{
+        .error      = {.code    = "jobud.path.unsafe",
+                       .message = "private-path-backend",
+                       .detail  = "artifact_owner_type_or_mode"},
+        .diagnostic = jb::jobud::detail::PathDiagnostic{.role = jb::jobud::detail::PathRole::DatabaseArtifact,
+                       .configured_path = "/state/database.sqlite",
+                       .failing_path    = "/state/database.sqlite-wal",
+                       .actual_mode     = 0644,
+                       .actual_uid      = 1001,
+                       .required_uid    = 1001,
+                       .actual_gid      = 1002,
+                       .actual_type     = std::filesystem::file_type::regular}
+    };
+    f.runtime->fail("database_paths", path_failure);
+    f.runtime->fail("late", failure());
+    CHECK(f.runtime->exit_code() == EXIT_FAILURE);
+    CHECK(f.runtime->state() == RuntimeState::Stopping);
+    auto const records = logs.capture->records();
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().event == "jobud.failed");
+    CHECK(records.front().message.find("/state/database.sqlite-wal") != std::string::npos);
+    CHECK(records.front().message.find("private-path-backend") == std::string::npos);
+    CHECK(records.front().fields.at("subsystem").as_string() == "database_paths");
+    CHECK(records.front().fields.at("actual_mode").as_string() == "0644");
 }
 
 TEST_CASE("Daemon logs committed delays and completed sweeps through service subscriptions", "[jobud][logging]")

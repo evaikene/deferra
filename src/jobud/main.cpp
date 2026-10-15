@@ -1,6 +1,7 @@
 #include "composition_priv.hpp"
 #include "daemon_logger_priv.hpp"
 #include "jobu_version_priv.hpp"
+#include "path_diagnostic_priv.hpp"
 #include "runtime_priv.hpp"
 #include "startup_priv.hpp"
 
@@ -48,13 +49,15 @@ void log_startup_failure(std::string_view subsystem, jb::core::Error const& erro
 {
     using namespace jb::core;
     auto const fields = std::array{
-        LogField{.name = "subsystem", .value = subsystem                     },
-        LogField{.name = "code",      .value = std::string_view{error.code}  },
-        LogField{.name = "reason",    .value = std::string_view{error.detail}}
+        LogField{.name = "subsystem", .value = subsystem                   },
+        LogField{.name = "code",      .value = std::string_view{error.code}}
     };
-    // Only the filesystem helper's two error families carry reviewed fixed reason tokens.
-    auto const count = error.code == "jobud.path.unsafe" || error.code == "jobud.path.inspect_failed" ? 3U : 2U;
-    log_event(LogLevel::Error, "jobud.failed", std::span{fields}.first(count));
+    log_event(LogLevel::Error, "jobud.failed", fields);
+}
+
+void log_startup_failure(std::string_view subsystem, jb::jobud::detail::PathFailure const& failure)
+{
+    jb::jobud::detail::log_path_failure(subsystem, failure);
 }
 
 void print_help(jb::jobud::detail::CompiledPaths const& paths)
@@ -120,7 +123,12 @@ auto main(int argc, char* argv[]) -> int
 
     auto loaded = jb::jobud::detail::load_configuration(arguments, paths, invocation_directory);
     if (!loaded) {
-        fmt::print(stderr, "jobud: {} ({})\n", loaded.error().message, loaded.error().code);
+        if (loaded.error().path_failure) {
+            fmt::print(stderr, "jobud: {}\n", jb::jobud::detail::path_failure_text(*loaded.error().path_failure));
+        }
+        else {
+            fmt::print(stderr, "jobud: {} ({})\n", loaded.error().message, loaded.error().code);
+        }
         return loaded.error().code == "jobud.config.read_failed" ? EXIT_FAILURE : 2;
     }
     auto resolved = jb::jobud::detail::resolve_startup_options(arguments, loaded->input, paths, invocation_directory);

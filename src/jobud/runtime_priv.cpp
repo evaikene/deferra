@@ -220,6 +220,16 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         }
     }
 
+    void fail(std::string_view subsystem, PathFailure const& failure)
+    {
+        auto const first_failure = exit_code == EXIT_SUCCESS;
+        exit_code                = EXIT_FAILURE;
+        request_stop();
+        if (first_failure) {
+            log_path_failure(subsystem, failure);
+        }
+    }
+
     auto poll_stop() -> bool
     {
         if (should_stop && should_stop()) {
@@ -585,6 +595,11 @@ void DaemonRuntime::request_stop() noexcept
 void DaemonRuntime::fail(std::string_view subsystem, jb::core::Error const& error)
 {
     d_ptr<Private>()->fail(subsystem, error);
+}
+
+void DaemonRuntime::fail(std::string_view subsystem, PathFailure const& failure)
+{
+    d_ptr<Private>()->fail(subsystem, failure);
 }
 
 auto DaemonRuntime::state() const noexcept -> RuntimeState

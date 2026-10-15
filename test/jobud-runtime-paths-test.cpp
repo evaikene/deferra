@@ -7,6 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <cerrno>
 #include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
@@ -66,6 +67,10 @@ TEST_CASE("configuration trust checks the invoking owner and protected parents",
     REQUIRE_FALSE(refused);
     CHECK(refused.error().code == "jobud.config.read_failed");
     CHECK(refused.error().category == jb::core::ErrorCategory::PermissionDenied);
+    REQUIRE(refused.error().path_failure);
+    REQUIRE(refused.error().path_failure->diagnostic);
+    CHECK(refused.error().path_failure->diagnostic->failing_path == config);
+    CHECK(refused.error().path_failure->diagnostic->actual_mode == static_cast<unsigned>(mode));
 }
 
 TEST_CASE("unsafe parents cannot be hidden by optional absence or alias traversal", "[jobud][paths][config]")
@@ -88,7 +93,8 @@ TEST_CASE("protected parent traversal preserves aliases before dot-dot", "[jobud
     std::filesystem::create_directories(target / "child");
     REQUIRE(::chmod(target.c_str(), 0700) == 0);
     std::filesystem::create_directory_symlink(target / "child", directory.path() / "alias");
-    auto parent = open_trusted_parent(directory.path() / "alias/../state.sqlite", ::geteuid(), false);
+    auto parent =
+        open_trusted_parent(directory.path() / "alias/../state.sqlite", ::geteuid(), false, PathRole::StateDirectory);
     REQUIRE(parent);
     REQUIRE(*parent);
     CHECK(parent->value().path == target);
@@ -101,6 +107,12 @@ TEST_CASE("protected parent traversal preserves aliases before dot-dot", "[jobud
     REQUIRE(prepared);
     CHECK(prepared->database_path() == target / "state.sqlite");
     REQUIRE(verify_runtime_paths(*prepared, identity.user));
+    REQUIRE(::chmod(target.c_str(), 0755) == 0);
+    auto refused = verify_runtime_paths(*prepared, identity.user);
+    REQUIRE_FALSE(refused);
+    REQUIRE(refused.error().diagnostic);
+    CHECK(refused.error().diagnostic->failing_path == target);
+    CHECK(refused.error().diagnostic->configured_path == directory.path() / "alias/../state.sqlite");
 }
 
 TEST_CASE("runtime preparation creates only explicit leaves and never repairs existing trees", "[jobud][paths]")
@@ -119,11 +131,25 @@ TEST_CASE("runtime preparation creates only explicit leaves and never repairs ex
     auto missing = prepare_runtime_paths(options_for(directory.path() / "missing/leaf"), identity, *operations);
     REQUIRE_FALSE(missing);
     CHECK_FALSE(std::filesystem::exists(directory.path() / "missing"));
+    REQUIRE(missing.error().diagnostic);
+    CHECK(missing.error().diagnostic->failing_path == directory.path() / "missing");
+    CHECK(missing.error().diagnostic->configured_path == directory.path() / "missing/leaf/state.sqlite");
+    CHECK(missing.error().diagnostic->system_errno == ENOENT);
+    CHECK_FALSE(missing.error().diagnostic->actual_mode);
 
     REQUIRE(::chmod((directory.path() / "leaf").c_str(), 0755) == 0);
     auto insecure = prepare_runtime_paths(options, identity, *operations);
     REQUIRE_FALSE(insecure);
     CHECK((metadata(directory.path() / "leaf").st_mode & 07777) == 0755);
+    REQUIRE(insecure.error().diagnostic);
+    CHECK(insecure.error().diagnostic->failing_path == directory.path() / "leaf");
+    CHECK(insecure.error().diagnostic->actual_mode == 0755);
+    CHECK(insecure.error().diagnostic->required_mode == 0700);
+    CHECK(insecure.error().diagnostic->actual_uid == identity.user);
+
+    // Formatting uses the refusal snapshot even if the path changes before delivery.
+    REQUIRE(::chmod((directory.path() / "leaf").c_str(), 0700) == 0);
+    CHECK(format_path_failure("paths", insecure.error()).message.find("permissions 0755") != std::string::npos);
 }
 
 TEST_CASE("operational leaves reject symlinks and shared temporary paths", "[jobud][paths]")
@@ -135,6 +161,62 @@ TEST_CASE("operational leaves reject symlinks and shared temporary paths", "[job
     CHECK_FALSE(prepare_runtime_paths(options_for(directory.path() / "alias"), identity, *operations));
     CHECK_FALSE(prepare_runtime_paths(options_for("/tmp"), identity, *operations));
     REQUIRE(prepare_runtime_paths(options_for(directory.path()), identity, *operations));
+}
+
+TEST_CASE("account lookup failure does not invent a filesystem diagnosis", "[jobud][paths]")
+{
+    TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    auto               operations = make_system_privilege_operations();
+    auto               identity   = current_identity(*operations);
+    auto               options    = options_for(directory.path() / "uncreated");
+    options.socket_group          = "jobud-stage936-no-such-group";
+    auto expected                 = operations->group(*options.socket_group);
+    REQUIRE_FALSE(expected);
+    auto refused = prepare_runtime_paths(options, identity, *operations);
+    REQUIRE_FALSE(refused);
+    CHECK(refused.error().error == expected.error());
+    CHECK_FALSE(refused.error().diagnostic);
+    CHECK_FALSE(std::filesystem::exists(directory.path() / "uncreated"));
+}
+
+TEST_CASE("denied directory open retains errno and the inspected component", "[jobud][paths]")
+{
+    if (::geteuid() == 0) {
+        SKIP("requires an ordinary user whose directory access is constrained by mode bits");
+    }
+    TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    auto const         blocked = directory.path() / "blocked";
+    REQUIRE(std::filesystem::create_directory(blocked));
+    REQUIRE(::chmod(blocked.c_str(), 0000) == 0);
+    auto refused = open_trusted_parent(blocked / "daemon.ini", ::geteuid(), false, PathRole::Configuration);
+    // Restore traversal before assertions so cleanup remains reliable even if a check fails.
+    REQUIRE(::chmod(blocked.c_str(), 0700) == 0);
+    REQUIRE_FALSE(refused);
+    REQUIRE(refused.error().diagnostic);
+    CHECK(refused.error().diagnostic->failing_path == blocked);
+    CHECK(refused.error().diagnostic->actual_mode == 0000);
+    CHECK(refused.error().diagnostic->system_errno == EACCES);
+}
+
+TEST_CASE("foreign-owned existing state leaf reports the intended daemon identity", "[jobud][paths]")
+{
+    auto       operations = make_system_privilege_operations();
+    auto       identity   = current_identity(*operations);
+    auto const before     = metadata("/");
+    if (before.st_uid == identity.user) {
+        SKIP("requires an invoking identity different from the root directory owner");
+    }
+    // The existing root is a trusted ancestor, but cannot be this user's private state leaf.
+    // Refusal must precede resource creation and must never repair the directory.
+    auto refused = prepare_runtime_paths(options_for("/"), identity, *operations);
+    REQUIRE_FALSE(refused);
+    REQUIRE(refused.error().diagnostic);
+    CHECK(refused.error().error.detail == "leaf_owner_or_mode");
+    CHECK(refused.error().diagnostic->failing_path == "/");
+    CHECK(refused.error().diagnostic->actual_uid == before.st_uid);
+    CHECK(refused.error().diagnostic->required_uid == identity.user);
+    CHECK(metadata("/").st_uid == before.st_uid);
+    CHECK(metadata("/").st_mode == before.st_mode);
 }
 
 TEST_CASE("group runtime leaves require the authorized group and a separate private state leaf", "[jobud][paths]")
@@ -159,7 +241,11 @@ TEST_CASE("group runtime leaves require the authorized group and a separate priv
     REQUIRE(::chmod(directory.path().c_str(), 0700) == 0);
     auto inaccessible = prepare_runtime_paths(options, identity, *operations);
     REQUIRE_FALSE(inaccessible);
-    CHECK(inaccessible.error().detail == "runtime_parent_not_traversable");
+    CHECK(inaccessible.error().error.detail == "runtime_parent_not_traversable");
+    REQUIRE(inaccessible.error().diagnostic);
+    CHECK(inaccessible.error().diagnostic->failing_path == directory.path());
+    CHECK(inaccessible.error().diagnostic->required_gid == identity.group);
+    CHECK(inaccessible.error().diagnostic->actual_mode == 0700);
 }
 
 TEST_CASE("SQLite artifact inspection refuses insecure modes without repairing them", "[jobud][paths][sqlite]")
@@ -177,7 +263,13 @@ TEST_CASE("SQLite artifact inspection refuses insecure modes without repairing t
     REQUIRE(::chmod(path.c_str(), 0600) == 0);
     REQUIRE(validate_database_artifacts(*prepared, identity.user));
     REQUIRE(::chmod(path.c_str(), 0644) == 0);
-    CHECK_FALSE(validate_database_artifacts(*prepared, identity.user));
+    auto refused = validate_database_artifacts(*prepared, identity.user);
+    REQUIRE_FALSE(refused);
+    REQUIRE(refused.error().diagnostic);
+    CHECK(refused.error().diagnostic->failing_path == path);
+    CHECK(refused.error().diagnostic->role == PathRole::DatabaseArtifact);
+    CHECK(refused.error().diagnostic->actual_mode == 0644);
+    CHECK_FALSE(refused.error().diagnostic->required_mode);
     CHECK((metadata(path).st_mode & 07777) == 0644);
 }
 
@@ -211,7 +303,9 @@ TEST_CASE("retained directory descriptors detect pathname replacement", "[jobud]
     REQUIRE(::chmod((directory.path() / "leaf").c_str(), 0700) == 0);
     auto verified = verify_runtime_paths(*prepared, identity.user);
     REQUIRE_FALSE(verified);
-    CHECK(verified.error().detail == "parent_replaced");
+    CHECK(verified.error().error.detail == "parent_replaced");
+    REQUIRE(verified.error().diagnostic);
+    CHECK(verified.error().diagnostic->failing_path == directory.path() / "leaf");
 }
 
 TEST_CASE("filesystem failures release every retained descriptor", "[jobud][paths][lifetime]")
@@ -235,7 +329,8 @@ TEST_CASE("filesystem failures release every retained descriptor", "[jobud][path
         CHECK_FALSE(read_configuration_file(directory.path() / "missing.ini", false));
         CHECK_FALSE(read_configuration_file(config, false));
         CHECK_FALSE(read_configuration_file(fifo, false));
-        CHECK_FALSE(open_trusted_parent(directory.path() / "cycle/file", identity.user, false));
+        CHECK_FALSE(
+            open_trusted_parent(directory.path() / "cycle/file", identity.user, false, PathRole::Configuration));
         CHECK_FALSE(prepare_runtime_paths(partial, identity, *operations));
         {
             auto prepared = prepare_runtime_paths(options_for(directory.path()), identity, *operations);

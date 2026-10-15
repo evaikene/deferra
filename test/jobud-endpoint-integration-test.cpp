@@ -1,14 +1,17 @@
 #include "application.hpp"
 #include "byte_buffer.hpp"
 #include "database.hpp"
+#include "json.hpp"
 #include "privileges_priv.hpp"
 #include "process.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "support/temporary_directory.hpp"
+#include "text_validation.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
@@ -19,6 +22,7 @@
 #include <optional>
 #include <pwd.h>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -109,6 +113,26 @@ auto metadata(std::filesystem::path const& path) -> struct stat {
     REQUIRE(::lstat(path.c_str(), &value) == 0);
     return value;
 
+}
+
+auto failure_fields(std::string const& output, std::string_view format) -> JsonValue::Object
+
+{
+    auto const event = output.find("jobud.failed");
+    REQUIRE(event != std::string::npos);
+    auto const previous = output.rfind('\n', event);
+    auto const begin    = previous == std::string::npos ? 0U : previous + 1U;
+    auto const end      = output.find('\n', event);
+    REQUIRE(end != std::string::npos);
+    auto line = std::string_view{output}.substr(begin, end - begin);
+    if (format == "text") {
+        auto const fields = line.find(" fields=");
+        REQUIRE(fields != std::string_view::npos);
+        line.remove_prefix(fields + 8U);
+    }
+    auto parsed = parse_json(line);
+    REQUIRE(parsed);
+    return format == "text" ? parsed->as_object() : parsed->as_object().at("fields").as_object();
 }
 
 auto provisioned(char const* variable) -> std::string
@@ -227,6 +251,102 @@ TEST_CASE("Daemon endpoint collisions preserve non-socket entries before recover
     rejected.failed("jobud.path.unsafe");
     CHECK(metadata(socket).st_ino == before.st_ino);
     CHECK(metadata(socket).st_mode == before.st_mode);
+}
+
+TEST_CASE("Daemon startup explains missing ancestors and wrong directory modes", "[jobud][paths][integration]")
+{
+    auto const*                  format = GENERATE("json", "text");
+    Application                  app{0, nullptr};
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    auto const                   config = directory.path() / "daemon.ini";
+    std::ofstream{config} << "logging.format = " << format << '\n';
+    REQUIRE(::chmod(config.c_str(), 0600) == 0);
+    auto                  database = directory.path() / "state/database.sqlite";
+    auto                  socket   = directory.path() / "runtime/daemon.sock";
+    std::filesystem::path failing;
+    std::string           resource;
+    std::string           reason;
+    SECTION("missing state ancestor")
+    {
+        failing  = directory.path() / "missing var";
+        database = failing / "lib/database.sqlite";
+        resource = "state_directory";
+        reason   = "missing_parent";
+    }
+    SECTION("wrong state mode")
+    {
+        failing = database.parent_path();
+        REQUIRE(std::filesystem::create_directory(failing));
+        REQUIRE(::chmod(failing.c_str(), 0755) == 0);
+        resource = "state_directory";
+        reason   = "leaf_owner_or_mode";
+    }
+    SECTION("wrong runtime mode")
+    {
+        failing = socket.parent_path();
+        REQUIRE(std::filesystem::create_directory(failing));
+        REQUIRE(::chmod(failing.c_str(), 0755) == 0);
+        resource = "runtime_directory";
+        reason   = "leaf_owner_or_mode";
+    }
+    Daemon daemon{app};
+    daemon.launch(database, socket, config);
+    daemon.failed(reason == "missing_parent" ? "jobud.path.inspect_failed" : "jobud.path.unsafe");
+    auto const fields = failure_fields(daemon.log, format);
+    CHECK(fields.at("reason").as_string() == reason);
+    CHECK(fields.at("path").as_string() == failing.string());
+    CHECK(fields.at("resource").as_string() == resource);
+    CHECK_FALSE(fields.at("action").as_string().empty());
+    CHECK_FALSE(std::filesystem::exists(database));
+    CHECK_FALSE(std::filesystem::exists(socket));
+    if (reason == "missing_parent") {
+        CHECK(daemon.log.find("is missing") != std::string::npos);
+        CHECK(daemon.log.find("Provision") != std::string::npos);
+        CHECK_FALSE(std::filesystem::exists(failing));
+    }
+    else {
+        CHECK(fields.at("actual_mode").as_string() == "0755");
+        CHECK(fields.at("required_mode").as_string() == "0700");
+        CHECK(daemon.log.find("required permissions are 0700") != std::string::npos);
+        CHECK((metadata(failing).st_mode & 07777) == 0755);
+    }
+}
+
+TEST_CASE("Configuration path failures are actionable before logger installation",
+          "[jobud][paths][config][integration]")
+{
+    Application                  app{0, nullptr};
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    auto                         config = directory.path() / "missing parent/daemon.ini";
+    SECTION("explicit missing configuration parent")
+    {}
+    SECTION("wrong configuration permissions do not disclose contents")
+    {
+        config = directory.path() / "daemon.ini";
+        std::ofstream{config} << "http.proxy = http://stage936-private-credential@proxy.test\n";
+        REQUIRE(::chmod(config.c_str(), 0620) == 0);
+    }
+    SECTION("alias target containing controls and malformed UTF-8")
+    {
+        auto const hostile = directory.path() / std::string{"a 'quoted'\n\x1b\xff"};
+        REQUIRE(std::filesystem::create_directory(hostile));
+        REQUIRE(::chmod(hostile.c_str(), 0777) == 0);
+        std::filesystem::create_directory_symlink(hostile, directory.path() / "alias");
+        config = directory.path() / "alias/daemon.ini";
+    }
+    Daemon daemon{app};
+    daemon.launch(directory.path() / "database.sqlite", directory.path() / "daemon.sock", config);
+    daemon.failed("jobud.config.read_failed");
+    CHECK(daemon.log.find("Action:") != std::string::npos);
+    CHECK((daemon.log.find("Configured resource:") != std::string::npos ||
+           daemon.log.find(config.string()) != std::string::npos));
+    CHECK(daemon.log.find("jobud.starting") == std::string::npos);
+    CHECK(daemon.log.find("stage936-private-credential") == std::string::npos);
+    CHECK(daemon.log.find('\x1b') == std::string::npos);
+    CHECK(jb::core::is_valid_utf8(daemon.log));
+    CHECK(std::count(daemon.log.begin(), daemon.log.end(), '\n') == 1);
+    CHECK_FALSE(std::filesystem::exists(directory.path() / "database.sqlite"));
+    CHECK_FALSE(std::filesystem::exists(directory.path() / "daemon.sock"));
 }
 
 TEST_CASE("Configured socket group admits administrators and rejects outsiders", "[jobud][endpoint][integration][root]")
