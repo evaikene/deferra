@@ -1,6 +1,7 @@
 #include "logging.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <array>
 #include <atomic>
@@ -367,19 +368,57 @@ TEST_CASE("Structured events capture call-site metadata and accept empty fields"
     CHECK(records[1].level == LogLevel::Warning);
 }
 
+TEST_CASE("Independent event messages preserve caller metadata and empty text", "[core][logging]")
+{
+    LoggerGuard g;
+    auto const  before = std::chrono::system_clock::now();
+    auto const  line   = std::source_location::current().line() + 1;
+    log_event_message(LogLevel::Info, "empty.event", "No fields were supplied.");
+    auto const after = std::chrono::system_clock::now();
+
+    auto const explicit_location = std::source_location::current();
+    log_event_message(LogLevel::Warning, "located.event", "", {}, explicit_location);
+
+    auto const records = g.cap->records();
+    REQUIRE(records.size() == 2);
+    CHECK(records[0].event_name == "empty.event");
+    CHECK(records[0].message == "No fields were supplied.");
+    CHECK(records[0].level == LogLevel::Info);
+    CHECK(records[0].line == line);
+    CHECK(records[0].file == std::source_location::current().file_name());
+    CHECK(records[0].timestamp >= before);
+    CHECK(records[0].timestamp <= after);
+    CHECK(records[0].thread_id == std::this_thread::get_id());
+    CHECK(records[0].fields.empty());
+    CHECK(records[1].event_name == "located.event");
+    CHECK(records[1].message.empty());
+    CHECK(records[1].line == explicit_location.line());
+    CHECK(records[1].file == explicit_location.file_name());
+    CHECK(records[1].level == LogLevel::Warning);
+    CHECK(records[1].fields.empty());
+}
+
 TEST_CASE("Structured event copies survive caller storage mutation and destruction", "[core][logging]")
 {
+    auto const  independent_message = GENERATE(false, true);
     LoggerGuard g;
     {
         std::string      event_name{"owned.event"};
+        std::string      message{"Finished work."};
         std::string      field_name{"label"};
         std::string      value{"original"};
         std::array const fields{
             LogField{.name = field_name, .value = std::string_view{value}}
         };
-        log_event(LogLevel::Info, event_name, fields);
+        if (independent_message) {
+            log_event_message(LogLevel::Info, event_name, message, fields);
+        }
+        else {
+            log_event(LogLevel::Info, event_name, fields);
+        }
 
         event_name.assign("changed");
+        message.assign("changed");
         field_name.assign("changed");
         value.assign("changed");
     }
@@ -387,7 +426,7 @@ TEST_CASE("Structured event copies survive caller storage mutation and destructi
     auto const records = g.cap->records();
     REQUIRE(records.size() == 1);
     CHECK(records[0].event_name == "owned.event");
-    CHECK(records[0].message == "owned.event");
+    CHECK(records[0].message == (independent_message ? "Finished work." : "owned.event"));
     REQUIRE(records[0].fields.size() == 1);
     CHECK(records[0].fields[0].name == "label");
     CHECK(std::get<std::string>(records[0].fields[0].value) == "original");
@@ -395,11 +434,14 @@ TEST_CASE("Structured event copies survive caller storage mutation and destructi
 
 TEST_CASE("Structured events borrow caller storage during the synchronous sink call", "[core][logging]")
 {
+    auto const independent_message = GENERATE(false, true);
+
     struct BorrowLogger final : Logger {
         void log(LogMessage const& record) override
         {
-            event_data = record.event_name.data();
-            field_data = record.fields.data();
+            event_data   = record.event_name.data();
+            message_data = record.message.data();
+            field_data   = record.fields.data();
             if (record.fields.size() == 1) {
                 name_data  = record.fields[0].name.data();
                 value_data = std::get<std::string_view>(record.fields[0].value).data();
@@ -407,6 +449,7 @@ TEST_CASE("Structured events borrow caller storage during the synchronous sink c
         }
 
         char const*     event_data{};
+        char const*     message_data{};
         LogField const* field_data{};
         char const*     name_data{};
         char const*     value_data{};
@@ -418,14 +461,21 @@ TEST_CASE("Structured events borrow caller storage during the synchronous sink c
     set_logger(sink);
 
     std::string const event_name{"borrowed.event"};
+    std::string const message{"Borrowed message."};
     std::string const name{"name"};
     std::string const value{"value"};
     std::array const  fields{
         LogField{.name = name, .value = std::string_view{value}}
     };
-    log_event(LogLevel::Info, event_name, fields);
+    if (independent_message) {
+        log_event_message(LogLevel::Info, event_name, message, fields);
+    }
+    else {
+        log_event(LogLevel::Info, event_name, fields);
+    }
 
     CHECK(sink->event_data == event_name.data());
+    CHECK(sink->message_data == (independent_message ? message.data() : event_name.data()));
     CHECK(sink->field_data == fields.data());
     CHECK(sink->name_data == name.data());
     CHECK(sink->value_data == value.data());
@@ -433,6 +483,7 @@ TEST_CASE("Structured events borrow caller storage during the synchronous sink c
 
 TEST_CASE("Structured events obey every severity threshold", "[core][logging]")
 {
+    auto const       independent_message = GENERATE(false, true);
     LoggerGuard      g;
     std::array const levels{LogLevel::Fatal,
                             LogLevel::Error,
@@ -446,13 +497,20 @@ TEST_CASE("Structured events obey every severity threshold", "[core][logging]")
         g.cap->set_level(levels[threshold]);
         g.cap->clear();
         for (auto level : levels) {
-            log_event(level, "threshold.checked");
+            if (independent_message) {
+                log_event_message(level, "threshold.checked", "Threshold checked.");
+            }
+            else {
+                log_event(level, "threshold.checked");
+            }
         }
 
         auto const records = g.cap->records();
         REQUIRE(records.size() == threshold + 1);
         for (std::size_t index = 0; index < records.size(); ++index) {
             CHECK(records[index].level == levels[index]);
+            CHECK(records[index].event_name == "threshold.checked");
+            CHECK(records[index].message == (independent_message ? "Threshold checked." : "threshold.checked"));
         }
     }
 }
@@ -463,11 +521,14 @@ TEST_CASE("Structured events obey every severity threshold", "[core][logging]")
 
 TEST_CASE("An in-flight event retains its sink across logger replacement", "[core][logging]")
 {
+    auto const independent_message = GENERATE(false, true);
+
     struct PausedCall {
         std::latch       entered{1};
         std::latch       release{1};
         std::atomic_bool destroyed{false};
         std::string      event_name;
+        std::string      message;
     } state;
 
     struct PausedLogger final : Logger {
@@ -482,6 +543,7 @@ TEST_CASE("An in-flight event retains its sink across logger replacement", "[cor
             state.entered.count_down();
             state.release.wait();
             state.event_name = record.event_name;
+            state.message    = record.message;
         }
 
         PausedCall& state;
@@ -495,11 +557,28 @@ TEST_CASE("An in-flight event retains its sink across logger replacement", "[cor
     original.reset();
 
     // The old sink is now owned only by the slot and the admitted call. Replace the slot while the call is paused.
-    std::jthread caller{[] { log_event(LogLevel::Info, "original.event"); }};
+    std::jthread caller{[independent_message] {
+        std::string const message{"Original message."};
+        if (independent_message) {
+            log_event_message(LogLevel::Info, "original.event", message);
+        }
+        else {
+            log_event(LogLevel::Info, "original.event");
+        }
+    }};
     state.entered.wait();
+    // A threshold change after admission must not cancel the paused record either.
+    if (auto admitted = weak.lock()) {
+        admitted->set_level(LogLevel::Fatal);
+    }
     set_logger(replacement.cap);
     bool const retained = !weak.expired() && !state.destroyed.load();
-    log_event(LogLevel::Info, "replacement.event");
+    if (independent_message) {
+        log_event_message(LogLevel::Info, "replacement.event", "Replacement message.");
+    }
+    else {
+        log_event(LogLevel::Info, "replacement.event");
+    }
     state.release.count_down();
     caller.join();
 
@@ -507,13 +586,16 @@ TEST_CASE("An in-flight event retains its sink across logger replacement", "[cor
     CHECK(weak.expired());
     CHECK(state.destroyed.load());
     CHECK(state.event_name == "original.event");
+    CHECK(state.message == (independent_message ? "Original message." : "original.event"));
     auto const records = replacement.cap->records();
     REQUIRE(records.size() == 1);
     CHECK(records[0].event_name == "replacement.event");
+    CHECK(records[0].message == (independent_message ? "Replacement message." : "replacement.event"));
 }
 
 TEST_CASE("Concurrent events remain complete across logger and threshold changes", "[core][logging]")
 {
+    auto const  independent_message = GENERATE(false, true);
     LoggerGuard first;
     auto const  second = std::make_shared<CaptureLogger>();
     second->set_level(LogLevel::Info);
@@ -533,8 +615,14 @@ TEST_CASE("Concurrent events remain complete across logger and threshold changes
                     LogField{.name = "worker",   .value = static_cast<std::uint64_t>(worker)},
                     LogField{.name = "sequence", .value = sequence                          }
                 };
-                log_event(LogLevel::Error, "concurrent.event", fields);
-                log_event(LogLevel::Info, "optional.event", fields);
+                if (independent_message) {
+                    log_event_message(LogLevel::Error, "concurrent.event", "Concurrent work.", fields);
+                    log_event_message(LogLevel::Info, "optional.event", "Optional work.", fields);
+                }
+                else {
+                    log_event(LogLevel::Error, "concurrent.event", fields);
+                    log_event(LogLevel::Info, "optional.event", fields);
+                }
             }
         });
     }
@@ -557,7 +645,12 @@ TEST_CASE("Concurrent events remain complete across logger and threshold changes
     std::size_t                                                   required_count{};
     for (auto const& sink : {first.cap, second}) {
         for (auto const& record : sink->records()) {
-            CHECK(record.message == record.event_name);
+            if (independent_message) {
+                CHECK(record.message == (record.level == LogLevel::Error ? "Concurrent work." : "Optional work."));
+            }
+            else {
+                CHECK(record.message == record.event_name);
+            }
             REQUIRE(record.fields.size() == 2);
             CHECK(record.fields[0].name == "worker");
             CHECK(record.fields[1].name == "sequence");
