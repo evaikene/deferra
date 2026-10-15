@@ -60,6 +60,13 @@ void log_failure(std::string_view event, std::string_view subsystem, std::string
 
 void log_recovery(jb::jobu::RecoveryReport const& report)
 {
+    auto const repaired = report.interrupted_attempts != 0 || report.retrying_runs != 0 || report.terminal_runs != 0 ||
+                          report.finished_jobs != 0 || report.inserted_successors != 0 || report.suspended_jobs != 0 ||
+                          report.suspended_queues != 0 || report.repaired_timing_rows != 0;
+    auto const level    = repaired ? jb::core::LogLevel::Info : jb::core::LogLevel::Debug2;
+    std::string_view const message =
+        repaired ? "Startup recovery repaired persisted state." : "Startup recovery completed; no repairs were needed.";
+
     auto const fields = std::array{
         jb::core::LogField{.name = "interrupted_attempts", .value = report.interrupted_attempts},
         jb::core::LogField{.name = "retrying_runs",        .value = report.retrying_runs       },
@@ -70,7 +77,7 @@ void log_recovery(jb::jobu::RecoveryReport const& report)
         jb::core::LogField{.name = "suspended_queues",     .value = report.suspended_queues    },
         jb::core::LogField{.name = "repaired_timing_rows", .value = report.repaired_timing_rows}
     };
-    jb::core::log_event(jb::core::LogLevel::Info, "jobud.recovery.completed", fields);
+    jb::core::log_event_message(level, "jobud.recovery.completed", message, fields);
 }
 
 void log_delayed(jb::jobu::DelayedRun const& delayed)
@@ -94,6 +101,11 @@ void log_delayed(jb::jobu::DelayedRun const& delayed)
 
 void log_retention(jb::jobu::RetentionPurgeCounts const& counts)
 {
+    auto const purged = counts.runs != 0 || counts.idempotency_records != 0 || counts.jobs != 0 || counts.queues != 0;
+    auto const level  = purged ? jb::core::LogLevel::Info : jb::core::LogLevel::Debug2;
+    std::string_view const message =
+        purged ? "Retention sweep removed eligible records." : "Retention sweep completed; no records were removed.";
+
     auto const fields = std::array{
         jb::core::LogField{.name = "runs",                 .value = static_cast<std::uint64_t>(counts.runs)  },
         jb::core::LogField{.name  = "idempotency_records",
@@ -101,7 +113,7 @@ void log_retention(jb::jobu::RetentionPurgeCounts const& counts)
         jb::core::LogField{.name = "jobs",                 .value = static_cast<std::uint64_t>(counts.jobs)  },
         jb::core::LogField{.name = "queues",               .value = static_cast<std::uint64_t>(counts.queues)}
     };
-    jb::core::log_event(jb::core::LogLevel::Info, "jobud.retention.completed", fields);
+    jb::core::log_event_message(level, "jobud.retention.completed", message, fields);
 }
 
 } // namespace
