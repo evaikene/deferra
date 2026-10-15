@@ -108,6 +108,9 @@ struct Scheduler::Private : jb::core::priv::ObjectPrivate {
                    .failure_reported = [this](jb::core::Error const& error) -> void { fail(error); },
                    // bind_owner() supplies the public owner after Object has taken ownership of this block.
                    .attempt_started  = [this](AttemptStarted value) { owner->emit(owner->attempt_started, value); },
+                   .attempt_finished = [this](AttemptFinished value) { owner->emit(owner->attempt_finished, value); },
+                   .retry_scheduled  = [this](RetryScheduled value) { owner->emit(owner->retry_scheduled, value); },
+                   .run_finished     = [this](RunFinished value) { owner->emit(owner->run_finished, value); },
                }}
     {
         if (!valid_options(options)) {
@@ -380,6 +383,20 @@ auto Scheduler::cancel_run(jb::core::Uuid const& run_id) -> jb::core::Result<Can
     }
     if (cancelled && cancelled->disposition == CancelDisposition::Completed) {
         data->request_rescan();
+        // The core's transaction/queries have unwound and timer handling is complete before observers run.
+        if (!data->terminal) {
+            auto const& run = cancelled->run;
+            emit(run_finished,
+                 RunFinished{
+                     .execution    = {.queue_id = run.queue_id,
+                                      .job_id   = run.job_id,
+                                      .run_id   = run.id,
+                                      .type     = run.type,
+                                      .origin   = run.origin},
+                     .state        = run.state,
+                     .completed_at = *run.completed_at
+            });
+        }
     }
     return cancelled;
 }

@@ -186,7 +186,10 @@ struct Fixture {
                                            if (on_started) {
                                                on_started(value);
                                            }
-                                       }});
+                                       },
+                                   .attempt_finished = [this](AttemptFinished value) { completions.push_back(value); },
+                                   .retry_scheduled  = [this](RetryScheduled value) { retries.push_back(value); },
+                                   .run_finished     = [this](RunFinished value) { finishes.push_back(value); }});
         faults->classify = [](std::string_view sql) { return std::string{classify(sql)}; };
         telemetry->failed.connect(&receiver, [this](Error const& error) {
             timing_failures.push_back(error);
@@ -297,6 +300,9 @@ struct Fixture {
     std::vector<Error>                         timing_failures;
     std::vector<DelayedRun>                    warnings;
     std::vector<AttemptStarted>                starts;
+    std::vector<AttemptFinished>               completions;
+    std::vector<RetryScheduled>                retries;
+    std::vector<RunFinished>                   finishes;
     std::function<void(AttemptStarted const&)> on_started;
     std::size_t                                calls_at_failure{0};
     std::unique_ptr<ExecutionTelemetry>        telemetry;
@@ -332,7 +338,20 @@ TEST_CASE("Dispatch closes wait before external start and completion excludes ex
     CHECK(f.timing(run.id).runnable_wait_us == 7'000'000);
     CHECK_FALSE(f.timing(run.id).open_epoch);
     f.time.advance(50s);
+    // Storage work consumes local time after handler entry; it must not inflate diagnostic elapsed or runnable wait.
+    auto advanced     = false;
+    f.faults->observe = [&](DatabaseCall const& call) {
+        if (!advanced && call.boundary == "connection" && call.operation == DatabaseOperation::Begin) {
+            advanced = true;
+            f.time.advance(30s);
+        }
+    };
     f.finish();
+    f.faults->observe = {};
+    CHECK(advanced);
+    REQUIRE(f.completions.size() == 1);
+    CHECK(f.completions.front().elapsed == 50s);
+    CHECK(f.finishes.size() == 1);
     CHECK(f.run(run.id).state == RunState::Succeeded);
     CHECK(f.timing(run.id).quality == WaitQuality::Complete);
     CHECK(f.timing(run.id).runnable_wait_us == 7'000'000);
@@ -769,6 +788,9 @@ TEST_CASE("Missing or open Running timing aborts completion before durable chang
     f.finish();
     REQUIRE(f.failures.size() == 1);
     CHECK(f.failures.front().detail == "operation=completion reason=durable_invariant");
+    CHECK(f.completions.empty());
+    CHECK(f.retries.empty());
+    CHECK(f.finishes.empty());
     CHECK(storage_snapshot(f.storage.database) == before);
 }
 

@@ -5,6 +5,7 @@
 #include "attempt_executor.hpp"
 #include "attempt_repository_priv.hpp"
 #include "database.hpp"
+#include "execution_diagnostics_priv.hpp"
 #include "job_lifecycle_priv.hpp"
 #include "json.hpp"
 #include "object_priv.hpp"
@@ -17,6 +18,7 @@
 #include "transaction.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -69,11 +71,53 @@ struct EligibleQueue {
 using CandidateCache = std::map<jb::core::Uuid, CandidateBatch>;
 
 struct CompletionEffect {
-    bool queue_slot_retained{false};
+    bool                                      queue_slot_retained{false};
+    AttemptFinished                           attempt;
+    std::variant<RetryScheduled, RunFinished> following;
 };
 
 using CompletionProcessor =
     std::function<CoreResult<std::optional<CompletionEffect>>(jb::core::Uuid const&, AttemptCompletion const&)>;
+using CompletionDelivery = std::function<void(CompletionEffect const&)>;
+
+auto attempt_elapsed(std::optional<jb::core::TimePoint> accepted_at, jb::core::TimePoint completed_at)
+    -> std::optional<std::chrono::milliseconds>
+{
+    if (!accepted_at || completed_at < *accepted_at) {
+        return std::nullopt;
+    }
+
+    // Comparing endpoints first avoids overflowing the native signed duration when clocks span its whole range.
+    auto const accepted = accepted_at->time_since_epoch();
+    if (accepted < jb::core::Duration::zero() &&
+        completed_at.time_since_epoch() > jb::core::Duration::max() + accepted) {
+        return std::nullopt;
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(completed_at - *accepted_at);
+}
+
+void deliver_completion(CompletionEffect const& effect, SchedulerCoreCallbacks const& callbacks, bool const& terminal)
+{
+    if (terminal) {
+        return;
+    }
+    if (callbacks.attempt_finished) {
+        callbacks.attempt_finished(effect.attempt);
+    }
+
+    // A receiver may request terminal shutdown between the two owning values of this committed transition.
+    if (terminal) {
+        return;
+    }
+    if (auto const* retry = std::get_if<RetryScheduled>(&effect.following)) {
+        if (callbacks.retry_scheduled) {
+            callbacks.retry_scheduled(*retry);
+        }
+    }
+    else if (callbacks.run_finished) {
+        callbacks.run_finished(std::get<RunFinished>(effect.following));
+    }
+}
 
 auto core_error(jb::core::ErrorCategory category, std::string code, std::string message) -> jb::core::Error
 {
@@ -492,7 +536,8 @@ auto process_completion(jb::db::Database&                        database,
                         std::map<jb::core::Uuid, ActiveAttempt>& active_attempts,
                         std::set<jb::core::Uuid>&                cancellation_requests,
                         jb::core::Uuid const&                    expected_run_id,
-                        AttemptCompletion const&                 completion) -> CoreResult<CompletionEffect>
+                        AttemptCompletion const&                 completion,
+                        jb::core::TimePoint                      completion_entered_at) -> CoreResult<CompletionEffect>
 {
     // Validate the executor's original callback before applying any accepted-cancellation override. Cancellation may
     // change the durable outcome, but it must not conceal a key mismatch or another executor protocol violation.
@@ -592,7 +637,21 @@ auto process_completion(jb::db::Database&                        database,
         }
     }
 
-    auto effect = CompletionEffect{};
+    // The fixed cancellation result contains no numeric runner diagnostics. Never project the overridden original.
+    auto const diagnostics = cancellation_requested
+                               ? ExecutionDiagnostics{}
+                               : project_execution_diagnostics(active->second.execution.type, completion.result);
+    auto       effect      = CompletionEffect{
+        .attempt = {.execution      = active->second.execution,
+                    .attempt_number = active->second.attempt_number,
+                    .outcome        = outcome,
+                    .start_phase    = active->second.start_phase,
+                    .completed_at   = std::chrono::floor<std::chrono::microseconds>(completed_at),
+                    .elapsed        = attempt_elapsed(active->second.accepted_at, completion_entered_at),
+                    .exit_code      = diagnostics.exit_code,
+                    .signal_number  = diagnostics.signal_number,
+                    .http_status    = diagnostics.http_status},
+    };
     if (decision->retry) {
         auto retry_wait = repository.set_run_retry_wait(completion.key.run_id, decision->retry->due_at);
         if (!retry_wait) {
@@ -604,6 +663,14 @@ auto process_completion(jb::db::Database&                        database,
             context->job_state == JobState::Active || context->run.origin == RunOrigin::Manual;
         effect.queue_slot_retained = decision->retry->mode == RetryMode::Blocking && job_permits_execution &&
                                      context->queue_state == QueueState::Active;
+        // retry_decision() has already enforced the configured and representable attempt-number limit.
+        effect.following           = RetryScheduled{
+            .execution         = effect.attempt.execution,
+            .completed_attempt = effect.attempt.attempt_number,
+            .next_attempt      = effect.attempt.attempt_number + 1U,
+            .runnable_at       = std::chrono::floor<std::chrono::microseconds>(decision->retry->due_at),
+            .mode              = decision->retry->mode,
+        };
     }
     else {
         auto terminal = terminal_run_state(outcome);
@@ -614,13 +681,17 @@ auto process_completion(jb::db::Database&                        database,
         if (!run_completed) {
             return CoreResult<CompletionEffect>::failure(std::move(run_completed).error());
         }
-        auto successor = insert_recurring_successor(database,
-                                                    attributes,
-                                                    cron,
-                                                    uuid_generator,
-                                                    context->run,
-                                                    std::max(completed_at, context->run.planned_at),
-                                                    timing.measurement());
+        effect.following = RunFinished{.execution          = effect.attempt.execution,
+                                       .state              = *terminal,
+                                       .completed_at       = effect.attempt.completed_at,
+                                       .completing_attempt = effect.attempt.attempt_number};
+        auto successor   = insert_recurring_successor(database,
+                                                      attributes,
+                                                      cron,
+                                                      uuid_generator,
+                                                      context->run,
+                                                      std::max(completed_at, context->run.planned_at),
+                                                      timing.measurement());
         if (!successor) {
             return CoreResult<CompletionEffect>::failure(std::move(successor).error());
         }
@@ -774,6 +845,7 @@ auto dispatch_visit(jb::db::Database&                          database,
                     std::map<jb::core::Uuid, ActiveAttempt>&   active_attempts,
                     std::set<jb::core::Uuid>&                  attempted_blocking_retries,
                     CompletionProcessor const&                 completion_processor,
+                    CompletionDelivery const&                  completion_delivery,
                     std::function<void(AttemptStarted)> const& started_delivery,
                     std::function<bool(DelayedRun)> const&     delayed_delivery,
                     bool const&                                terminal) -> CoreResult<bool>
@@ -860,11 +932,14 @@ auto dispatch_visit(jb::db::Database&                          database,
                 return CoreResult<bool>::success(false);
             }
             auto completion = [expected_run_id = run_id,
-                               processor       = completion_processor](AttemptCompletion const& value) mutable {
-                // The shared processor records a sticky failure or rescan request before this callback drops the
-                // Result.
+                               processor       = completion_processor,
+                               delivery        = completion_delivery](AttemptCompletion const& value) {
+                // The shared processor latches failure or requests the normal rescan after SQL cleanup. Async
+                // completion has no cycle-local capacity to reconcile, so its event batch is now safe to deliver.
                 auto handled = processor(expected_run_id, value);
-                (void)handled;
+                if (handled && handled->has_value()) {
+                    delivery(**handled);
+                }
             };
             // Each claim has its own sample. An immediate completion can invalidate that
             // sample before this cycle reaches its next dispatch opportunity.
@@ -943,6 +1018,8 @@ auto dispatch_visit(jb::db::Database&                          database,
                 if (!reconciled) {
                     return CoreResult<bool>::failure(std::move(reconciled).error());
                 }
+                // Immediate failures still own this cycle's capacity snapshot until reconciliation completes.
+                completion_delivery(**completed);
             }
             return CoreResult<bool>::success(true);
         };
@@ -1257,7 +1334,7 @@ auto SchedulerCore::cancel_run_impl(jb::core::Uuid const& run_id) -> jb::core::R
     }
 
     run.state        = RunState::Cancelled;
-    run.completed_at = completed_at;
+    run.completed_at = std::chrono::floor<std::chrono::microseconds>(completed_at);
     run.result       = std::move(result);
     return CancellationResult::success({
         .run         = std::move(run),
@@ -1349,7 +1426,8 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
             if (token->terminal || !token->owner) {
                 return CompletionResult::success(std::nullopt);
             }
-            auto& core = *token->owner;
+            auto&      core                  = *token->owner;
+            auto const completion_entered_at = core._time_source.monotonic_now();
             core._telemetry_failure.reset();
             auto completed = process_completion(core._database,
                                                 core._attributes,
@@ -1361,7 +1439,8 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
                                                 core._active_attempts,
                                                 core._cancellation_requests,
                                                 expected_run_id,
-                                                completion);
+                                                completion,
+                                                completion_entered_at);
             if (!completed) {
                 auto error = core.fail_operation(completed.error(), StorageOperation::Completion, true);
                 return CompletionResult::failure(std::move(error));
@@ -1371,6 +1450,11 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
             }
             return CompletionResult::success(*completed);
         }};
+    auto completion_delivery = CompletionDelivery{[token = _completion_token](CompletionEffect const& effect) {
+        if (!token->terminal && token->owner) {
+            deliver_completion(effect, token->owner->_callbacks, token->terminal);
+        }
+    }};
 
     // Manual and schedule-owned runs share each repository-ordered batch; only the CLI/HTTP first opportunity
     // alternates after a productive round, so origin handling cannot bypass strict priority.
@@ -1401,6 +1485,7 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
                                     _active_attempts,
                                     first_blocking,
                                     completion_processor,
+                                    completion_delivery,
                                     _callbacks.attempt_started,
                                     delayed_delivery,
                                     _completion_token->terminal);
@@ -1430,6 +1515,7 @@ auto SchedulerCore::process_cycle_impl() -> jb::core::Result<SchedulerCycleResul
                                      _active_attempts,
                                      second_blocking,
                                      completion_processor,
+                                     completion_delivery,
                                      _callbacks.attempt_started,
                                      delayed_delivery,
                                      _completion_token->terminal);

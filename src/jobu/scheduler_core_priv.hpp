@@ -60,6 +60,9 @@ struct SchedulerCoreCallbacks {
     std::function<void()>                       rescan_requested;
     std::function<void(jb::core::Error const&)> failure_reported;
     std::function<void(AttemptStarted)>         attempt_started;
+    std::function<void(AttemptFinished)>        attempt_finished;
+    std::function<void(RetryScheduled)>         retry_scheduled;
+    std::function<void(RunFinished)>            run_finished;
 };
 
 class SchedulerCore final {

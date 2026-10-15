@@ -222,16 +222,19 @@ struct Fixture {
     SequenceUuidGenerator                  generator{
         {recovery_id(100), recovery_id(101)}
     };
-    RejectingSecretProvider     secrets;
-    DatabaseSecretProvider      database_secrets{store.database};
-    FakeTimeSource              time;
-    ObservingExecutor           executor{faults};
-    std::vector<Error>          failures;
-    std::vector<AttemptStarted> starts;
-    std::unique_ptr<Scheduler>  scheduler;
-    Queue                       queue{recovery_queue(recovery_id(1))};
-    JobDefinition               job;
-    RecoveryRunFixture          original;
+    RejectingSecretProvider      secrets;
+    DatabaseSecretProvider       database_secrets{store.database};
+    FakeTimeSource               time;
+    ObservingExecutor            executor{faults};
+    std::vector<Error>           failures;
+    std::vector<AttemptStarted>  starts;
+    std::vector<AttemptFinished> completions;
+    std::vector<RetryScheduled>  retries;
+    std::vector<RunFinished>     finishes;
+    std::unique_ptr<Scheduler>   scheduler;
+    Queue                        queue{recovery_queue(recovery_id(1))};
+    JobDefinition                job;
+    RecoveryRunFixture           original;
 
     explicit Fixture(Scenario      scenario   = Scenario::Terminal,
                      RunState      initial    = RunState::Scheduled,
@@ -275,6 +278,12 @@ struct Fixture {
         scheduler->failed.connect(scheduler.get(), [this](Error const& error) { failures.push_back(error); });
         scheduler->attempt_started.connect(scheduler.get(),
                                            [this](AttemptStarted const& value) { starts.push_back(value); });
+        scheduler->attempt_finished.connect(scheduler.get(),
+                                            [this](AttemptFinished const& value) { completions.push_back(value); });
+        scheduler->retry_scheduled.connect(scheduler.get(),
+                                           [this](RetryScheduled const& value) { retries.push_back(value); });
+        scheduler->run_finished.connect(scheduler.get(),
+                                        [this](RunFinished const& value) { finishes.push_back(value); });
     }
 
     void arm(DatabaseCall call, std::string code = "db.io")
@@ -329,6 +338,9 @@ struct Fixture {
 
     void require_failure(std::string_view code = "db.io") const
     {
+        CHECK(completions.empty());
+        CHECK(retries.empty());
+        CHECK(finishes.empty());
         REQUIRE(failures.size() == 1U);
         CHECK(failures.front().code == code);
         CHECK(failures.front().detail.find("private-backend-marker") == std::string::npos);
@@ -653,6 +665,10 @@ TEST_CASE("Completion controls persist the entire intended transition", "[jobu][
             auto    key = fixture.start_completion(scenario);
             REQUIRE(fixture.executor.fake.complete(key, completion(key, retries(scenario))));
             CHECK(fixture.failures.empty());
+            REQUIRE(fixture.completions.size() == 1);
+            CHECK(fixture.completions.front().execution.run_id == key.run_id);
+            CHECK(fixture.retries.size() == (retries(scenario) ? 1U : 0U));
+            CHECK(fixture.finishes.size() == (retries(scenario) ? 0U : 1U));
             fixture.reopen();
             require_committed_completion(fixture, key, scenario);
         }

@@ -125,6 +125,18 @@ struct SchedulerFixture {
         scheduler  = std::make_unique<Scheduler>(database, registry, cron, generator, time, executor, secrets, options);
         scheduler->attempt_started.connect(scheduler.get(),
                                            [this](AttemptStarted const& value) { starts.push_back(value); });
+        scheduler->attempt_finished.connect(scheduler.get(), [this](AttemptFinished const& value) {
+            completions.push_back(value);
+            events.emplace_back("attempt");
+        });
+        scheduler->retry_scheduled.connect(scheduler.get(), [this](RetryScheduled const& value) {
+            retries.push_back(value);
+            events.emplace_back("retry");
+        });
+        scheduler->run_finished.connect(scheduler.get(), [this](RunFinished const& value) {
+            finishes.push_back(value);
+            events.emplace_back("run");
+        });
     }
 
     auto create_queue(std::string name = "queue", std::uint32_t concurrency = 1) const -> Queue
@@ -134,13 +146,14 @@ struct SchedulerFixture {
         return std::move(created).value();
     }
 
-    auto create_job(Queue const& queue, JobType type, UtcTimePoint planned_at) -> JobRun
+    auto create_job(Queue const& queue, JobType type, UtcTimePoint planned_at, AttributeSet attributes = {}) -> JobRun
     {
         auto definition = management->create_job({
-            .queue    = queue.id,
-            .type     = type,
-            .schedule = OnceSchedule{.planned_at = planned_at},
-            .payload  = payload(type),
+            .queue      = queue.id,
+            .type       = type,
+            .schedule   = OnceSchedule{.planned_at = planned_at},
+            .attributes = std::move(attributes),
+            .payload    = payload(type),
         });
         REQUIRE(definition);
         auto run = runs.find_schedule_owned(definition->id);
@@ -162,6 +175,10 @@ struct SchedulerFixture {
     FakeAttemptExecutor                    executor;
     RunRepository                          runs;
     std::vector<AttemptStarted>            starts;
+    std::vector<AttemptFinished>           completions;
+    std::vector<RetryScheduled>            retries;
+    std::vector<RunFinished>               finishes;
+    std::vector<std::string_view>          events;
     std::unique_ptr<ManagementService>     management;
     std::unique_ptr<Scheduler>             scheduler;
 };
@@ -274,6 +291,237 @@ TEST_CASE("Scheduler start observers see accepted committed attempts once for bo
             }
         }
     }
+}
+
+TEST_CASE("Completion observers see committed public events for both origins and runner families",
+          "[jobu][scheduler][event-loop][execution][sqlite]")
+{
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        for (bool manual : {false, true}) {
+            DYNAMIC_SECTION("type " << static_cast<int>(type) << " manual " << manual)
+            {
+                SchedulerFixture fixture;
+                auto const       queue = fixture.create_queue();
+                auto             run   = fixture.create_job(queue, type, at_seconds(manual ? 200 : 90));
+                if (manual) {
+                    auto requested = fixture.management->run_now({.job_id = run.job_id});
+                    REQUIRE(requested);
+                    run = *requested;
+                }
+                fixture.executor.set_available(type, true);
+                fixture.scheduler->attempt_finished.connect(fixture.scheduler.get(), [&](AttemptFinished const& value) {
+                    CHECK(value.execution.run_id == run.id);
+                    CHECK(value.execution.queue_id == queue.id);
+                    CHECK(value.execution.job_id == run.job_id);
+                    CHECK(value.execution.type == type);
+                    CHECK(value.execution.origin == run.origin);
+                    auto durable = fixture.runs.find_by_id(run.id);
+                    REQUIRE(durable);
+                    REQUIRE(durable->has_value());
+                    CHECK(durable->value().state == RunState::Succeeded);
+                    CHECK(durable->value().completed_at == value.completed_at);
+                    auto transaction = Transaction::begin(fixture.database);
+                    REQUIRE(transaction);
+                    REQUIRE(transaction->rollback());
+                    fixture.scheduler->request_rescan();
+                });
+                REQUIRE(fixture.scheduler->start());
+                auto const key = fixture.executor.pending_keys().front();
+                fixture.time.set_utc(at_seconds(101) + 999ns);
+                REQUIRE(fixture.executor.complete(key, success(key)));
+                CHECK(fixture.events == std::vector<std::string_view>{"attempt", "run"});
+                REQUIRE(fixture.finishes.size() == 1);
+                CHECK(fixture.finishes.front().execution.run_id == run.id);
+                CHECK(fixture.finishes.front().completing_attempt == key.attempt_number);
+                CHECK(fixture.finishes.front().completed_at == at_seconds(101));
+                CHECK(fixture.event_loop.loop->process_events(EventFlag::Timers) == ProcessEventsResult::Stopped);
+                CHECK(fixture.completions.size() == 1);
+            }
+        }
+    }
+}
+
+TEST_CASE("Pending cancellation emits only a terminal run after cleanup and rescan handling",
+          "[jobu][scheduler][event-loop][execution][cancellation][sqlite]")
+{
+    for (bool retry_wait : {false, true}) {
+        SchedulerFixture fixture;
+        auto const       queue = fixture.create_queue();
+        auto             run   = fixture.create_job(queue,
+                                                    JobType::Cli,
+                                                    at_seconds(retry_wait ? 90 : 200),
+                                                    {
+                                                        {"retry.initial_delay", {.data = Duration{10s}}  },
+                                                        {"retry.max_attempts",  {.data = std::int64_t{2}}}
+        });
+        fixture.executor.set_available(JobType::Cli, true);
+        REQUIRE(fixture.scheduler->start());
+        if (retry_wait) {
+            auto const key                 = fixture.executor.pending_keys().front();
+            auto       completion          = success(key);
+            completion.outcome             = AttemptOutcome::Failed;
+            completion.failure_disposition = FailureDisposition::Retryable;
+            REQUIRE(fixture.executor.complete(key, std::move(completion)));
+            REQUIRE(fixture.retries.size() == 1);
+            fixture.completions.clear();
+            fixture.retries.clear();
+            fixture.events.clear();
+        }
+        fixture.scheduler->run_finished.connect(fixture.scheduler.get(), [&](RunFinished const& event) {
+            CHECK(event.execution.run_id == run.id);
+            CHECK(event.state == RunState::Cancelled);
+            CHECK_FALSE(event.completing_attempt);
+            CHECK(event.completed_at == at_seconds(102));
+            auto transaction = Transaction::begin(fixture.database);
+            REQUIRE(transaction);
+            REQUIRE(transaction->rollback());
+            CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop) == 1);
+        });
+
+        fixture.time.set_utc(at_seconds(102) + 765ns);
+        auto cancelled = fixture.scheduler->cancel_run(run.id);
+        REQUIRE(cancelled);
+        CHECK(cancelled->disposition == CancelDisposition::Completed);
+        CHECK(cancelled->run.completed_at == at_seconds(102));
+        CHECK(fixture.completions.empty());
+        CHECK(fixture.retries.empty());
+        CHECK(fixture.events == std::vector<std::string_view>{"run"});
+        CHECK_FALSE(fixture.scheduler->cancel_run(run.id));
+        CHECK(fixture.finishes.size() == 1);
+    }
+}
+
+TEST_CASE("Completion receivers can shut down between events without later writes or timer arming",
+          "[jobu][scheduler][event-loop][execution][shutdown][sqlite]")
+{
+    for (bool retry : {false, true}) {
+        for (bool at_attempt : {false, true}) {
+            DYNAMIC_SECTION("retry " << retry << " attempt receiver " << at_attempt)
+            {
+                SchedulerFixture fixture;
+                auto const       queue            = fixture.create_queue("mixed", 2);
+                auto const       retry_attributes = AttributeSet{
+                    {"retry.max_attempts", {.data = std::int64_t{2}}}
+                };
+                fixture.create_job(queue, JobType::Cli, at_seconds(90), retry_attributes);
+                fixture.create_job(queue, JobType::Http, at_seconds(90), retry_attributes);
+                fixture.create_job(queue, JobType::Cli, at_seconds(200));
+                fixture.executor.set_available(JobType::Cli, true);
+                fixture.executor.set_available(JobType::Http, true);
+                if (at_attempt) {
+                    fixture.scheduler->attempt_finished.connect(fixture.scheduler.get(), [&](AttemptFinished const&) {
+                        fixture.scheduler->shutdown();
+                    });
+                }
+                else if (retry) {
+                    fixture.scheduler->retry_scheduled.connect(fixture.scheduler.get(), [&](RetryScheduled const&) {
+                        fixture.scheduler->shutdown();
+                    });
+                }
+                else {
+                    fixture.scheduler->run_finished.connect(fixture.scheduler.get(),
+                                                            [&](RunFinished const&) { fixture.scheduler->shutdown(); });
+                }
+                REQUIRE(fixture.scheduler->start());
+                auto keys = fixture.executor.pending_keys();
+                REQUIRE(keys.size() == 2);
+                auto completion = success(keys.front());
+                if (retry) {
+                    completion.outcome             = AttemptOutcome::Failed;
+                    completion.failure_disposition = FailureDisposition::Retryable;
+                }
+                REQUIRE(fixture.executor.complete(keys.front(), std::move(completion)));
+                CHECK(fixture.scheduler->state() == SchedulerState::Shutdown);
+                CHECK(fixture.completions.size() == 1);
+                CHECK(fixture.retries.size() == (retry && !at_attempt ? 1U : 0U));
+                CHECK(fixture.finishes.size() == (!retry && !at_attempt ? 1U : 0U));
+
+                REQUIRE(fixture.executor.complete(keys.back(), success(keys.back())));
+                auto unresolved = fixture.runs.find_by_id(keys.back().run_id);
+                REQUIRE(unresolved);
+                REQUIRE(unresolved->has_value());
+                CHECK(unresolved->value().state == RunState::Running);
+                CHECK(fixture.event_loop.loop->process_events(EventFlag::All) == ProcessEventsResult::Stopped);
+                CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop) == 0);
+                CHECK(fixture.starts.size() == 2);
+                CHECK(fixture.completions.size() == 1);
+            }
+        }
+    }
+}
+
+TEST_CASE("Queued lifecycle values outlive active attempts and skip destroyed receivers",
+          "[jobu][scheduler][event-loop][execution][lifetime][sqlite]")
+{
+    SchedulerFixture fixture;
+    auto const       queue = fixture.create_queue();
+    auto const       run   = fixture.create_job(queue,
+                                                JobType::Cli,
+                                                at_seconds(90),
+                                                {
+                                                    {"retry.max_attempts", {.data = std::int64_t{2}}}
+    });
+    fixture.executor.set_available(JobType::Cli, true);
+    Object receiver;
+    auto   destroyed            = std::make_unique<Object>();
+    auto   attempts             = std::vector<AttemptFinished>{};
+    auto   retries              = std::vector<RetryScheduled>{};
+    auto   finishes             = std::vector<RunFinished>{};
+    auto   destroyed_deliveries = 0;
+    fixture.scheduler->attempt_finished.connect(
+        &receiver,
+        [&](AttemptFinished value) { attempts.push_back(value); },
+        ConnectionType::Queued);
+    fixture.scheduler->retry_scheduled.connect(
+        &receiver,
+        [&](RetryScheduled value) { retries.push_back(value); },
+        ConnectionType::Queued);
+    fixture.scheduler->run_finished.connect(
+        &receiver,
+        [&](RunFinished value) { finishes.push_back(value); },
+        ConnectionType::Queued);
+    fixture.scheduler->attempt_finished.connect(
+        destroyed.get(),
+        [&](AttemptFinished const&) { ++destroyed_deliveries; },
+        ConnectionType::Queued);
+    fixture.scheduler->retry_scheduled.connect(
+        destroyed.get(),
+        [&](RetryScheduled const&) { ++destroyed_deliveries; },
+        ConnectionType::Queued);
+    fixture.scheduler->run_finished.connect(
+        destroyed.get(),
+        [&](RunFinished const&) { ++destroyed_deliveries; },
+        ConnectionType::Queued);
+
+    REQUIRE(fixture.scheduler->start());
+    auto key                   = fixture.executor.pending_keys().front();
+    auto failed                = success(key);
+    failed.outcome             = AttemptOutcome::Failed;
+    failed.failure_disposition = FailureDisposition::Retryable;
+    REQUIRE(fixture.executor.complete(key, std::move(failed)));
+    CHECK(fixture.event_loop.loop->process_events(EventFlag::Timers) == ProcessEventsResult::Stopped);
+    REQUIRE(fixture.executor.pending_keys().size() == 1);
+    key = fixture.executor.pending_keys().front();
+    REQUIRE(fixture.executor.complete(key, success(key)));
+    CHECK(attempts.empty());
+    CHECK(retries.empty());
+    CHECK(finishes.empty());
+    fixture.scheduler->shutdown();
+    destroyed.reset();
+
+    // Active correlation is retired before delivery; retained receiver copies must then outlive the scheduler too.
+    CHECK(fixture.event_loop.loop->process_events(EventFlag::Events) == ProcessEventsResult::Stopped);
+    fixture.scheduler.reset();
+    REQUIRE(attempts.size() == 2);
+    CHECK(attempts.front().outcome == AttemptOutcome::Failed);
+    CHECK(attempts.back().outcome == AttemptOutcome::Succeeded);
+    REQUIRE(retries.size() == 1);
+    CHECK(retries.front().execution.run_id == run.id);
+    CHECK(retries.front().next_attempt == 2);
+    REQUIRE(finishes.size() == 1);
+    CHECK(finishes.front().execution.run_id == run.id);
+    CHECK(finishes.front().completing_attempt == 2);
+    CHECK(destroyed_deliveries == 0);
 }
 
 TEST_CASE("Queued attempt starts retain their values after completion and skip destroyed receivers",
@@ -514,6 +762,7 @@ TEST_CASE("Scheduler stop retains completion persistence without restarting disp
 
     fixture.scheduler->stop();
     REQUIRE(fixture.executor.complete(key, success(key)));
+    CHECK(fixture.events == std::vector<std::string_view>{"attempt", "run"});
     auto persisted = fixture.runs.find_by_id(key.run_id);
     REQUIRE(persisted);
     REQUIRE(persisted->has_value());
