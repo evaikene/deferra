@@ -222,8 +222,12 @@ void explain(PathFailure const& failure, std::string_view reason, FormattedPathF
     auto const& diagnostic = *failure.diagnostic;
     auto const  path       = safe_line(diagnostic.failing_path.string());
     auto const  label      = resource_label(diagnostic.role);
-    auto const  owner_wrong =
-        diagnostic.actual_uid && diagnostic.required_uid && *diagnostic.actual_uid != *diagnostic.required_uid;
+
+    // Configuration trust accepts root as well as the invoking UID. A writable root-owned
+    // configuration needs permission advice, not an instruction to change its ownership.
+    auto const root_configuration_owner = diagnostic.role == PathRole::Configuration && diagnostic.actual_uid == 0;
+    auto const owner_wrong              = diagnostic.actual_uid && diagnostic.required_uid &&
+                                        *diagnostic.actual_uid != *diagnostic.required_uid && !root_configuration_owner;
     auto const group_wrong =
         diagnostic.actual_gid && diagnostic.required_gid && *diagnostic.actual_gid != *diagnostic.required_gid;
 

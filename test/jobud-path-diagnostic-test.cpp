@@ -87,6 +87,56 @@ TEST_CASE("Directory advice distinguishes modes from incorrect identities", "[jo
     CHECK(formatted.message.find("GID 1002") != std::string::npos);
 }
 
+TEST_CASE("Writable configuration with an accepted owner gets permission advice", "[jobud][paths][diagnostic]")
+{
+    auto const owner                    = GENERATE(std::uint64_t{0}, std::uint64_t{1001});
+    auto       failure                  = refused("config_owner_type_or_mode", PathRole::Configuration);
+    failure.error.code                  = "jobud.config.read_failed";
+    failure.diagnostic->configured_path = "/prefix/etc/jobud.ini";
+    failure.diagnostic->failing_path    = failure.diagnostic->configured_path;
+
+    // Captured metadata reproduces a non-root invocation reading root-owned configuration
+    // without requiring this test process to create or change a root-owned file.
+    set_path_metadata(*failure.diagnostic, S_IFREG | 0664U, owner, 0);
+    auto const formatted = format_path_failure("configuration", failure);
+    auto const text      = path_failure_text(failure);
+    CHECK(formatted.message.find("/prefix/etc/jobud.ini") != std::string::npos);
+    CHECK(formatted.message.find("permissions 0664") != std::string::npos);
+    CHECK(formatted.action.find("group/other writes") != std::string::npos);
+    CHECK(formatted.action.find("changing permissions alone is insufficient") == std::string::npos);
+    CHECK(text.find("permissions 0664") != std::string::npos);
+    CHECK(text.find("changing permissions alone is insufficient") == std::string::npos);
+    CHECK(std::get<std::uint64_t>(field(formatted, "actual_uid").value) == owner);
+    CHECK(std::get<std::uint64_t>(field(formatted, "required_uid").value) == 1001);
+    CHECK(std::get<std::string>(field(formatted, "actual_mode").value) == "0664");
+}
+
+TEST_CASE("Ownership advice still rejects foreign configuration and root-owned daemon resources",
+          "[jobud][paths][diagnostic]")
+{
+    auto failure = refused("config_owner_type_or_mode", PathRole::Configuration);
+    SECTION("foreign configuration owner")
+    {
+        set_path_metadata(*failure.diagnostic, S_IFREG | 0664U, 2001, 0);
+    }
+    SECTION("root-owned state directory")
+    {
+        failure.diagnostic->role          = PathRole::StateDirectory;
+        failure.diagnostic->required_mode = 0700;
+        failure.error.detail              = "leaf_owner_or_mode";
+        set_path_metadata(*failure.diagnostic, S_IFDIR | 0755U, 0, 0);
+    }
+    SECTION("root-owned database artifact")
+    {
+        failure.diagnostic->role = PathRole::DatabaseArtifact;
+        failure.error.detail     = "artifact_owner_type_or_mode";
+        set_path_metadata(*failure.diagnostic, S_IFREG | 0664U, 0, 0);
+    }
+    auto const formatted = format_path_failure("paths", failure);
+    CHECK(formatted.message.find("required identity is UID 1001") != std::string::npos);
+    CHECK(formatted.action.find("changing permissions alone is insufficient") != std::string::npos);
+}
+
 TEST_CASE("Ancestor and administrative traversal advice preserves protected access", "[jobud][paths][diagnostic]")
 {
     auto failure = refused("parent_writable", PathRole::RuntimeDirectory);
