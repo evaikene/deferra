@@ -10,6 +10,7 @@
 #include <cstdio> // IWYU pragma: keep for stdout macro
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace jb::jobuctl::detail {
@@ -43,15 +44,29 @@ auto parse_run_list(std::filesystem::path socket_path, std::span<CommandLineArgu
     auto planned   = JsonValue::Object{};
     auto started   = JsonValue::Object{};
     auto completed = JsonValue::Object{};
+    auto states    = JsonValue::Array{};
+    auto all       = false;
 
     // Build the public wire shape, then let its strict codec enforce enum, UTC range, and cursor rules.
     for (auto const& argument : arguments) {
+        auto const name = argument.name();
+        if (name == "all") {
+            all = true;
+            continue;
+        }
+
         auto value = option_value(argument);
         if (!value) {
             return parse_failure("run list requires nonempty option values");
         }
-        auto const name = argument.name();
-        if (name == "limit") {
+        if (name == "state") {
+            if (value->find(',') != std::string_view::npos) {
+                return parse_failure(
+                    "--state accepts one state; repeat the option: --state failed --state interrupted");
+            }
+            states.push_back(JsonValue{.data = std::string{*value}});
+        }
+        else if (name == "limit") {
             auto parsed = parse_unsigned(*value, 1, 200);
             if (!parsed) {
                 return parse_failure("--limit must be from 1 through 200");
@@ -85,6 +100,28 @@ auto parse_run_list(std::filesystem::path socket_path, std::span<CommandLineArgu
     }
     if (!completed.empty()) {
         params.emplace("completed", JsonValue{.data = std::move(completed)});
+    }
+
+    if (all && !states.empty()) {
+        return parse_failure("--all and --state cannot be combined");
+    }
+    if (params.contains("cursor") && (all || !states.empty())) {
+        return parse_failure("--cursor excludes --all, filters, and --limit");
+    }
+
+    // Only new flag-built queries receive this policy; raw request files bypass the builder,
+    // and a cursor reuses its original selection. Explicit scalar states remain compatible with older peers.
+    if (!params.contains("cursor") && !all && states.empty()) {
+        states = {JsonValue{.data = std::string{"succeeded"}},
+                  JsonValue{.data = std::string{"failed"}},
+                  JsonValue{.data = std::string{"interrupted"}},
+                  JsonValue{.data = std::string{"cancelled"}}};
+    }
+    if (states.size() == 1U) {
+        params.emplace("state", std::move(states.front()));
+    }
+    else if (!states.empty()) {
+        params.emplace("states", JsonValue{.data = std::move(states)});
     }
 
     auto request = run_list_request_from_json(JsonValue{.data = std::move(params)});

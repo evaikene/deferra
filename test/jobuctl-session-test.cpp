@@ -26,6 +26,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -38,6 +39,7 @@ namespace {
 
 enum class PeerBehavior : std::uint8_t {
     EmptyPage,
+    RunPage,
     RemoteError,
     InvalidInfo,
     InvalidResult,
@@ -63,6 +65,7 @@ enum class PeerBehavior : std::uint8_t {
 
 struct Exchange {
     std::vector<std::string>   methods;
+    std::vector<JsonValue>     run_list_params;
     std::string                output;
     std::string                error;
     std::optional<ProcessExit> exit;
@@ -87,7 +90,8 @@ auto is_job_suspend_behavior(PeerBehavior behavior) noexcept -> bool
 /// @throws Catch::TestFailureException when setup, framing, or the child watchdog fails.
 auto run_session(PeerBehavior             behavior,
                  std::vector<std::string> command        = {"queue", "list"},
-                 std::vector<std::string> global_options = {}) -> Exchange
+                 std::vector<std::string> global_options = {},
+                 ApiVersion               api_version    = {.major = 1, .minor = 2}) -> Exchange
 {
     Exchange                     exchange;
     Application                  app{0, nullptr};
@@ -123,18 +127,26 @@ auto run_session(PeerBehavior             behavior,
                 {"id",      fields.at("id")                      }
             };
             if (method == "system.info") {
-                auto info = system_info_to_json({
-                    .daemon_version = behavior == PeerBehavior::ControlInfo ? "fixture\x1b[31m" : "fixture",
-                    .api_version    = {.major = 1, .minor = 2},
-                    .capabilities   = behavior == PeerBehavior::MissingCapability
-                                        ? std::vector<std::string>{"system.info"}
-                                        : std::vector<std::string>{"job.get",
-                                       "job.suspend", "run.cancel",
-                                       "run.get", "attempt.output",
-                                       "queue.create", "queue.delete",
-                                       "queue.get", "queue.suspend",
-                                       "queue.list", "system.info"}
-                });
+                auto capabilities = behavior == PeerBehavior::MissingCapability
+                                      ? std::vector<std::string>{"system.info"}
+                                      : std::vector<std::string>{"job.get",
+                                                                 "job.suspend",
+                                                                 "run.cancel",
+                                                                 "run.get",
+                                                                 "attempt.output",
+                                                                 "queue.create",
+                                                                 "queue.delete",
+                                                                 "queue.get",
+                                                                 "queue.suspend",
+                                                                 "queue.list",
+                                                                 "system.info"};
+                if (behavior == PeerBehavior::RunPage) {
+                    capabilities.emplace_back("run.list");
+                }
+                auto info = system_info_to_json(
+                    {.daemon_version = behavior == PeerBehavior::ControlInfo ? "fixture\x1b[31m" : "fixture",
+                     .api_version    = api_version,
+                     .capabilities   = std::move(capabilities)});
                 response.emplace("result", behavior == PeerBehavior::InvalidInfo ? JsonValue{} : std::move(info));
             }
             else if (behavior == PeerBehavior::RemoteError) {
@@ -142,6 +154,13 @@ auto run_session(PeerBehavior             behavior,
                     R"({"code":-32000,"message":"fixture rejection","data":{"category":"conflict","code":"jobu.fixture.conflict"}})");
                 REQUIRE(error);
                 response.emplace("error", std::move(*error));
+            }
+            else if (method == "run.list") {
+                REQUIRE(behavior == PeerBehavior::RunPage);
+                exchange.run_list_params.push_back(fields.at("params"));
+                auto result = run_page_to_json(RunPage{});
+                REQUIRE(result);
+                response.emplace("result", std::move(*result));
             }
             else if (method == "run.cancel" || method == "run.get") {
                 StandardAttributeRegistry registry;
@@ -346,6 +365,78 @@ TEST_CASE("jobuctl session preserves handshake ordering and human output", "[job
     CHECK(exchange.exit->exit_code == EXIT_SUCCESS);
     CHECK(exchange.output == "No queues\n");
     CHECK(exchange.error.empty());
+}
+
+TEST_CASE("jobuctl run list sends the selected wire shape and preserves the result schema", "[jobuctl][session][run]")
+{
+    struct Case {
+        std::vector<std::string> options;
+        std::string_view         params;
+    };
+
+    for (auto const& item : std::vector<Case>{
+             {.options = {},                                              .params = R"({"states":["succeeded","failed","interrupted","cancelled"],"limit":100})"},
+             {.options = {"--state", "failed"},                           .params = R"({"state":"failed","limit":100})"                                         },
+             {.options = {"--state", "failed", "--state", "interrupted"},
+              .params  = R"({"states":["failed","interrupted"],"limit":100})"                                                                                   },
+             {.options = {"--all"},                                       .params = R"({"limit":100})"                                                          },
+             {.options = {"--cursor", "token"},                           .params = R"({"cursor":"token"})"                                                     },
+    }) {
+        CAPTURE(item.options);
+        auto command = std::vector<std::string>{"run", "list"};
+        command.insert(command.end(), item.options.begin(), item.options.end());
+        auto exchange = run_session(PeerBehavior::RunPage, std::move(command), {"--json"}, {.major = 1, .minor = 5});
+        CHECK(exchange.methods == std::vector<std::string>{"system.info", "run.list"});
+        REQUIRE(exchange.run_list_params.size() == 1);
+        auto expected = parse_json(item.params);
+        REQUIRE(expected);
+        CHECK(exchange.run_list_params.front() == *expected);
+        CHECK(exchange.exit->exit_code == 0);
+        CHECK(exchange.output == "{\"items\":[],\"next_cursor\":null}\n");
+        CHECK(exchange.error.empty());
+    }
+}
+
+TEST_CASE("jobuctl run list reports old-peer state-set rejection without a query", "[jobuctl][session][run]")
+{
+    for (auto const& command : std::vector<std::vector<std::string>>{
+             {"run", "list"},
+             {"run", "list", "--state", "failed", "--state", "interrupted"}
+    }) {
+        for (auto const json : {false, true}) {
+            auto exchange = run_session(PeerBehavior::RunPage,
+                                        command,
+                                        json ? std::vector<std::string>{"--json"} : std::vector<std::string>{},
+                                        {.major = 1, .minor = 4});
+            CHECK(exchange.methods == std::vector<std::string>{"system.info"});
+            CHECK(exchange.run_list_params.empty());
+            CHECK(exchange.exit->exit_code == 1);
+            CHECK(exchange.output.empty());
+            if (json) {
+                auto value = parse_json(exchange.error);
+                REQUIRE(value);
+                auto const& error = value->as_object().at("error").as_object();
+                CHECK(error.at("kind").as_string() == "local");
+                CHECK(error.at("code").as_string() == "jobu.client.unsupported_feature");
+                CHECK(error.at("message").as_string() == "Run-list state sets require JobU API 1.5 or newer");
+            }
+            else {
+                CHECK(exchange.error == "jobuctl: Run-list state sets require JobU API 1.5 or newer\n");
+            }
+        }
+    }
+    for (auto const& options : std::vector<std::vector<std::string>>{
+             {"--state", "running"},
+             {"--all"},
+             {"--cursor", "token"}
+    }) {
+        auto command = std::vector<std::string>{"run", "list"};
+        command.insert(command.end(), options.begin(), options.end());
+        auto exchange = run_session(PeerBehavior::RunPage, std::move(command), {"--json"}, {.major = 1, .minor = 4});
+        CHECK(exchange.methods == std::vector<std::string>{"system.info", "run.list"});
+        CHECK(exchange.exit->exit_code == 0);
+        CHECK(exchange.error.empty());
+    }
 }
 
 TEST_CASE("jobuctl session preserves represented remote errors", "[jobuctl][session]")

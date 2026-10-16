@@ -5,6 +5,8 @@
 #include "command_registry_priv.hpp"
 #include "control_json.hpp"
 #include "help_priv.hpp"
+#include "history.hpp"
+#include "history_json.hpp"
 #include "input_priv.hpp"
 #include "jobu_paths_priv.hpp"
 #include "json.hpp"
@@ -1219,6 +1221,155 @@ TEST_CASE("jobuctl wait is local to suspend and compatible with request files", 
     CHECK(file.command->wait);
     CHECK(file.command->request_file == std::filesystem::path{"job.json"});
     CHECK_FALSE(parse({"--socket", "fixture.sock", "queue", "resume", "--name", "reports", "--wait"}).command);
+}
+
+TEST_CASE("jobuctl run list maps flag selections to scalar or set filters", "[jobuctl][parse][run][list]")
+{
+    auto const terminal =
+        std::vector{RunState::Succeeded, RunState::Failed, RunState::Interrupted, RunState::Cancelled};
+
+    struct Case {
+        std::vector<std::string>             options;
+        std::optional<RunState>              state;
+        std::optional<std::vector<RunState>> states;
+    };
+
+    auto const cases = std::vector<Case>{
+        {.options = {}, .states = terminal},
+        {.options = {"--job-id", job_id}, .states = terminal},
+        {.options = {"--state", "failed"}, .state = RunState::Failed},
+        {.options = {"--state", "running"}, .state = RunState::Running},
+        {.options = {"--state", "failed", "--state", "interrupted"},
+         .states  = std::vector{RunState::Failed, RunState::Interrupted}},
+        {.options = {"--state=interrupted", "--state=failed"},
+         .states  = std::vector{RunState::Interrupted, RunState::Failed}},
+        {.options = {"--all"}},
+        {.options = {"--job-id", job_id, "--all"}},
+    };
+    for (auto const& item : cases) {
+        CAPTURE(item.options);
+        for (auto const json : {false, true}) {
+            auto arguments = std::vector<std::string>{"run", "list"};
+            arguments.insert(arguments.end(), item.options.begin(), item.options.end());
+            if (json) {
+                arguments.emplace_back("--json");
+            }
+            auto parsed = parse(std::move(arguments));
+            REQUIRE(parsed.command);
+            CHECK(parsed.command->json == json);
+            auto const& request = std::get<RunListRequest>(parsed.command->request);
+            auto const& query   = std::get<RunQuery>(request);
+            CHECK(query.filters.state == item.state);
+            CHECK(query.filters.states == item.states);
+            auto encoded = run_list_request_to_json(request);
+            REQUIRE(encoded);
+            CHECK(encoded->as_object().contains("state") == item.state.has_value());
+            CHECK(encoded->as_object().contains("states") == item.states.has_value());
+        }
+    }
+
+    // Selection policy must not displace the remaining AND filters or their time ranges.
+    auto scoped = parse({"run",
+                         "list",
+                         "--queue-id",
+                         job_id,
+                         "--job-id",
+                         job_id,
+                         "--type",
+                         "http",
+                         "--origin",
+                         "scheduled",
+                         "--started-from",
+                         "2030-01-01T00:00:00Z",
+                         "--started-to",
+                         "2030-02-01T00:00:00Z",
+                         "--completed-from",
+                         "2030-01-01T00:00:00Z",
+                         "--completed-to",
+                         "2030-02-01T00:00:00Z",
+                         "--limit",
+                         "2"});
+    REQUIRE(scoped.command);
+    auto const& query = std::get<RunQuery>(std::get<RunListRequest>(scoped.command->request));
+    CHECK(query.filters.states == terminal);
+    CHECK(query.filters.queue_id == *Uuid::parse(job_id));
+    CHECK(query.filters.job_id == *Uuid::parse(job_id));
+    CHECK(query.filters.type == JobType::Http);
+    CHECK(query.filters.origin == RunOrigin::Scheduled);
+    CHECK(query.filters.started.from);
+    CHECK(query.filters.started.to);
+    CHECK(query.filters.completed.from);
+    CHECK(query.filters.completed.to);
+    CHECK(query.limit == 2);
+}
+
+TEST_CASE("jobuctl run list rejects invalid selections and mixed cursor forms", "[jobuctl][parse][run][list]")
+{
+    for (auto const& options : std::vector<std::vector<std::string>>{
+             {"--state", "failed", "--state", "failed"},
+             {"--state", "failed", "--state", "interrupted", "--state", "failed"},
+             {"--all", "--state", "failed"},
+             {"--state", "failed", "--all"},
+             {"--all", "--all"},
+             {"--all=true"},
+             {"--state", "FAILED"},
+             {"--state", "unknown"},
+             {"--state", ""},
+             {"--state"},
+             {"--cursor", "token", "--state", "failed"},
+             {"--cursor", "token", "--state", "failed", "--state", "interrupted"},
+             {"--cursor", "token", "--all"},
+             {"--all", "--cursor", "token"},
+             {"--cursor", "token", "--job-id", job_id},
+             {"--cursor", "token", "--limit", "1"},
+    }) {
+        CAPTURE(options);
+        auto arguments = std::vector<std::string>{"run", "list"};
+        arguments.insert(arguments.end(), options.begin(), options.end());
+        auto parsed = parse(std::move(arguments));
+        CHECK_FALSE(parsed.command);
+        CHECK_FALSE(parsed.error.empty());
+    }
+    auto comma = parse({"run", "list", "--state", "failed,interrupted"});
+    CHECK_FALSE(comma.command);
+    CHECK(comma.error.find("--state failed --state interrupted") != std::string::npos);
+}
+
+TEST_CASE("jobuctl run list request files preserve raw selections", "[jobuctl][input][run][list]")
+{
+    jb::test::TemporaryDirectory directory;
+    StandardAttributeRegistry    registry;
+    auto const                   path   = directory.path() / "runs.json";
+    auto                         parsed = parse({"run", "list", "--request-file", path.string()});
+    REQUIRE(parsed.command);
+    for (auto const* document :
+         {R"({})", R"({"state":"running"})", R"({"states":["failed","interrupted"]})", R"({"cursor":"token"})"}) {
+        CAPTURE(document);
+        auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
+        REQUIRE(file);
+        file << document;
+        file.close();
+        REQUIRE(load_request_file(*parsed.command, registry));
+        auto encoded = run_list_request_to_json(std::get<RunListRequest>(parsed.command->request));
+        REQUIRE(encoded);
+        auto expected = parse_json(document);
+        REQUIRE(expected);
+        if (!expected->as_object().contains("cursor")) {
+            std::get<JsonValue::Object>(expected->data).emplace("limit", JsonValue{.data = std::uint64_t{100}});
+        }
+        CHECK(*encoded == *expected);
+    }
+    for (auto const& options : std::vector<std::vector<std::string>>{
+             {"--all"},
+             {"--state", "failed"},
+             {"--state", "failed", "--state", "interrupted"},
+             {"--cursor", "token"},
+             {"--limit", "2"}
+    }) {
+        auto arguments = std::vector<std::string>{"run", "list", "--request-file", path.string()};
+        arguments.insert(arguments.end(), options.begin(), options.end());
+        CHECK_FALSE(parse(std::move(arguments)).command);
+    }
 }
 
 TEST_CASE("jobuctl run commands preserve history filters and cursor-only continuations", "[jobuctl][parse]")

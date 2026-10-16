@@ -27,6 +27,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -726,6 +727,104 @@ void check_capture(DurableAttempt const& value,
 
 } // namespace
 
+TEST_CASE("run list CLI defaults select terminal history while raw requests retain all states",
+          "[jobud][cli][history][integration]")
+{
+    DaemonFixture fixture{2, false};
+    fixture.queue("run-selection");
+    jb::test::HttpTestServer server;
+    server.enqueue_response({});
+    server.enqueue_response({.status_code = 503, .reason = "Unavailable"});
+    server.release_responses();
+    fixture.http("selected-success", "run-selection", server.url());
+    auto const succeeded = fixture.complete("selected-success");
+    fixture.http("selected-failure", "run-selection", server.url());
+    auto const failed = fixture.complete("selected-failure", "failed");
+
+    // Future occurrences remain stable while separate CLI processes inspect and cancel them.
+    auto future = [&](std::string const& at) {
+        auto  request = json(R"({"queue_name":"run-selection","type":"http",
+            "schedule":{"kind":"once","at":""},"payload":{"url":""}})");
+        auto& fields  = std::get<JsonValue::Object>(request.data);
+        std::get<JsonValue::Object>(fields.at("schedule").data).at("at") = text(at);
+        std::get<JsonValue::Object>(fields.at("payload").data).at("url") = text(server.url());
+        auto job = fixture.rpc("job.create", std::move(request));
+        return job.as_object().at("id").as_string();
+    };
+    auto const pending_job_id   = future("2030-01-01T00:00:00Z");
+    auto const cancelled_job_id = future("2031-01-01T00:00:00Z");
+    auto       pending_page =
+        json(fixture.control({"run", "list", "--job-id", pending_job_id, "--state", "scheduled", "--json"}));
+    REQUIRE(pending_page.as_object().at("items").as_array().size() == 1);
+    auto const pending_id = pending_page.as_object().at("items").as_array().front().as_object().at("id").as_string();
+    auto const queue_id =
+        pending_page.as_object().at("items").as_array().front().as_object().at("queue_id").as_string();
+    auto cancelled_page = json(fixture.control({"run", "list", "--job-id", cancelled_job_id, "--all", "--json"}));
+    REQUIRE(cancelled_page.as_object().at("items").as_array().size() == 1);
+    auto const cancelled_id =
+        cancelled_page.as_object().at("items").as_array().front().as_object().at("id").as_string();
+    static_cast<void>(fixture.control({"run", "cancel", cancelled_id, "--wait"}));
+
+    auto ids = [](JsonValue const& page) {
+        CHECK(page.as_object().size() == 2);
+        CHECK(page.as_object().contains("next_cursor"));
+        auto result = std::set<std::string>{};
+        for (auto const& item : page.as_object().at("items").as_array()) {
+            auto const& fields = item.as_object();
+            CHECK_FALSE(fields.contains("payload"));
+            CHECK_FALSE(fields.contains("result"));
+            CHECK_FALSE(fields.contains("attempts"));
+            CHECK_FALSE(fields.contains("output"));
+            CHECK(result.insert(fields.at("id").as_string()).second);
+        }
+        return result;
+    };
+    auto const terminal_ids = std::set<std::string>{succeeded.run_id, failed.run_id, cancelled_id};
+    CHECK(ids(json(fixture.control({"run", "list", "--json"}))) == terminal_ids);
+    CHECK(ids(json(fixture.control({"run", "list", "--job-id", pending_job_id, "--json"}))).empty());
+    CHECK(ids(json(fixture.control(
+              {"run", "list", "--queue-id", queue_id, "--type", "http", "--origin", "scheduled", "--json"}))) ==
+          terminal_ids);
+    auto const union_ids = std::set<std::string>{failed.run_id, cancelled_id};
+    CHECK(ids(json(fixture.control({"run",
+                                    "list",
+                                    "--state",
+                                    "failed",
+                                    "--state",
+                                    "cancelled",
+                                    "--type",
+                                    "http",
+                                    "--origin",
+                                    "scheduled",
+                                    "--json"}))) == union_ids);
+    CHECK(ids(json(fixture.control({"run", "list", "--state", "failed", "--state", "interrupted", "--json"}))) ==
+          std::set<std::string>{failed.run_id});
+
+    auto const all_ids = std::set<std::string>{succeeded.run_id, failed.run_id, cancelled_id, pending_id};
+    CHECK(ids(json(fixture.control({"run", "list", "--all", "--json"}))) == all_ids);
+    auto const path = fixture.directory.path() / "raw-runs.json";
+    write_file(path, "{}");
+    CHECK(ids(json(fixture.control({"run", "list", "--request-file", path.string(), "--json"}))) == all_ids);
+    CHECK(ids(fixture.rpc("run.list", json("{}"))) == all_ids);
+
+    // The scheduled row lies between terminal rows in history order. Continuations must retain
+    // the original terminal set rather than broaden it or apply filtering after the row limit.
+    auto page      = json(fixture.control({"run", "list", "--limit", "1", "--json"}));
+    auto paged_ids = std::set<std::string>{};
+    for (auto pages = std::size_t{0};; ++pages) {
+        REQUIRE(pages < terminal_ids.size());
+        auto const selected = ids(page);
+        REQUIRE(selected.size() == 1);
+        CHECK(paged_ids.insert(*selected.begin()).second);
+        auto const& cursor = page.as_object().at("next_cursor");
+        if (cursor.is_null()) {
+            break;
+        }
+        page = json(fixture.control({"run", "list", "--cursor", cursor.as_string(), "--json"}));
+    }
+    CHECK(paged_ids == terminal_ids);
+}
+
 TEST_CASE("daemon executes complete jobuctl CLI payload and persists exact context", "[jobud][cli][integration]")
 {
     require_execution_environment();
@@ -1172,7 +1271,7 @@ TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls
     CHECK(advanced.as_object().at("revision").as_uint() == 2);
     auto stale = fixture.control({"job", "update", cron_job_id, "--revision", "1", "--priority", "2", "--json"}, 1);
     CHECK(stale.find("jobu.job.revision_conflict") != std::string::npos);
-    auto cron_runs = json(fixture.control({"run", "list", "--job-id", cron_job_id, "--json"}));
+    auto cron_runs = json(fixture.control({"run", "list", "--all", "--job-id", cron_job_id, "--json"}));
     REQUIRE(cron_runs.as_object().at("items").as_array().size() == 2);
     static_cast<void>(fixture.control({"job", "suspend", cron_job_id, "--wait"}));
     static_cast<void>(fixture.control({"job", "resume", cron_job_id}));
@@ -1183,7 +1282,7 @@ TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls
         "schedule":{"kind":"once","at":"now"},"payload":{"command":"/bin/true"}})");
     auto       pending_job     = fixture.rpc("job.create", std::move(pending_request));
     auto const pending_job_id  = pending_job.as_object().at("id").as_string();
-    auto       pending_runs    = json(fixture.control({"run", "list", "--job-id", pending_job_id, "--json"}));
+    auto       pending_runs    = json(fixture.control({"run", "list", "--all", "--job-id", pending_job_id, "--json"}));
     REQUIRE(pending_runs.as_object().at("items").as_array().size() == 1);
     auto const pending_id = pending_runs.as_object().at("items").as_array().front().as_object().at("id").as_string();
     auto       cancelled  = json(fixture.control({"run", "cancel", pending_id, "--wait", "--json"}));
@@ -1198,9 +1297,9 @@ TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls
         "schedule":{"kind":"once","at":"now"},"payload":{"url":""}})");
     std::get<JsonValue::Object>(std::get<JsonValue::Object>(active_request.data).at("payload").data).at("url") =
         text(active_server.url("/active"));
-    auto active_job = fixture.rpc("job.create", std::move(active_request));
-    auto active_runs =
-        json(fixture.control({"run", "list", "--job-id", active_job.as_object().at("id").as_string(), "--json"}));
+    auto active_job  = fixture.rpc("job.create", std::move(active_request));
+    auto active_runs = json(
+        fixture.control({"run", "list", "--all", "--job-id", active_job.as_object().at("id").as_string(), "--json"}));
     REQUIRE(active_runs.as_object().at("items").as_array().size() == 1);
     auto const active_id = active_runs.as_object().at("items").as_array().front().as_object().at("id").as_string();
     REQUIRE(active_server.wait_for_requests(1, 5s));
@@ -1230,7 +1329,7 @@ TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls
     auto replayed_manual =
         json(fixture.control({"job", "run-now", cron_job_id, "--idempotency-key", "workflow-manual", "--json"}));
     CHECK(replayed_manual == manual);
-    auto retained_cron_runs = json(fixture.control({"run", "list", "--job-id", cron_job_id, "--json"}));
+    auto retained_cron_runs = json(fixture.control({"run", "list", "--all", "--job-id", cron_job_id, "--json"}));
     CHECK(retained_cron_runs.as_object().at("items").as_array().size() == 2);
     fixture.responsive();
 }
@@ -1256,7 +1355,7 @@ TEST_CASE("lost real-transport creation response replays one durable job and run
     auto       created = json(fixture.control({"job", "create", "--request-file", request_file.string(), "--json"}));
     auto const job_id  = created.as_object().at("id").as_string();
     CHECK(fixture.job_count("lost-create") == 1);
-    auto page = json(fixture.control({"run", "list", "--job-id", job_id, "--json"}));
+    auto page = json(fixture.control({"run", "list", "--all", "--job-id", job_id, "--json"}));
     REQUIRE(page.as_object().at("items").as_array().size() == 1);
     auto const run_id = page.as_object().at("items").as_array().front().as_object().at("id").as_string();
     CHECK(fixture.run_state(run_id) == "scheduled");
@@ -1265,7 +1364,7 @@ TEST_CASE("lost real-transport creation response replays one durable job and run
     auto replayed = json(fixture.control({"job", "create", "--request-file", request_file.string(), "--json"}));
     CHECK(replayed == created);
     CHECK(fixture.job_count("lost-create") == 1);
-    auto retained = json(fixture.control({"run", "list", "--job-id", job_id, "--json"}));
+    auto retained = json(fixture.control({"run", "list", "--all", "--job-id", job_id, "--json"}));
     REQUIRE(retained.as_object().at("items").as_array().size() == 1);
     CHECK(retained.as_object().at("items").as_array().front().as_object().at("id").as_string() == run_id);
     CHECK(fixture.run_state(run_id) == "scheduled");
@@ -1321,7 +1420,7 @@ TEST_CASE("CLI secret flags stay symbolic and resolve the rotated value at real 
     CHECK(payload.at("environment").as_object().at("MODE").as_string() == "daily");
     CHECK(payload.at("environment").as_object().at("REPORT_TOKEN") == json(R"({"secret":"flags.token"})"));
 
-    auto page = json(fixture.control({"run", "list", "--job-id", job_id, "--json"}));
+    auto page = json(fixture.control({"run", "list", "--all", "--job-id", job_id, "--json"}));
     REQUIRE(page.as_object().at("items").as_array().size() == 1);
     auto const run_id = page.as_object().at("items").as_array().front().as_object().at("id").as_string();
     CHECK(fixture.run_state(run_id) == "scheduled");
@@ -1364,7 +1463,7 @@ TEST_CASE("CLI secret flags stay symbolic and resolve the rotated value at real 
     auto manual_replay =
         json(fixture.control({"job", "run-now", future_id, "--idempotency-key", "flags-manual", "--json"}));
     CHECK(manual_replay == manual);
-    auto future_runs = json(fixture.control({"run", "list", "--job-id", future_id, "--json"}));
+    auto future_runs = json(fixture.control({"run", "list", "--all", "--job-id", future_id, "--json"}));
     REQUIRE(future_runs.as_object().at("items").as_array().size() == 2);
     auto future_job = json(fixture.control({"job", "get", future_id, "--json"}));
     CHECK(future_job.as_object().at("state").as_string() == "active");
@@ -1425,7 +1524,7 @@ TEST_CASE("CLI secret flags resolve again after a gated real daemon retry",
                                                  "--json"});
     auto       created        = json(fixture.control(std::move(create_command)));
     auto const job_id         = created.as_object().at("id").as_string();
-    auto       runs           = json(fixture.control({"run", "list", "--job-id", job_id, "--json"}));
+    auto       runs           = json(fixture.control({"run", "list", "--all", "--job-id", job_id, "--json"}));
     REQUIRE(runs.as_object().at("items").as_array().size() == 1);
     auto const run_id = runs.as_object().at("items").as_array().front().as_object().at("id").as_string();
 
