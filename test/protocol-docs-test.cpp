@@ -6,6 +6,7 @@
 #include "secret_json.hpp"
 #include "statistics_json.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
+#include "uuid.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -15,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <variant>
+#include <vector>
 
 using namespace jb::core;
 using namespace jb::jobu;
@@ -49,6 +51,7 @@ TEST_CASE("Published protocol requests use production decoders", "[jobu][protoco
     REQUIRE(job_list_request_from_json(example("job-list.params.json")));
     REQUIRE(job_list_request_from_json(example("job-list-all.params.json")));
     REQUIRE(run_list_request_from_json(example("run-list.params.json")));
+    REQUIRE(run_list_request_from_json(example("run-list-states.params.json")));
     REQUIRE(attempt_get_request_from_json(example("attempt-get-max.params.json")));
     REQUIRE(attempt_output_request_from_json(example("attempt-output.params.json")));
     REQUIRE(set_secret_request_from_json(example("secret-set.params.json")));
@@ -67,6 +70,23 @@ TEST_CASE("Published protocol results use production decoders", "[jobu][protocol
     REQUIRE(secret_metadata_from_json(example("secret-set.result.json")));
     REQUIRE(schedule_next_result_from_json(example("schedule-next.result.json")));
     REQUIRE(statistics_page_from_json(example("system-stats.result.json")));
+}
+
+TEST_CASE("Published run state sets retain their owner intersection and caller order", "[jobu][protocol][docs]")
+{
+    auto const request = run_list_request_from_json(example("run-list-states.params.json"));
+    REQUIRE(request);
+    auto const* query = std::get_if<RunQuery>(&*request);
+    REQUIRE(query != nullptr);
+    CHECK(query->filters.queue_id == Uuid::parse("00112233-4455-6677-8899-aabbccddeeff").value());
+    CHECK_FALSE(query->filters.state);
+    REQUIRE(query->filters.states);
+    CHECK(*query->filters.states == std::vector<RunState>{RunState::Failed, RunState::Interrupted});
+    CHECK(query->limit == 2U);
+
+    auto const encoded = run_list_request_to_json(*request);
+    REQUIRE(encoded);
+    CHECK(*encoded == example("run-list-states.params.json"));
 }
 
 TEST_CASE("Published closure examples preserve terminal and raw request semantics", "[jobu][protocol][docs]")

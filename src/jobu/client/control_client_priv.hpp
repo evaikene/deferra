@@ -6,6 +6,7 @@
 #include "connection.hpp"
 #include "event_loop_types.hpp"
 #include "object_priv.hpp"
+#include "system_info.hpp"
 #include "timer.hpp"
 
 #include <cstdint>
@@ -106,6 +107,7 @@ struct ControlClient::Private final : jb::core::priv::ObjectPrivate {
     ControlClient*                         owner{nullptr};
     jb::core::Timer                        deadline_timer;
     Phase                                  phase{Phase::Uninitialized};
+    ApiVersion                             api_version;
     std::set<std::string>                  capabilities;
     std::map<ControlCallId, Pending>       pending;
     std::map<std::uint64_t, ControlCallId> wire_to_local;

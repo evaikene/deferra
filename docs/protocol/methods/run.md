@@ -35,7 +35,7 @@ the run or advances the scheduler. A lost reply can be retried as a read.
 
 ## List runs (`run.list`)
 
-An initial params object may contain `queue_id`, `job_id`, `state`, `origin`,
+An initial params object may contain `queue_id`, `job_id`, `state`, `states`, `origin`,
 `type`, `planned`, `started`, `completed`, and `limit`. All are optional and
 combine with AND. The default limit is 100; accepted limits are 1–200. IDs
 refer to the immutable run snapshot, so moved jobs and deleted owners retain
@@ -48,7 +48,8 @@ start or completion time does not match a nonempty corresponding range.
 | --- | --- | --- | --- | --- |
 | `queue_id` | ID | All queues | 1.3 | Captured queue |
 | `job_id` | ID | All jobs | 1.3 | Captured definition |
-| `state` | `RunState` | All | 1.3 | Current state |
+| `state` | `RunState` | All | 1.3 | One current state; mutually exclusive with `states` |
+| `states` | array of `RunState` | All | 1.5 | Any of 1–7 distinct current states; mutually exclusive with `state` |
 | `origin` | `scheduled` or `manual` | Both | 1.3 | `submitted` is reserved |
 | `type` | `cli` or `http` | Both | 1.3 | Runner family |
 | `planned` | time range | Unbounded | 1.3 | Planned-time filter |
@@ -61,6 +62,27 @@ start or completion time does not match a nonempty corresponding range.
 {"queue_id":"00112233-4455-6677-8899-aabbccddeeff","state":"failed","limit":2}
 ```
 
+Since API 1.5, an explicit state set selects the union of its members, combined
+with every other filter before ordering and paging:
+
+```json
+{"states":["failed","interrupted"],"limit":50}
+```
+
+The [checked state-set example](../examples/run-list-states.params.json) also
+combines a queue filter. An absent `state` and `states` means all states, including
+nonterminal ones; raw `{}` remains unfiltered. A supplied `states` must be a
+nonempty array of at most seven distinct, exactly spelled `RunState` strings.
+Empty arrays, duplicates, invalid states, null, non-array values, non-string
+members, and simultaneous `state`/`states` are invalid params. Caller order is
+retained but does not affect selection.
+
+State sets require a daemon advertising API 1.5 or newer. The typed client
+rejects an initial state-set request to API 1.0–1.4 locally with Unsupported
+`jobu.client.unsupported_feature`, without sending it. Scalar-state, unfiltered,
+and cursor-only forms retain their existing advertised-method support. The client
+does not split a set into requests or filter pages locally.
+
 The result has `items`, an array of lightweight run summaries, and
 `next_cursor`, a string or null. Each summary contains the full view's identity,
 origin, type, state, schedule ownership, priority, planned/runnable time, and
@@ -71,6 +93,8 @@ An [empty result page](../examples/run-list.result.json) has `items:[]` and
 `next_cursor:null`.
 
 Resume with `{"cursor":"<opaque token>"}` and no other fields. A cursor is
+bound to the complete initial query, including any state set and other filters;
+continuation reuses that selection without injecting defaults. It is
 server-owned, expires five minutes after the first page, and may be evicted
 earlier or lost on restart. Retrying a still-valid cursor is allowed. Pages
 read live retained data; they are not a frozen multi-request snapshot. Missing,

@@ -196,7 +196,7 @@ foreach(component runtime development documentation)
     endforeach()
     check_manifest("${root}" "${inventoried}")
     file(READ "${root}/${data_directory}/jobu/package/build-info-${component}.txt" metadata)
-    foreach(required "project-version=@PROJECT_VERSION@" "rpc-api-version=1.4"
+    foreach(required "project-version=@PROJECT_VERSION@" "rpc-api-version=1.5"
         "build-configuration=Release" "tests-enabled=OFF" "examples-enabled=OFF"
         "producer-paths-remapped=ON" "dependency-shared-library-files-bundled=false")
         string(FIND "${metadata}" "${required}" position)

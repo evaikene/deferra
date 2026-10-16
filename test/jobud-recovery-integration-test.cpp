@@ -349,7 +349,7 @@ public:
         INFO(output);
         REQUIRE(result->kind == ProcessExitKind::Exited);
         REQUIRE(result->exit_code == 0);
-        REQUIRE(output.find("API version: 1.4") != std::string::npos);
+        REQUIRE(output.find("API version: 1.5") != std::string::npos);
     }
 
     auto rpc(std::string_view method, JsonValue parameters) -> JsonValue

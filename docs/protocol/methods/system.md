@@ -19,7 +19,7 @@ method-specific fields and ignores supplied params. The result has these members
 | `daemon_version` | string | 1.0 | Executable version |
 | `api_version` | object | 1.0 | Supported API version |
 | `api_version.major` | integer | 1.0 | Protocol compatibility family; currently 1 |
-| `api_version.minor` | integer | 1.0 | Additive API version; currently 4 |
+| `api_version.minor` | integer | 1.0 | Additive API version; currently 5 |
 | `capabilities` | array of strings | 1.0 | Sorted unique names of registered methods |
 
 For example, send `{"jsonrpc":"2.0","id":1,"method":"system.info","params":{}}`.
