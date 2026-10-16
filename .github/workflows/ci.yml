@@ -44,7 +44,7 @@ jobs:
             ctest --test-dir .bld/test --output-on-failure -LE '^distribution$'
           else
             ctest --test-dir .bld/test --output-on-failure
-          fi      - name: Test
+          fi
 
   alpine:
     name: Alpine
@@ -88,4 +88,4 @@ jobs:
             ctest --test-dir .bld/test --output-on-failure -LE '^distribution$'
           else
             ctest --test-dir .bld/test --output-on-failure
-          fi      - name: Test
+          fi
