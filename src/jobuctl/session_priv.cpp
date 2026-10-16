@@ -255,13 +255,16 @@ auto job_run_from_details(RunDetails const& run) -> JobRun
 } // namespace
 
 struct Session::Private : jb::core::priv::ObjectPrivate {
-    Private(Command value, StandardAttributeRegistry const& attributes)
+    Private(Command value, StandardAttributeRegistry const& attributes, SessionMode delivery)
         : command{std::move(value)}
         , registry{attributes}
+        , mode{delivery}
     {}
 
     Command                          command;
     StandardAttributeRegistry const& registry;
+    SessionMode                      mode;
+    std::optional<SessionResult>     result;
 
     // Reverse destruction stops the timer and typed client before their borrowed RPC client and socket.
     LocalSocket                      socket;
@@ -276,9 +279,9 @@ struct Session::Private : jb::core::priv::ObjectPrivate {
     std::chrono::milliseconds        poll_interval{100};
 };
 
-Session::Session(Command command, StandardAttributeRegistry const& registry)
+Session::Session(Command command, StandardAttributeRegistry const& registry, SessionMode mode)
     : Object{
-          *new Private{std::move(command), registry}
+          *new Private{std::move(command), registry, mode}
 }
 {
     // Receiver-aware observers are installed after Object owns its only private allocation.
@@ -324,7 +327,12 @@ void Session::start()
     data->socket.connect_to_server(data->command.socket_path);
 }
 
-void Session::finish(int code, std::optional<CliError> error)
+auto Session::take_result() -> std::optional<SessionResult>
+{
+    return std::exchange(d_ptr<Private>()->result, std::nullopt);
+}
+
+void Session::finish(int code, std::optional<CliError> error, std::optional<ControlReply> reply)
 {
     auto* data = d_ptr<Private>();
     if (data->phase == SessionPhase::Finished) {
@@ -332,14 +340,15 @@ void Session::finish(int code, std::optional<CliError> error)
     }
 
     // Latch completion before close() emits any pending-call failures through receiver-aware observers.
-    data->phase = SessionPhase::Finished;
+    data->phase  = SessionPhase::Finished;
+    data->result = SessionResult{.exit_code = code, .reply = std::move(reply), .error = std::move(error)};
     data->timer.stop();
     data->poll_timer.stop();
     if (data->control) {
         data->control->close();
     }
-    if (error) {
-        print_error(data->command.json, *error);
+    if (data->mode == SessionMode::Render && data->result->error) {
+        print_error(data->command.json, *data->result->error);
     }
     emit(finished, code);
 }
@@ -413,16 +422,7 @@ void Session::ready(SystemInfo const& info)
         return;
     }
     if (data->command.kind == CommandKind::SystemInfo) {
-        if (!print_command_result(data->command, ControlReply{info}, data->registry)) {
-            finish(3,
-                   local_error({
-                       .category = ErrorCategory::Internal,
-                       .code     = "jobuctl.output.invalid_reply",
-                       .message  = "Unable to render the daemon reply",
-                   }));
-            return;
-        }
-        finish(0);
+        deliver_reply(ControlReply{info});
         return;
     }
 
@@ -484,14 +484,7 @@ void Session::receive_reply(ControlCallId id, ControlReply const& reply)
             if (run->state == RunState::Cancelled) {
                 auto completed =
                     CancelRunResult{.run = job_run_from_details(*run), .disposition = CancelDisposition::Completed};
-                if (!print_command_result(data->command, ControlReply{std::move(completed)}, data->registry)) {
-                    finish(3,
-                           local_error({.category = ErrorCategory::Internal,
-                                        .code     = "jobuctl.output.invalid_reply",
-                                        .message  = "Unable to render the daemon reply"}));
-                    return;
-                }
-                finish(0);
+                deliver_reply(ControlReply{std::move(completed)});
                 return;
             }
             if (run->state == RunState::Succeeded || run->state == RunState::Failed ||
@@ -522,6 +515,18 @@ void Session::receive_reply(ControlCallId id, ControlReply const& reply)
             schedule_poll();
             return;
         }
+    }
+
+    deliver_reply(reply);
+}
+
+void Session::deliver_reply(ControlReply const& reply)
+{
+    auto* data = d_ptr<Private>();
+    if (data->mode == SessionMode::Capture) {
+        // Typed-client signal arguments are borrowed; own the final value before returning to its callback.
+        finish(0, std::nullopt, reply);
+        return;
     }
 
     if (data->command.kind == CommandKind::AttemptOutput && (data->command.raw || data->command.output_file)) {

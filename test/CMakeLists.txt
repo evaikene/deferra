@@ -1097,6 +1097,15 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
         set_tests_properties(jobuctl-session-test PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
     endif()
 
+    # Direct capture/runner tests own their Application scope; the scripted peer runs on a separate EventThread.
+    add_executable(jobuctl-run-session-test jobuctl-run-session-test.cpp support/temporary_directory.cpp)
+    target_link_libraries(jobuctl-run-session-test PRIVATE jobuctl-private Catch2::Catch2WithMain)
+    add_test(NAME jobuctl-run-session-test COMMAND $<TARGET_FILE:jobuctl-run-session-test>)
+    set_tests_properties(jobuctl-run-session-test PROPERTIES TIMEOUT 60)
+    if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+        set_tests_properties(jobuctl-run-session-test PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+    endif()
+
     # The real client talks to a controlled local peer through the native Process backend.
     add_executable(jobuctl-cli-creation-test jobuctl-cli-creation-test.cpp support/temporary_directory.cpp)
     target_link_libraries(jobuctl-cli-creation-test PRIVATE jobu Catch2::Catch2WithMain)

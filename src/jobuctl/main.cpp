@@ -1,12 +1,11 @@
 #include "jobu_version_priv.hpp"
 
-#include "application.hpp"
 #include "attribute_registry.hpp"
 #include "command_line_priv.hpp"
 #include "help_priv.hpp"
 #include "input_priv.hpp"
 #include "output_priv.hpp"
-#include "session_priv.hpp"
+#include "run_session_priv.hpp"
 
 #include <fmt/format.h>
 
@@ -53,9 +52,5 @@ auto main(int argc, char* argv[]) -> int
         return 2;
     }
 
-    jb::core::Application app{0, nullptr};
-    Session               session{std::move(command), registry};
-    session.finished.connect(&app, [&app](int code) { static_cast<void>(app.quit(code)); });
-    session.start();
-    return app.exec();
+    return run_session(std::move(command), registry).exit_code;
 }

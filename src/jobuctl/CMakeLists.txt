@@ -8,7 +8,7 @@ configure_file(
     @ONLY
 )
 
-# Private implementation shared by the executable and direct command parsing tests.
+# Private implementation shared by the executable and direct parsing/session tests.
 add_library(jobuctl-private STATIC
     command_line_priv.cpp
     command_registry_priv.cpp
@@ -17,6 +17,7 @@ add_library(jobuctl-private STATIC
     input_priv.cpp
     output_priv.cpp
     session_priv.cpp
+    run_session_priv.cpp
     commands/system_commands.cpp
     commands/queue_commands.cpp
     commands/job_commands.cpp

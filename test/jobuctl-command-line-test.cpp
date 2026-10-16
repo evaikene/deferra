@@ -558,6 +558,73 @@ TEST_CASE("jobuctl accepts one params object from standard input", "[jobuctl][in
     CHECK(std::get<QueueListRequest>(command.command->request).page.limit == 3);
 }
 
+TEST_CASE("jobuctl shared request decoding owns strict params without CLI defaults", "[jobuctl][input]")
+{
+    auto decoded = [] {
+        StandardAttributeRegistry registry;
+        auto                      value = parse_json(
+            R"({"job_id":"00000000-0000-7000-8000-000000000001","expected_revision":7,"name":"edited","priority":50})");
+        REQUIRE(value);
+        return decode_command_request(CommandKind::JobUpdate, *value, registry);
+    }();
+    REQUIRE(decoded);
+    auto const& update = std::get<UpdateJobRequest>(*decoded);
+    CHECK(update.job_id.to_string() == job_id);
+    CHECK(update.expected_revision == 7);
+    REQUIRE(update.name);
+    CHECK(*update.name == "edited");
+    CHECK(update.priority == 50);
+    CHECK_FALSE(update.payload);
+
+    StandardAttributeRegistry registry;
+    auto                      empty = parse_json("{}");
+    REQUIRE(empty);
+    auto system = decode_command_request(CommandKind::SystemInfo, *empty, registry);
+    REQUIRE(system);
+    CHECK(std::holds_alternative<std::monostate>(*system));
+    auto runs = decode_command_request(CommandKind::RunList, *empty, registry);
+    REQUIRE(runs);
+    auto const& query = std::get<RunQuery>(std::get<RunListRequest>(*runs));
+    CHECK_FALSE(query.filters.state);
+    CHECK_FALSE(query.filters.states);
+
+    auto cursor = parse_json(R"({"cursor":"opaque-token"})");
+    REQUIRE(cursor);
+    auto continuation = decode_command_request(CommandKind::RunList, *cursor, registry);
+    REQUIRE(continuation);
+    CHECK(std::get<CursorRequest>(std::get<RunListRequest>(*continuation)).cursor == "opaque-token");
+}
+
+TEST_CASE("jobuctl shared request decoding rejects malformed input with safe errors", "[jobuctl][input]")
+{
+    StandardAttributeRegistry registry;
+    for (auto const* document : {"null", "[]", "true", "42", "\"private-input\""}) {
+        auto value = parse_json(document);
+        REQUIRE(value);
+        for (auto kind : {CommandKind::SystemInfo, CommandKind::JobUpdate, CommandKind::RunList}) {
+            auto decoded = decode_command_request(kind, *value, registry);
+            REQUIRE_FALSE(decoded);
+            CHECK(decoded.error().code == "jobuctl.input.invalid_params");
+            CHECK(decoded.error().message == "Request parameters are invalid");
+        }
+    }
+
+    for (auto const* document :
+         {R"({"job_id":"00000000-0000-7000-8000-000000000001","priority":50})",
+          R"({"job_id":"00000000-0000-7000-8000-000000000001","expected_revision":7})",
+          R"({"job_id":"00000000-0000-7000-8000-000000000001","expected_revision":7,"private-input":50})"}) {
+        auto value = parse_json(document);
+        REQUIRE(value);
+        auto decoded = decode_command_request(CommandKind::JobUpdate, *value, registry);
+        REQUIRE_FALSE(decoded);
+        CHECK(decoded.error().code == "jobuctl.input.invalid_params");
+        CHECK(decoded.error().message == "Request parameters are invalid");
+    }
+    auto unexpected = parse_json(R"({"private-input":true})");
+    REQUIRE(unexpected);
+    CHECK_FALSE(decode_command_request(CommandKind::SystemInfo, *unexpected, registry));
+}
+
 TEST_CASE("jobuctl secret commands select metadata-only requests and deferred input", "[jobuctl][parse]")
 {
     auto set = parse({"--socket", "fixture.sock", "secret", "set", "reports.token", "--stdin"});
