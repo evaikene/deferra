@@ -84,6 +84,7 @@ jobs:
         run: |
           apk add --no-cache \
             ccache \
+            tar \
             catch2-3 \
             cmake \
             curl-dev \
