@@ -28,21 +28,25 @@ struct UtcRange {
 /// Queue and job IDs refer to the run snapshot, including after an owner is moved or deleted.
 struct RunFilters {
     /// Queue captured on the run, independent of the job's current queue.
-    std::optional<jb::core::Uuid> queue_id;
+    std::optional<jb::core::Uuid>        queue_id;
     /// Definition identity retained after soft deletion.
-    std::optional<jb::core::Uuid> job_id;
-    /// Current retained lifecycle state.
-    std::optional<RunState>       state;
+    std::optional<jb::core::Uuid>        job_id;
+    /// Current retained lifecycle state; mutually exclusive with states.
+    std::optional<RunState>              state;
+    /// Matches any listed current state; mutually exclusive with state.
+    /// Absent means no set filter; a present set requires 1–7 distinct valid RunState values.
+    /// Codecs retain caller order, which does not affect selection semantics.
+    std::optional<std::vector<RunState>> states;
     /// Scheduled or manual; Submitted is reserved and rejected.
-    std::optional<RunOrigin>      origin;
+    std::optional<RunOrigin>             origin;
     /// Runner family captured on the run.
-    std::optional<JobType>        type;
+    std::optional<JobType>               type;
     /// Immutable nominal occurrence-time range.
-    UtcRange                      planned;
+    UtcRange                             planned;
     /// Actual first-start range; null timestamps never match a nonempty range.
-    UtcRange                      started;
+    UtcRange                             started;
     /// Terminal completion range; null timestamps never match a nonempty range.
-    UtcRange                      completed;
+    UtcRange                             completed;
 };
 
 /// Initial run query. Limit is the maximum item count, from 1 through 200.
