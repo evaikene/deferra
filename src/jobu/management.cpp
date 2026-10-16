@@ -12,6 +12,7 @@
 #include "idempotency_codec_priv.hpp"
 #include "idempotency_repository_priv.hpp"
 #include "job_lifecycle_priv.hpp"
+#include "job_payload_admission_priv.hpp"
 #include "job_repository_priv.hpp"
 #include "job_validation_priv.hpp"
 #include "json.hpp"
@@ -1348,6 +1349,13 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
     if (!name) {
         return ServiceResult<JobDefinition>::failure(std::move(name).error());
     }
+    // Normalize the owned request before serialization and replay encoding so every new durable copy agrees.
+    auto normalized = detail::normalize_submitted_job_payload(request.type, std::move(request.payload));
+    if (!normalized) {
+        return ServiceResult<JobDefinition>::failure(std::move(normalized).error());
+    }
+    request.payload = std::move(normalized).value();
+
     auto payload = validate_job_payload(request.type, request.payload);
     if (!payload) {
         return ServiceResult<JobDefinition>::failure(std::move(payload).error());
@@ -1890,6 +1898,8 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
         return ServiceResult<JobDefinition>::failure(schedule_refresh_conflict());
     }
 
+    // An explicitly repeated type is not a conversion: retained legacy payloads keep their original semantics.
+    auto const type_changed = request.type && *request.type != replacement.type;
     if (request.name) {
         replacement.name = std::move(*request.name);
     }
@@ -1908,6 +1918,14 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
     if (request.payload) {
         replacement.payload = std::move(*request.payload);
     }
+    if (request.payload || type_changed) {
+        auto normalized = detail::normalize_submitted_job_payload(replacement.type, std::move(replacement.payload));
+        if (!normalized) {
+            return ServiceResult<JobDefinition>::failure(std::move(normalized).error());
+        }
+        replacement.payload = std::move(normalized).value();
+    }
+
     auto payload = validate_job_payload(replacement.type, replacement.payload);
     if (!payload) {
         return ServiceResult<JobDefinition>::failure(std::move(payload).error());

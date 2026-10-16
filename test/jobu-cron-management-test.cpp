@@ -2,10 +2,12 @@
 
 #include "management_json.hpp"
 
+#include "attempt.hpp"
 #include "attempt_repository_priv.hpp"
 #include "attribute_registry.hpp"
 #include "database.hpp"
 #include "job_lifecycle_priv.hpp"
+#include "job_validation_priv.hpp"
 #include "query.hpp"
 #include "run_repository_priv.hpp"
 #include "sqlite/sqlite_driver.hpp"
@@ -24,6 +26,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -89,7 +92,7 @@ auto cli_payload(std::string command) -> jb::core::JsonValue
     return payload;
 }
 
-auto http_payload(std::string url) -> jb::core::JsonValue
+auto http_payload(std::string url, std::optional<std::string> method = std::nullopt) -> jb::core::JsonValue
 {
     auto url_value = jb::core::JsonValue{};
     url_value.data = std::move(url);
@@ -97,6 +100,9 @@ auto http_payload(std::string url) -> jb::core::JsonValue
     payload.data   = jb::core::JsonValue::Object{
         {"url", std::move(url_value)}
     };
+    if (method) {
+        std::get<JsonValue::Object>(payload.data).emplace("method", JsonValue{.data = std::move(*method)});
+    }
     return payload;
 }
 
@@ -551,6 +557,7 @@ TEST_CASE("Recurring update replans one unstarted run with a complete new snapsh
     fixture.time.advance(10s);
 
     auto const replacement_payload = http_payload("https://updated.test/");
+    auto const canonical_payload   = http_payload("https://updated.test/", "GET");
     auto       updated             = service.update_job({
         .job_id            = job_id,
         .expected_revision = 1,
@@ -568,7 +575,7 @@ TEST_CASE("Recurring update replans one unstarted run with a complete new snapsh
     check_schedule(updated->schedule, updated_schedule);
     CHECK(updated->priority == 9);
     CHECK(std::get<std::int64_t>(updated->attributes.at("retry.max_attempts").data) == 6);
-    CHECK(updated->payload == replacement_payload);
+    CHECK(updated->payload == canonical_payload);
     CHECK(updated->created_at == UtcTimePoint{10s});
     CHECK(updated->updated_at == UtcTimePoint{20s});
 
@@ -589,7 +596,7 @@ TEST_CASE("Recurring update replans one unstarted run with a complete new snapsh
     CHECK((**stored).type == JobType::Http);
     CHECK((**stored).priority == 9);
     CHECK(std::get<std::int64_t>((**stored).attributes.at("retry.max_attempts").data) == 6);
-    CHECK((**stored).payload == replacement_payload);
+    CHECK((**stored).payload == canonical_payload);
 
     fixture.cron.set_validation_error(
         injected_error(ErrorCategory::InvalidArgument, "jobu.schedule.invalid_expression"));
@@ -619,18 +626,23 @@ TEST_CASE("Recurring update replans one unstarted run with a complete new snapsh
     execute(fixture.database,
             "CREATE TRIGGER fail_recurring_refresh BEFORE UPDATE ON jobu_runs "
             "BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
-    require_error(service.update_job({.job_id = job_id, .expected_revision = 2, .priority = 10}),
+    require_error(service.update_job({.job_id            = job_id,
+                                      .expected_revision = 2,
+                                      .priority          = 10,
+                                      .payload           = http_payload("https://rollback.test/", "pOsT")}),
                   ErrorCategory::Conflict,
                   "db.constraint");
     unchanged = service.get_job(job_id);
     REQUIRE(unchanged);
     CHECK(unchanged->revision == 2);
     CHECK(unchanged->priority == 9);
+    CHECK(unchanged->payload == canonical_payload);
     stored = runs.find_schedule_owned(job_id);
     REQUIRE(stored);
     REQUIRE(stored->has_value());
     CHECK((**stored).job_revision == 2);
     CHECK((**stored).priority == 9);
+    CHECK((**stored).payload == canonical_payload);
 }
 
 TEST_CASE("Recurring update ignores historical attempts while refreshing the current occurrence",
@@ -757,6 +769,7 @@ TEST_CASE("Running recurring updates preserve the active snapshot for the newest
     }
 
     auto const replacement_payload = http_payload("https://successor.test/");
+    auto const canonical_payload   = http_payload("https://successor.test/", "GET");
     auto       updated             = service.update_job({
         .job_id            = job_id,
         .expected_revision = 1,
@@ -771,7 +784,7 @@ TEST_CASE("Running recurring updates preserve the active snapshot for the newest
     CHECK(updated->type == JobType::Http);
     check_schedule(updated->schedule, updated_schedule);
     CHECK(updated->priority == 9);
-    CHECK(updated->payload == replacement_payload);
+    CHECK(updated->payload == canonical_payload);
     REQUIRE(fixture.cron.validation_calls().size() == 2);
     CHECK(fixture.cron.next_calls().size() == 1);
 
@@ -804,6 +817,105 @@ TEST_CASE("Running recurring updates preserve the active snapshot for the newest
     REQUIRE(unchanged);
     CHECK(unchanged->revision == 3);
     CHECK(std::holds_alternative<CronSchedule>(unchanged->schedule));
+}
+
+TEST_CASE("HTTP admission refreshes only untouched recurring snapshots", "[jobu][cron][http][legacy][update]")
+{
+    for (auto state : {RunState::Scheduled, RunState::Running, RunState::RetryWait}) {
+        DYNAMIC_SECTION(static_cast<int>(state))
+        {
+            ServiceFixture fixture{
+                {sequence_id(1), sequence_id(2), sequence_id(3)}
+            };
+            auto const schedule = cron_schedule();
+            fixture.cron.set_occurrences(schedule, {UtcTimePoint{60s}, UtcTimePoint{120s}});
+            ManagementService service{fixture.database,
+                                      fixture.registry,
+                                      fixture.cron,
+                                      fixture.generator,
+                                      fixture.time};
+            auto              queue = service.create_queue({.name = "legacy"});
+            REQUIRE(queue);
+            auto created = service.create_job({
+                .queue    = queue->id,
+                .type     = JobType::Http,
+                .schedule = CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone},
+                .payload  = http_payload("https://legacy.test/")
+            });
+            REQUIRE(created);
+
+            // The isolated fixture owns one definition and current run. Seed their pre-admission spelling together.
+            auto const legacy     = http_payload("https://legacy.test/", "get");
+            auto       serialized = jb::jobu::detail::validate_and_serialize_job_payload(JobType::Http, legacy);
+            REQUIRE(serialized);
+            for (auto const* sql : {"UPDATE jobu_jobs SET payload_json = :payload WHERE type = 'http'",
+                                    "UPDATE jobu_runs SET payload_json = :payload WHERE type = 'http'"}) {
+                Query query{fixture.database};
+                REQUIRE(query.prepare(sql));
+                REQUIRE(query.bind_value(":payload", std::string{serialized->serialized()}));
+                REQUIRE(query.exec());
+            }
+
+            jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+            auto                            original = runs.find_schedule_owned(created->id);
+            REQUIRE(original);
+            REQUIRE(*original);
+            auto historical         = **original;
+            historical.id           = sequence_id(4);
+            historical.state        = RunState::Succeeded;
+            historical.planned_at   = UtcTimePoint{0s};
+            historical.runnable_at  = UtcTimePoint{0s};
+            historical.started_at   = UtcTimePoint{1s};
+            historical.completed_at = UtcTimePoint{2s};
+            historical.result       = JsonValue{.data = JsonValue::Object{}};
+            {
+                auto transaction = Transaction::begin(fixture.database);
+                REQUIRE(transaction);
+                // The fixture models a completed scheduled occurrence; manual insertion only accepts new work.
+                REQUIRE(runs.insert_schedule_owned(historical));
+                REQUIRE(transaction->commit());
+            }
+
+            jb::jobu::detail::AttemptRepository attempts{fixture.database};
+            if (state != RunState::Scheduled) {
+                execute(
+                    fixture.database,
+                    state == RunState::Running
+                        ? "UPDATE jobu_runs SET state = 'running', started_at_us = 11000000 WHERE state = 'scheduled'"
+                        : "UPDATE jobu_runs SET state = 'retry_wait', started_at_us = 11000000 WHERE state = "
+                          "'scheduled'");
+                auto attempt = JobAttempt{.run_id         = (**original).id,
+                                          .attempt_number = 1,
+                                          .due_at         = UtcTimePoint{60s},
+                                          .started_at     = UtcTimePoint{11s},
+                                          .state          = AttemptState::Running};
+                if (state == RunState::RetryWait) {
+                    attempt.state        = AttemptState::Completed;
+                    attempt.completed_at = UtcTimePoint{12s};
+                    attempt.outcome      = AttemptOutcome::Failed;
+                }
+                REQUIRE(attempts.insert_attempt(attempt));
+            }
+
+            auto updated = service.update_job({.job_id            = created->id,
+                                               .expected_revision = 1,
+                                               .payload = http_payload("https://replacement.test/", "pAtCh")});
+            REQUIRE(updated);
+            auto const expected = http_payload("https://replacement.test/", "PATCH");
+            CHECK(updated->payload == expected);
+            auto current = runs.find_schedule_owned(created->id);
+            REQUIRE(current);
+            REQUIRE(*current);
+            CHECK((**current).state == state);
+            CHECK((**current).payload == (state == RunState::Scheduled ? expected : legacy));
+            CHECK((**current).job_revision == (state == RunState::Scheduled ? 2 : 1));
+            auto retained = runs.find_by_id(historical.id);
+            REQUIRE(retained);
+            REQUIRE(*retained);
+            CHECK((**retained).payload == legacy);
+            CHECK((**retained).job_revision == 1);
+        }
+    }
 }
 
 TEST_CASE("Unstarted schedule conversions preserve the run identity and reject pending attempts",

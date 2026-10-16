@@ -5,8 +5,12 @@
 #include "attribute_registry.hpp"
 #include "database.hpp"
 #include "domain_storage_priv.hpp"
+#include "http_job_method_priv.hpp"
+#include "http_job_payload_priv.hpp"
+#include "idempotency_codec_priv.hpp"
 #include "idempotency_repository_priv.hpp"
 #include "job_repository_priv.hpp"
+#include "job_validation_priv.hpp"
 #include "management_json.hpp"
 #include "query.hpp"
 #include "recovery.hpp"
@@ -19,6 +23,7 @@
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/sequence_uuid_generator.hpp"
+#include "support/storage_fault_helpers.hpp"
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -308,6 +313,21 @@ auto stored_documents(Database& database, Uuid const& job_id) -> StoredJobRunDoc
     };
 }
 
+void seed_legacy_http_payload(Database& database, Uuid const& job_id, JsonValue const& payload)
+{
+    // Bypass new-input admission only in fixture setup, retaining the old structural validation contract.
+    auto serialized = detail::validate_and_serialize_job_payload(JobType::Http, payload);
+    REQUIRE(serialized);
+    for (auto const* sql : {"UPDATE jobu_jobs SET payload_json = :payload WHERE id = :job_id",
+                            "UPDATE jobu_runs SET payload_json = :payload WHERE job_id = :job_id"}) {
+        Query query{database};
+        REQUIRE(query.prepare(sql));
+        REQUIRE(query.bind_value(":payload", std::string{serialized->serialized()}));
+        REQUIRE(query.bind_value(":job_id", detail::uuid_to_storage(job_id)));
+        REQUIRE(query.exec());
+    }
+}
+
 class LargeAttributeRegistry final : public AttributeRegistry {
 public:
     [[nodiscard]] auto find(std::string_view name) const noexcept -> AttributeDefinition const* override
@@ -491,6 +511,390 @@ TEST_CASE("Job management creates durable one-time definitions and immutable run
     CHECK(count_rows(fixture.database, "jobu_jobs") == 2);
     CHECK(count_rows(fixture.database, "jobu_runs") == 2);
     CHECK(count_rows(fixture.database, "jobu_attempts") == 0);
+}
+
+TEST_CASE("HTTP creation normalizes every durable copy before idempotency comparison", "[jobu][job][http][admission]")
+{
+    struct MethodCase {
+        std::optional<std::string> submitted;
+        std::string                canonical;
+    };
+
+    for (auto const& method : std::array<MethodCase, 7>{
+             {
+              {.submitted = "gEt", .canonical = "GET"},
+              {.submitted = "pOsT", .canonical = "POST"},
+              {.submitted = "pUt", .canonical = "PUT"},
+              {.submitted = "pAtCh", .canonical = "PATCH"},
+              {.submitted = "dElEtE", .canonical = "DELETE"},
+              {.submitted = "hEaD", .canonical = "HEAD"},
+              {.submitted = std::nullopt, .canonical = "GET"},
+              }
+    }) {
+        DYNAMIC_SECTION(method.submitted.value_or("omitted"))
+        {
+            // Replays must work after the only job/run identities have been consumed.
+            ServiceFixture fixture{
+                {sequence_id(1), sequence_id(2), sequence_id(3)}
+            };
+            ManagementService service{fixture.database,
+                                      fixture.registry,
+                                      fixture.cron,
+                                      fixture.generator,
+                                      fixture.time};
+            auto              queue = service.create_queue({.name = "http"});
+            REQUIRE(queue);
+            auto       request  = CreateJobRequest{.queue    = queue->id,
+                                                   .type     = JobType::Http,
+                                                   .schedule = once_at(UtcTimePoint{20s}),
+                                                   .payload  = http_payload("https://admission.test/", method.submitted),
+                                                   .idempotency_key = "canonical"};
+            auto const original = request.payload;
+            auto const expected = http_payload("https://admission.test/", method.canonical);
+            auto       created  = service.create_job(request);
+            REQUIRE(created);
+            CHECK(request.payload == original);
+            CHECK(created->payload == expected);
+
+            auto fetched = service.get_job(created->id);
+            REQUIRE(fetched);
+            CHECK(fetched->payload == expected);
+            detail::RunRepository runs{fixture.database, fixture.registry};
+            auto                  run = runs.find_schedule_owned(created->id);
+            REQUIRE(run);
+            REQUIRE(*run);
+            CHECK((**run).payload == expected);
+            auto documents = stored_documents(fixture.database, created->id);
+            CHECK(documents.job_payload == documents.run_payload);
+
+            detail::IdempotencyRepository records{fixture.database};
+            auto                          record = records.find("job.create", queue->id, "canonical");
+            REQUIRE(record);
+            REQUIRE(*record);
+            auto saved_request = parse_json((**record).request_json);
+            auto saved_result  = parse_json((**record).result_json);
+            REQUIRE(saved_request);
+            REQUIRE(saved_result);
+            CHECK(saved_request->as_object().at("payload") == expected);
+            CHECK(saved_result->as_object().at("payload") == expected);
+
+            auto const before = storage_snapshot(fixture.database);
+            request.payload   = expected;
+            auto replay       = service.create_job(request);
+            REQUIRE(replay);
+            CHECK(replay->id == created->id);
+            CHECK(replay->revision == 1);
+            CHECK(replay->payload == expected);
+            CHECK(storage_snapshot(fixture.database) == before);
+        }
+    }
+}
+
+TEST_CASE("HTTP creation rejects method failures without durable changes", "[jobu][job][http][admission]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              queue = service.create_queue({.name = "http"});
+    REQUIRE(queue);
+    auto       request = CreateJobRequest{.queue           = queue->id,
+                                          .type            = JobType::Http,
+                                          .schedule        = once_at(UtcTimePoint{20s}),
+                                          .idempotency_key = "rejected"};
+    auto const before  = storage_snapshot(fixture.database);
+    for (auto const* method : {"OPTIONS", "CUSTOM", "GTE", "", " GET", "GET\n"}) {
+        CAPTURE(method);
+        request.payload = http_payload("https://payload-private-marker.test/", method);
+        auto error =
+            require_error(service.create_job(request), ErrorCategory::InvalidArgument, "jobu.job.invalid_payload");
+        CHECK(error.message.find("Supported methods: GET, POST, PUT, PATCH, DELETE, HEAD.") != std::string::npos);
+        CHECK(error.message.find("payload-private-marker") == std::string::npos);
+        CHECK(error.message.find('\n') == std::string::npos);
+        CHECK(storage_snapshot(fixture.database) == before);
+    }
+    for (auto const& method : {JsonValue{}, json_bool(true), json_array({})}) {
+        request.payload = http_payload("https://admission.test/");
+        object(request.payload).emplace("method", method);
+        auto error =
+            require_error(service.create_job(request), ErrorCategory::InvalidArgument, "jobu.job.invalid_payload");
+        CHECK(error.message == "HTTP method must be a string. Supported methods: GET, POST, PUT, PATCH, DELETE, HEAD.");
+        CHECK(storage_snapshot(fixture.database) == before);
+    }
+
+    // Case normalization must precede the existing HEAD body restriction.
+    request.payload = complete_http_payload("https://admission.test/", "head");
+    require_error(service.create_job(request), ErrorCategory::InvalidArgument, "jobu.job.invalid_payload");
+    CHECK(storage_snapshot(fixture.database) == before);
+
+    request.payload = http_payload("https://admission.test/");
+    auto created    = service.create_job(request);
+    REQUIRE(created);
+    CHECK(created->id == sequence_id(2));
+}
+
+TEST_CASE("HTTP metadata and repeated-type updates preserve legacy payloads", "[jobu][job][http][legacy]")
+{
+    for (auto const method :
+         {std::string_view{"get"}, std::string_view{"CUSTOM"}, std::string_view{"head"}, std::string_view{}}) {
+        DYNAMIC_SECTION((method.empty() ? "omitted" : method))
+        {
+            ServiceFixture fixture{
+                {sequence_id(1), sequence_id(2), sequence_id(3)}
+            };
+            ManagementService service{fixture.database,
+                                      fixture.registry,
+                                      fixture.cron,
+                                      fixture.generator,
+                                      fixture.time};
+            auto              queue = service.create_queue({.name = "legacy"});
+            REQUIRE(queue);
+            auto created = service.create_job({.queue    = queue->id,
+                                               .type     = JobType::Http,
+                                               .schedule = once_at(UtcTimePoint{20s}),
+                                               .payload  = http_payload("https://legacy.test/")});
+            REQUIRE(created);
+            auto legacy = http_payload("https://legacy.test/");
+            if (!method.empty()) {
+                object(legacy).emplace("method", json_string(std::string{method}));
+            }
+            if (method == "head") {
+                // Lowercase legacy HEAD with a body keeps the pre-admission semantics.
+                legacy = complete_http_payload("https://legacy.test/", "head");
+            }
+            seed_legacy_http_payload(fixture.database, created->id, legacy);
+            auto const original_documents = stored_documents(fixture.database, created->id);
+            auto       fetched            = service.get_job(created->id);
+            REQUIRE(fetched);
+            CHECK(fetched->payload == legacy);
+            auto listed = service.list_jobs({});
+            REQUIRE(listed);
+            REQUIRE(listed->items.size() == 1U);
+            CHECK(listed->items.front().payload == legacy);
+
+            auto updated = service.update_job({.job_id = created->id, .expected_revision = 1, .priority = 7});
+            REQUIRE(updated);
+            CHECK(updated->payload == legacy);
+            updated = service.update_job({
+                .job_id            = created->id,
+                .expected_revision = 2,
+                .name              = std::optional<std::optional<std::string>>{std::in_place, "renamed"},
+                .schedule          = once_at(UtcTimePoint{30s}
+                               ),
+                .attribute_changes = max_attempts(5)
+            });
+            REQUIRE(updated);
+            CHECK(updated->payload == legacy);
+            updated = service.update_job({.job_id = created->id, .expected_revision = 3, .type = JobType::Http});
+            REQUIRE(updated);
+            CHECK(updated->revision == 4);
+            CHECK(updated->payload == legacy);
+            auto documents = stored_documents(fixture.database, created->id);
+            CHECK(documents.job_payload == original_documents.job_payload);
+            CHECK(documents.run_payload == original_documents.run_payload);
+
+            detail::RunRepository runs{fixture.database, fixture.registry};
+            auto                  run = runs.find_schedule_owned(created->id);
+            REQUIRE(run);
+            REQUIRE(*run);
+            CHECK((**run).job_revision == 4);
+            auto decoded = detail::decode_http_job_payload((**run).payload);
+            REQUIRE(decoded);
+            CHECK(detail::http_method_wire_text(decoded->method) == (method.empty() ? "GET" : method));
+
+            auto const before      = storage_snapshot(fixture.database);
+            auto       replacement = http_payload("https://replacement.test/", "OPTIONS");
+            require_error(service.update_job({.job_id = created->id, .expected_revision = 3, .payload = replacement}),
+                          ErrorCategory::Conflict,
+                          "jobu.job.revision_conflict");
+            auto error = require_error(
+                service.update_job({.job_id = created->id, .expected_revision = 4, .payload = replacement}),
+                ErrorCategory::InvalidArgument,
+                "jobu.job.invalid_payload");
+            CHECK(error.message.find("Unsupported HTTP method \"OPTIONS\"") != std::string::npos);
+            CHECK(storage_snapshot(fixture.database) == before);
+
+            updated = service.update_job({.job_id            = created->id,
+                                          .expected_revision = 4,
+                                          .payload           = http_payload("https://replacement.test/", "pAtCh")});
+            REQUIRE(updated);
+            CHECK(updated->revision == 5);
+            CHECK(updated->payload == http_payload("https://replacement.test/", "PATCH"));
+            run = runs.find_schedule_owned(created->id);
+            REQUIRE(run);
+            REQUIRE(*run);
+            CHECK((**run).payload == updated->payload);
+        }
+    }
+}
+
+TEST_CASE("Actual type conversions admit the effective retained payload", "[jobu][job][http][admission][conversion]")
+{
+    for (auto const* method : {"get", "OPTIONS", ""}) {
+        DYNAMIC_SECTION(method)
+        {
+            ServiceFixture fixture{
+                {sequence_id(1), sequence_id(2), sequence_id(3)}
+            };
+            ManagementService service{fixture.database,
+                                      fixture.registry,
+                                      fixture.cron,
+                                      fixture.generator,
+                                      fixture.time};
+            auto              queue = service.create_queue({.name = "conversion"});
+            REQUIRE(queue);
+            // A CLI payload may contain unknown HTTP members; switching type makes those members authoritative.
+            auto payload = cli_payload("/bin/true");
+            object(payload).emplace("url", json_string("https://conversion.test/"));
+            if (*method != '\0') {
+                object(payload).emplace("method", json_string(method));
+            }
+            auto created =
+                service.create_job({.queue = queue->id, .schedule = once_at(UtcTimePoint{20s}), .payload = payload});
+            REQUIRE(created);
+            CHECK(created->payload == payload);
+            auto const before = storage_snapshot(fixture.database);
+            auto converted = service.update_job({.job_id = created->id, .expected_revision = 1, .type = JobType::Http});
+            if (std::string_view{method} == "OPTIONS") {
+                require_error(converted, ErrorCategory::InvalidArgument, "jobu.job.invalid_payload");
+                CHECK(storage_snapshot(fixture.database) == before);
+            }
+            else {
+                REQUIRE(converted);
+                object(payload).insert_or_assign("method", json_string("GET"));
+                CHECK(converted->type == JobType::Http);
+                CHECK(converted->payload == payload);
+                detail::RunRepository runs{fixture.database, fixture.registry};
+                auto                  run = runs.find_schedule_owned(created->id);
+                REQUIRE(run);
+                REQUIRE(*run);
+                CHECK((**run).type == JobType::Http);
+                CHECK((**run).payload == payload);
+            }
+        }
+    }
+
+    SECTION("HTTP to CLI keeps an unrelated legacy method member")
+    {
+        ServiceFixture fixture{
+            {sequence_id(1), sequence_id(2), sequence_id(3)}
+        };
+        ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+        auto              queue = service.create_queue({.name = "conversion"});
+        REQUIRE(queue);
+        auto created = service.create_job({.queue    = queue->id,
+                                           .type     = JobType::Http,
+                                           .schedule = once_at(UtcTimePoint{20s}),
+                                           .payload  = http_payload("https://conversion.test/")});
+        REQUIRE(created);
+        auto legacy = http_payload("https://conversion.test/", "CUSTOM");
+        object(legacy).emplace("command", json_string("/bin/true"));
+        seed_legacy_http_payload(fixture.database, created->id, legacy);
+        auto converted = service.update_job({.job_id = created->id, .expected_revision = 1, .type = JobType::Cli});
+        REQUIRE(converted);
+        CHECK(converted->type == JobType::Cli);
+        CHECK(converted->payload == legacy);
+    }
+}
+
+TEST_CASE("Pre-admission HTTP replay documents remain readable and unchanged", "[jobu][job][http][legacy][idempotency]")
+{
+    for (auto const method :
+         {std::string_view{"get"}, std::string_view{"CUSTOM"}, std::string_view{"GET"}, std::string_view{}}) {
+        DYNAMIC_SECTION((method.empty() ? "omitted" : method))
+        {
+            ServiceFixture fixture{
+                {sequence_id(1), sequence_id(2), sequence_id(3)}
+            };
+            ManagementService service{fixture.database,
+                                      fixture.registry,
+                                      fixture.cron,
+                                      fixture.generator,
+                                      fixture.time};
+            auto              queue = service.create_queue({.name = "legacy"});
+            REQUIRE(queue);
+            auto request = CreateJobRequest{.queue    = queue->id,
+                                            .type     = JobType::Http,
+                                            .schedule = once_at(UtcTimePoint{20s}),
+                                            .payload  = http_payload("https://legacy.test/")};
+            auto created = service.create_job(request);
+            REQUIRE(created);
+            if (!method.empty()) {
+                object(request.payload).emplace("method", json_string(std::string{method}));
+            }
+            seed_legacy_http_payload(fixture.database, created->id, request.payload);
+            created->payload        = request.payload;
+            request.idempotency_key = "old-key";
+
+            // Use the pre-admission codecs to model an old saved request/result, without changing production admission.
+            auto encoded_request = detail::encode_job_create_idempotency_request(request, queue->id, fixture.registry);
+            auto encoded_result  = detail::encode_job_idempotency_result(*created, fixture.registry);
+            REQUIRE(encoded_request);
+            REQUIRE(encoded_result);
+            detail::IdempotencyRepository records{fixture.database};
+            REQUIRE(records.insert({.method       = "job.create",
+                                    .scope_id     = queue->id,
+                                    .key          = "old-key",
+                                    .request_json = *encoded_request,
+                                    .result_json  = *encoded_result,
+                                    .resource_id  = created->id,
+                                    .created_at   = created->created_at}));
+            REQUIRE(detail::validate_job_create_idempotency_request(*encoded_request, fixture.registry));
+            auto decoded = detail::decode_job_idempotency_result(*encoded_result, fixture.registry);
+            REQUIRE(decoded);
+            CHECK(decoded->payload == request.payload);
+
+            auto const before = storage_snapshot(fixture.database);
+            if (method == "CUSTOM") {
+                require_error(service.create_job(request), ErrorCategory::InvalidArgument, "jobu.job.invalid_payload");
+            }
+            else if (method == "GET") {
+                auto replay = service.create_job(request);
+                REQUIRE(replay);
+                CHECK(replay->id == created->id);
+                CHECK(replay->payload == request.payload);
+            }
+            else {
+                require_error(service.create_job(request), ErrorCategory::Conflict, "jobu.idempotency.conflict");
+            }
+            CHECK(storage_snapshot(fixture.database) == before);
+        }
+    }
+}
+
+TEST_CASE("Canonical HTTP replay ignores later secret deletion", "[jobu][job][http][idempotency][secret]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    SecretService     secrets{fixture.database, fixture.time};
+    auto              queue = service.create_queue({.name = "http"});
+    REQUIRE(queue);
+    REQUIRE(secrets.set({.name = "token"}));
+    auto payload =
+        parse_json(R"({"url":"https://replay.test/","headers":[{"name":"Authorization","value":{"secret":"token"}}]})");
+    REQUIRE(payload);
+    auto request = CreateJobRequest{.queue           = queue->id,
+                                    .type            = JobType::Http,
+                                    .schedule        = once_at(UtcTimePoint{20s}),
+                                    .payload         = *payload,
+                                    .idempotency_key = "secret-replay"};
+    auto created = service.create_job(request);
+    REQUIRE(created);
+    REQUIRE(service.update_job(
+        {.job_id = created->id, .expected_revision = 1, .payload = http_payload("https://replacement.test/")}));
+    REQUIRE(secrets.erase("token"));
+
+    // Replay must remain observational even when its newly normalized input names a now-missing secret.
+    object(request.payload).emplace("method", json_string("gEt"));
+    auto const before = storage_snapshot(fixture.database);
+    auto       replay = service.create_job(request);
+    REQUIRE(replay);
+    CHECK(replay->id == created->id);
+    CHECK(replay->revision == 1);
+    CHECK(replay->payload == created->payload);
+    CHECK(storage_snapshot(fixture.database) == before);
 }
 
 TEST_CASE("Job create idempotency is queue-scoped and replays the original definition", "[jobu][job][idempotency]")

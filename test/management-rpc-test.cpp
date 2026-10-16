@@ -4,6 +4,7 @@
 #include "attribute_registry.hpp"
 #include "database.hpp"
 #include "framing.hpp"
+#include "job_validation_priv.hpp"
 #include "management.hpp"
 #include "management_json.hpp"
 #include "protocol_priv.hpp"
@@ -17,6 +18,7 @@
 #include "support/fake_time_source.hpp"
 #include "support/memory_io_device.hpp"
 #include "support/sequence_uuid_generator.hpp"
+#include "support/storage_fault_helpers.hpp"
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -865,6 +867,116 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
         CHECK(page->items.front().revision == 12);
         CHECK(rescans.request_count() == 12U);
     }
+}
+
+TEST_CASE("Management RPC applies central HTTP admission and preserves legacy updates", "[jobu][management-rpc][http]")
+{
+    Application    app{0, nullptr};
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    RpcEndpoint endpoint{fixture};
+    auto        queue =
+        decode_queue(endpoint.call("queue.create", encode_create(CreateQueueRequest{.name = "http"}, fixture.registry)),
+                     fixture.registry);
+    auto       original_payload = make_json(JsonValue::Object{
+        {"url", make_json(std::string{"https://payload-private-marker.test/"})},
+    });
+    auto       create_params    = encode_create(CreateJobRequest{.queue           = queue.id,
+                                                                 .type            = JobType::Http,
+                                                                 .schedule        = once_at(UtcTimePoint{20s}),
+                                                                 .payload         = original_payload,
+                                                                 .idempotency_key = "http"},
+                                                fixture.registry);
+    auto const empty            = storage_snapshot(fixture.database);
+
+    // These framed RPC documents bypass typed-client behavior; admission belongs to the service.
+    for (auto const& method :
+         {make_json(std::string{"OPTIONS"}), JsonValue{}, make_json(false), make_json(std::string{"GET\n"})}) {
+        auto invalid = create_params;
+        std::get<JsonValue::Object>(std::get<JsonValue::Object>(invalid.data).at("payload").data)
+            .insert_or_assign("method", method);
+        auto response = endpoint.call("job.create", invalid);
+        require_application_error(response, "invalid_argument", "jobu.job.invalid_payload");
+        auto const& error = require_error(response);
+        CHECK(error.message.find("Supported methods: GET, POST, PUT, PATCH, DELETE, HEAD.") != std::string::npos);
+        CHECK(error.message.find("payload-private-marker") == std::string::npos);
+        CHECK(error.message.find('\n') == std::string::npos);
+        CHECK(storage_snapshot(fixture.database) == empty);
+    }
+
+    auto created  = decode_job(endpoint.call("job.create", create_params), fixture.registry);
+    auto expected = original_payload;
+    std::get<JsonValue::Object>(expected.data).emplace("method", make_json(std::string{"GET"}));
+    CHECK(created.id == sequence_id(2));
+    CHECK(created.payload == expected);
+    auto replay_params = create_params;
+    std::get<JsonValue::Object>(std::get<JsonValue::Object>(replay_params.data).at("payload").data)
+        .emplace("method", make_json(std::string{"gEt"}));
+    auto replay = decode_job(endpoint.call("job.create", replay_params), fixture.registry);
+    CHECK(replay.id == created.id);
+    CHECK(replay.payload == expected);
+
+    auto replacement = original_payload;
+    std::get<JsonValue::Object>(replacement.data).emplace("method", make_json(std::string{"pOsT"}));
+    auto update_params = make_json(JsonValue::Object{
+        {"job_id",            make_json(created.id.to_string())},
+        {"expected_revision", make_json(std::uint64_t{1})      },
+        {"payload",           replacement                      },
+    });
+    auto updated       = decode_job(endpoint.call("job.update", update_params), fixture.registry);
+    std::get<JsonValue::Object>(expected.data).insert_or_assign("method", make_json(std::string{"POST"}));
+    CHECK(updated.revision == 2);
+    CHECK(updated.payload == expected);
+
+    auto const before = storage_snapshot(fixture.database);
+    require_application_error(endpoint.call("job.update", update_params), "conflict", "jobu.job.revision_conflict");
+    std::get<JsonValue::Object>(update_params.data).at("expected_revision") = make_json(std::uint64_t{2});
+    for (auto const& method : {make_json(std::string{"CUSTOM"}), JsonValue{}, make_json(std::string(512, 'Z'))}) {
+        std::get<JsonValue::Object>(replacement.data).at("method")    = method;
+        std::get<JsonValue::Object>(update_params.data).at("payload") = replacement;
+        auto response                                                 = endpoint.call("job.update", update_params);
+        require_application_error(response, "invalid_argument", "jobu.job.invalid_payload");
+        CHECK(require_error(response).message.size() < 256U);
+        CHECK(require_error(response).message.find("Supported methods:") != std::string::npos);
+        CHECK(require_error(response).message.find("payload-private-marker") == std::string::npos);
+        CHECK(storage_snapshot(fixture.database) == before);
+    }
+
+    // Install old data through fixture storage, then send ordinary RPC updates without a replacement payload.
+    auto legacy = original_payload;
+    std::get<JsonValue::Object>(legacy.data).emplace("method", make_json(std::string{"CUSTOM"}));
+    auto serialized = jb::jobu::detail::validate_and_serialize_job_payload(JobType::Http, legacy);
+    REQUIRE(serialized);
+    for (auto const* sql : {"UPDATE jobu_jobs SET payload_json = :payload WHERE type = 'http'",
+                            "UPDATE jobu_runs SET payload_json = :payload WHERE type = 'http'"}) {
+        Query query{fixture.database};
+        REQUIRE(query.prepare(sql));
+        REQUIRE(query.bind_value(":payload", std::string{serialized->serialized()}));
+        REQUIRE(query.exec());
+    }
+    auto fetched = decode_job(endpoint.call("job.get", encode_job_id(created.id)), fixture.registry);
+    CHECK(fetched.payload == legacy);
+    auto metadata = make_json(JsonValue::Object{
+        {"job_id",            make_json(created.id.to_string())},
+        {"expected_revision", make_json(std::uint64_t{2})      },
+        {"priority",          make_json(std::int64_t{7})       },
+    });
+    updated       = decode_job(endpoint.call("job.update", metadata), fixture.registry);
+    CHECK(updated.payload == legacy);
+    auto& fields = std::get<JsonValue::Object>(metadata.data);
+    fields.erase("priority");
+    fields.emplace("type", make_json(std::string{"http"}));
+    fields.at("expected_revision") = make_json(std::uint64_t{3});
+    updated                        = decode_job(endpoint.call("job.update", metadata), fixture.registry);
+    CHECK(updated.revision == 4);
+    CHECK(updated.payload == legacy);
+    jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+    auto                            run = runs.find_schedule_owned(created.id);
+    REQUIRE(run);
+    REQUIRE(*run);
+    CHECK((**run).payload == legacy);
+    CHECK((**run).job_revision == 4);
 }
 
 TEST_CASE("Management RPC separates invalid params from safe application errors", "[jobu][management-rpc][errors]")
