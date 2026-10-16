@@ -5,26 +5,37 @@
 #include "attribute_registry.hpp"
 #include "byte_buffer.hpp"
 #include "database.hpp"
+#include "domain_storage_priv.hpp"
 #include "event_loop_types.hpp"
+#include "framing.hpp"
 #include "http/http_attempt_executor.hpp"
 #include "http/system_http_client.hpp"
+#include "job_validation_priv.hpp"
 #include "json.hpp"
 #include "management.hpp"
+#include "management_json.hpp"
+#include "management_rpc.hpp"
+#include "protocol_priv.hpp"
+#include "query.hpp"
 #include "run_repository_priv.hpp"
 #include "secret_provider_priv.hpp"
 #include "secret_service.hpp"
+#include "server.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/http_test_server.hpp"
+#include "support/memory_io_device.hpp"
 #include "support/rejecting_secret_provider.hpp"
 #include "support/secret_execution_checks.hpp"
 #include "support/sequence_uuid_generator.hpp"
+#include "support/storage_fault_helpers.hpp"
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +45,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 using namespace jb::core;
@@ -321,6 +333,87 @@ public:
     std::unique_ptr<Scheduler>               scheduler;
 };
 
+// Exercise the real framed management adapter against the same service/database that the scheduler will consume.
+class ManagementWireEndpoint {
+public:
+    explicit ManagementWireEndpoint(RealSchedulerFixture& fixture)
+    {
+        REQUIRE(register_management_methods(_server, *fixture.management, fixture.registry));
+        auto device = std::make_unique<MemoryIODevice>();
+        _device     = device.get();
+        device->open();
+        REQUIRE(_server.add_connection(std::move(device)));
+    }
+
+    auto call(std::string_view method, JsonValue const& params) -> jb::rpc::detail::ResponseEnvelope
+    {
+        auto document = serialize_json(jb::rpc::detail::encode_request(_next_id++, method, params));
+        REQUIRE(document);
+        auto frame = jb::rpc::frame_message(*document);
+        REQUIRE(frame);
+        _device->inject_input(*frame);
+
+        jb::rpc::StreamFramer framer;
+        auto                  bodies = framer.append(_device->take_written_data());
+        REQUIRE(bodies);
+        REQUIRE(bodies->size() == 1U);
+        auto parsed = parse_json(bodies->front());
+        REQUIRE(parsed);
+        auto response = jb::rpc::detail::decode_response_document(*parsed);
+        REQUIRE(response);
+        REQUIRE(response->entries.size() == 1U);
+        return std::move(response->entries.front());
+    }
+
+private:
+    jb::rpc::Server _server;
+    MemoryIODevice* _device{nullptr};
+    std::uint64_t   _next_id{1};
+};
+
+auto submitted_http_job(Queue const& queue, JsonValue payload) -> JsonValue
+{
+    return json_object({
+        {"queue_id",   json_string(queue.id.to_string())                                                               },
+        {"type",       json_string("http")                                                                             },
+        {"schedule",   json_object({{"kind", json_string("once")}, {"at", json_string("1970-01-01T00:01:30.000000Z")}})},
+        {"attributes", json_object({{"output.capture", json_string("always")}})                                        },
+        {"payload",    std::move(payload)                                                                              },
+    });
+}
+
+auto rpc_job(jb::rpc::detail::ResponseEnvelope const& response, AttributeRegistry const& registry) -> JobDefinition
+{
+    REQUIRE(std::holds_alternative<JsonValue>(response.payload));
+    auto decoded = job_from_json(std::get<JsonValue>(response.payload), registry);
+    REQUIRE(decoded);
+    return std::move(decoded).value();
+}
+
+void check_payload_rejection(jb::rpc::detail::ResponseEnvelope const& response)
+{
+    REQUIRE(std::holds_alternative<jb::rpc::RpcError>(response.payload));
+    auto const& error = std::get<jb::rpc::RpcError>(response.payload);
+    CHECK(error.code == static_cast<std::int64_t>(jb::rpc::ErrorCode::ApplicationError));
+    REQUIRE(error.data);
+    CHECK(error.data->as_object().at("code").as_string() == "jobu.job.invalid_payload");
+}
+
+void seed_legacy_payload(RealSchedulerFixture& fixture, Uuid const& job_id, JsonValue const& payload)
+{
+    // Old definitions and snapshots enter through fixture storage, never through the new admission boundary.
+    auto serialized = validate_and_serialize_job_payload(JobType::Http, payload);
+    REQUIRE(serialized);
+    for (auto const* sql : {"UPDATE jobu_jobs SET payload_json = :payload WHERE id = :job_id",
+                            "UPDATE jobu_runs SET payload_json = :payload WHERE job_id = :job_id"}) {
+        Query query{fixture.database};
+        REQUIRE(query.prepare(sql));
+        REQUIRE(query.bind_value(":payload", std::string{serialized->serialized()}));
+        REQUIRE(query.bind_value(":job_id", uuid_to_storage(job_id)));
+        REQUIRE(query.exec());
+    }
+}
+
 auto all_terminal(RealSchedulerFixture& fixture, std::vector<CreatedJob> const& jobs) -> bool
 {
     for (auto const& job : jobs) {
@@ -342,6 +435,179 @@ auto prefix_count(std::vector<HttpTestRequest> const& requests, std::size_t limi
 }
 
 } // anonymous namespace
+
+TEST_CASE("admitted HTTP methods reach the wire from canonical definitions and snapshots",
+          "[jobu][scheduler][http][integration][admission]")
+{
+    struct MethodCase {
+        std::optional<std::string> submitted;
+        std::string                canonical;
+    };
+
+    for (auto const& method : std::array<MethodCase, 9>{
+             {
+              {.submitted = "get", .canonical = "GET"},
+              {.submitted = "Get", .canonical = "GET"},
+              {.submitted = "GET", .canonical = "GET"},
+              {.submitted = "pOsT", .canonical = "POST"},
+              {.submitted = "pUt", .canonical = "PUT"},
+              {.submitted = "pAtCh", .canonical = "PATCH"},
+              {.submitted = "dElEtE", .canonical = "DELETE"},
+              {.submitted = "hEaD", .canonical = "HEAD"},
+              {.submitted = std::nullopt, .canonical = "GET"},
+              }
+    }) {
+        DYNAMIC_SECTION(method.submitted.value_or("omitted"))
+        {
+            auto                   fixture = RealSchedulerFixture{};
+            ManagementWireEndpoint endpoint{fixture};
+            auto const             queue   = fixture.create_queue("methods", 1, 1);
+            auto                   payload = http_payload(fixture.server.url("/method"));
+            if (method.submitted) {
+                std::get<JsonValue::Object>(payload.data).emplace("method", json_string(*method.submitted));
+            }
+            auto const created =
+                rpc_job(endpoint.call("job.create", submitted_http_job(queue, payload)), fixture.registry);
+            auto expected = payload;
+            std::get<JsonValue::Object>(expected.data).insert_or_assign("method", json_string(method.canonical));
+            CHECK(created.payload == expected);
+            auto stored = fixture.management->get_job(created.id);
+            REQUIRE(stored);
+            CHECK(stored->payload == expected);
+            auto run = fixture.runs.find_schedule_owned(created.id);
+            REQUIRE(run);
+            REQUIRE(*run);
+            CHECK((**run).payload == expected);
+
+            // The fixture advertises the nonempty representation's length but sends no body for exact HEAD.
+            // A mere custom HEAD string without libcurl's no-body behavior would fail this completion check.
+            fixture.server.enqueue_response({.body = bytes("representation")});
+            fixture.server.release_responses();
+            REQUIRE(fixture.scheduler->start());
+            REQUIRE(fixture.process_until([&] { return fixture.has_run_state((**run).id, RunState::Succeeded); }));
+            auto const requests = fixture.server.requests();
+            REQUIRE(requests.size() == 1U);
+            CHECK(requests.front().method == method.canonical);
+            CHECK(requests.front().body.empty());
+            CHECK(fixture.find_run((**run).id).payload == expected);
+            auto output = fixture.find_output({.run_id = (**run).id, .attempt_number = 1});
+            REQUIRE(output);
+            REQUIRE(output->stdout_bytes);
+            CHECK(byte_text(*output->stdout_bytes) == (method.canonical == "HEAD" ? "" : "representation"));
+            REQUIRE(output->stderr_bytes);
+            CHECK(byte_text(*output->stderr_bytes).find("Content-Length: 14") != std::string_view::npos);
+            fixture.stop_after_idle();
+        }
+    }
+}
+
+TEST_CASE("admitted HTTP bodies and rejected replacements preserve the existing policies",
+          "[jobu][scheduler][http][integration][admission]")
+{
+    for (auto const* method : {"gEt", "pOsT", "pUt", "pAtCh", "dElEtE"}) {
+        DYNAMIC_SECTION(method)
+        {
+            auto                   fixture = RealSchedulerFixture{};
+            ManagementWireEndpoint endpoint{fixture};
+            auto const             queue  = fixture.create_queue("bodies", 1, 1);
+            auto                   params = submitted_http_job(queue, http_payload(fixture.server.url("/body")));
+            auto const             empty  = storage_snapshot(fixture.database);
+
+            auto  invalid = params;
+            auto& invalid_payload =
+                std::get<JsonValue::Object>(std::get<JsonValue::Object>(invalid.data).at("payload").data);
+            invalid_payload.emplace("method", json_string("hEaD"));
+            invalid_payload.emplace("body",
+                                    json_object({
+                                        {"encoding", json_string("utf8")},
+                                        {"data",     json_string("")    }
+            }));
+            check_payload_rejection(endpoint.call("job.create", invalid));
+            CHECK(storage_snapshot(fixture.database) == empty);
+
+            auto const created = rpc_job(endpoint.call("job.create", params), fixture.registry);
+            auto const before  = storage_snapshot(fixture.database);
+            auto       update  = json_object({
+                {"job_id",            json_string(created.id.to_string())                    },
+                {"expected_revision", JsonValue{.data = std::uint64_t{1}}                    },
+                {"payload",           std::get<JsonValue::Object>(invalid.data).at("payload")},
+            });
+            check_payload_rejection(endpoint.call("job.update", update));
+            CHECK(storage_snapshot(fixture.database) == before);
+
+            // Replace before dispatch; the eligible snapshot must carry exactly the admitted replacement.
+            auto& replacement =
+                std::get<JsonValue::Object>(std::get<JsonValue::Object>(update.data).at("payload").data);
+            replacement.at("method") = json_string(method);
+            replacement.at("body")   = json_object({
+                {"encoding", json_string("base64")},
+                {"data",     json_string("AEH/")  }
+            });
+            auto const updated       = rpc_job(endpoint.call("job.update", update), fixture.registry);
+            CHECK(updated.revision == 2);
+            auto run = fixture.runs.find_schedule_owned(created.id);
+            REQUIRE(run);
+            REQUIRE(*run);
+            CHECK((**run).payload == updated.payload);
+
+            fixture.server.release_responses();
+            REQUIRE(fixture.scheduler->start());
+            REQUIRE(fixture.process_until([&] { return fixture.has_run_state((**run).id, RunState::Succeeded); }));
+            auto const requests = fixture.server.requests();
+            REQUIRE(requests.size() == 1U);
+            CHECK(requests.front().method == updated.payload.as_object().at("method").as_string());
+            CHECK(requests.front().body == ByteBuffer{std::byte{0}, std::byte{0x41}, std::byte{0xff}});
+            fixture.stop_after_idle();
+        }
+    }
+}
+
+TEST_CASE("legacy HTTP spelling and lowercase head body behavior survive metadata edits on the wire",
+          "[jobu][scheduler][http][integration][legacy]")
+{
+    for (auto const* method : {"get", "head", "CUSTOM"}) {
+        DYNAMIC_SECTION(method)
+        {
+            auto       fixture = RealSchedulerFixture{};
+            auto const queue   = fixture.create_queue("legacy", 1, 1);
+            auto const job     = fixture.create_http_job(queue,
+                                                         "/legacy",
+                                                         {
+                                                             {"output.capture", {.data = std::string{"always"}}}
+            });
+            auto       legacy  = http_payload(fixture.server.url("/legacy"));
+            auto&      fields  = std::get<JsonValue::Object>(legacy.data);
+            fields.emplace("method", json_string(method));
+            fields.emplace("body",
+                           json_object({
+                               {"encoding", json_string("utf8")    },
+                               {"data",     json_string("old-body")}
+            }));
+            seed_legacy_payload(fixture, job.definition.id, legacy);
+
+            auto updated = fixture.management->update_job(
+                {.job_id = job.definition.id, .expected_revision = 1, .type = JobType::Http, .priority = 5});
+            REQUIRE(updated);
+            CHECK(updated->payload == legacy);
+            CHECK(fixture.find_run(job.run.id).payload == legacy);
+
+            fixture.server.enqueue_response({.body = bytes("legacy-response")});
+            fixture.server.release_responses();
+            REQUIRE(fixture.scheduler->start());
+            REQUIRE(fixture.process_until([&] { return fixture.has_run_state(job.run.id, RunState::Succeeded); }));
+            auto const requests = fixture.server.requests();
+            REQUIRE(requests.size() == 1U);
+            CHECK(requests.front().method == method);
+            CHECK(byte_text(requests.front().body) == "old-body");
+            auto output = fixture.find_output({.run_id = job.run.id, .attempt_number = 1});
+            REQUIRE(output);
+            REQUIRE(output->stdout_bytes);
+            CHECK(byte_text(*output->stdout_bytes) == "legacy-response");
+            CHECK(fixture.find_run(job.run.id).payload == legacy);
+            fixture.stop_after_idle();
+        }
+    }
+}
 
 TEST_CASE("real HTTP scheduling commits attempts before network observation and respects capacity",
           "[jobu][scheduler][http][integration][sqlite]")

@@ -47,6 +47,14 @@ the resolved timezone.
 {"queue_name":"reports","type":"cli","schedule":{"kind":"once","at":"now"},"payload":{"command":"/usr/bin/true"},"idempotency_key":"submit-42"}
 ```
 
+For HTTP jobs, creation admits only `GET`, `POST`, `PUT`, `PATCH`, `DELETE`,
+and `HEAD`, case-insensitively. The committed definition, first run snapshot,
+and returned result contain the uppercase method explicitly; omission stores
+`GET`. See the [HTTP payload contract](../types.md#cli-and-http-payloads)
+and a [complete HTTP creation request](../examples/job-create-http.params.json).
+An unsupported method returns `jobu.job.invalid_payload` with a bounded
+explanation naming the supported methods.
+
 A matching key and equivalent canonical request replay the original result
 while its record remains, even after the clock advances or a secret rotates.
 The key is scoped to the resolved queue. Reusing it with different input
@@ -55,6 +63,11 @@ returns `jobu.idempotency.conflict`. The canonical request retains symbolic
 timezone or attribute defaults leaves the replayed result unchanged; a new
 key uses the current defaults. After a lost reply, repeat the **same**
 keyed request; an unkeyed retry is a new creation.
+
+New HTTP creation requests normalize the method before idempotency comparison,
+so `get`, `Get`, `GET`, and an omitted method are equivalent when all other
+input matches. Previously saved keys and responses are not rewritten; a request
+against an older key can conflict with its saved canonical input.
 
 Creation keys follow the resource's lifetime. A live recurring definition,
 including a suspended one, keeps its key. A one-time definition keeps its key
@@ -124,6 +137,19 @@ or retry-waiting occurrence keeps its immutable snapshot. Terminal definitions
 cannot be updated. A stale revision returns `jobu.job.revision_conflict`
 without modifying either definition or
 secret-reference ownership. Updates commit before replying.
+
+An explicit HTTP `payload` replacement applies the same method admission as
+creation, even when its contents equal the stored payload. An actual runner-type
+conversion to HTTP also applies admission to the effective payload. A name,
+priority, attribute, or schedule edit without payload replacement preserves an
+older method's exact spelling and execution behavior. Repeating `type:"http"`
+without changing the type or replacing the payload also preserves it. Existing
+structural, template, and secret-reference checks still apply.
+
+Successful admission normalizes the definition and any eligible untouched
+schedule-owned snapshot. Started, retrying, and historical snapshots keep their
+payloads. A rejected replacement changes neither the revision nor stored data.
+See a [complete HTTP replacement request](../examples/job-update-http.params.json).
 
 ```json
 {"job_id":"00112233-4455-6677-8899-aabbccddeeff","expected_revision":1,"priority":5}

@@ -129,7 +129,7 @@ constexpr std::array job_create{
                  "Successful CLI exit code, 0..255; repeat distinct codes; default: 0.",
                  true),
     value_option("url", "URL", "Required HTTP URL for --type http."),
-    value_option("method", "METHOD", "HTTP method; default: GET."),
+    value_option("method", "METHOD", "GET, POST, PUT, PATCH, DELETE, or HEAD; case-insensitive; default: GET."),
     value_option("header", "NAME=VALUE", "HTTP header; repeat in order.", true),
     value_option("body", "TEXT", "UTF-8 HTTP request body; use --request-file for binary data or references."),
 };

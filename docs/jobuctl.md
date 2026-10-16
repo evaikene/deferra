@@ -152,10 +152,41 @@ For CLI jobs, repeat `--arg`, `--arg-secret`, `--env`, `--env-secret`,
 optional `--method`, repeated `--header NAME=VALUE`, and optional `--body TEXT`
 for a UTF-8 body. CLI and HTTP fields cannot be mixed.
 
+HTTP methods are `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, and `HEAD`.
+Input is case-insensitive: `--method pOsT` stores and executes `POST`.
+Omitting the method stores an explicit `GET`. Whitespace, empty values, and
+other methods such as `OPTIONS` are rejected. The daemon enforces this policy
+for flags, request files, and other clients. Some malformed payloads are rejected
+locally before connecting. `HEAD` rejects a supplied body, including an empty
+one, and receives no response body; other existing method/body behavior is
+unchanged.
+
+```sh
+jobuctl job create --queue-name reports --type http --now \
+    --url http://127.0.0.1:8080/events --method pOsT --body 'event=ready'
+```
+
 Use `--request-file` for complete nested configuration, binary HTTP bodies,
 HTTP secret references, or a full job type/payload replacement on update. For
 example, a job request file can contain a header value such as
 `{"secret":"service.token"}`; the secret name must already exist on the daemon.
+
+Older HTTP jobs retain their exact method spelling and execution behavior when
+read or updated in unrelated fields. A same-type update without a replacement
+payload also preserves it. Explicit payload replacement applies current
+admission; changing priority does not repair a legacy lowercase or custom
+method. Started and historical run snapshots remain unchanged.
+
+For a complete replacement, put `job_id`, the current `expected_revision`, and
+the complete `payload` in the file, following this
+[HTTP update example](protocol/examples/job-update-http.params.json), then run:
+
+```sh
+jobuctl job update --request-file update-http.json
+```
+
+The file carries the job ID; this form takes no positional UUID. A stale
+revision or rejected payload leaves the stored definition and revision intact.
 
 `queue suspend --wait` returns when the queue reaches `suspended`. An accepted
 `job suspend --wait` returns when the job reaches `suspended` or when its last

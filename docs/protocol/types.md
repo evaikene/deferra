@@ -101,7 +101,7 @@ Every job definition result contains:
 | `schedule` | schedule object | 1.1 | Stored concrete once or cron schedule |
 | `priority` | integer | 1.1 | Signed 32-bit scheduling priority |
 | `attributes` | attribute object | 1.1 | Complete materialized job attributes |
-| `payload` | object | 1.1 | Original runner payload or secret-reference template |
+| `payload` | object | 1.1 | Admitted runner payload or secret-reference template |
 | `created_at` | time | 1.1 | Creation time |
 | `updated_at` | time | 1.1 | Last durable mutation time |
 | `deleted_at` | time or null | 1.1 | Soft-deletion time |
@@ -325,8 +325,10 @@ Output limits bound retained bytes; they are not a redaction mechanism. See
 
 ## CLI and HTTP payloads
 
-The `payload` member of a job definition or run detail is the original JSON
-object, including any [secret references](../secrets.md). JobU accepts
+The `payload` member of a job definition or run detail is the admitted JSON
+object, including any [secret references](../secrets.md). New HTTP submissions
+canonicalize the method as described below; stored legacy payloads retain their
+original spelling. JobU accepts
 additional payload members but only the recognized fields below affect
 execution. Both the original serialized template and the resolved payload
 must fit 256 KiB. Recognized secret references were introduced in API 1.2.
@@ -348,10 +350,26 @@ secret resolution. The prepared argv/environment request is limited to
 | HTTP payload member | Type | Required | Default | Since | Meaning |
 | --- | --- | --- | --- | --- | --- |
 | `url` | string | Yes | — | 1.1 | Request URL |
-| `method` | string | No | `GET` | 1.1 | HTTP method |
+| `method` | string | No | `GET` | 1.1 | New input: GET, POST, PUT, PATCH, DELETE, HEAD; ASCII case-insensitive, stored uppercase |
 | `headers` | array of header objects | No | `[]` | 1.1 | Ordered request headers |
 | `body` | encoded body or reference | No | Absent | 1.1; reference 1.2 | Request-body bytes |
 | `expected_statuses` | string array | No | `["200-299"]` | 1.1 | Successful HTTP status selectors |
+
+HTTP creation, explicit payload replacement, and actual type conversion to HTTP
+apply method admission centrally. Omission stores an explicit `method:"GET"`.
+Null, non-string, empty, whitespace-padded, unsupported (including `OPTIONS`),
+and custom values are rejected with `jobu.job.invalid_payload`. Whitespace is
+not trimmed. Errors describe the supported methods without dumping the payload.
+
+Canonical `HEAD` has no response body and rejects a supplied request body,
+including an empty body or secret reference, after method normalization. The
+other methods retain their existing body behavior, including GET with a body.
+
+Reading, executing, retrying, or editing unrelated fields of an older job does
+not normalize its method. Legacy lowercase or custom tokens retain their exact
+wire spelling; lowercase `head` retains its previous body behavior. Explicitly
+replacing that payload applies current admission. Existing run snapshots and
+saved idempotency records are not repaired automatically.
 
 | Nested member | Type | Required | Since | Meaning |
 | --- | --- | --- | --- | --- |
