@@ -15,6 +15,7 @@ add_library(jobuctl-private STATIC
     help_priv.cpp
     command_helpers_priv.cpp
     input_priv.cpp
+    job_edit_priv.cpp
     output_priv.cpp
     session_priv.cpp
     run_session_priv.cpp
