@@ -12,7 +12,9 @@ use the [foreground workflow below](#macos-foreground-operation).
 On Linux, startup resolves arguments/configuration and validates the final
 identity before constructing worker-capable objects. It prepares only permitted state/runtime
 leaves, finalizes identity, acquires endpoint/database ownership, validates
-format 4 and recovers interrupted work before admitting requests. Telemetry
+format 4 and recovers interrupted work before admitting requests. A successful
+post-recovery inventory is logged before runner construction and dispatch; it
+reports loaded persisted state, independently of readiness. Telemetry
 activates before dispatch; retention starts after listening. `jobud.ready`
 means those startup steps completed. A bounded successful `jobuctl system info`
 call proves the client can actually reach the endpoint.
@@ -56,25 +58,21 @@ Run as your ordinary user, with the default mode-0600 socket. Leave run-as and
 socket-owner/group overrides unset and both unsafe root permissions false.
 No service manager starts, restarts or stops this developer instance for you.
 
-For a new installation, provision private directories explicitly:
-
-```sh
-umask 077
-mkdir -m 0700 "$HOME/jobu/etc" "$HOME/jobu/var"
-mkdir -m 0700 "$HOME/jobu/var/lib" "$HOME/jobu/var/run"
-```
-
-These commands assume the directories do not yet exist. If they exist, inspect
-their ownership, modes and contents first; preserve existing configuration and
-data. Do not recursively repair an existing tree. Darwin sets umask 0077 before
+The Runtime install creates missing normal `etc`/`var` directories with mode
+0755 and `var/lib`/`var/run` with mode 0700. A fresh installation at its configured
+prefix needs no manual directory setup or active INI. Custom paths still need
+explicit provisioning. Existing ownership, modes, configuration and data are
+preserved; inspect unsuitable existing paths instead of recursively repairing
+the tree. Darwin sets umask 0077 before
 creating runtime resources, protecting newly created files; it does not repair
 existing permissions or provide Linux's runtime-path admission checks.
 
-An active config is optional. For a fresh setup without an existing active file,
-copy the generated sample and validate it locally:
+An active config is optional. To create one, follow the repeat-safe initial-copy
+command in `$HOME/jobu/etc/README.md`. It refuses an existing file or symlink,
+creates the INI with owner-only permissions and scopes its umask to a subshell.
+Edit the copy and validate it locally:
 
 ```sh
-install -m 0600 "$HOME/jobu/share/jobu/jobud.ini.example" "$HOME/jobu/etc/jobud.ini"
 "$HOME/jobu/bin/jobud" --check-config --config "$HOME/jobu/etc/jobud.ini"
 ```
 
@@ -294,7 +292,7 @@ retain checkpointed wait and become partial; downtime is not charged. See
 | `jobud.config.invalid`, `unknown_key`, `duplicate_key` | Check the selected file against the reference for spelling, grammar, ranges and cross-field constraints. Current command-line diagnostics report a fixed message/code, not rejected values or a full configuration dump. |
 | `jobud.config.read_failed` | Check the selected file exists, is readable under the invocation identity, and has protected owners/parents. Explicit config is required to exist. |
 | Linux `jobud.privilege.root_disallowed`, `drop_failed` | Use the dedicated account or a valid non-root run-as target; privilege verification must finish before resources are admitted. |
-| Linux `jobud.path.unsafe`, `jobud.path.inspect_failed` | Use the fixed `reason` to inspect the configured state/runtime path and its ancestors against the owner/type/mode rules above. Logs omit raw path values. Provision only the intended leaf; do not recursively chmod/chown a supplied tree. |
+| Linux `jobud.path.unsafe`, `jobud.path.inspect_failed` | Inspect `resource`, the exact failing `path`, fixed `reason`, observed/required metadata and `action`. A missing custom-path ancestor needs provisioning; a wrong leaf mode or owner needs the specific correction described. Preserve collisions; do not recursively chmod/chown a supplied tree. |
 | Linux `jobud.socket.in_use`, `jobud.socket.inspect_failed` | Find the endpoint owner or ambiguous collision. Preserve other resources and held lock files. |
 | Schema/recovery failure before `jobud.ready` | Preserve database and sidecars; check package/format compatibility and sanitized failure code. Do not change the marker or attempt repair SQL. |
 | Client cannot connect | Compare its attempted endpoint with daemon config, readiness and runtime traversal/socket permissions. Override with `--socket` when necessary. |
@@ -307,6 +305,15 @@ exit 1; successful local actions and healthy stop exit 0. Early configuration
 diagnostics precede the configured logger and need not be JSON. `--check-config`
 success, unit syntax validation and a passing unprivileged fixture are different
 evidence from a verified managed deployment.
+
+Path failures now explain the inspected resource, for example:
+`State directory '/home/user/jobu/var/lib' has permissions 0755; required permissions are 0700.`
+Missing-parent errors identify the missing component and the resource depending
+on it. Modes are octal strings; owner/group IDs are numeric. Unknown facts are
+omitted. Read the ownership advice before changing permissions: chmod alone
+does not repair a wrong owner. Advice never requires recursive permission changes,
+deleting collisions or unlinking an endpoint. Configuration syntax failures still
+omit rejected values, and pre-logger path diagnostics escape control characters.
 
 The existing `run.list` membership/filtering and pending-run update/move behavior
 remain unchanged; issue #230 is deliberately deferred. Native macOS developer

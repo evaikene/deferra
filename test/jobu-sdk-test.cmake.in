@@ -140,7 +140,7 @@ function(configure_consumer label case sdk expect_error)
     file(REMOVE_RECURSE "${build}")
 endfunction()
 
-set(cases default Core Shared Client CLI discovery optional-http example)
+set(cases default Core Shared Jobu Client CLI discovery optional-http example)
 if("SQLite" IN_LIST sdk_components)
     list(APPEND cases SQLite)
 endif()

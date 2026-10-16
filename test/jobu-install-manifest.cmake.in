@@ -95,6 +95,35 @@ function(check_manifest destination expected)
     endif()
 endfunction()
 
+# Inventory membership alone cannot catch stale or altered installed guidance.
+# Compare maintained manuals and configured assets with their actual producer.
+function(check_asset_bytes installed source)
+    file(SHA256 "${installed}" installed_hash)
+    file(SHA256 "${source}" source_hash)
+    if(NOT installed_hash STREQUAL source_hash)
+        message(FATAL_ERROR "Installed guidance differs from its source: ${installed}")
+    endif()
+endfunction()
+
+function(check_documentation destination)
+    foreach(manual IN LISTS manuals)
+        check_asset_bytes("${destination}/${documentation_directory}/${manual}"
+            "@PROJECT_SOURCE_DIR@/docs/${manual}")
+    endforeach()
+    foreach(manual IN LISTS protocol_manuals)
+        check_asset_bytes("${destination}/${documentation_directory}/protocol/${manual}"
+            "@PROJECT_SOURCE_DIR@/docs/protocol/${manual}")
+    endforeach()
+endfunction()
+
+function(check_runtime_guidance destination generated_directory)
+    check_asset_bytes("${destination}/${configuration_readme}" "${generated_directory}/configuration-README.md")
+    check_asset_bytes("${destination}/${data_directory}/jobu/jobud.ini.example"
+        "${generated_directory}/jobud.ini.example")
+    check_asset_bytes("${destination}/${data_directory}/jobu/services/README.md"
+        "@PROJECT_SOURCE_DIR@/docs/services/systemd.md")
+endfunction()
+
 function(read_metadata output path)
     if("@CMAKE_SYSTEM_NAME@" STREQUAL "Darwin")
         set(stat_arguments -f "%Lp:%u:%g")
