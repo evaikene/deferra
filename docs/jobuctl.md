@@ -217,11 +217,43 @@ no automatic history cleanup.
 jobuctl job run-now JOB_UUID --idempotency-key manual-42 --json
 jobuctl run get RUN_UUID --json
 jobuctl run list --job-id JOB_UUID --state failed --limit 20
+jobuctl run list --state failed --state interrupted
+jobuctl run list --all
 ```
 
-`run list` accepts `--queue-id`, `--job-id`, `--state`, `--origin scheduled|manual`, `--type cli|http`, and the UTC bounds `--planned-from/--planned-to`, `--started-from/--started-to`, and `--completed-from/--completed-to`. Lower bounds are inclusive and upper bounds are exclusive. Filters combine. `--limit` is 1–200, default 100. The result contains run summaries, without payload, result, attempts, or output. Full run details are available through `run get`.
+Ordinary `run list` selects terminal execution history: `succeeded`, `failed`,
+`interrupted`, and `cancelled` runs. This differs from `job list`, which selects
+active job definitions by default. The terminal selection also applies with
+other filters, such as `--job-id`, and in `--json` mode.
 
-When a run page has `next_cursor`, pass it as `run list --cursor TOKEN` with no filters or limit. A cursor can expire or become invalid after daemon restart. This cursor differs from the ID-based `--after` option on queue/job lists.
+Use `--state STATE` to replace the default with one of `scheduled`, `running`,
+`retry_wait`, `succeeded`, `failed`, `interrupted`, or `cancelled`. Repeat the
+option for a union, for example `--state failed --state interrupted`. State names
+are lowercase; duplicates and comma-separated values are rejected. `--all`
+removes the state filter and cannot be combined with `--state`.
+
+`run list` also accepts `--queue-id`, `--job-id`, `--origin scheduled|manual`,
+`--type cli|http`, and the UTC bounds `--planned-from/--planned-to`,
+`--started-from/--started-to`, and `--completed-from/--completed-to`. Lower bounds
+are inclusive and upper bounds are exclusive. These filters combine with the
+selected states using AND. `--limit` is 1–200, default 100. The result contains
+run summaries, without payload, result, attempts, or output. Full run details
+are available through `run get`.
+
+The terminal default and multiple explicit states require daemon API 1.5 or
+newer. An older peer produces an unsupported-feature error before the query is
+sent. A single explicit `--state` uses the compatible scalar form, and `--all`
+uses an unfiltered form. The CLI does not split queries or filter fetched pages.
+
+`run list --request-file FILE` preserves the supplied protocol selection through
+the normal typed decode/encode path. In particular, `{}` selects all states,
+including nonterminal runs; no CLI terminal default is added. Request files
+cannot be combined with command-local options such as `--state` or `--all`.
+
+When a run page has `next_cursor`, pass it as `run list --cursor TOKEN` with no
+filters, `--all`, or limit. Continuation retains the original query selection;
+no new default is added. A cursor can expire or become invalid after daemon
+restart. This cursor differs from the ID-based `--after` option on queue/job lists.
 
 `run cancel RUN_UUID` succeeds when the daemon returns either `completed` or `requested`. A `requested` reply means active work is still settling. Add `--wait` to submit cancellation once and observe `run.get` until the run is durably `cancelled`, another terminal state causes a conflict, or the overall deadline expires. Set `--timeout` long enough for the job's process termination grace when waiting on active work. After a wait timeout, inspect the run before deciding what to do next. A successful `run get` can describe a failed run without changing the CLI's exit status.
 

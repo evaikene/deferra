@@ -162,9 +162,12 @@ constexpr std::array run_cancel{flag("wait", "Wait until the run is durably canc
 constexpr std::array run_list{
     value_option("queue-id", "UUID", "Filter by the run's captured queue ID."),
     value_option("job-id", "UUID", "Filter by the run's job ID."),
-    value_option("state",
-                 "STATE",
-                 "Filter by scheduled, running, retry_wait, succeeded, failed, interrupted, or cancelled."),
+    value_option(
+        "state",
+        "STATE",
+        "Select scheduled, running, retry_wait, succeeded, failed, interrupted, or cancelled; repeat for a union.",
+        true),
+    flag("all", "Include every run state; excludes --state."),
     value_option("origin", "scheduled|manual", "Filter by run origin."),
     value_option("type", "cli|http", "Filter by captured runner type."),
     value_option("planned-from", "UTC", "Inclusive planned-time lower bound."),
@@ -537,12 +540,17 @@ constexpr CommandSpec run_list_command{
     .name             = "list",
     .kind             = CommandKind::RunList,
     .alias            = {},
-    .summary          = "List retained run summaries",
+    .summary          = "List retained execution history; terminal runs by default",
     .operands         = {},
     .maximum_operands = 0,
     .options          = run_list,
-    .rules            = "--cursor is a cursor-only continuation; omit every filter and --limit with it.",
-    .example          = "jobuctl run list --state failed --limit 20",
+    .rules            = "Defaults to succeeded, failed, interrupted, and cancelled runs, unlike active job definitions "
+                        "in job list. --state replaces that default; repeat for distinct states, without commas. "
+                        "--all excludes --state. The default and multiple states require API 1.5; a single --state "
+                        "or --all retains older-peer compatibility. --request-file uses the supplied JSON selection; "
+                        "{} selects all states. --cursor is a cursor-only continuation; omit --all, every filter, "
+                        "and --limit with it.",
+    .example          = "jobuctl run list --state failed --state interrupted --limit 20",
     .capability       = "run.list",
     .build            = parse_run_command,
 };

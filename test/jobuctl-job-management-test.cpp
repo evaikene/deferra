@@ -625,8 +625,8 @@ auto verify_run_attempt_cli(std::filesystem::path const& executable,
         return false;
     }
     auto const pending_job_id = pending_json->as_object().at("id").as_string();
-    auto       pending_page   = run_success(executable, socket, {"run", "list", "--job-id", pending_job_id, "--json"});
-    auto       pending_page_json = jb::core::parse_json(pending_page.value_or(""));
+    auto pending_page = run_success(executable, socket, {"run", "list", "--all", "--job-id", pending_job_id, "--json"});
+    auto pending_page_json = jb::core::parse_json(pending_page.value_or(""));
     if (!pending_page_json || pending_page_json->as_object().at("items").as_array().size() != 1U) {
         return false;
     }
@@ -718,7 +718,8 @@ auto verify_run_attempt_cli(std::filesystem::path const& executable,
     }
 
     // Pages contain summaries only; details and raw output require separate requests.
-    auto page = run_success(executable, socket, {"run", "list", "--job-id", output_job_id, "--limit", "1", "--json"});
+    auto page =
+        run_success(executable, socket, {"run", "list", "--all", "--job-id", output_job_id, "--limit", "1", "--json"});
     auto page_json = jb::core::parse_json(page.value_or(""));
     if (!page_json || page_json->as_object().at("items").as_array().size() != 1U ||
         !page_json->as_object().at("next_cursor").is_string()) {

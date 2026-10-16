@@ -262,6 +262,27 @@ TEST_CASE("jobuctl help reaches every registered command and alias without a dae
     }
 }
 
+TEST_CASE("jobuctl run list help explains terminal history without opening supplied paths", "[jobuctl][help][run]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   fifo = directory.path() / "unread-run-input";
+    REQUIRE(::mkfifo(fifo.c_str(), 0600) == 0);
+    auto result = run({"run", "list", "--socket", fifo.string(), "--request-file", fifo.string(), "--help"});
+    CHECK(result.code == 0);
+    CHECK(result.err.empty());
+    for (auto const* text : {"--state STATE",
+                             "repeat for a union",
+                             "--all",
+                             "succeeded, failed, interrupted, and cancelled",
+                             "active job definitions",
+                             "API 1.5",
+                             "{} selects all states",
+                             "cursor-only continuation"}) {
+        CAPTURE(text);
+        CHECK(result.out.find(text) != std::string::npos);
+    }
+}
+
 TEST_CASE("jobuctl executable rejects invalid help syntax with contextual stderr", "[jobuctl][help]")
 {
     for (auto const& arguments : std::vector<std::vector<std::string>>{

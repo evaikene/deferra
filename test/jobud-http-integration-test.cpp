@@ -502,7 +502,8 @@ auto write_request(std::filesystem::path const& path, jb::core::JsonValue const&
 auto job_run(std::filesystem::path const& executable, std::filesystem::path const& socket_path, std::string_view job_id)
     -> std::optional<jb::core::JsonValue>
 {
-    auto listed = run_json(executable, socket_path, {"--json", "run", "list", "--job-id", job_id});
+    // Snapshot checks also inspect future scheduled runs, so bypass the CLI terminal-state default.
+    auto listed = run_json(executable, socket_path, {"--json", "run", "list", "--all", "--job-id", job_id});
     if (!listed) {
         return std::nullopt;
     }
