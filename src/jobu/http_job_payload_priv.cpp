@@ -1,6 +1,7 @@
 #include "http_job_payload_priv.hpp"
 
 #include "attempt.hpp"
+#include "http_job_method_priv.hpp"
 #include "http_validation_priv.hpp"
 #include "payload_template_priv.hpp"
 #include "text_validation.hpp"
@@ -455,7 +456,7 @@ auto decode_http_job_payload(jb::core::JsonValue const& payload) -> DecodeResult
     }
     return DecodeResult<HttpJobPayload>::success({
         .url               = std::move(parsed->url),
-        .method            = std::move(parsed->method),
+        .method            = decode_stored_http_method(std::move(parsed->method)),
         .headers           = std::move(headers),
         .body              = std::move(parsed->body),
         .expected_statuses = HttpStatusSet{std::move(parsed->expected_statuses)},

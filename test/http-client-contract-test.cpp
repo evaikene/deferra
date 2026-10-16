@@ -93,6 +93,17 @@ TEST_CASE("HTTP validation accepts method and URL contract boundaries", "[net][h
     check_valid(request_for("http://example.test:8080?empty"));
 }
 
+TEST_CASE("Generic HTTP validation retains custom and case-sensitive method behavior", "[net][http][validation]")
+{
+    for (auto const* spelling : {"OPTIONS", "X-Custom", "GTE", "get", "head"}) {
+        auto request   = request_for();
+        request.method = spelling;
+        request.body   = ByteBuffer{};
+        check_valid(request);
+        CHECK(request.method == spelling);
+    }
+}
+
 TEST_CASE("HTTP validation rejects invalid methods", "[net][http][validation]")
 {
     auto empty   = request_for();
