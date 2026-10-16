@@ -1,5 +1,6 @@
 #include "history_cursor_priv.hpp"
 
+#include "history_json.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_time_source.hpp"
 
@@ -8,6 +9,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -120,6 +122,70 @@ TEST_CASE("Successor cursors retain the initial monotonic expiry and input bound
     invalid_cursor(store.get_run(*original));
     invalid_cursor(store.get_run(*successor));
     CHECK(store.size() == 0);
+}
+
+TEST_CASE("Run cursors own the complete state-set query through copies and successors", "[jobu][history][cursor]")
+{
+    FakeTimeSource        time;
+    CountingUuidGenerator ids;
+    HistoryCursorStore    store{ids, time};
+    auto                  initial = RunQuery{
+        .filters = {.queue_id  = key().id,
+                    .job_id    = key().id,
+                    .states    = std::vector{RunState::Interrupted, RunState::Failed, RunState::Running},
+                    .origin    = RunOrigin::Manual,
+                    .type      = JobType::Http,
+                    .planned   = {.from = UtcTimePoint{1s}, .to = UtcTimePoint{3s}},
+                    .started   = {.from = UtcTimePoint{2s}, .to = UtcTimePoint{4s}},
+                    .completed = {.from = UtcTimePoint{3s}, .to = UtcTimePoint{5s}}},
+        .limit   = 7
+    };
+    auto expected = run_list_request_to_json(initial);
+    REQUIRE(expected);
+    auto token = store.start_run(initial, key());
+    REQUIRE(token);
+
+    // The caller's vector and each lookup result are independent of the stored query.
+    initial.filters.states->clear();
+    initial.filters.queue_id.reset();
+    initial.limit = 1;
+    auto first    = store.get_run(*token);
+    REQUIRE(first);
+    auto encoded = run_list_request_to_json(first->query);
+    REQUIRE(encoded);
+    CHECK(*encoded == *expected);
+    first->query.filters.states->front() = RunState::Scheduled;
+    first->query.limit                   = 2;
+
+    time.advance(4min);
+    auto again = store.get_run(*token);
+    REQUIRE(again);
+    encoded = run_list_request_to_json(again->query);
+    REQUIRE(encoded);
+    CHECK(*encoded == *expected);
+    auto next_key        = key();
+    next_key.planned_at -= 1s;
+    auto successor       = store.advance_run(*again, next_key);
+    REQUIRE(successor);
+    again->query.filters.states->clear();
+
+    auto next     = store.get_run(*successor);
+    auto original = store.get_run(*token);
+    REQUIRE(next);
+    REQUIRE(original);
+    for (auto const& state : {*original, *next}) {
+        encoded = run_list_request_to_json(state.query);
+        REQUIRE(encoded);
+        CHECK(*encoded == *expected);
+    }
+    CHECK(original->after.planned_at == key().planned_at);
+    CHECK(next->after.planned_at == next_key.planned_at);
+    CHECK(next->expires_at == original->expires_at);
+    invalid_cursor(store.get_attempt(*successor));
+
+    time.advance(1min);
+    invalid_cursor(store.get_run(*token));
+    invalid_cursor(store.get_run(*successor));
 }
 
 TEST_CASE("History cursor storage evicts expired entries before the least recently used live entry",
