@@ -4,6 +4,8 @@
 #include "history_scalar_codec_priv.hpp"
 #include "utc_timestamp.hpp"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
@@ -11,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace jb::jobu {
 
@@ -22,6 +25,9 @@ using jb::core::JsonValue;
 
 template <typename T>
 using ConversionResult = jb::core::Result<T, Error>;
+
+// The current run-state wire domain contains seven values.
+constexpr std::size_t maximum_run_states = 7;
 
 auto invalid(bool request) -> Error
 {
@@ -227,11 +233,49 @@ auto decode_limit(JsonValue const& value, std::size_t& limit) -> bool
     return true;
 }
 
+auto valid_run_state_selection(RunFilters const& filters) -> bool
+{
+    if (filters.state) {
+        return !filters.states && detail::history_wire_text(*filters.state).has_value();
+    }
+    if (!filters.states) {
+        return true;
+    }
+
+    auto const& states = *filters.states;
+    if (states.empty() || states.size() > maximum_run_states) {
+        return false;
+    }
+    for (auto state : states) {
+        if (!detail::history_wire_text(state) || std::ranges::count(states, state) != 1) {
+            return false;
+        }
+    }
+    return true;
+}
+
+auto decode_run_states(JsonValue const& value, std::vector<RunState>& result) -> bool
+{
+    if (!value.is_array() || value.as_array().size() > maximum_run_states) {
+        return false;
+    }
+
+    // Bound allocation here; shared query validation checks empty sets, duplicates, and selector conflicts.
+    result.reserve(value.as_array().size());
+    for (auto const& item : value.as_array()) {
+        auto state = RunState{};
+        if (!decode_enum(item, state)) {
+            return false;
+        }
+        result.push_back(state);
+    }
+    return true;
+}
+
 auto valid_query(RunQuery const& query) -> bool
 {
     return valid_limit(query.limit) && valid_range(query.filters.planned) && valid_range(query.filters.started) &&
-           valid_range(query.filters.completed) &&
-           (!query.filters.state || detail::history_wire_text(*query.filters.state)) &&
+           valid_range(query.filters.completed) && valid_run_state_selection(query.filters) &&
            (!query.filters.origin || detail::history_wire_text(*query.filters.origin)) &&
            (!query.filters.type || detail::history_wire_text(*query.filters.type));
 }
@@ -270,6 +314,16 @@ auto run_list_request_to_json(RunListRequest const& request) -> ConversionResult
     if (filters.job_id) {
         object.emplace("job_id", json(filters.job_id->to_string()));
     }
+    if (filters.states) {
+        // Validation guarantees wire spellings; retain the supplied order rather than sorting the set.
+        auto states = JsonValue::Array{};
+        states.reserve(filters.states->size());
+        for (auto state : *filters.states) {
+            states.push_back(json(std::string{*detail::history_wire_text(state)}));
+        }
+        object.emplace("states", json(std::move(states)));
+    }
+
     if ((filters.state && !append_enum(object, "state", *filters.state)) ||
         (filters.origin && !append_enum(object, "origin", *filters.origin)) ||
         (filters.type && !append_enum(object, "type", *filters.type)) ||
@@ -292,8 +346,9 @@ auto run_list_request_from_json(JsonValue const& value) -> ConversionResult<RunL
         }
         return ConversionResult<RunListRequest>::success(CursorRequest{cursor->as_string()});
     }
-    if (!only_members(object,
-                      {"queue_id", "job_id", "state", "origin", "type", "planned", "started", "completed", "limit"})) {
+    if (!only_members(
+            object,
+            {"queue_id", "job_id", "state", "states", "origin", "type", "planned", "started", "completed", "limit"})) {
         return reject<RunListRequest>(true);
     }
 
@@ -319,6 +374,12 @@ auto run_list_request_from_json(JsonValue const& value) -> ConversionResult<RunL
             return reject<RunListRequest>(true);
         }
     }
+    if (auto const* states = member(object, "states")) {
+        query.filters.states.emplace();
+        if (!decode_run_states(*states, *query.filters.states)) {
+            return reject<RunListRequest>(true);
+        }
+    }
     if (auto const* origin = member(object, "origin")) {
         query.filters.origin.emplace();
         if (!decode_enum(*origin, *query.filters.origin)) {
@@ -334,6 +395,11 @@ auto run_list_request_from_json(JsonValue const& value) -> ConversionResult<RunL
     if ((member(object, "planned") && !decode_range(*member(object, "planned"), query.filters.planned)) ||
         (member(object, "started") && !decode_range(*member(object, "started"), query.filters.started)) ||
         (member(object, "completed") && !decode_range(*member(object, "completed"), query.filters.completed))) {
+        return reject<RunListRequest>(true);
+    }
+
+    // Typed requests and decoded JSON must obey the same state-selection and cross-field rules.
+    if (!valid_query(query)) {
         return reject<RunListRequest>(true);
     }
     return ConversionResult<RunListRequest>::success(query);

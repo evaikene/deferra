@@ -22,6 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
+            ccache \
             catch2 \
             cmake \
             g++ \
@@ -33,10 +34,13 @@ jobs:
             nlohmann-json3-dev
 
       - name: Configure
-        run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build
-        run: cmake --build .bld
+        run: |
+          ccache --zero-stats
+          cmake --build .bld
+          ccache --show-stats
 
       - name: Test
         run: |
@@ -60,6 +64,7 @@ jobs:
       - name: Install tools and dependencies
         run: |
           apk add --no-cache \
+            ccache \
             catch2-3 \
             cmake \
             curl-dev \
@@ -77,10 +82,13 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Configure
-        run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build
-        run: cmake --build .bld
+        run: |
+          ccache --zero-stats
+          cmake --build .bld
+          ccache --show-stats
 
       - name: Test
         run: |

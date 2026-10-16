@@ -25,11 +25,14 @@ namespace jb::jobu {
     -> jb::core::Result<AttemptKey, jb::core::Error>;
 
 /// Encodes an initial run query or cursor-only continuation as RPC parameters.
-/// Rejects invalid limits, ranges, enum values, and the reserved submitted origin.
+/// Rejects invalid limits, ranges, enum values, state selections, and the reserved submitted origin.
+/// State selections follow RunFilters::states; supplied state-set order is preserved.
 [[nodiscard]] auto run_list_request_to_json(RunListRequest const& request)
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 /// Strictly decodes run.list parameters. Unknown members and fields beside cursor are invalid.
+/// State selections follow RunFilters::states; omitting both selectors leaves the query unfiltered by state.
+/// Invalid requests return InvalidArgument with code jobu.protocol.invalid_request.
 [[nodiscard]] auto run_list_request_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<RunListRequest, jb::core::Error>;
 

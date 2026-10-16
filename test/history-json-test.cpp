@@ -5,12 +5,14 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <variant>
+#include <vector>
 
 using namespace jb::core;
 using namespace jb::jobu;
@@ -40,6 +42,7 @@ template <typename T>
 void invalid_request(Result<T, Error> const& result)
 {
     REQUIRE_FALSE(result);
+    CHECK(result.error().category == ErrorCategory::InvalidArgument);
     CHECK(result.error().code == "jobu.protocol.invalid_request");
 }
 
@@ -66,12 +69,15 @@ TEST_CASE("Run history requests preserve filters and require cursor-only continu
     };
     auto encoded = run_list_request_to_json(request);
     REQUIRE(encoded);
+    CHECK(encoded->as_object().at("state") == json(std::string{"retry_wait"}));
+    CHECK_FALSE(encoded->as_object().contains("states"));
     auto decoded = run_list_request_from_json(*encoded);
     REQUIRE(decoded);
     REQUIRE(std::holds_alternative<RunQuery>(*decoded));
     auto const& query = std::get<RunQuery>(*decoded);
     CHECK(query.filters.queue_id == queue);
     CHECK(query.filters.state == RunState::RetryWait);
+    CHECK_FALSE(query.filters.states);
     CHECK(query.filters.origin == RunOrigin::Manual);
     CHECK(query.filters.type == JobType::Http);
     CHECK(query.filters.planned.from == at("2026-01-01T00:00:00Z"));
@@ -94,6 +100,222 @@ TEST_CASE("Run history requests preserve filters and require cursor-only continu
     std::get<JsonValue::Object>(continuation.data).erase("limit");
     std::get<JsonValue::Object>(continuation.data).emplace("state", json(std::string{"running"}));
     invalid_request(run_list_request_from_json(continuation));
+    std::get<JsonValue::Object>(continuation.data).erase("state");
+    std::get<JsonValue::Object>(continuation.data)
+        .emplace("states", json(JsonValue::Array{json(std::string{"failed"})}));
+    invalid_request(run_list_request_from_json(continuation));
+}
+
+TEST_CASE("Run history requests without a state selector remain unfiltered", "[jobu][history][json]")
+{
+    auto decoded = run_list_request_from_json(json(JsonValue::Object{}));
+    REQUIRE(decoded);
+    auto const& query = std::get<RunQuery>(*decoded);
+    CHECK_FALSE(query.filters.state);
+    CHECK_FALSE(query.filters.states);
+    CHECK(query.limit == 100);
+
+    auto encoded = run_list_request_to_json(*decoded);
+    REQUIRE(encoded);
+    CHECK(*encoded == json(JsonValue::Object{
+                          {"limit", json(std::uint64_t{100})}
+    }));
+}
+
+TEST_CASE("Every run state retains its exact scalar and singleton-set wire spelling", "[jobu][history][json]")
+{
+    auto const cases = std::array{
+        std::pair{RunState::Scheduled,   "scheduled"  },
+        std::pair{RunState::Running,     "running"    },
+        std::pair{RunState::RetryWait,   "retry_wait" },
+        std::pair{RunState::Succeeded,   "succeeded"  },
+        std::pair{RunState::Failed,      "failed"     },
+        std::pair{RunState::Interrupted, "interrupted"},
+        std::pair{RunState::Cancelled,   "cancelled"  },
+    };
+    for (auto const& [state, text] : cases) {
+        CAPTURE(text);
+        auto const set_request = json(JsonValue::Object{
+            {"states", json(JsonValue::Array{json(std::string{text})})},
+            {"limit",  json(std::uint64_t{100})                       },
+        });
+        auto       encoded     = run_list_request_to_json(RunQuery{.filters = {.states = std::vector{state}}});
+        REQUIRE(encoded);
+        CHECK(*encoded == set_request);
+
+        auto decoded = run_list_request_from_json(set_request);
+        REQUIRE(decoded);
+        auto const& query = std::get<RunQuery>(*decoded);
+        CHECK_FALSE(query.filters.state);
+        REQUIRE(query.filters.states);
+        CHECK(*query.filters.states == std::vector{state});
+
+        auto const scalar_request = json(JsonValue::Object{
+            {"state", json(std::string{text}) },
+            {"limit", json(std::uint64_t{100})},
+        });
+        auto       scalar_encoded = run_list_request_to_json(RunQuery{.filters = {.state = state}});
+        REQUIRE(scalar_encoded);
+        CHECK(*scalar_encoded == scalar_request);
+        auto scalar_decoded = run_list_request_from_json(scalar_request);
+        REQUIRE(scalar_decoded);
+        CHECK(std::get<RunQuery>(*scalar_decoded).filters.state == state);
+        CHECK_FALSE(std::get<RunQuery>(*scalar_decoded).filters.states);
+    }
+}
+
+TEST_CASE("Run history state sets preserve caller order alongside other filters", "[jobu][history][json]")
+{
+    struct StateSetCase {
+        std::vector<RunState> states;
+        JsonValue::Array      wire;
+    };
+
+    // Deliberately use non-enum order so sorting or replacing the selection is observable.
+    auto const pair_selection = StateSetCase{
+        .states = {RunState::Interrupted,            RunState::Failed           },
+        .wire   = {json(std::string{"interrupted"}), json(std::string{"failed"})},
+    };
+    auto const all_selection = StateSetCase{
+        .states = {RunState::Cancelled,
+                   RunState::Running,
+                   RunState::Failed,
+                   RunState::Scheduled,
+                   RunState::Interrupted,
+                   RunState::RetryWait,
+                   RunState::Succeeded           },
+        .wire   = {json(std::string{"cancelled"}),
+                   json(std::string{"running"}),
+                   json(std::string{"failed"}),
+                   json(std::string{"scheduled"}),
+                   json(std::string{"interrupted"}),
+                   json(std::string{"retry_wait"}),
+                   json(std::string{"succeeded"})},
+    };
+    auto const cases = std::array{pair_selection, all_selection};
+
+    auto const queue = id("00112233-4455-6677-8899-aabbccddeeff");
+    auto const job   = id("10112233-4455-6677-8899-aabbccddeeff");
+    auto const lower = at("2026-01-01T00:00:00Z");
+    auto const upper = at("2026-02-01T00:00:00Z");
+
+    for (auto const& selection : cases) {
+        CAPTURE(selection.states.size());
+        auto const request = RunQuery{
+            .filters = {.queue_id  = queue,
+                        .job_id    = job,
+                        .states    = selection.states,
+                        .origin    = RunOrigin::Manual,
+                        .type      = JobType::Http,
+                        .planned   = {.from = lower, .to = upper},
+                        .started   = {.from = lower},
+                        .completed = {.to = upper}},
+            .limit   = 50,
+        };
+        auto encoded = run_list_request_to_json(request);
+        REQUIRE(encoded);
+        CHECK(encoded->as_object().at("states") == json(selection.wire));
+        CHECK_FALSE(encoded->as_object().contains("state"));
+
+        auto decoded = run_list_request_from_json(*encoded);
+        REQUIRE(decoded);
+        auto const& query = std::get<RunQuery>(*decoded);
+        REQUIRE(query.filters.states);
+        CHECK(*query.filters.states == selection.states);
+        CHECK_FALSE(query.filters.state);
+        CHECK(query.filters.queue_id == queue);
+        CHECK(query.filters.job_id == job);
+        CHECK(query.filters.origin == RunOrigin::Manual);
+        CHECK(query.filters.type == JobType::Http);
+        CHECK(query.filters.planned.from == lower);
+        CHECK(query.filters.planned.to == upper);
+        CHECK(query.filters.started.from == lower);
+        CHECK(query.filters.completed.to == upper);
+        CHECK(query.limit == 50);
+    }
+}
+
+TEST_CASE("Typed run history state selections reject empty, duplicate, invalid, and conflicting values",
+          "[jobu][history][json]")
+{
+    auto const invalid_state = static_cast<RunState>(255);
+    auto const cases         = std::array{
+        std::vector<RunState>{},
+        std::vector{RunState::Failed, RunState::Failed},
+        std::vector{RunState::Failed, RunState::Interrupted, RunState::Failed},
+        std::vector{invalid_state},
+        std::vector{RunState::Failed, invalid_state},
+        std::vector{RunState::Scheduled,
+                              RunState::Running,
+                              RunState::RetryWait,
+                              RunState::Succeeded,
+                              RunState::Failed,
+                              RunState::Interrupted,
+                              RunState::Cancelled,
+                              RunState::Scheduled},
+    };
+    for (auto const& states : cases) {
+        CAPTURE(states.size());
+        invalid_request(run_list_request_to_json(RunQuery{.filters = {.states = states}}));
+    }
+    invalid_request(run_list_request_to_json(RunQuery{.filters = {.state = invalid_state}}));
+    invalid_request(run_list_request_to_json(RunQuery{
+        .filters = {.state = RunState::Failed, .states = std::vector{RunState::Failed}}
+    }));
+}
+
+TEST_CASE("Raw run history state sets reject malformed arrays and exact-spelling violations", "[jobu][history][json]")
+{
+    auto const invalid_values = std::array{
+        json(JsonNull{}),
+        json(true),
+        json(std::int64_t{-1}),
+        json(std::uint64_t{1}),
+        json(1.0),
+        json(std::string{"failed"}),
+        json(JsonValue::Object{}),
+    };
+    for (auto const& value : invalid_values) {
+        invalid_request(run_list_request_from_json(json(JsonValue::Object{
+            {"states", value}
+        })));
+        // A scalar state string is valid only as an array member; other replacements are invalid there too.
+        if (!value.is_string()) {
+            invalid_request(run_list_request_from_json(json(JsonValue::Object{
+                {"states", json(JsonValue::Array{json(std::string{"failed"}), value})}
+            })));
+        }
+    }
+
+    auto const invalid_arrays = std::array{
+        JsonValue::Array{},
+        JsonValue::Array{json(JsonValue::Array{})},
+        JsonValue::Array{json(std::string{"failed"}), json(std::string{"failed"})},
+        JsonValue::Array{json(std::string{"failed"}), json(std::string{"interrupted"}), json(std::string{"failed"})},
+        JsonValue::Array{json(std::string{"scheduled"}),
+                         json(std::string{"running"}),
+                         json(std::string{"retry_wait"}),
+                         json(std::string{"succeeded"}),
+                         json(std::string{"failed"}),
+                         json(std::string{"interrupted"}),
+                         json(std::string{"cancelled"}),
+                         json(std::string{"scheduled"})},
+    };
+    for (auto const& values : invalid_arrays) {
+        invalid_request(run_list_request_from_json(json(JsonValue::Object{
+            {"states", json(values)}
+        })));
+    }
+    for (auto const* text : {"", "unknown", "FAILED", "retry-wait", "failed,interrupted", " failed", "failed "}) {
+        CAPTURE(text);
+        invalid_request(run_list_request_from_json(json(JsonValue::Object{
+            {"states", json(JsonValue::Array{json(std::string{text})})}
+        })));
+    }
+    invalid_request(run_list_request_from_json(json(JsonValue::Object{
+        {"state",  json(std::string{"failed"})                        },
+        {"states", json(JsonValue::Array{json(std::string{"failed"})})},
+    })));
 }
 
 TEST_CASE("Run history request validation rejects invalid ranges, enums, and limits", "[jobu][history][json]")
@@ -250,7 +472,7 @@ TEST_CASE("Output request codec enforces channel, limit, offset, and strict fiel
     std::get<JsonValue::Object>(changed.data)["offset"] = json(std::numeric_limits<std::uint64_t>::max());
     invalid_request(attempt_output_request_from_json(changed));
 
-    changed                                             = defaults;
+    changed                                             = std::move(defaults);
     std::get<JsonValue::Object>(changed.data)["future"] = json(true);
     invalid_request(attempt_output_request_from_json(changed));
     invalid_request(attempt_output_request_to_json(AttemptOutputRequest{
