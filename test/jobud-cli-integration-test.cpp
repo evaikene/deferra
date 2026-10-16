@@ -12,6 +12,7 @@
 #include "uuid.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <sqlite3.h>
 
 #include <array>
@@ -244,10 +245,17 @@ void check_no_secret_value(std::string_view value)
 /// @throws Catch::TestFailureException when setup, RPC, or a bounded readiness check fails.
 class DaemonFixture {
 public:
-    explicit DaemonFixture(std::uint32_t cli_concurrency = 2, bool allow_root = true)
+    explicit DaemonFixture(std::uint32_t cli_concurrency = 2, bool allow_root = true, bool execution_logs = false)
         : _cli_concurrency{cli_concurrency}
         , _allow_root_cli{allow_root}
+        , _execution_logs{execution_logs}
     {
+        if (_execution_logs) {
+            auto const path = directory.path() / "execution.ini";
+            write_file(path, "logging.level=debug1\nlogging.format=json\n");
+            std::filesystem::permissions(path,
+                                         std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+        }
         auto arguments = daemon_arguments();
         daemon.standard_output.connect(&app, [&](ByteBuffer const& chunk) { log.append(as_string_view(chunk)); });
         daemon.standard_error.connect(&app, [&](ByteBuffer const& chunk) { log.append(as_string_view(chunk)); });
@@ -559,6 +567,26 @@ public:
         }
     }
 
+    auto execution_records(std::string_view run_id) const -> std::vector<JsonValue>
+    {
+        std::vector<JsonValue> records;
+        std::string_view       remaining{log};
+        while (true) {
+            auto const end = remaining.find('\n');
+            if (end == std::string_view::npos) {
+                break; // A pipe read may end partway through the next JSON record.
+            }
+            auto        value  = json(remaining.substr(0, end));
+            auto const& fields = value.as_object().at("fields").as_object();
+            auto        id     = fields.find("run_id");
+            if (id != fields.end() && id->second.as_string() == run_id) {
+                records.push_back(std::move(value));
+            }
+            remaining.remove_prefix(end + 1);
+        }
+        return records;
+    }
+
     Application                                        app{0, nullptr};
     jb::test::TemporaryDirectory                       directory{std::filesystem::perms::owner_all};
     std::filesystem::path                              socket_path{directory.path() / "daemon.sock"};
@@ -571,8 +599,7 @@ public:
 private:
     auto daemon_arguments() const -> std::vector<std::string>
     {
-        auto arguments = std::vector<std::string>{"--no-config",
-                                                  "--socket",
+        auto arguments = std::vector<std::string>{"--socket",
                                                   socket_path.string(),
                                                   "--database",
                                                   database_path.string(),
@@ -580,6 +607,13 @@ private:
                                                   std::to_string(_cli_concurrency),
                                                   "--http-concurrency",
                                                   "1"};
+        if (_execution_logs) {
+            arguments.emplace_back("--config");
+            arguments.push_back((directory.path() / "execution.ini").string());
+        }
+        else {
+            arguments.emplace_back("--no-config");
+        }
         if (::geteuid() == 0) {
             arguments.emplace_back("--allow-root-daemon");
             if (_allow_root_cli) {
@@ -591,6 +625,7 @@ private:
 
     std::uint32_t _cli_concurrency;
     bool          _allow_root_cli;
+    bool          _execution_logs;
 
     auto has_running_attempt() const -> bool
     {
@@ -607,6 +642,22 @@ private:
         return prepared == SQLITE_OK && sqlite3_step(raw) == SQLITE_ROW;
     }
 };
+
+auto require_execution_logs(DaemonFixture& fixture, std::string_view run_id, std::vector<std::string_view> const& names)
+    -> std::vector<JsonValue>
+{
+    // SQLite commit can be visible before stderr reaches the parent. Wait for the actual log boundary too.
+    fixture.until([&] { return fixture.execution_records(run_id).size() >= names.size(); });
+    auto records = fixture.execution_records(run_id);
+    REQUIRE(records.size() == names.size());
+    for (std::size_t index = 0; index < names.size(); ++index) {
+        auto const& record = records[index].as_object();
+        CHECK(record.at("event").as_string() == names[index]);
+        CHECK(record.at("level").as_string() == (names[index] == "jobud.run.failed" ? "WARN" : "DBG1"));
+        CHECK(record.at("fields").as_object().at("run_id").as_string() == run_id);
+    }
+    return records;
+}
 
 auto cli_create_argv(std::string name, std::string queue_name, std::vector<std::string> options)
     -> std::vector<std::string>
@@ -678,7 +729,7 @@ void check_capture(DurableAttempt const& value,
 TEST_CASE("daemon executes complete jobuctl CLI payload and persists exact context", "[jobud][cli][integration]")
 {
     require_execution_environment();
-    DaemonFixture fixture;
+    DaemonFixture fixture{2, true, true};
     fixture.queue("context");
     fixture.cli("context",
                 "context",
@@ -708,7 +759,84 @@ TEST_CASE("daemon executes complete jobuctl CLI payload and persists exact conte
     check_capture(value, *serialized, std::string{"e\0r\n", 4}, serialized->size(), 4);
     CHECK(value.result.as_object().at("outcome").as_string() == "success");
     CHECK(value.result.as_object().at("exit_code").as_uint() == 37);
+    auto records = require_execution_logs(fixture,
+                                          value.run_id,
+                                          {"jobud.attempt.started", "jobud.attempt.succeeded", "jobud.run.succeeded"});
+    CHECK(records[1].as_object().at("fields").as_object().at("exit_code").as_uint() == 37);
+    CHECK(records[1].as_object().at("message").as_string() == "CLI attempt 1 succeeded with exit code 37.");
+    CHECK(fixture.log.find("inspect-daemon") == std::string::npos);
     fixture.responsive();
+}
+
+TEST_CASE("Real daemon logs CLI retry exhaustion with one terminal warning", "[jobud][logging][execution][integration]")
+{
+    require_execution_environment();
+    DaemonFixture fixture{2, true, true};
+    fixture.queue("logged-cli");
+    auto request = json(R"({"name":"logged-cli-failure","queue_name":"logged-cli","type":"cli",
+        "schedule":{"kind":"once","at":"now"},"payload":{"command":"","arguments":["exit","7"]},
+        "attributes":{"retry.max_attempts":2,"retry.initial_delay":0,"retry.max_delay":0}})");
+    std::get<JsonValue::Object>(std::get<JsonValue::Object>(request.data).at("payload").data).at("command") =
+        text(PROCESS_TEST_HELPER);
+    auto created = fixture.rpc("job.create", std::move(request));
+    auto runs    = fixture.rpc("run.list", {.data = JsonValue::Object{{"job_id", created.as_object().at("id")}}});
+    REQUIRE(runs.as_object().at("items").as_array().size() == 1);
+    auto const run_id = runs.as_object().at("items").as_array().front().as_object().at("id").as_string();
+    fixture.until([&] { return fixture.run_state(run_id) == "failed"; });
+
+    auto records = require_execution_logs(fixture,
+                                          run_id,
+                                          {"jobud.attempt.started",
+                                           "jobud.attempt.failed",
+                                           "jobud.run.retry_scheduled",
+                                           "jobud.attempt.started",
+                                           "jobud.attempt.failed",
+                                           "jobud.run.failed"});
+    CHECK(records[1].as_object().at("fields").as_object().at("exit_code").as_uint() == 7);
+    CHECK(records[4].as_object().at("fields").as_object().at("exit_code").as_uint() == 7);
+    CHECK(records[5].as_object().at("fields").as_object().at("completing_attempt").as_uint() == 2);
+}
+
+TEST_CASE("Real daemon logs configured HTTP success and exhausted retries", "[jobud][logging][execution][integration]")
+{
+    auto const    succeeds = GENERATE(false, true);
+    DaemonFixture fixture{2, false, true};
+    fixture.queue("logged-http");
+    jb::test::HttpTestServer server;
+    auto const               output = as_bytes("stage942-private-http-output");
+    server.enqueue_response({
+        .status_code = static_cast<std::uint16_t>(succeeds ? 404 : 503),
+        .reason      = "Log example",
+        .body        = ByteBuffer{output.begin(), output.end()}
+    });
+    if (!succeeds) {
+        server.enqueue_response({.status_code = 503, .reason = "Still unavailable"});
+    }
+    server.release_responses();
+
+    auto       request = json(R"({"name":"stage942-private-http-job","queue_name":"logged-http","type":"http",
+        "schedule":{"kind":"once","at":"now"},"payload":{"url":"","expected_statuses":["404"]},
+        "attributes":{"retry.max_attempts":2,"retry.initial_delay":0,"retry.max_delay":0,"output.capture":"always"}})");
+    auto const url     = server.url("/stage942-private-url");
+    std::get<JsonValue::Object>(std::get<JsonValue::Object>(request.data).at("payload").data).at("url") = text(url);
+    auto created = fixture.rpc("job.create", std::move(request));
+    auto runs    = fixture.rpc("run.list", {.data = JsonValue::Object{{"job_id", created.as_object().at("id")}}});
+    REQUIRE(runs.as_object().at("items").as_array().size() == 1);
+    auto const run_id = runs.as_object().at("items").as_array().front().as_object().at("id").as_string();
+    fixture.until([&] { return fixture.run_state(run_id) == (succeeds ? "succeeded" : "failed"); });
+    auto const names =
+        succeeds
+            ? std::vector<std::string_view>{"jobud.attempt.started", "jobud.attempt.succeeded", "jobud.run.succeeded"}
+            : std::vector<std::string_view>{"jobud.attempt.started",
+                                            "jobud.attempt.failed",
+                                            "jobud.run.retry_scheduled",
+                                            "jobud.attempt.started",
+                                            "jobud.attempt.failed",
+                                            "jobud.run.failed"};
+    auto records = require_execution_logs(fixture, run_id, names);
+    CHECK(records[1].as_object().at("fields").as_object().at("http_status").as_uint() == (succeeds ? 404 : 503));
+    CHECK(server.requests().size() == (succeeds ? 1U : 2U));
+    CHECK(fixture.log.find("stage942-private-") == std::string::npos);
 }
 
 TEST_CASE("daemon preserves binary first and last capture and discarded-capture metadata", "[jobud][cli][integration]")
@@ -908,7 +1036,7 @@ TEST_CASE("root daemon denies CLI targets without the unsafe override", "[jobud]
 TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls, and restart",
           "[jobud][phase8][integration]")
 {
-    DaemonFixture            fixture{2, false};
+    DaemonFixture            fixture{2, false, true};
     jb::test::HttpTestServer retry_server;
     auto const               failed_body = as_bytes("retry response");
     auto const               final_body  = as_bytes("final response");
@@ -954,6 +1082,20 @@ TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls
     static_cast<void>(fixture.control({"secret", "set", "workflow.token", "--file", secret_file.string(), "--json"}));
     retry_server.release_responses();
     fixture.until([&] { return fixture.run_state(retry_run_id) == "succeeded"; });
+
+    auto logs = require_execution_logs(fixture,
+                                       retry_run_id,
+                                       {"jobud.attempt.started",
+                                        "jobud.attempt.failed",
+                                        "jobud.run.retry_scheduled",
+                                        "jobud.attempt.started",
+                                        "jobud.attempt.succeeded",
+                                        "jobud.run.succeeded"});
+    CHECK(logs[1].as_object().at("fields").as_object().at("http_status").as_uint() == 503);
+    CHECK(logs[4].as_object().at("fields").as_object().at("http_status").as_uint() == 200);
+    for (auto const* canary : {"workflow-first", "workflow-second", "retry response", "final response"}) {
+        CHECK(fixture.log.find(canary) == std::string::npos);
+    }
 
     auto const requests = retry_server.requests();
     REQUIRE(requests.size() == 2);
