@@ -5,7 +5,14 @@ if(NOT DEFINED fixture OR NOT DEFINED test_logs)
 endif()
 include("@CMAKE_CURRENT_BINARY_DIR@/jobu-install-manifest.cmake")
 execute_process(COMMAND id -u OUTPUT_VARIABLE installer_uid OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
-execute_process(COMMAND id -g OUTPUT_VARIABLE installer_gid OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+if("@CMAKE_SYSTEM_NAME@" STREQUAL "Darwin")
+    # Darwin inherits the parent's group even without setgid. Installation does
+    # not choose a group, while the expected UID still belongs to the installer.
+    read_metadata(fixture_metadata "${fixture}")
+    string(REGEX REPLACE "^[0-9]+:[0-9]+:" "" installer_gid "${fixture_metadata}")
+else()
+    execute_process(COMMAND id -g OUTPUT_VARIABLE installer_gid OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+endif()
 
 function(configure_layout name prefix)
     execute_process(COMMAND "@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@/test/systemd-fixture"

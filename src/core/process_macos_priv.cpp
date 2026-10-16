@@ -3,12 +3,16 @@
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
+#include <cstddef>
 #include <limits>
 #include <string_view>
+#include <vector>
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/proc.h>
 #include <sys/socket.h>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 
 namespace jb::core::priv {
@@ -30,6 +34,26 @@ auto discard_pair(int* descriptors) noexcept -> int
     close_process_fd(descriptors[1]);
     errno = error;
     return -1;
+}
+
+auto group_has_no_live_members(pid_t group_id) noexcept -> bool
+{
+    int         query[]{CTL_KERN, KERN_PROC, KERN_PROC_PGRP, group_id};
+    std::size_t bytes{0};
+    if (::sysctl(query, 4, nullptr, &bytes, nullptr, 0) != 0) {
+        return false;
+    }
+
+    // The sizing query includes spare space. If the group nevertheless outgrows this buffer, preserve the signal
+    // error rather than treating an incomplete observation as proof that no live member remains.
+    std::vector<kinfo_proc> members((bytes / sizeof(kinfo_proc)) + 1);
+    bytes = members.size() * sizeof(kinfo_proc);
+    if (::sysctl(query, 4, members.data(), &bytes, nullptr, 0) != 0 || bytes % sizeof(kinfo_proc) != 0) {
+        return false;
+    }
+
+    members.resize(bytes / sizeof(kinfo_proc));
+    return std::ranges::all_of(members, [](auto const& member) { return member.kp_proc.p_stat == SZOMB; });
 }
 } // namespace
 
@@ -158,7 +182,16 @@ auto ProcessOperations::monotonic_now() noexcept -> TimePoint
 
 auto ProcessOperations::signal_group(pid_t group_id, int signal) noexcept -> int
 {
-    return ::kill(-group_id, signal);
+    auto const result = ::kill(-group_id, signal);
+    if (result == 0 || errno != EPERM) {
+        return result;
+    }
+
+    // Darwin skips zombies when signalling groups and reports EPERM when none of its members is live. Process
+    // deliberately retains its exited leader until after group cleanup to protect the PGID from reuse. Normalize
+    // only a confirmed dead group to ESRCH; live members or failed inspection retain the actual permission error.
+    errno = group_has_no_live_members(group_id) ? ESRCH : EPERM;
+    return -1;
 }
 
 auto ProcessOperations::signal_process(pid_t process_id, int signal) noexcept -> int

@@ -61,9 +61,10 @@ auto test_ids() -> std::vector<Uuid>
     return values;
 }
 
-auto at_seconds(std::int64_t seconds) -> UtcTimePoint
+auto at_seconds(std::int64_t seconds, std::chrono::nanoseconds fraction = {}) -> UtcTimePoint
 {
-    return UtcTimePoint{std::chrono::seconds{seconds}};
+    // Preserve sub-microsecond ticks where supported; macOS's UTC clock only represents microseconds.
+    return UtcTimePoint{std::chrono::seconds{seconds}} + std::chrono::duration_cast<UtcTimePoint::duration>(fraction);
 }
 
 auto make_database(std::filesystem::path database_file) -> Database
@@ -242,8 +243,8 @@ TEST_CASE("Scheduler start observers see accepted committed attempts once for bo
             DYNAMIC_SECTION("type " << static_cast<int>(type) << " manual " << manual)
             {
                 SchedulerFixture fixture;
-                // Real clocks can carry sub-microsecond ticks that storage does not retain.
-                fixture.time.set_utc(at_seconds(100) + 321ns);
+                // Exercise storage truncation where the native UTC clock supports sub-microsecond ticks.
+                fixture.time.set_utc(at_seconds(100, 321ns));
                 auto const queue = fixture.create_queue();
                 auto       run   = fixture.create_job(queue, type, at_seconds(manual ? 200 : 90));
                 if (manual) {
@@ -327,7 +328,7 @@ TEST_CASE("Completion observers see committed public events for both origins and
                 });
                 REQUIRE(fixture.scheduler->start());
                 auto const key = fixture.executor.pending_keys().front();
-                fixture.time.set_utc(at_seconds(101) + 999ns);
+                fixture.time.set_utc(at_seconds(101, 999ns));
                 REQUIRE(fixture.executor.complete(key, success(key)));
                 CHECK(fixture.events == std::vector<std::string_view>{"attempt", "run"});
                 REQUIRE(fixture.finishes.size() == 1);
@@ -378,7 +379,7 @@ TEST_CASE("Pending cancellation emits only a terminal run after cleanup and resc
             CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*fixture.event_loop.loop) == 1);
         });
 
-        fixture.time.set_utc(at_seconds(102) + 765ns);
+        fixture.time.set_utc(at_seconds(102, 765ns));
         auto cancelled = fixture.scheduler->cancel_run(run.id);
         REQUIRE(cancelled);
         CHECK(cancelled->disposition == CancelDisposition::Completed);

@@ -10,11 +10,13 @@
 #include "signal.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_event_loop_backend.hpp"
+#include "support/process_exit_watch.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <cerrno>
 #include <chrono>
+#include <csignal> // IWYU pragma: keep POSIX process-group signals.
 #include <memory>
 #include <optional>
 #include <string>
@@ -139,6 +141,70 @@ struct InheritedDescriptor {
     }
 };
 
+/// Retain both owned child identities until every group signal has finished, including assertion-failure cleanup.
+struct NativeGroup {
+    pid_t leader{-1};
+    pid_t peer{-1};
+    int   gate[2]{-1, -1};
+
+    ~NativeGroup()
+    {
+        for (auto pid : {peer, leader}) {
+            if (pid > 0) {
+                ::kill(pid, SIGKILL);
+                while (::waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {
+                }
+            }
+        }
+        for (auto fd : gate) {
+            if (fd >= 0) {
+                ::close(fd);
+            }
+        }
+    }
+
+    /// @throws Catch::TestFailureException if the gated group cannot be created.
+    void start(bool with_peer)
+    {
+        REQUIRE(::pipe(gate) == 0);
+        leader = ::fork();
+        if (leader == 0) {
+            ::close(gate[1]);
+            if (::setpgid(0, 0) != 0) {
+                ::_exit(2);
+            }
+            ::alarm(10);
+            char       permission;
+            auto const received = ::read(gate[0], &permission, 1);
+            ::_exit(received == 1 ? 0 : 3);
+        }
+        REQUIRE(leader > 0);
+        REQUIRE(::setpgid(leader, leader) == 0);
+
+        if (with_peer) {
+            peer = ::fork();
+            if (peer == 0) {
+                if (::setpgid(0, leader) != 0) {
+                    ::_exit(2);
+                }
+                ::alarm(10);
+                for (;;) {
+                    ::pause();
+                }
+            }
+            REQUIRE(peer > 0);
+            REQUIRE(::setpgid(peer, leader) == 0);
+        }
+    }
+
+    /// @throws Catch::TestFailureException if the coordinated leader cannot be released.
+    void release_leader() const
+    {
+        char const permission{'x'};
+        REQUIRE(::write(gate[1], &permission, 1) == 1);
+    }
+};
+
 } // namespace
 
 TEST_CASE("macOS Process launches a literal command and drains its output before completion", "[core][process][macos]")
@@ -154,6 +220,65 @@ TEST_CASE("macOS Process launches a literal command and drains its output before
     CHECK(as_string_view(run.output) == "literal $value; *");
     CHECK_FALSE(exit.stdout_lost);
     CHECK_FALSE(exit.stderr_lost);
+}
+
+TEST_CASE("macOS Process group cleanup distinguishes an exited leader from a live member", "[core][process][macos]")
+{
+    NativeGroup       group;
+    ProcessOperations operations;
+    SECTION("an unreaped exited leader needs no signal delivery")
+    {
+        group.start(false);
+        jb::test::ProcessExitWatch leader_exit{group.leader};
+        group.release_leader();
+        REQUIRE(leader_exit.exited(std::chrono::seconds{5}));
+
+        // NOTE_EXIT observes the zombie without consuming wait status or releasing its protected PGID.
+        auto const result = operations.signal_group(group.leader, SIGKILL);
+        CHECK((result == 0 || (result == -1 && errno == ESRCH)));
+        int status{0};
+        REQUIRE(::waitpid(group.leader, &status, WNOHANG) == group.leader);
+        group.leader = -1;
+        REQUIRE(WIFEXITED(status));
+        CHECK(WEXITSTATUS(status) == 0);
+    }
+    SECTION("a live peer is still killed after the leader exits")
+    {
+        group.start(true);
+        jb::test::ProcessExitWatch leader_exit{group.leader};
+        jb::test::ProcessExitWatch peer_exit{group.peer};
+        group.release_leader();
+        REQUIRE(leader_exit.exited(std::chrono::seconds{5}));
+        REQUIRE_FALSE(peer_exit.exited());
+
+        REQUIRE(operations.signal_group(group.leader, SIGKILL) == 0);
+        REQUIRE(peer_exit.exited(std::chrono::seconds{5}));
+        int status{0};
+        REQUIRE(::waitpid(group.peer, &status, WNOHANG) == group.peer);
+        group.peer = -1;
+        REQUIRE(WIFSIGNALED(status));
+        CHECK(WTERMSIG(status) == SIGKILL);
+    }
+    SECTION("multiple unreaped exited members need no signal delivery")
+    {
+        group.start(true);
+        jb::test::ProcessExitWatch leader_exit{group.leader};
+        jb::test::ProcessExitWatch peer_exit{group.peer};
+        group.release_leader();
+        REQUIRE(leader_exit.exited(std::chrono::seconds{5}));
+        REQUIRE(::kill(group.peer, SIGKILL) == 0);
+        REQUIRE(peer_exit.exited(std::chrono::seconds{5}));
+
+        auto const result = operations.signal_group(group.leader, SIGKILL);
+        CHECK((result == 0 || (result == -1 && errno == ESRCH)));
+    }
+    SECTION("other signal errors remain failures")
+    {
+        group.start(false);
+        CHECK(operations.signal_group(group.leader, NSIG) == -1);
+        CHECK(errno == EINVAL);
+        CHECK(operations.signal_group(group.leader, 0) == 0);
+    }
 }
 
 TEST_CASE("macOS Process reports asynchronous setup failures without request data", "[core][process][macos]")
