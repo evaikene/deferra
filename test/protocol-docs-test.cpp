@@ -44,6 +44,8 @@ TEST_CASE("Published protocol requests use production decoders", "[jobu][protoco
     REQUIRE(create_queue_request_from_json(example("queue-create.params.json"), attributes));
     REQUIRE(create_job_request_from_json(example("job-create.params.json"), attributes));
     REQUIRE(create_job_request_from_json(example("job-create-secret.params.json"), attributes));
+    REQUIRE(create_job_request_from_json(example("job-create-http.params.json"), attributes));
+    REQUIRE(update_job_request_from_json(example("job-update-http.params.json"), attributes));
     REQUIRE(job_list_request_from_json(example("job-list.params.json")));
     REQUIRE(job_list_request_from_json(example("job-list-all.params.json")));
     REQUIRE(run_list_request_from_json(example("run-list.params.json")));

@@ -648,6 +648,7 @@ if(TARGET jobu-sqlite)
     add_executable(${TARGET}
         http-scheduler-integration-test.cpp
         support/http_test_server.cpp
+        support/memory_io_device.cpp
         support/temporary_directory.cpp
     )
     target_link_libraries(${TARGET}
@@ -1500,3 +1501,14 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
         set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
     endif()
 endif()
+
+# Mark the distribution tests with a label for selective execution.
+foreach(name IN ITEMS
+    jobu-install-test
+    jobu-fresh-install-test
+    jobu-sdk-test
+    jobu-package-test)
+    if(TEST ${name})
+        set_tests_properties(${name} PROPERTIES LABELS distribution)
+    endif()
+endforeach()

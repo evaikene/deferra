@@ -2,6 +2,7 @@
 #include "support/temporary_directory.hpp"
 
 #include "byte_buffer.hpp"
+#include "json.hpp"
 
 #include <fmt/format.h>
 
@@ -19,6 +20,7 @@
 #endif
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <initializer_list>
 #include <memory>
 #include <optional>
@@ -122,6 +124,36 @@ struct CommandResult {
     bool        completed{false};
     int         status{0};
     std::string output;
+    std::string error_output;
+};
+
+// Own each capture pipe across every spawn/setup failure; only its reader remains open in the parent after spawn.
+struct CommandPipe {
+    CommandPipe()                                      = default;
+    CommandPipe(CommandPipe const&)                    = delete;
+    auto operator=(CommandPipe const&) -> CommandPipe& = delete;
+
+    ~CommandPipe()
+    {
+        for (auto fd : descriptors) {
+            if (fd >= 0) {
+                static_cast<void>(::close(fd));
+            }
+        }
+    }
+
+    auto open() -> bool
+    {
+        if (::pipe(descriptors) < 0) {
+            return false;
+        }
+        auto const flags = ::fcntl(descriptors[0], F_GETFL, 0);
+        return flags >= 0 && ::fcntl(descriptors[0], F_SETFL, flags | O_NONBLOCK) == 0;
+    }
+
+    void close_writer() { static_cast<void>(::close(std::exchange(descriptors[1], -1))); }
+
+    int descriptors[2]{-1, -1};
 };
 
 auto fail(std::string_view message) -> int
@@ -155,8 +187,9 @@ void read_available(int fd, std::string& output, bool& eof)
 
 auto run_command(std::filesystem::path const& executable, std::vector<std::string> arguments) -> CommandResult
 {
-    int output_pipe[2];
-    if (::pipe(output_pipe) < 0) {
+    CommandPipe output_pipe;
+    CommandPipe error_pipe;
+    if (!output_pipe.open() || !error_pipe.open()) {
         return {};
     }
 
@@ -170,49 +203,44 @@ auto run_command(std::filesystem::path const& executable, std::vector<std::strin
 
     posix_spawn_file_actions_t actions;
     if (::posix_spawn_file_actions_init(&actions) != 0) {
-        static_cast<void>(::close(output_pipe[0]));
-        static_cast<void>(::close(output_pipe[1]));
         return {};
     }
-    auto const actions_ready = ::posix_spawn_file_actions_addclose(&actions, output_pipe[0]) == 0 &&
-                               ::posix_spawn_file_actions_adddup2(&actions, output_pipe[1], STDOUT_FILENO) == 0 &&
-                               ::posix_spawn_file_actions_adddup2(&actions, output_pipe[1], STDERR_FILENO) == 0 &&
-                               ::posix_spawn_file_actions_addclose(&actions, output_pipe[1]) == 0;
-    auto       pid           = pid_t{};
-    auto       spawned =
+    auto const actions_ready =
+        ::posix_spawn_file_actions_addclose(&actions, output_pipe.descriptors[0]) == 0 &&
+        ::posix_spawn_file_actions_addclose(&actions, error_pipe.descriptors[0]) == 0 &&
+        ::posix_spawn_file_actions_adddup2(&actions, output_pipe.descriptors[1], STDOUT_FILENO) == 0 &&
+        ::posix_spawn_file_actions_adddup2(&actions, error_pipe.descriptors[1], STDERR_FILENO) == 0 &&
+        ::posix_spawn_file_actions_addclose(&actions, output_pipe.descriptors[1]) == 0 &&
+        ::posix_spawn_file_actions_addclose(&actions, error_pipe.descriptors[1]) == 0;
+    auto pid = pid_t{};
+    auto spawned =
         actions_ready
             ? ::posix_spawn(&pid, executable.c_str(), &actions, nullptr, exec_arguments.data(), process_environment())
             : EINVAL;
     static_cast<void>(::posix_spawn_file_actions_destroy(&actions));
     if (spawned != 0) {
-        static_cast<void>(::close(output_pipe[0]));
-        static_cast<void>(::close(output_pipe[1]));
         return {};
     }
 
-    static_cast<void>(::close(output_pipe[1]));
-    auto const flags = ::fcntl(output_pipe[0], F_GETFL, 0);
-    if (flags < 0 || ::fcntl(output_pipe[0], F_SETFL, flags | O_NONBLOCK) < 0) {
-        static_cast<void>(::close(output_pipe[0]));
-        ChildProcess child{pid};
-        return {};
-    }
+    output_pipe.close_writer();
+    error_pipe.close_writer();
 
     ChildProcess  command{pid};
     CommandResult result;
-    auto          eof      = false;
-    auto const    deadline = std::chrono::steady_clock::now() + 8s;
+    auto          eof       = false;
+    auto          error_eof = false;
+    auto const    deadline  = std::chrono::steady_clock::now() + 8s;
     while (std::chrono::steady_clock::now() < deadline) {
-        read_available(output_pipe[0], result.output, eof);
+        read_available(output_pipe.descriptors[0], result.output, eof);
+        read_available(error_pipe.descriptors[0], result.error_output, error_eof);
         auto const status = command.try_wait();
-        if (status && eof) {
+        if (status && eof && error_eof) {
             result.completed = true;
             result.status    = *status;
             break;
         }
         std::this_thread::sleep_for(10ms);
     }
-    static_cast<void>(::close(output_pipe[0]));
     return result;
 }
 
@@ -244,7 +272,7 @@ auto run_success(std::filesystem::path const&            executable,
 {
     auto result = run_jobuctl(executable, socket_path, arguments);
     if (!successful(result)) {
-        fmt::print(stderr, "{}", result.output);
+        fmt::print(stderr, "{}{}", result.output, result.error_output);
         return std::nullopt;
     }
     return std::move(result.output);
@@ -309,7 +337,7 @@ auto rejects_usage(std::filesystem::path const& jobud,
         std::vector<std::string>{"--no-config", "--socket", socket_path.string(), "--database", database_path.string()};
     arguments.insert(arguments.end(), extra_arguments.begin(), extra_arguments.end());
     auto result = run_command(jobud, std::move(arguments));
-    return failed(result) && result.output.find("jobud.startup.invalid_arguments") != std::string::npos &&
+    return failed(result) && result.error_output.find("jobud.startup.invalid_arguments") != std::string::npos &&
            !std::filesystem::exists(socket_path) && !std::filesystem::exists(database_path);
 }
 
@@ -329,7 +357,7 @@ auto rejects_client_options(std::filesystem::path const& jobud,
                                   std::string{option},
                                   std::string{value},
                               });
-    return failed(result) && result.output.find("jobud.config.invalid") != std::string::npos &&
+    return failed(result) && result.error_output.find("jobud.config.invalid") != std::string::npos &&
            !std::filesystem::exists(socket_path);
 }
 
@@ -441,6 +469,231 @@ auto bytes(std::string_view value) -> jb::core::ByteBuffer
 {
     return {reinterpret_cast<std::byte const*>(value.data()),
             reinterpret_cast<std::byte const*>(value.data() + value.size())};
+}
+
+auto run_json(std::filesystem::path const&            executable,
+              std::filesystem::path const&            socket_path,
+              std::initializer_list<std::string_view> arguments) -> std::optional<jb::core::JsonValue>
+{
+    auto result = run_jobuctl(executable, socket_path, arguments);
+    if (!successful(result) || !result.error_output.empty()) {
+        fmt::print(stderr, "{}{}", result.output, result.error_output);
+        return std::nullopt;
+    }
+    auto parsed = jb::core::parse_json(result.output);
+    if (!parsed || !parsed->is_object()) {
+        return std::nullopt;
+    }
+    return std::move(parsed).value();
+}
+
+auto write_request(std::filesystem::path const& path, jb::core::JsonValue const& request) -> bool
+{
+    auto encoded = jb::core::serialize_json(request);
+    if (!encoded) {
+        return false;
+    }
+    auto output = std::ofstream{path};
+    output << *encoded;
+    output.close();
+    return !output.fail();
+}
+
+auto job_run(std::filesystem::path const& executable, std::filesystem::path const& socket_path, std::string_view job_id)
+    -> std::optional<jb::core::JsonValue>
+{
+    auto listed = run_json(executable, socket_path, {"--json", "run", "list", "--job-id", job_id});
+    if (!listed) {
+        return std::nullopt;
+    }
+    auto const& items = listed->as_object().at("items").as_array();
+    if (items.size() != 1U) {
+        return std::nullopt;
+    }
+    return run_json(executable, socket_path, {"--json", "run", "get", items.front().as_object().at("id").as_string()});
+}
+
+auto method_rejection(CommandResult const& result, bool json) -> bool
+{
+    if (!failed(result) || WEXITSTATUS(result.status) != 1 || !result.output.empty()) {
+        return false;
+    }
+    auto message = result.error_output;
+    if (json) {
+        auto parsed = jb::core::parse_json(message);
+        if (!parsed || !parsed->is_object()) {
+            return false;
+        }
+        auto const& error = parsed->as_object().at("error").as_object();
+        if (error.at("kind").as_string() != "remote" || error.at("code").as_string() != "jobu.job.invalid_payload" ||
+            error.at("category").as_string() != "invalid_argument" || error.at("outcome_unknown").as_bool()) {
+            return false;
+        }
+        message = error.at("message").as_string();
+    }
+    else if (message.find("jobu.job.invalid_payload") == std::string::npos) {
+        return false;
+    }
+
+    // The diagnostic may quote the bounded method, but must never expose unrelated payload fields or raw controls.
+    return message.find("Supported methods: GET, POST, PUT, PATCH, DELETE, HEAD.") != std::string::npos &&
+           message.find("private-marker") == std::string::npos && message.find("GET\n") == std::string::npos &&
+           message.find(std::string(65, 'Z')) == std::string::npos && message.size() < 300U;
+}
+
+auto verify_http_submissions(std::filesystem::path const& executable,
+                             std::filesystem::path const& socket_path,
+                             std::filesystem::path const& directory,
+                             jb::test::HttpTestServer&    server) -> bool
+{
+    using jb::core::JsonValue;
+
+    auto const flag_url = server.url("/flag-method");
+    auto       flag_job = run_json(executable,
+                                   socket_path,
+                                   {"--json",
+                                    "job",
+                                    "create",
+                                    "--queue-name",
+                                    "daemon-http",
+                                    "--type",
+                                    "http",
+                                    "--now",
+                                    "--url",
+                                    flag_url,
+                                    "--method",
+                                    "pOsT",
+                                    "--body",
+                                    "flag-body"});
+    if (!flag_job || flag_job->as_object().at("payload").as_object().at("method").as_string() != "POST" ||
+        !server.wait_for_requests(2, 5s)) {
+        return false;
+    }
+    auto const requests = server.requests();
+    if (requests.size() != 2U || requests[1].method != "POST" || requests[1].target != "/flag-method" ||
+        requests[1].body != bytes("flag-body")) {
+        return false;
+    }
+    auto const flag_run = job_run(executable, socket_path, flag_job->as_object().at("id").as_string());
+    if (!flag_run || flag_run->as_object().at("payload") != flag_job->as_object().at("payload")) {
+        return false;
+    }
+
+    // Keep this occurrence in the future until a revision-checked replacement explicitly makes it due.
+    auto request = jb::core::parse_json(
+        R"({"queue_name":"daemon-http","type":"http","schedule":{"kind":"once","at":"2100-01-01T00:00:00.000000Z"},"payload":{}})");
+    if (!request) {
+        return false;
+    }
+    auto& create_fields = std::get<JsonValue::Object>(request->data);
+    create_fields.at("payload") =
+        JsonValue{.data = JsonValue::Object{{"url", JsonValue{.data = server.url("/file-method")}}}};
+    auto const path = directory / "http-request.json";
+    if (!write_request(path, *request)) {
+        return false;
+    }
+    auto created = run_json(executable, socket_path, {"--json", "job", "create", "--request-file", path.string()});
+    if (!created || created->as_object().at("payload").as_object().at("method").as_string() != "GET") {
+        return false;
+    }
+    auto const job_id      = created->as_object().at("id").as_string();
+    auto const initial_run = job_run(executable, socket_path, job_id);
+    if (!initial_run || initial_run->as_object().at("payload") != created->as_object().at("payload")) {
+        return false;
+    }
+
+    auto update = jb::core::parse_json(
+        R"({"expected_revision":1,"payload":{"url":"http://private-marker.test/","headers":[{"name":"Authorization","value":"header-private-marker"}],"body":{"encoding":"utf8","data":"body-private-marker"}}})");
+    if (!update) {
+        return false;
+    }
+    auto& update_fields = std::get<JsonValue::Object>(update->data);
+    update_fields.emplace("job_id", JsonValue{.data = job_id});
+    auto& payload = std::get<JsonValue::Object>(update_fields.at("payload").data);
+    for (auto const& method : {JsonValue{.data = std::string{"OPTIONS"}},
+                               JsonValue{.data = std::string(512, 'Z')},
+                               JsonValue{.data = std::string{"GET\n"}},
+                               JsonValue{},
+                               JsonValue{.data = false}}) {
+        payload.insert_or_assign("method", method);
+        if (!write_request(path, *update)) {
+            return false;
+        }
+        auto human = run_jobuctl(executable, socket_path, {"job", "update", "--request-file", path.string()});
+        auto json  = run_jobuctl(executable, socket_path, {"--json", "job", "update", "--request-file", path.string()});
+        if (!method_rejection(human, false) || !method_rejection(json, true)) {
+            fmt::print(stderr, "{}{}", human.error_output, json.error_output);
+            return false;
+        }
+    }
+    auto unchanged     = run_json(executable, socket_path, {"--json", "job", "get", job_id});
+    auto unchanged_run = job_run(executable, socket_path, job_id);
+    if (!unchanged || *unchanged != *created || !unchanged_run || *unchanged_run != *initial_run ||
+        server.requests().size() != 2U) {
+        return false;
+    }
+
+    // Token-shaped unsupported flags reach central admission; malformed token syntax retains the local usage path.
+    auto unsupported = run_jobuctl(executable,
+                                   socket_path,
+                                   {"job",
+                                    "create",
+                                    "--queue-name",
+                                    "daemon-http",
+                                    "--type",
+                                    "http",
+                                    "--now",
+                                    "--url",
+                                    flag_url,
+                                    "--method",
+                                    "OPTIONS"});
+    auto malformed   = run_jobuctl(executable,
+                                   socket_path,
+                                   {"job",
+                                    "create",
+                                    "--queue-name",
+                                    "daemon-http",
+                                    "--type",
+                                    "http",
+                                    "--now",
+                                    "--url",
+                                    flag_url,
+                                    "--method",
+                                    "GET\n"});
+    if (!method_rejection(unsupported, false) || !failed(malformed) || WEXITSTATUS(malformed.status) != 2 ||
+        !malformed.output.empty() || malformed.error_output.find("invalid_method") == std::string::npos ||
+        malformed.error_output.find("GET\n") != std::string::npos) {
+        return false;
+    }
+
+    payload = JsonValue::Object{
+        {"url",    JsonValue{.data = server.url("/file-method")}                                    },
+        {"method", JsonValue{.data = std::string{"pAtCh"}}                                          },
+        {"body",
+         JsonValue{.data = JsonValue::Object{{"encoding", JsonValue{.data = std::string{"utf8"}}},
+                                             {"data", JsonValue{.data = std::string{"file-body"}}}}}},
+    };
+    update_fields.emplace("schedule",
+                          JsonValue{
+                              .data = JsonValue::Object{
+                                                        {"kind", JsonValue{.data = std::string{"once"}}},
+                                                        {"at", JsonValue{.data = std::string{"2000-01-01T00:00:00.000000Z"}}},
+                                                        }
+    });
+    if (!write_request(path, *update)) {
+        return false;
+    }
+    auto replaced = run_json(executable, socket_path, {"--json", "job", "update", "--request-file", path.string()});
+    if (!replaced || replaced->as_object().at("revision").as_uint() != 2U ||
+        replaced->as_object().at("payload").as_object().at("method").as_string() != "PATCH" ||
+        !server.wait_for_requests(3, 5s)) {
+        return false;
+    }
+    auto const replaced_run   = job_run(executable, socket_path, job_id);
+    auto const final_requests = server.requests();
+    return replaced_run && replaced_run->as_object().at("payload") == replaced->as_object().at("payload") &&
+           final_requests.size() == 3U && final_requests[2].method == "PATCH" &&
+           final_requests[2].target == "/file-method" && final_requests[2].body == bytes("file-body");
 }
 
 } // anonymous namespace
@@ -562,6 +815,9 @@ auto main(int argc, char* argv[]) -> int
     if (!wait_for_durable_completion(database_path, durable_error)) {
         fmt::print(stderr, "{}\n", durable_error);
         return fail("jobud did not commit the expected HTTP completion and output");
+    }
+    if (!verify_http_submissions(jobuctl, socket_path, directory.path(), server)) {
+        return fail("HTTP CLI submission, diagnostic, snapshot, or wire verification failed");
     }
     if (daemon->try_wait()) {
         return fail("jobud exited after completing the HTTP attempt");

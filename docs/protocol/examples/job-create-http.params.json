@@ -1,0 +1,1 @@
+{"queue_name":"reports","type":"http","schedule":{"kind":"once","at":"now"},"payload":{"url":"http://127.0.0.1:8080/events","method":"pOsT","body":{"encoding":"utf8","data":"event=ready"}}}

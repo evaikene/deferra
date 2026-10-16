@@ -46,6 +46,7 @@ set(JOBU_PROTOCOL_MANUALS
     examples/README.md
     examples/attempt-get-max.params.json examples/attempt-list.result.json examples/attempt-output.params.json
     examples/job-create-cron-default.params.json examples/job-create-secret.params.json examples/job-create.params.json
+    examples/job-create-http.params.json examples/job-update-http.params.json
     examples/job-list-all.params.json examples/job-list.params.json examples/job-list.result.json
     examples/queue-create.params.json examples/queue-list.result.json
     examples/run-list.params.json examples/run-list.result.json

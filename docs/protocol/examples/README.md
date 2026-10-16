@@ -11,6 +11,8 @@ names, IDs, and timestamps.
 | [Queue creation](queue-create.params.json) | Defaulted queue configuration and an idempotency key |
 | [Job creation](job-create.params.json) | A symbolic once-now schedule and a CLI payload |
 | [Job creation with secret references](job-create-secret.params.json) | Ordered CLI argument references and a named environment reference |
+| [HTTP job creation](job-create-http.params.json) | Mixed-case POST input admitted and stored as uppercase POST |
+| [HTTP payload replacement](job-update-http.params.json) | Explicit revision and a complete replacement admitted as PATCH |
 | [Job listing request](job-list.params.json) and its [terminal result](job-list.result.json) | An explicit succeeded-state filter and one finished one-time definition |
 | [Unfiltered job listing](job-list-all.params.json) | The raw API's absent-state default, also used by `--request-file` |
 | [Run listing](run-list.params.json) | Combined owner/state filters |
