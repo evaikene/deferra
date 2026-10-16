@@ -7,6 +7,12 @@
 
 namespace jb::jobuctl::detail {
 
+/// Decodes one params object with the command's strict public codec, without adding CLI defaults.
+/// The returned request owns its data; failures use fixed messages that do not expose input.
+[[nodiscard]] auto
+decode_command_request(CommandKind kind, jb::core::JsonValue const& value, jb::jobu::AttributeRegistry const& registry)
+    -> jb::core::Result<CommandRequest, jb::core::Error>;
+
 /// Reads one bounded JSON object from a file or standard input (-) with fixed, input-safe errors.
 [[nodiscard]] auto load_json_object(std::filesystem::path const& path)
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;

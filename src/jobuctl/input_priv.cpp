@@ -92,9 +92,16 @@ auto request_from(Result<T, Error> decoded) -> Result<CommandRequest, Error>
     return Result<CommandRequest, Error>::success(CommandRequest{std::move(decoded).value()});
 }
 
-auto decode_request(CommandKind kind, JsonValue const& value, AttributeRegistry const& registry)
+} // namespace
+
+auto decode_command_request(CommandKind kind, JsonValue const& value, AttributeRegistry const& registry)
     -> Result<CommandRequest, Error>
 {
+    // File loading and in-memory callers share this boundary, including the SystemInfo fast path.
+    if (!value.is_object()) {
+        return Result<CommandRequest, Error>::failure(
+            input_error("jobuctl.input.invalid_params", "Request parameters are invalid"));
+    }
     if (kind == CommandKind::SystemInfo) {
         if (!value.as_object().empty()) {
             return Result<CommandRequest, Error>::failure(
@@ -164,8 +171,6 @@ auto decode_request(CommandKind kind, JsonValue const& value, AttributeRegistry 
         input_error("jobuctl.input.invalid_params", "Request parameters are invalid"));
 }
 
-} // namespace
-
 auto load_json_object(std::filesystem::path const& path) -> Result<JsonValue, Error>
 {
     auto       file   = std::ifstream{};
@@ -201,7 +206,7 @@ auto load_request_file(Command& command, StandardAttributeRegistry const& regist
     if (!value) {
         return Result<void, Error>::failure(std::move(value).error());
     }
-    auto request = decode_request(command.kind, *value, registry);
+    auto request = decode_command_request(command.kind, *value, registry);
     if (!request) {
         return Result<void, Error>::failure(std::move(request).error());
     }
