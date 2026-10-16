@@ -280,6 +280,11 @@ add_executable(history-cursor-test history-cursor-test.cpp)
 target_link_libraries(history-cursor-test PRIVATE jobu Catch2::Catch2WithMain)
 add_test(NAME history-cursor-test COMMAND $<TARGET_FILE:history-cursor-test>)
 
+# New-input admission remains separate from stored-payload decoding.
+add_executable(job-payload-admission-test job-payload-admission-test.cpp)
+target_link_libraries(job-payload-admission-test PRIVATE jobu Catch2::Catch2WithMain)
+add_test(NAME job-payload-admission-test COMMAND $<TARGET_FILE:job-payload-admission-test>)
+
 # JobU HTTP payload decoding and validation test
 set(TARGET "http-job-payload-test")
 add_executable(${TARGET} http-job-payload-test.cpp)

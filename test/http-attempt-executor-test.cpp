@@ -219,13 +219,13 @@ class CaptureLogger final : public Logger {
 public:
     void log(LogMessage const& message) override
     {
-        std::lock_guard lock{_mutex};
+        std::scoped_lock lock{_mutex};
         _records.push_back({.level = message.level, .message = std::string{message.message}});
     }
 
     [[nodiscard]] auto records() const -> std::vector<LogRecord>
     {
-        std::lock_guard lock{_mutex};
+        std::scoped_lock lock{_mutex};
         return _records;
     }
 
@@ -354,6 +354,37 @@ TEST_CASE("HTTP attempt executor preserves generic limits after metadata injecti
 
     REQUIRE(client.complete_success(accepted.id, response()));
     CHECK(completions == 1U);
+}
+
+TEST_CASE("HTTP attempt executor preserves canonical and legacy method spelling", "[jobu][http][executor][legacy]")
+{
+    for (auto const* spelling :
+         {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "get", "Get", "head", "OPTIONS", "X-Custom"}) {
+        CAPTURE(spelling);
+        FakeHttpClient      client;
+        FakeTimeSource      time;
+        HttpAttemptExecutor executor{client, time};
+        auto                request = start_request();
+        auto&               payload = std::get<JsonValue::Object>(request.payload.data);
+        payload.insert_or_assign("method", json_string(spelling));
+        if (std::string_view{spelling} == "HEAD") {
+            payload.erase("body");
+        }
+
+        auto completions = std::vector<AttemptCompletion>{};
+        auto started     = executor.start(std::move(request), [&](AttemptCompletion completion) {
+            completions.push_back(std::move(completion));
+        });
+        REQUIRE(started);
+        REQUIRE(client.start_records().size() == 1U);
+        auto const& sent = client.start_records().front();
+        CHECK(sent.request.method == spelling);
+        CHECK(sent.request.body.has_value() == (std::string_view{spelling} != "HEAD"));
+
+        REQUIRE(client.complete_success(sent.id, response()));
+        REQUIRE(completions.size() == 1U);
+        CHECK(completions.front().outcome == AttemptOutcome::Succeeded);
+    }
 }
 
 TEST_CASE("HTTP attempt executor rejects invalid starts without retaining callbacks", "[jobu][http][executor]")

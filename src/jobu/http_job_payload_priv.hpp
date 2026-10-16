@@ -2,6 +2,7 @@
 
 #include "byte_buffer.hpp"
 #include "http_client.hpp"
+#include "http_job_method_priv.hpp"
 #include "job_validation_priv.hpp"
 #include "json.hpp"
 #include "result.hpp"
@@ -46,7 +47,7 @@ private:
 
 struct HttpJobPayload {
     std::string                         url;
-    std::string                         method;
+    DecodedHttpMethod                   method;
     std::vector<jb::net::HttpHeader>    headers;
     std::optional<jb::core::ByteBuffer> body;
     HttpStatusSet                       expected_statuses;

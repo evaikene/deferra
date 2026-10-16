@@ -76,6 +76,8 @@ target_sources(${TARGET}
         execution_telemetry_priv.hpp
         run_eligibility_priv.cpp
         run_eligibility_priv.hpp
+        http_job_method_priv.cpp
+        http_job_method_priv.hpp
         http_job_payload_priv.cpp
         http_job_payload_priv.hpp
         http_retry_priv.cpp
@@ -100,6 +102,8 @@ target_sources(${TARGET}
         job_lifecycle_priv.hpp
         job_repository_priv.cpp
         job_repository_priv.hpp
+        job_payload_admission_priv.cpp
+        job_payload_admission_priv.hpp
         job_validation_priv.cpp
         job_validation_priv.hpp
         jobu.cpp

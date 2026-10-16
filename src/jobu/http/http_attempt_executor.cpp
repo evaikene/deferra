@@ -1,6 +1,7 @@
 #include "http_attempt_executor.hpp"
 
 #include "attribute_registry.hpp"
+#include "http_job_method_priv.hpp"
 #include "http_job_payload_priv.hpp"
 #include "http_retry_priv.hpp"
 #include "json.hpp"
@@ -227,7 +228,7 @@ struct HttpAttemptExecutor::Private {
         }
 
         auto http_request = jb::net::HttpRequest{
-            .method                = std::move(payload->method),
+            .method                = std::string{detail::http_method_wire_text(payload->method)},
             .url                   = std::move(payload->url),
             .headers               = std::move(payload->headers),
             .body                  = std::move(payload->body),

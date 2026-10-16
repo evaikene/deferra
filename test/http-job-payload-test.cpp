@@ -1,5 +1,6 @@
 #include "http_job_payload_priv.hpp"
 
+#include "http_job_method_priv.hpp"
 #include "job_validation_priv.hpp"
 #include "json.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
@@ -12,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 using namespace jb::core;
@@ -123,7 +125,9 @@ TEST_CASE("HTTP payload defaults produce one owning request policy", "[jobu][htt
     auto decoded = decode_http_job_payload(payload);
     REQUIRE(decoded);
     CHECK(decoded->url == "https://example.test/path");
-    CHECK(decoded->method == "GET");
+    REQUIRE(std::holds_alternative<HttpJobMethod>(decoded->method));
+    CHECK(std::get<HttpJobMethod>(decoded->method) == HttpJobMethod::Get);
+    CHECK(http_method_wire_text(decoded->method) == "GET");
     CHECK(decoded->headers.empty());
     CHECK_FALSE(decoded->body);
     CHECK(decoded->expected_statuses.ranges() == std::vector<HttpStatusRange>{
@@ -140,6 +144,51 @@ TEST_CASE("HTTP payload defaults produce one owning request policy", "[jobu][htt
     REQUIRE(validated);
     CHECK(validated->serialized() == *serialized);
     CHECK(validated->serialized().find("future") != std::string_view::npos);
+}
+
+TEST_CASE("Stored HTTP methods retain exact spelling and the legacy token grammar", "[jobu][http][payload][legacy]")
+{
+    for (auto const* spelling : {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}) {
+        auto payload = http_payload();
+        set_member(payload, "method", json_string(spelling));
+        auto decoded = decode_http_job_payload(payload);
+        REQUIRE(decoded);
+        CHECK(std::holds_alternative<HttpJobMethod>(decoded->method));
+        CHECK(http_method_wire_text(decoded->method) == spelling);
+    }
+
+    for (auto const* spelling : {"get", "Get", "head", "HeAd", "OPTIONS", "GTE", "X-Custom"}) {
+        CAPTURE(spelling);
+        auto payload = http_payload();
+        set_member(payload, "method", json_string(spelling));
+        auto decoded = decode_http_job_payload(payload);
+        REQUIRE(decoded);
+        REQUIRE(std::holds_alternative<LegacyHttpMethod>(decoded->method));
+        CHECK(std::get<LegacyHttpMethod>(decoded->method).wire_value == spelling);
+        CHECK(http_method_wire_text(decoded->method) == spelling);
+
+        auto serialized = serialize_json(payload);
+        auto validated  = validate_and_serialize_job_payload(JobType::Http, payload);
+        REQUIRE(serialized);
+        REQUIRE(validated);
+        CHECK(validated->serialized() == *serialized);
+
+        // Decoded legacy text owns its storage independently of the original JSON.
+        set_member(payload, "method", json_string("POST"));
+        CHECK(http_method_wire_text(decoded->method) == spelling);
+    }
+
+    auto lowercase_head = http_payload();
+    set_member(lowercase_head, "method", json_string("head"));
+    set_member(lowercase_head, "body", body("utf8", "legacy-body"));
+    REQUIRE(decode_http_job_payload(lowercase_head));
+    REQUIRE(validate_and_serialize_job_payload(JobType::Http, lowercase_head));
+
+    for (auto const* spelling : {"", "HAS SPACE", "GET\n", "GET/"}) {
+        auto payload = http_payload();
+        set_member(payload, "method", json_string(spelling));
+        check_issue(payload, JobPayloadIssue::InvalidMethod);
+    }
 }
 
 TEST_CASE("HTTP payload decodes headers body and merged statuses", "[jobu][http][payload]")
