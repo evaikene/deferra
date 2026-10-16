@@ -128,6 +128,21 @@ ascending ID bytes. Their page members are:
 
 ## Run and attempt history
 
+Initial `run.list` requests use the following optional selectors; see the
+[run-list contract](methods/run.md#list-runs-runlist) for all other filters.
+
+| Request member | Type | Since | Meaning |
+| --- | --- | --- | --- |
+| `state` | `RunState` | 1.3 | One current state; mutually exclusive with `states` |
+| `states` | array of `RunState` | 1.5 | Match any of 1–7 distinct valid states; mutually exclusive with `state` |
+
+Absence of both selectors leaves all states eligible. A present `states` value
+must be a nonempty array of distinct, exactly spelled state strings; null,
+duplicates, invalid states, non-arrays, and non-string members are rejected.
+Caller order is retained without affecting selection. Selection combines with
+other filters before paging, and cursor-only continuation retains the entire
+initial query, including the state set.
+
 `run.list` returns summaries. `run.get`, `job.run_now`, and `run.cancel.run`
 return full details. Each run retains the definition fields captured at its
 creation; updating or moving today's definition does not rewrite those fields.

@@ -63,7 +63,7 @@ auto unsupported_method_error() -> Error
 
 auto valid_deadline(ControlCallOptions options) -> std::optional<jb::core::TimePoint>
 {
-    using Clock = jb::core::Clock;
+    using jb::core::Clock;
     if (options.timeout.count() <= 0 ||
         options.timeout > std::chrono::duration_cast<std::chrono::milliseconds>(Clock::duration::max())) {
         return std::nullopt;
@@ -425,6 +425,14 @@ auto ControlClient::Private::start_encoded_call(Method                   method,
     if (!params) {
         return Result<ControlCallId, Error>::failure(std::move(params).error());
     }
+
+    // The shared codec has validated the request; only initial run queries carry this additive field.
+    if (method == Method::ListRuns && api_version.minor < 5U && params->as_object().contains("states")) {
+        return Result<ControlCallId, Error>::failure(client_error(ErrorCategory::Unsupported,
+                                                                  "jobu.client.unsupported_feature",
+                                                                  "Run-list state sets require JobU API 1.5 or newer"));
+    }
+
     return start_call(method, name, std::move(params).value(), options);
 }
 

@@ -118,6 +118,8 @@ void ControlClient::Private::deliver_one(ControlCallId id, Pending call)
             return;
         }
 
+        // Ready handlers may submit calls immediately, so publish the negotiated feature version first.
+        api_version  = decoded->api_version;
         capabilities = std::set<std::string>{decoded->capabilities.begin(), decoded->capabilities.end()};
         phase        = Phase::Ready;
         owner->emit(owner->ready, std::move(decoded).value());

@@ -94,6 +94,21 @@ Successful queue, job, and secret deletions return `EmptyReply`; cron validation
 returns `ScheduleValidationReply` only for a valid schedule. Invalid schedules
 produce a remote error.
 
+For `list_runs`, `RunFilters::state` selects one state. Since API 1.5,
+`RunFilters::states` selects any of 1–7 distinct valid states, preserving caller
+order in the request. The two selectors are mutually exclusive; an absent set
+means no set filter, while a present empty vector is invalid. With neither
+selector, the query remains unfiltered. Other filters combine with the selection
+before paging, and a cursor retains the entire initial query.
+
+The client retains the API version from its successful handshake before emitting
+`ready`. A valid initial state-set request to API 1.0–1.4 returns local Unsupported
+`jobu.client.unsupported_feature` with a message requiring API 1.5, without writing
+a request. Scalar-state, unfiltered, and cursor-only requests keep their existing
+advertised-method support. Shared codec validation still applies, and calls
+before readiness or after close return `jobu.client.not_ready`. The client never
+splits a state set into multiple calls or filters returned pages locally.
+
 API 1.4 statistics replies include `StatisticsGroup::runnable_wait_coverage`
 and an available `runnable_wait_ms` duration for Complete terminal runs only.
 Both statistics methods use the shared decoder, which validates coverage

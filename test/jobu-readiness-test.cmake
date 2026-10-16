@@ -11,7 +11,7 @@ file(WRITE "${client}" [=[#!/bin/sh
 printf '%s\n' call "$@" >> "$call_log"
 count=$(awk '$0 == "call" { n++ } END { print n }' "$call_log")
 if [ "$count" -ge "$ready_after" ]; then
-    printf '%s\n' '{"rpc_api_version":"1.4"}'
+    printf '%s\n' '{"rpc_api_version":"1.5"}'
     exit 0
 fi
 printf '%s\n' 'fixture RPC unavailable' >&2

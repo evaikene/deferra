@@ -54,11 +54,11 @@ auto remote_error(std::uint64_t id) -> std::string
                                                }));
 }
 
-auto info(std::vector<std::string> methods = {"job.create", "run.list"}) -> JsonValue
+auto info(std::vector<std::string> methods = {"job.create", "run.list"}, std::uint32_t minor = 4U) -> JsonValue
 {
     return system_info_to_json(SystemInfo{
         .daemon_version = "test",
-        .api_version    = {.major = 1, .minor = 4},
+        .api_version    = {.major = 1, .minor = minor},
         .capabilities   = std::move(methods),
     });
 }
@@ -132,10 +132,10 @@ struct Fixture {
         REQUIRE(app.process_events(EventFlag::Timers) != ProcessEventsResult::Failed);
     }
 
-    void initialize(std::vector<std::string> methods = {"job.create", "run.list"})
+    void initialize(std::vector<std::string> methods = {"job.create", "run.list"}, std::uint32_t minor = 4U)
     {
         REQUIRE(typed->initialize());
-        device.inject_input(success(1U, info(std::move(methods))));
+        device.inject_input(success(1U, info(std::move(methods), minor)));
         drain_tasks();
         static_cast<void>(device.take_written_data());
     }
@@ -161,6 +161,86 @@ TEST_CASE("Typed history calls reject oversized attempt numbers before writing",
         CHECK(output.error().code == "jobu.protocol.invalid_request");
         CHECK(fixture.device.take_written_data().empty());
     }
+}
+
+TEST_CASE("State-set peer handling is ready before readiness delivery and preserves lifecycle precedence",
+          "[jobu][client]")
+{
+    for (auto minor : {4U, 5U}) {
+        INFO(minor);
+        Fixture    fixture;
+        auto const query = RunQuery{.filters = {.states = std::vector<RunState>{RunState::Failed}}};
+
+        auto check_not_ready = [&] {
+            auto rejected = fixture.typed->list_runs(query);
+            REQUIRE_FALSE(rejected);
+            CHECK(rejected.error().code == "jobu.client.not_ready");
+
+            auto invalid = fixture.typed->list_runs(RunQuery{.filters = {.states = std::vector<RunState>{}}});
+            REQUIRE_FALSE(invalid);
+            CHECK(invalid.error().code == "jobu.client.not_ready");
+            CHECK(fixture.device.take_written_data().empty());
+        };
+
+        check_not_ready();
+        auto ready_count = 0;
+        fixture.typed->ready.connect(fixture.typed.get(), [&](SystemInfo const& negotiated) {
+            ++ready_count;
+            CHECK(negotiated.api_version.minor == minor);
+            auto call = fixture.typed->list_runs(query);
+            if (minor < 5U) {
+                REQUIRE_FALSE(call);
+                CHECK(call.error().code == "jobu.client.unsupported_feature");
+                CHECK(fixture.device.take_written_data().empty());
+            }
+            else {
+                REQUIRE(call);
+                CHECK_FALSE(fixture.device.take_written_data().empty());
+            }
+        });
+
+        REQUIRE(fixture.typed->initialize());
+        static_cast<void>(fixture.device.take_written_data());
+        check_not_ready();
+
+        // A received handshake still waits for deferred delivery before the wrapper becomes ready.
+        fixture.device.inject_input(success(1U, info({"run.list"}, minor)));
+        check_not_ready();
+        fixture.drain_tasks();
+        CHECK(ready_count == 1);
+
+        fixture.typed->close();
+        check_not_ready();
+    }
+}
+
+TEST_CASE("State-set requests preserve failed-handshake and missing-capability admission", "[jobu][client]")
+{
+    auto const query = RunQuery{.filters = {.states = std::vector<RunState>{RunState::Failed}}};
+    {
+        Fixture fixture;
+        REQUIRE(fixture.typed->initialize());
+        static_cast<void>(fixture.device.take_written_data());
+        fixture.device.inject_input(success(1U,
+                                            system_info_to_json(SystemInfo{
+                                                .daemon_version = "incompatible",
+                                                .api_version    = {.major = 2, .minor = 5},
+                                                .capabilities   = {"run.list"},
+        })));
+        fixture.drain_tasks();
+
+        auto rejected = fixture.typed->list_runs(query);
+        REQUIRE_FALSE(rejected);
+        CHECK(rejected.error().code == "jobu.client.not_ready");
+        CHECK(fixture.device.take_written_data().empty());
+    }
+
+    Fixture fixture;
+    fixture.initialize({"system.info"}, 5U);
+    auto rejected = fixture.typed->list_runs(query);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == "jobu.client.unsupported_method");
+    CHECK(fixture.device.take_written_data().empty());
 }
 
 TEST_CASE("Synchronous handshake and replies are delivered after accepting calls return", "[jobu][client]")

@@ -106,6 +106,7 @@ struct ControlFailure {
 /// ------------------  -----------------  --------------------------------------------------------
 /// not_ready           Unavailable        Wrong lifecycle state; no request written.
 /// unsupported_method  Unsupported        Method not advertised; no request written.
+/// unsupported_feature Unsupported        Request feature needs a newer API minor; no write.
 /// invalid_timeout     InvalidArgument    Nonpositive or unrepresentable timeout; no write.
 /// pending_limit       ResourceExhausted  Typed pending limit reached; no request written.
 /// invalid_response    InvalidArgument    Malformed success result; call or handshake fails.
@@ -214,6 +215,10 @@ public:
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
     /// Reads one run-summary page using an initial query or cursor-only continuation.
+    /// Initial queries with RunFilters::states require a negotiated API version of at least 1.5;
+    /// older peers return local jobu.client.unsupported_feature without writing a request.
+    /// Scalar state, unfiltered queries, and cursor-only continuations retain their advertised-method support.
+    /// Shared request validation applies before the feature check; a non-ready client returns jobu.client.not_ready.
     [[nodiscard]] auto list_runs(RunListRequest const& request, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 

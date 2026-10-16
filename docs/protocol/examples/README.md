@@ -16,6 +16,7 @@ names, IDs, and timestamps.
 | [Job listing request](job-list.params.json) and its [terminal result](job-list.result.json) | An explicit succeeded-state filter and one finished one-time definition |
 | [Unfiltered job listing](job-list-all.params.json) | The raw API's absent-state default, also used by `--request-file` |
 | [Run listing](run-list.params.json) | Combined owner/state filters |
+| [Run listing with a state set](run-list-states.params.json) | API 1.5 union of failed/interrupted states combined with an owner filter |
 | [Maximum attempt number](attempt-get-max.params.json) | The inclusive upper bound for `attempt.get` |
 | [Attempt output](attempt-output.params.json) | A retained-byte slice |
 | [Secret set](secret-set.params.json) | UTF-8 secret input, never a value-read result |

@@ -25,6 +25,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 using namespace jb::core;
@@ -97,13 +98,13 @@ struct Fixture {
 
     void drain_tasks() { REQUIRE(app.process_events(EventFlag::Tasks) != ProcessEventsResult::Failed); }
 
-    void initialize()
+    void initialize(std::uint32_t minor = 5U)
     {
         REQUIRE(typed->initialize());
         device.inject_input(success(1U,
                                     system_info_to_json(SystemInfo{
                                         .daemon_version = "test",
-                                        .api_version    = {.major = 1, .minor = 4},
+                                        .api_version    = {.major = 1, .minor = minor},
                                         .capabilities   = all_methods()
         })));
         drain_tasks();
@@ -140,6 +141,129 @@ struct ReplyCase {
 };
 
 } // anonymous namespace
+
+TEST_CASE("Run state sets require API 1.5 without consuming a call or writing to older peers", "[jobu][client]")
+{
+    for (auto minor : {0U, 1U, 2U, 3U, 4U}) {
+        INFO(minor);
+        Fixture fixture;
+        fixture.initialize(minor);
+
+        auto replies  = 0;
+        auto failures = 0;
+        fixture.typed->reply_received.connect(fixture.typed.get(),
+                                              [&](ControlCallId, ControlReply const&) { ++replies; });
+        fixture.typed->call_failed.connect(fixture.typed.get(),
+                                           [&](ControlCallId, ControlFailure const&) { ++failures; });
+
+        for (auto const& states : {
+                 std::vector<RunState>{RunState::Failed},
+                 std::vector<RunState>{RunState::Interrupted, RunState::Failed}
+        }) {
+            auto rejected = fixture.typed->list_runs(RunQuery{.filters = {.states = states}});
+            REQUIRE_FALSE(rejected);
+            CHECK(rejected.error().category == ErrorCategory::Unsupported);
+            CHECK(rejected.error().code == "jobu.client.unsupported_feature");
+            CHECK(rejected.error().message == "Run-list state sets require JobU API 1.5 or newer");
+            CHECK(fixture.device.take_written_data().empty());
+        }
+
+        fixture.drain_tasks();
+        CHECK(replies == 0);
+        CHECK(failures == 0);
+
+        // Rejection must not allocate a local call ID or disable otherwise advertised calls.
+        auto accepted = fixture.typed->list_runs(RunQuery{});
+        REQUIRE(accepted);
+        CHECK(*accepted == 1U);
+    }
+}
+
+TEST_CASE("API 1.5 and newer preserve run state sets and other query fields on the wire", "[jobu][client]")
+{
+    auto const job_id = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff");
+    REQUIRE(job_id);
+
+    for (auto minor : {5U, 6U}) {
+        INFO(minor);
+        Fixture fixture;
+        fixture.initialize(minor);
+
+        for (auto const& states : {
+                 std::vector<RunState>{RunState::Failed},
+                 std::vector<RunState>{RunState::Interrupted, RunState::Failed}
+        }) {
+            auto const query = RunQuery{
+                .filters = {.job_id = *job_id, .states = states},
+                .limit   = 2,
+            };
+            auto call = fixture.typed->list_runs(query);
+            REQUIRE(call);
+
+            auto const wire = request_body(fixture.device.take_written_data());
+            CHECK(wire.as_object().at("method").as_string() == "run.list");
+            CHECK(wire.as_object().at("params") == encoded(run_list_request_to_json(query)));
+            fixture.device.inject_input(
+                success(wire.as_object().at("id").as_uint(), encoded(run_page_to_json(RunPage{}))));
+            fixture.drain_tasks();
+        }
+    }
+}
+
+TEST_CASE("Compatible run-list peers retain scalar unfiltered and cursor-only request shapes", "[jobu][client]")
+{
+    for (auto minor : {3U, 4U, 5U, 6U}) {
+        INFO(minor);
+        Fixture fixture;
+        fixture.initialize(minor);
+
+        auto const requests = std::vector<RunListRequest>{
+            RunQuery{.filters = {.state = RunState::Failed}},
+            RunQuery{},
+            CursorRequest{.cursor = "retained-query-cursor"},
+        };
+        auto replies = 0;
+        fixture.typed->reply_received.connect(fixture.typed.get(), [&](ControlCallId, ControlReply const& reply) {
+            CHECK(std::holds_alternative<RunPage>(reply));
+            ++replies;
+        });
+
+        for (auto const& request : requests) {
+            REQUIRE(fixture.typed->list_runs(request));
+            auto const wire = request_body(fixture.device.take_written_data());
+            CHECK(wire.as_object().at("method").as_string() == "run.list");
+            CHECK(wire.as_object().at("params") == encoded(run_list_request_to_json(request)));
+            CHECK_FALSE(wire.as_object().at("params").as_object().contains("states"));
+            fixture.device.inject_input(
+                success(wire.as_object().at("id").as_uint(), encoded(run_page_to_json(RunPage{}))));
+            fixture.drain_tasks();
+        }
+        CHECK(replies == 3);
+    }
+}
+
+TEST_CASE("Run state sets use shared request validation before checking the peer feature version", "[jobu][client]")
+{
+    for (auto minor : {4U, 5U}) {
+        INFO(minor);
+        Fixture fixture;
+        fixture.initialize(minor);
+
+        auto const invalid = std::vector<RunQuery>{
+            {.filters = {.states = std::vector<RunState>{}}},
+            {.filters = {.states = std::vector<RunState>{RunState::Failed, RunState::Failed}}},
+            {.filters = {.states = std::vector<RunState>{static_cast<RunState>(255)}}},
+            {.filters = {.state = RunState::Failed, .states = std::vector<RunState>{RunState::Interrupted}}},
+            {.filters = {.states = std::vector<RunState>{RunState::Failed}}, .limit = 0},
+        };
+        for (auto const& request : invalid) {
+            auto rejected = fixture.typed->list_runs(request);
+            REQUIRE_FALSE(rejected);
+            CHECK(rejected.error().code == "jobu.protocol.invalid_request");
+            CHECK(fixture.device.take_written_data().empty());
+        }
+    }
+}
 
 TEST_CASE("Every typed method selects its capability and shared request shape", "[jobu][client]")
 {
@@ -296,7 +420,7 @@ TEST_CASE("Every distinct typed result decodes into its public reply alternative
     auto       cases = std::vector<ReplyCase>{
         {[](auto& client) { return client.get_system_info(); },
          system_info_to_json(SystemInfo{.daemon_version = "test",
-                                        .api_version    = {.major = 1, .minor = 4},
+                                        .api_version    = {.major = 1, .minor = 5},
                                         .capabilities   = all_methods()}),
          ControlReply{SystemInfo{}}.index()},
         {[](auto& client) { return client.system_statistics(StatisticsRequest{}); },
