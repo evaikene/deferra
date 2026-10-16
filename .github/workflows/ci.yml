@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 1G
+
 jobs:
   ubuntu:
     name: Ubuntu
@@ -33,6 +37,14 @@ jobs:
             ninja-build \
             nlohmann-json3-dev
 
+      - name: Restore ccache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1-${{ github.job }}-${{ github.sha }}
+          restore-keys: |
+            ccache-v1-${{ github.job }}-
+
       - name: Configure
         run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
@@ -41,6 +53,13 @@ jobs:
           ccache --zero-stats
           cmake --build .bld
           ccache --show-stats
+
+      - name: Save ccache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1-${{ github.job }}-${{ github.sha }}
 
       - name: Test
         run: |
@@ -81,6 +100,14 @@ jobs:
       - name: Check out sources
         uses: actions/checkout@v5
 
+      - name: Restore ccache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1-${{ github.job }}-${{ github.sha }}
+          restore-keys: |
+            ccache-v1-${{ github.job }}-
+
       - name: Configure
         run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
@@ -89,6 +116,13 @@ jobs:
           ccache --zero-stats
           cmake --build .bld
           ccache --show-stats
+
+      - name: Save ccache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1-${{ github.job }}-${{ github.sha }}
 
       - name: Test
         run: |

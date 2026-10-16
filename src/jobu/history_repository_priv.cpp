@@ -7,6 +7,9 @@
 #include "run_repository_priv.hpp"
 #include "value.hpp"
 
+#include <fmt/format.h>
+
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -333,6 +336,19 @@ auto HistoryRepository::list_runs(RunQuery const& query, std::optional<RunCursor
     if (filters.state) {
         sql += " AND state = :state";
         bindings.emplace_back(":state", jb::db::make_text(storage_text(*filters.state)));
+    }
+    else if (filters.states) {
+        // Only placeholder indices enter SQL; state values remain bound data before paging.
+        sql += " AND state IN (";
+        for (auto index = std::size_t{0}; index < filters.states->size(); ++index) {
+            if (index != 0) {
+                sql += ", ";
+            }
+            auto name  = fmt::format(":state{}", index);
+            sql       += name;
+            bindings.emplace_back(std::move(name), jb::db::make_text(storage_text((*filters.states)[index])));
+        }
+        sql += ')';
     }
     if (filters.origin) {
         sql += " AND origin = :origin";

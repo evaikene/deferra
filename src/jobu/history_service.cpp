@@ -4,6 +4,7 @@
 #include "history_cursor_priv.hpp"
 #include "history_json.hpp"
 #include "history_repository_priv.hpp"
+#include "history_run_page_priv.hpp"
 #include "json.hpp"
 #include "object_priv.hpp"
 #include "storage_failure_priv.hpp"
@@ -12,6 +13,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -178,6 +180,57 @@ auto capture_evidence(jb::jobu::detail::OutputRead const& read, jb::jobu::Output
 
 } // namespace
 
+namespace jb::jobu::detail {
+
+auto build_run_page(std::span<RunSummary const>          rows,
+                    RunQuery const&                      query,
+                    std::optional<RunCursorState> const& previous,
+                    HistoryCursorStore&                  cursors,
+                    std::size_t                          byte_budget) -> ServiceResult<RunPage>
+{
+    if (byte_budget < page_wrapper_bytes) {
+        return ServiceResult<RunPage>::failure(too_large());
+    }
+
+    auto page  = RunPage{};
+    auto bytes = page_wrapper_bytes;
+    for (auto const& row : rows) {
+        if (page.items.size() == query.limit) {
+            break;
+        }
+        auto encoded = run_summary_to_json(row);
+        if (!encoded) {
+            return ServiceResult<RunPage>::failure(invalid_stored_summary());
+        }
+        auto size = serialized_size(*encoded);
+        if (!size) {
+            return ServiceResult<RunPage>::failure(std::move(size).error());
+        }
+        if (*size + 1U > byte_budget - bytes) {
+            break;
+        }
+        bytes += *size + 1U;
+        page.items.push_back(row);
+    }
+    if (page.items.empty() && !rows.empty()) {
+        return ServiceResult<RunPage>::failure(too_large());
+    }
+
+    if (page.items.size() < rows.size()) {
+        // The lookahead is never a continuation boundary; the first un-emitted row remains reachable.
+        auto const& last = page.items.back();
+        auto        key  = detail::RunCursorKey{.planned_at = last.planned_at, .id = last.id};
+        auto        next = previous ? cursors.advance_run(*previous, key) : cursors.start_run(query, key);
+        if (!next) {
+            return ServiceResult<RunPage>::failure(std::move(next).error());
+        }
+        page.next_cursor = std::move(next).value();
+    }
+    return ServiceResult<RunPage>::success(std::move(page));
+}
+
+} // namespace jb::jobu::detail
+
 namespace jb::jobu {
 
 struct HistoryService::Private : jb::core::priv::ObjectPrivate {
@@ -299,41 +352,7 @@ auto HistoryService::list_runs(RunListRequest const& request) -> ServiceResult<R
             return ServiceResult<RunPage>::failure(std::move(rows).error());
         }
 
-        auto page  = RunPage{};
-        auto bytes = page_wrapper_bytes;
-        for (auto const& row : *rows) {
-            if (page.items.size() == query.limit) {
-                break;
-            }
-            auto encoded = run_summary_to_json(row);
-            if (!encoded) {
-                return ServiceResult<RunPage>::failure(invalid_stored_summary());
-            }
-            auto size = serialized_size(*encoded);
-            if (!size) {
-                return ServiceResult<RunPage>::failure(std::move(size).error());
-            }
-            if (*size + 1U > result_budget_bytes - bytes) {
-                break;
-            }
-            bytes += *size + 1U;
-            page.items.push_back(row);
-        }
-        if (page.items.empty() && !rows->empty()) {
-            return ServiceResult<RunPage>::failure(too_large());
-        }
-
-        if (page.items.size() < rows->size()) {
-            // The lookahead is never a continuation boundary; the first un-emitted row remains reachable.
-            auto const& last = page.items.back();
-            auto        key  = detail::RunCursorKey{.planned_at = last.planned_at, .id = last.id};
-            auto next = previous ? data->cursors.advance_run(*previous, key) : data->cursors.start_run(query, key);
-            if (!next) {
-                return ServiceResult<RunPage>::failure(std::move(next).error());
-            }
-            page.next_cursor = std::move(next).value();
-        }
-        return ServiceResult<RunPage>::success(std::move(page));
+        return detail::build_run_page(*rows, query, previous, data->cursors, result_budget_bytes);
     });
 }
 

@@ -1,6 +1,10 @@
 #include "history_service.hpp"
 
 #include "domain_storage_priv.hpp"
+#include "history_cursor_priv.hpp"
+#include "history_json.hpp"
+#include "history_repository_priv.hpp"
+#include "history_run_page_priv.hpp"
 #include "management.hpp"
 #include "management_json.hpp"
 #include "query.hpp"
@@ -13,11 +17,14 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -73,6 +80,38 @@ auto create_run(Fixture&             fixture,
     run.run.planned_at = planned;
     fixture.storage.insert_run(run);
     return run;
+}
+
+auto create_state_run(Fixture&             fixture,
+                      JobDefinition const& job,
+                      std::uint32_t        suffix,
+                      RunState             state,
+                      UtcTimePoint         planned) -> RecoveryRunFixture
+{
+    // Manual occurrences allow several independent nonterminal runs for one definition.
+    auto prior_failures = state == RunState::RetryWait ? AttemptNumber{1} : AttemptNumber{0};
+    auto run            = fixture.storage.make_run(recovery_id(suffix), job, state, prior_failures, RunOrigin::Manual);
+    run.run.planned_at  = planned;
+    fixture.storage.insert_run(run);
+    return run;
+}
+
+auto run_ids(RunPage const& page) -> std::vector<Uuid>
+{
+    auto ids = std::vector<Uuid>{};
+    for (auto const& run : page.items) {
+        ids.push_back(run.id);
+    }
+    return ids;
+}
+
+auto page_bytes(RunPage const& page) -> std::size_t
+{
+    auto encoded = run_page_to_json(page);
+    REQUIRE(encoded);
+    auto serialized = serialize_json(*encoded);
+    REQUIRE(serialized);
+    return serialized->size();
 }
 
 } // namespace
@@ -156,6 +195,346 @@ TEST_CASE("History pages preserve equal-time keysets and descending attempt numb
     auto attempt = fixture.history.get_attempt({.run_id = first.run.id, .attempt_number = 3});
     REQUIRE(attempt);
     CHECK(attempt->result == first.attempts[2].attempt.result);
+}
+
+TEST_CASE("History state sets select every state without changing scalar or unfiltered queries",
+          "[jobu][history][sqlite]")
+{
+    Fixture    fixture;
+    auto       job    = create_job(fixture, 1, 2);
+    auto const states = std::vector{RunState::Scheduled,
+                                    RunState::Running,
+                                    RunState::RetryWait,
+                                    RunState::Succeeded,
+                                    RunState::Failed,
+                                    RunState::Interrupted,
+                                    RunState::Cancelled};
+    for (auto index = std::size_t{0}; index < states.size(); ++index) {
+        auto suffix = std::uint32_t{10} + static_cast<std::uint32_t>(index);
+        create_state_run(fixture, job, suffix, states[index], UtcTimePoint{10s});
+
+        auto scalar    = fixture.history.list_runs(RunQuery{.filters = {.state = states[index]}});
+        auto singleton = fixture.history.list_runs(RunQuery{.filters = {.states = std::vector{states[index]}}});
+        REQUIRE(scalar);
+        REQUIRE(singleton);
+        CHECK(run_ids(*scalar) == std::vector{recovery_id(suffix)});
+        CHECK(run_ids(*singleton) == run_ids(*scalar));
+    }
+
+    auto unfiltered = fixture.history.list_runs(RunQuery{});
+    auto all_states = fixture.history.list_runs(RunQuery{.filters = {.states = states}});
+    REQUIRE(unfiltered);
+    REQUIRE(all_states);
+    CHECK(run_ids(*unfiltered) == std::vector{recovery_id(16),
+                                              recovery_id(15),
+                                              recovery_id(14),
+                                              recovery_id(13),
+                                              recovery_id(12),
+                                              recovery_id(11),
+                                              recovery_id(10)});
+    CHECK(run_ids(*all_states) == run_ids(*unfiltered));
+
+    auto reversed_states = states;
+    std::ranges::reverse(reversed_states);
+    auto reversed = fixture.history.list_runs(RunQuery{.filters = {.states = std::move(reversed_states)}});
+    REQUIRE(reversed);
+    CHECK(run_ids(*reversed) == run_ids(*all_states));
+
+    auto started   = fixture.history.list_runs(RunQuery{
+        .filters = {.states = states, .started = {.from = UtcTimePoint{0s}}}
+    });
+    auto completed = fixture.history.list_runs(RunQuery{
+        .filters = {.states = states, .completed = {.from = UtcTimePoint{12s}, .to = UtcTimePoint{13s}}}
+    });
+    REQUIRE(started);
+    REQUIRE(completed);
+    CHECK(run_ids(*started) ==
+          std::vector{recovery_id(15), recovery_id(14), recovery_id(13), recovery_id(12), recovery_id(11)});
+    CHECK(run_ids(*completed) == std::vector{recovery_id(16), recovery_id(15), recovery_id(14), recovery_id(13)});
+}
+
+TEST_CASE("History state sets filter interleaved rows before every small page", "[jobu][history][sqlite]")
+{
+    Fixture    fixture;
+    auto       job  = create_job(fixture, 1, 2);
+    auto const rows = std::array{
+        std::pair{RunState::Succeeded,   8s },
+        std::pair{RunState::Scheduled,   9s },
+        std::pair{RunState::Failed,      9s },
+        std::pair{RunState::Interrupted, 10s},
+        std::pair{RunState::Running,     10s},
+        std::pair{RunState::Succeeded,   10s},
+        std::pair{RunState::RetryWait,   11s},
+        std::pair{RunState::Cancelled,   11s},
+        std::pair{RunState::Scheduled,   12s}
+    };
+    auto suffix = std::uint32_t{10};
+    for (auto const& [state, planned] : rows) {
+        create_state_run(fixture, job, suffix++, state, UtcTimePoint{planned});
+    }
+
+    auto request = RunListRequest{
+        RunQuery{.filters = {.states = std::vector{RunState::Cancelled,
+                                                   RunState::Failed,
+                                                   RunState::Succeeded,
+                                                   RunState::Interrupted}},
+                 .limit   = 2}
+    };
+    auto const expected_pages = std::vector{
+        std::vector{recovery_id(17), recovery_id(15)},
+        std::vector{recovery_id(13), recovery_id(12)},
+        std::vector{recovery_id(10)}
+    };
+    auto first_cursor = std::optional<std::string>{};
+    for (auto index = std::size_t{0}; index < expected_pages.size(); ++index) {
+        auto page = fixture.history.list_runs(request);
+        REQUIRE(page);
+        CHECK(run_ids(*page) == expected_pages[index]);
+        CHECK(page_bytes(*page) <= std::size_t{512} * 1024U);
+        CHECK(page->next_cursor.has_value() == (index + 1U < expected_pages.size()));
+        if (page->next_cursor) {
+            if (!first_cursor) {
+                first_cursor = page->next_cursor;
+            }
+            request = CursorRequest{*page->next_cursor};
+        }
+    }
+
+    REQUIRE(first_cursor);
+    auto replay = fixture.history.list_runs(CursorRequest{*first_cursor});
+    REQUIRE(replay);
+    CHECK(run_ids(*replay) == expected_pages[1]);
+
+    auto empty = fixture.history.list_runs(RunQuery{
+        .filters = {.states = std::vector{RunState::Failed}, .planned = {.from = UtcTimePoint{20s}}}
+    });
+    REQUIRE(empty);
+    CHECK(empty->items.empty());
+    CHECK_FALSE(empty->next_cursor);
+}
+
+TEST_CASE("History state sets intersect snapshot owners, type, origin, and every time range", "[jobu][history][sqlite]")
+{
+    Fixture fixture;
+    auto    job       = create_job(fixture, 1, 2);
+    auto    other_job = create_job(fixture, 3, 4);
+    auto    http_job  = fixture.storage.make_job(recovery_id(5), job.queue_id, JobType::Http);
+    fixture.storage.insert_job(http_job);
+
+    auto suffix = std::uint32_t{10};
+    for (auto state : {RunState::Failed, RunState::Interrupted}) {
+        fixture.storage.insert_run(fixture.storage.make_run(recovery_id(suffix++), job, state, 0, RunOrigin::Manual));
+    }
+
+    // Each near miss changes one captured dimension, independently of the job's current definition.
+    for (suffix = 12; suffix <= 18; ++suffix) {
+        auto run = fixture.storage.make_run(recovery_id(suffix), job, RunState::Failed, 0, RunOrigin::Manual);
+        switch (suffix) {
+            case 12:
+                run.run.queue_id = other_job.queue_id;
+                break;
+            case 13:
+                run.run.job_id = other_job.id;
+                break;
+            case 14:
+                run.run.type    = JobType::Http;
+                run.run.payload = http_job.payload;
+                break;
+            case 15:
+                run.run.origin         = RunOrigin::Scheduled;
+                run.run.schedule_owned = true;
+                break;
+            case 16:
+                run.run.planned_at = UtcTimePoint{9s};
+                break;
+            case 17:
+                run.run.started_at = UtcTimePoint{10s};
+                break;
+            case 18:
+                run.run.completed_at = UtcTimePoint{13s};
+                break;
+            default:
+                FAIL("Unexpected near-miss fixture");
+        }
+        fixture.storage.insert_run(run);
+    }
+
+    auto query = RunQuery{
+        .filters = {.queue_id  = job.queue_id,
+                    .job_id    = job.id,
+                    .states    = std::vector{RunState::Interrupted, RunState::Failed},
+                    .origin    = RunOrigin::Manual,
+                    .type      = JobType::Cli,
+                    .planned   = {.from = UtcTimePoint{10s}, .to = UtcTimePoint{11s}},
+                    .started   = {.from = UtcTimePoint{11s}, .to = UtcTimePoint{12s}},
+                    .completed = {.from = UtcTimePoint{12s}, .to = UtcTimePoint{13s}}},
+        .limit   = 1
+    };
+    auto first = fixture.history.list_runs(query);
+    REQUIRE(first);
+    CHECK(run_ids(*first) == std::vector{recovery_id(11)});
+    REQUIRE(first->next_cursor);
+
+    // Moving and deleting the live definition cannot retarget the retained run snapshots or saved query.
+    Query move{fixture.storage.database};
+    REQUIRE(move.prepare("UPDATE jobu_jobs SET queue_id = :queue WHERE id = :id"));
+    REQUIRE(move.bind_value(":queue", jb::jobu::detail::uuid_to_storage(other_job.queue_id)));
+    REQUIRE(move.bind_value(":id", jb::jobu::detail::uuid_to_storage(job.id)));
+    REQUIRE(move.exec());
+    fixture.execute("UPDATE jobu_jobs SET state = 'deleted', deleted_at_us = 13000000 WHERE id = :id", job.id);
+
+    auto second = fixture.history.list_runs(CursorRequest{*first->next_cursor});
+    REQUIRE(second);
+    CHECK(run_ids(*second) == std::vector{recovery_id(10)});
+    CHECK_FALSE(second->next_cursor);
+}
+
+TEST_CASE("History state-set continuation observes live changes only below its boundary", "[jobu][history][sqlite]")
+{
+    Fixture fixture;
+    auto    job = create_job(fixture, 1, 2);
+    create_state_run(fixture, job, 10, RunState::Failed, UtcTimePoint{6s});
+    create_state_run(fixture, job, 11, RunState::Failed, UtcTimePoint{7s});
+    create_state_run(fixture, job, 12, RunState::Running, UtcTimePoint{8s});
+    create_state_run(fixture, job, 13, RunState::Failed, UtcTimePoint{9s});
+    create_state_run(fixture, job, 14, RunState::Running, UtcTimePoint{10s});
+
+    auto first = fixture.history.list_runs(
+        RunQuery{.filters = {.states = std::vector{RunState::Failed, RunState::Interrupted}}, .limit = 1});
+    REQUIRE(first);
+    CHECK(run_ids(*first) == std::vector{recovery_id(13)});
+    REQUIRE(first->next_cursor);
+
+    fixture.execute("UPDATE jobu_runs SET state = 'succeeded' WHERE id = :id", recovery_id(11));
+    fixture.execute("UPDATE jobu_runs SET state = 'interrupted', completed_at_us = 12000000 WHERE id = :id",
+                    recovery_id(12));
+    fixture.execute("UPDATE jobu_runs SET state = 'failed', completed_at_us = 12000000 WHERE id = :id",
+                    recovery_id(14));
+
+    auto second = fixture.history.list_runs(CursorRequest{*first->next_cursor});
+    REQUIRE(second);
+    CHECK(run_ids(*second) == std::vector{recovery_id(12)});
+    REQUIRE(second->next_cursor);
+    auto third = fixture.history.list_runs(CursorRequest{*second->next_cursor});
+    REQUIRE(third);
+    CHECK(run_ids(*third) == std::vector{recovery_id(10)});
+    CHECK_FALSE(third->next_cursor);
+}
+
+TEST_CASE("History state-set cursors preserve method and expiry errors at the service boundary",
+          "[jobu][history][sqlite]")
+{
+    Fixture fixture;
+    auto    job = create_job(fixture, 1, 2);
+    auto    run = create_run(fixture, job, 10, UtcTimePoint{10s}, 2);
+    create_state_run(fixture, job, 11, RunState::Failed, UtcTimePoint{11s});
+    auto page = fixture.history.list_runs(
+        RunQuery{.filters = {.states = std::vector{RunState::Succeeded, RunState::Failed}}, .limit = 1});
+    REQUIRE(page);
+    REQUIRE(page->next_cursor);
+    CHECK(fixture.history.list_attempts(CursorRequest{*page->next_cursor}).error().code ==
+          "jobu.history.invalid_cursor");
+    auto attempts = fixture.history.list_attempts(AttemptQuery{.run_id = run.run.id, .limit = 1});
+    REQUIRE(attempts);
+    REQUIRE(attempts->next_cursor);
+    for (auto const& token : {std::string{"not-a-token"}, recovery_id(999).to_string(), *attempts->next_cursor}) {
+        auto invalid = fixture.history.list_runs(CursorRequest{token});
+        REQUIRE_FALSE(invalid);
+        CHECK(invalid.error().code == "jobu.history.invalid_cursor");
+    }
+    fixture.time.advance(5min);
+    auto expired = fixture.history.list_runs(CursorRequest{*page->next_cursor});
+    REQUIRE_FALSE(expired);
+    CHECK(expired.error().code == "jobu.history.invalid_cursor");
+    CHECK(fixture.failures.empty());
+}
+
+TEST_CASE("Byte-limited run pages retain every selected row and the complete successor query",
+          "[jobu][history][sqlite]")
+{
+    Fixture    fixture;
+    auto       job    = create_job(fixture, 1, 2);
+    auto const states = std::array{RunState::Failed,
+                                   RunState::Scheduled,
+                                   RunState::Interrupted,
+                                   RunState::Failed,
+                                   RunState::Running,
+                                   RunState::Interrupted};
+    auto       suffix = std::uint32_t{10};
+    for (auto state : states) {
+        create_state_run(fixture, job, suffix++, state, UtcTimePoint{10s});
+    }
+
+    auto query = RunQuery{
+        .filters = {.job_id = job.id, .states = std::vector{RunState::Interrupted, RunState::Failed}},
+        .limit   = 4
+    };
+    auto repository = jb::jobu::detail::HistoryRepository{fixture.storage.database, fixture.storage.registry};
+    auto cursors    = jb::jobu::detail::HistoryCursorStore{fixture.tokens, fixture.time};
+    auto rows       = repository.list_runs(query, std::nullopt, query.limit + 1U);
+    REQUIRE(rows);
+    REQUIRE(rows->size() == 4);
+    auto maximum_row_bytes = std::size_t{0};
+    for (auto const& row : *rows) {
+        auto encoded = run_summary_to_json(row);
+        REQUIRE(encoded);
+        auto serialized = serialize_json(*encoded);
+        REQUIRE(serialized);
+        maximum_row_bytes = std::max(maximum_row_bytes, serialized->size());
+    }
+
+    // This leaves room for the wrapper and one summary, but not two summaries plus the wrapper.
+    auto const budget   = maximum_row_bytes * 2U;
+    auto       previous = std::optional<jb::jobu::detail::RunCursorState>{};
+    auto       seen     = std::vector<Uuid>{};
+    do {
+        auto const& retained = previous ? previous->query : query;
+        auto        after    = previous ? std::optional{previous->after} : std::nullopt;
+        rows                 = repository.list_runs(retained, after, retained.limit + 1U);
+        REQUIRE(rows);
+        auto page = jb::jobu::detail::build_run_page(*rows, retained, previous, cursors, budget);
+        REQUIRE(page);
+        REQUIRE(page->items.size() == 1);
+        CHECK(page_bytes(*page) <= budget);
+        seen.push_back(page->items.front().id);
+        REQUIRE(seen.size() <= 4);
+        if (!page->next_cursor) {
+            break;
+        }
+        auto saved = cursors.get_run(*page->next_cursor);
+        REQUIRE(saved);
+        CHECK(saved->query.filters.job_id == job.id);
+        REQUIRE(saved->query.filters.states);
+        CHECK(*saved->query.filters.states == *query.filters.states);
+        CHECK(saved->query.limit == query.limit);
+        CHECK(saved->after.id == page->items.back().id);
+        previous = std::move(*saved);
+    } while (true);
+    CHECK(seen == std::vector{recovery_id(15), recovery_id(13), recovery_id(12), recovery_id(10)});
+}
+
+TEST_CASE("A run summary that cannot fit the byte budget issues no cursor", "[jobu][history][sqlite]")
+{
+    Fixture fixture;
+    auto    job = create_job(fixture, 1, 2);
+    create_state_run(fixture, job, 10, RunState::Failed, UtcTimePoint{10s});
+    auto repository = jb::jobu::detail::HistoryRepository{fixture.storage.database, fixture.storage.registry};
+    auto cursors    = jb::jobu::detail::HistoryCursorStore{fixture.tokens, fixture.time};
+    auto query      = RunQuery{.filters = {.states = std::vector{RunState::Failed}}};
+    auto rows       = repository.list_runs(query, std::nullopt, query.limit + 1U);
+    REQUIRE(rows);
+    REQUIRE(rows->size() == 1);
+    auto encoded = run_summary_to_json(rows->front());
+    REQUIRE(encoded);
+    auto serialized = serialize_json(*encoded);
+    REQUIRE(serialized);
+    for (auto budget : {std::size_t{0}, serialized->size()}) {
+        auto page = jb::jobu::detail::build_run_page(*rows, query, std::nullopt, cursors, budget);
+        REQUIRE_FALSE(page);
+        CHECK(page.error().category == ErrorCategory::ResourceExhausted);
+        CHECK(page.error().code == "jobu.response.too_large");
+        CHECK(cursors.size() == 0);
+    }
 }
 
 TEST_CASE("History filters use durable snapshots and half-open nullable time ranges", "[jobu][history][sqlite]")

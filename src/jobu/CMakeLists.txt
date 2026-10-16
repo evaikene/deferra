@@ -91,6 +91,7 @@ target_sources(${TARGET}
         history_output_repository_priv.cpp
         history_repository_priv.cpp
         history_repository_priv.hpp
+        history_run_page_priv.hpp
         history_scalar_codec_priv.cpp
         history_scalar_codec_priv.hpp
         history_service.cpp
