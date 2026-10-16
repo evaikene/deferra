@@ -232,6 +232,10 @@ class Gate:
         for path in sorted(self.installed_files, key=lambda item: len(item.parts), reverse=True):
             path.unlink()
         for path in reversed(self.created_directories):
+            # Package parents can also hold active fixture files. Their owned root
+            # removes them recursively after its device/inode identity is checked.
+            if any(path.is_relative_to(root) for root, _, _ in self.created_roots):
+                continue
             path.rmdir()
         for path, device, inode in reversed(self.created_roots):
             if not path.exists() and not path.is_symlink():

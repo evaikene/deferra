@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import signal
 import socket as sockets
+import stat
 import sys
 
 from common import Foreground, digest, metadata, require
@@ -135,6 +136,18 @@ def reject(gate, daemon, directory, options, code, *, user=None, trace=False):
     gate.event("rejected", code=code, directory=str(directory), trace=str(trace_path) if trace else None)
 
 
+def require_installed_config_directory(gate, directory):
+    """Reuse only the real directory created while deploying the packaged README."""
+    require(directory in gate.created_directories,
+            f"Configuration directory was not created by this installation: {directory}")
+
+    value = directory.lstat()
+    require(stat.S_ISDIR(value.st_mode), f"Installed configuration directory is not a real directory: {directory}")
+    require(value.st_uid == os.geteuid(), f"Installed configuration directory has an unexpected owner: {directory}")
+    require(stat.S_IMODE(value.st_mode) == 0o755,
+            f"Installed configuration directory does not have mode 0755: {directory}")
+
+
 def run_foreground(gate, prefix, helper):
     daemon = prefix / "bin/jobud"
     client = prefix / "bin/jobuctl"
@@ -150,7 +163,7 @@ def run_foreground(gate, prefix, helper):
 
     with gate.case("private-prefix packaged foreground smoke"):
         config = prefix / "etc/jobud.ini"
-        gate.directory(config.parent, mode=0o755)
+        require_installed_config_directory(gate, config.parent)
         gate.config(config, (prefix / "share/jobu/jobud.ini.example").read_text())
         before = set(state.iterdir()) | set(runtime.iterdir())
         gate.run([daemon, "--check-config", "--config", config], user="jobu")
