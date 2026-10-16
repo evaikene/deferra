@@ -234,9 +234,10 @@ public:
             }
             return connected;
         });
-        probe.abort();
         // A successful real client round trip proves recovery and scheduler startup have both returned.
+        // Keep the earlier probe connected until then so acceptance cannot race its close.
         control_info();
+        probe.abort();
         ready_before = UtcClock::now();
 
         sqlite3*   raw{};
@@ -1085,9 +1086,11 @@ TEST_CASE("Configured foreground daemon measures mixed work maintains history an
 TEST_CASE("Configured daemon filters maintenance and preserves lifecycle logs in JSON and text",
           "[jobud][logging][integration]")
 {
-    auto const   format  = GENERATE(std::string{"json"}, std::string{"text"});
-    auto const   level   = GENERATE(std::string{"info"}, std::string{"debug1"}, std::string{"debug2"});
-    auto const   changed = GENERATE(false, true);
+    auto const format  = GENERATE(std::string{"json"}, std::string{"text"});
+    auto const level   = GENERATE(std::string{"info"}, std::string{"debug1"}, std::string{"debug2"});
+    auto const changed = GENERATE(false, true);
+    CAPTURE(format, level, changed);
+
     CrashFixture fixture;
     fixture.configuration = "logging.format = " + format + "\nlogging.level = " + level + "\n";
     if (changed) {
@@ -1110,7 +1113,9 @@ TEST_CASE("Configured daemon filters maintenance and preserves lifecycle logs in
         fixture.until([&] { return fixture.logged("jobud.retention.completed"); });
     }
     // start() already proved readiness with a client round trip when empty maintenance is filtered.
-    auto const               output    = fixture.stop_and_logs();
+    auto const output = fixture.stop_and_logs();
+    INFO(output);
+
     auto                     remaining = std::string_view{output};
     std::vector<std::string> events;
     while (!remaining.empty()) {

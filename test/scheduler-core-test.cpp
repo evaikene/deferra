@@ -8,6 +8,7 @@
 #include "job_repository_priv.hpp"
 #include "management.hpp"
 #include "query.hpp"
+#include "retry_policy_priv.hpp"
 #include "run_repository_priv.hpp"
 #include "secret_provider_priv.hpp"
 #include "secret_repository_priv.hpp"
@@ -60,9 +61,11 @@ auto id(std::uint8_t suffix) -> Uuid
     return Uuid{bytes};
 }
 
-auto at(std::int64_t microseconds) -> UtcTimePoint
+auto at(std::int64_t microseconds, std::chrono::nanoseconds fraction = {}) -> UtcTimePoint
 {
-    return UtcTimePoint{std::chrono::microseconds{microseconds}};
+    // Preserve sub-microsecond ticks where supported; macOS's UTC clock only represents microseconds.
+    return UtcTimePoint{std::chrono::microseconds{microseconds}} +
+           std::chrono::duration_cast<UtcTimePoint::duration>(fraction);
 }
 
 auto make_database(std::filesystem::path database_file) -> Database
@@ -466,7 +469,7 @@ public:
     [[nodiscard]] auto utc_now() const noexcept -> UtcTimePoint override
     {
         ++utc_calls;
-        return at(static_cast<std::int64_t>(119U + utc_calls));
+        return at(119 + static_cast<std::int64_t>(utc_calls));
     }
 
     [[nodiscard]] auto monotonic_now() const noexcept -> TimePoint override { return {}; }
@@ -701,7 +704,7 @@ TEST_CASE("Completion events describe committed outcomes with bounded diagnostic
                     auto const key = fixture.executor.pending_keys().front();
 
                     // UTC jumps independently; a backwards or unrepresentable monotonic interval is diagnostic only.
-                    fixture.time.set_utc(at(1000000) + 987ns);
+                    fixture.time.set_utc(at(1000000, 987ns));
                     fixture.time.set_monotonic(clock_case == 2 ? TimePoint::max()
                                                                : TimePoint{clock_case == 1 ? 99ms : 175ms});
                     auto completion   = failed ? failure(key, FailureDisposition::Terminal) : success(key);
@@ -747,7 +750,7 @@ TEST_CASE("Completion events describe committed outcomes with bounded diagnostic
     }
 }
 
-TEST_CASE("Retry events preserve persisted jitter deadline and mode before success or exhaustion",
+TEST_CASE("Retry events match committed deadlines and mode or reject unrepresentable jitter",
           "[jobu][scheduler][core][execution][retry][sqlite]")
 {
     for (auto const* mode : {"blocking", "reschedule"}) {
@@ -767,6 +770,9 @@ TEST_CASE("Retry events preserve persisted jitter deadline and mode before succe
                                                              immediate ? 0.0 : 0.5);
                         insert_scheduled(fixture, id(1), 2, JobType::Cli, 0, 100, 100, attributes);
                         fixture.executor.set_available(JobType::Cli, true);
+                        auto callbacks             = fixture.callbacks();
+                        auto failures              = std::vector<Error>{};
+                        callbacks.failure_reported = [&](Error const& error) { failures.push_back(error); };
                         SchedulerCore core{fixture.database,
                                            fixture.registry,
                                            fixture.cron,
@@ -775,22 +781,66 @@ TEST_CASE("Retry events preserve persisted jitter deadline and mode before succe
                                            fixture.executor,
                                            fixture.secrets,
                                            {},
-                                           fixture.callbacks()};
+                                           callbacks};
                         REQUIRE(core.process_cycle());
-                        auto const first = fixture.executor.pending_keys().front();
-                        fixture.time.set_utc(at(200) + 789ns);
+                        auto const first  = fixture.executor.pending_keys().front();
+                        auto       before = fixture.runs.find_by_id(first.run_id);
+                        REQUIRE(before);
+                        REQUIRE(before->has_value());
+                        auto policy = retry_policy_from_attributes(before->value().attributes);
+                        REQUIRE(policy);
+                        auto delay = retry_delay(*policy, first.run_id, first.attempt_number + 1);
+                        REQUIRE(delay);
+
+                        fixture.time.set_utc(at(200, 789ns));
                         REQUIRE(fixture.executor.complete(
                             first,
                             failure(first,
                                     FailureDisposition::Retryable,
-                                    deadline ? std::optional{at(1000) + 777ns} : std::nullopt)));
+                                    deadline ? std::optional{at(1000, 777ns)} : std::nullopt)));
 
-                        REQUIRE(fixture.retries.size() == 1);
-                        CHECK(fixture.finishes.empty());
-                        CHECK(fixture.events == std::vector<std::string_view>{"start", "rescan", "attempt", "retry"});
                         auto waiting = fixture.runs.find_by_id(first.run_id);
                         REQUIRE(waiting);
                         REQUIRE(waiting->has_value());
+
+                        // Coarser UTC clocks must reject precision loss rather than round jitter or publish completion.
+                        auto const clock_delay = std::chrono::duration_cast<UtcTimePoint::duration>(*delay);
+                        if (clock_delay != *delay) {
+                            REQUIRE(failures.size() == 1);
+                            CHECK(failures.front().code == "jobu.retry.out_of_range");
+                            CHECK(fixture.completions.empty());
+                            CHECK(fixture.retries.empty());
+                            CHECK(fixture.finishes.empty());
+                            CHECK(fixture.events == std::vector<std::string_view>{"start"});
+
+                            // Neither the run nor its attempt may commit a partial completion or create a retry.
+                            CHECK(waiting->value().state == RunState::Running);
+                            CHECK(waiting->value().runnable_at == before->value().runnable_at);
+                            CHECK(waiting->value().started_at == before->value().started_at);
+                            CHECK_FALSE(waiting->value().completed_at);
+                            CHECK_FALSE(waiting->value().result);
+                            auto attempt = fixture.attempts.find(first.run_id, first.attempt_number);
+                            REQUIRE(attempt);
+                            REQUIRE(attempt->has_value());
+                            CHECK(attempt->value().state == AttemptState::Running);
+                            CHECK_FALSE(attempt->value().completed_at);
+                            CHECK_FALSE(attempt->value().outcome);
+                            CHECK_FALSE(attempt->value().result);
+                            auto next = fixture.attempts.find(first.run_id, first.attempt_number + 1);
+                            REQUIRE(next);
+                            CHECK_FALSE(next->has_value());
+
+                            // Rejection must also release the completion transaction before returning to the caller.
+                            auto transaction = Transaction::begin(fixture.database);
+                            REQUIRE(transaction);
+                            REQUIRE(transaction->rollback());
+                            continue;
+                        }
+
+                        CHECK(failures.empty());
+                        REQUIRE(fixture.retries.size() == 1);
+                        CHECK(fixture.finishes.empty());
+                        CHECK(fixture.events == std::vector<std::string_view>{"start", "rescan", "attempt", "retry"});
                         auto const& retry = fixture.retries.front();
                         CHECK(retry.execution.run_id == first.run_id);
                         CHECK(retry.completed_attempt == 1);
