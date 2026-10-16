@@ -124,6 +124,11 @@ foreach(component runtime development documentation)
         set(layout "${runtime_directories}")
     endif()
     check_directories("${root}" "${expected}" "${layout}")
+    if(component STREQUAL "runtime")
+        check_runtime_guidance("${root}" "${producer}/jobu-generated")
+    elseif(component STREQUAL "documentation")
+        check_documentation("${root}")
+    endif()
 
     # Inspect actual archive directory entries, not just a staging inventory.
     # Empty leaves would be missing after extraction if CPack lost them.

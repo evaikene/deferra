@@ -16,9 +16,10 @@ DESTDIR=/tmp/jobu-stage cmake --install .bld-install
 ```
 
 `DESTDIR` stages files beneath `/tmp/jobu-stage`; it is never compiled into
-runtime defaults. Omit it for installation at the configured prefix. No install
-step creates users, active configuration, state/runtime directories, databases,
-locks or sockets, or activates/restarts a service. Binaries are installed without
+runtime defaults. Omit it for installation at the configured prefix. Runtime/full
+installation creates the missing normal private-prefix directories described
+below. Installation creates no users, active configuration, databases, locks or
+sockets, and never activates/restarts a service. Binaries are installed without
 setuid/setgid permissions. External libraries are not bundled; use the runtime
 dependencies appropriate to the build host and toolchain.
 
@@ -29,7 +30,7 @@ dependencies appropriate to the build host and toolchain.
 
 | Component | Default destination relative to the installation prefix |
 | --- | --- |
-| Runtime | `bin/jobud`, `bin/jobuctl`; `share/jobu/jobud.ini.example`; systemd assets and readiness probe in `share/jobu/services`; selected system profile also stages `lib/systemd/system/jobud.service` |
+| Runtime | `bin/jobud`, `bin/jobuctl`; `share/jobu/jobud.ini.example`; configuration guide at `etc/README.md` for the normal config layout, otherwise `share/jobu/configuration-README.md`; normal private directories below; systemd assets and readiness probe in `share/jobu/services`; selected system profile also stages `lib/systemd/system/jobud.service` |
 | Development | Static libraries and `cmake/JobU` package metadata in the configured library directory; headers in `include/jb/<module>`; buildable C++ example sources in `share/jobu/examples/jobu-client` |
 | Documentation | Manual entry point, installation/configuration/operations/observability/CLI/client/cron/secret guides, systemd setup, and protocol references/examples in the configured documentation directory |
 
@@ -37,7 +38,52 @@ GNUInstallDirs controls the binary, library, include, data and documentation
 destinations. Explicit manifests exclude planning documents, shared evidence,
 test helpers and application-private libraries. Reinstalling refreshes the
 sample and templates while leaving an operator's active `jobud.ini` and data
-untouched. Copy and secure the sample deliberately before using it.
+untouched. An active configuration is optional; the installed configuration guide
+contains the repeat-safe initial-copy and validation commands.
+
+## Fresh private-prefix installation
+
+As an ordinary user, choose a short writable prefix and a fresh build directory:
+
+```sh
+cmake -S . -B .bld-private -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="$HOME/jobu" -DJB_JOBU_SYSTEMD_PROFILE=none \
+    -DBUILD_TESTING=OFF -DJB_BUILD_EXAMPLES=OFF
+cmake --build .bld-private --parallel
+cmake --install .bld-private
+"$HOME/jobu/bin/jobud"
+```
+
+At the exact configured prefix, a fresh installation starts with no INI and no
+preparatory directory commands. From another terminal, confirm RPC readiness:
+
+```sh
+"$HOME/jobu/bin/jobuctl" --timeout 1000 system info
+```
+
+Stop the foreground daemon with Ctrl-C. To customize settings later, use
+`$HOME/jobu/etc/README.md`: its initial-copy command refuses existing files and
+symlinks, creates a mode-0600 INI with a scoped restrictive umask, then shows
+`--check-config --config` and normal startup. Review new sample settings manually
+on upgrades; there is no automatic merge. Explicit `--config` requires its file.
+
+| Normal prefix directory | Mode when newly created |
+| --- | --- |
+| `etc`, `var` | 0755 |
+| `var/lib`, `var/run` | 0700 |
+
+Each operational directory is provisioned only when its configured path exactly
+equals its normal prefix default. Runtime/full installs create these directories;
+Development-only and Documentation-only installs do not. The config guide is
+mode 0644. Existing directories retain ownership, modes and contents; the prefix
+and existing ancestors are preserved. A file or symlink occupying a managed
+directory is preserved and reported as a collision.
+
+Custom/external paths require explicit provisioning. A root installation does
+not infer a later daemon account: dedicated-account deployments still need the
+ownership and directory setup in the systemd guide. Existing mode-0750
+administrative runtime directories remain operator-owned. Installation never
+repairs an unsuitable existing tree; startup validation remains authoritative.
 
 Every component includes `share/jobu/LICENSE`, `THIRD_PARTY_NOTICES.md` and its
 own `share/jobu/package/build-info-<component>.txt`. Build information reports
@@ -94,10 +140,12 @@ libraries; this installation is not a self-contained distributable package.
 The compiled operational defaults are `$HOME/jobu/etc/jobud.ini`,
 `$HOME/jobu/var/lib/jobu.sqlite3`, and `$HOME/jobu/var/run/jobud.sock`, with the
 home directory expanded at configure time. Installation creates no active
-configuration or state. Inert systemd examples under `share/jobu/services`
+configuration or database. The Runtime install provisions the normal private
+directories and installs `$HOME/jobu/etc/README.md` as described above.
+Inert systemd examples under `share/jobu/services`
 are data only and need no action on macOS. Follow
 [macOS foreground operation](operations.md#macos-foreground-operation) to
-provision private directories and start and stop the daemon manually.
+start and stop the daemon manually.
 
 ## Producing and extracting Linux TGZ artifacts
 
@@ -129,8 +177,9 @@ cpack --config .bld-package/CPackConfig.cmake -G TGZ -C Release -B .bld-package/
 ```
 
 One invocation generates Runtime, Development and Documentation `.tar.gz`
-archives plus a `.sha256` archive checksum and `.files.sha256` payload inventory
-for each. Keep both sidecars with their archive. Names identify JobU's project
+archives plus a `.sha256` archive checksum, `.files.sha256` payload inventory and
+`.directories.txt` directory/mode inventory for each. Keep all three sidecars with
+their archive. Names identify JobU's project
 version, producer OS/distribution and architecture; RPC API 1.4 is a separate
 metadata field. Each archive contains a prefix-relative tree, without a wrapper
 directory, so components can be extracted into the same selected prefix.
@@ -153,6 +202,8 @@ Substitute the actual generated filename. The same commands apply to Development
 and Documentation. Each archive's sorted `.files.sha256` sidecar covers every
 payload file; run `sha256sum -c` on it from the extraction root. Runtime's
 `build-info-runtime.txt` includes dependencies captured from its staged binaries.
+Private-layout Runtime archives retain empty private leaves and their modes;
+they contain neither an active INI nor a live database.
 Required shared libraries, the C/C++ runtime, and any SDK dependency headers/libraries remain
 external; archives are specific to the producer platform and toolchain. Building
 on another distribution or libc produces a distinct artifact, not evidence that
@@ -198,7 +249,26 @@ at `/etc/jobu`, `/var/lib/jobu` and `/run/jobu`. A foreground smoke test must su
 explicit protected paths or use a producer configured for its actual private
 prefix. No extraction creates accounts, activates services, starts a daemon, or
 overwrites an active config/database. Stop the daemon deliberately before replacing
-running binaries. Compare an active config with the new `jobud.ini.example`, then
+running binaries. For an existing prefix, use the directory-preserving upgrade
+policy from the installed configuration guide. With GNU tar:
+
+```sh
+tar --extract --gzip --file /path/to/runtime.tar.gz \
+    --directory /path/to/existing-prefix --no-overwrite-dir
+```
+
+With BusyBox tar (Alpine):
+
+```sh
+tar --extract --gzip --file /path/to/runtime.tar.gz \
+    --directory /path/to/existing-prefix -o --no-same-permissions
+```
+
+These policies preserve existing directory ownership and modes, including a 0750
+runtime leaf. BusyBox creates new entries with archived modes subject to umask.
+Ordinary extraction can reapply archived 0700 over an existing 0750 directory;
+arbitrary extraction commands do not carry the preservation guarantee.
+Compare an active config with the new `jobud.ini.example`, then
 apply selected changes and run `--check-config` under the intended identity.
 There is no database upgrade script; older formats are rejected without migration.
 
@@ -238,9 +308,21 @@ use in another shared library. No PHP bindings or stable binary ABI are promised
 | HTTP | `JobU::net-http`, `JobU::jobu-http` | Net, Jobu, CURL 7.85+ |
 | CLI | `JobU::jobu-cli` | Jobu, Core |
 
+The Jobu component includes `<jb/jobu/scheduler.hpp>`,
+`<jb/jobu/execution_events.hpp>` and `<jb/jobu/retry_mode.hpp>`. Link
+`JobU::jobu` to observe `attempt_started`, `attempt_finished`, `retry_scheduled`
+and `run_finished` through receiver-aware connections. Event values own their
+data; copy borrowed direct-delivery arguments if retaining them. Subscribe
+before `Scheduler::start()`, which can dispatch synchronously. The public header
+documents owner-thread, dependency-lifetime and direct-observer restrictions.
+These diagnostics have no replay or durable audit guarantee; see
+[execution events](observability.md#execution-events).
+
 Package components select dependency discovery; they are distinct from the
 Runtime/Development/Documentation installation components. Core and Client do
-not discover SQLite, CURL, Catch2 or nlohmann_json. The producer still needs its
+not discover SQLite, CURL, Catch2 or nlohmann_json. The generic Jobu component and
+its execution signals likewise require no concrete SQLite, CLI or HTTP runner.
+The producer still needs its
 documented build dependencies. HTTP consumers using the system client link both
 HTTP targets; the executor's generic HTTP-client interface does not itself
 require libcurl. Unknown or unavailable required components reject the package
@@ -280,8 +362,10 @@ A selected Linux `system` profile requires `/usr` and initializes fresh operatio
 cache values to `/etc/jobu`, `/var/lib/jobu` and `/run/jobu`, rejecting conflicts.
 The `custom` profile generates a matching unit without systemd directory
 directives; the default `none` preserves the generic path defaults. A private
-foreground deployment can use a short writable prefix. On Linux, provision
-protected parents and final-user-owned state/runtime leaves with mode 0700. A mode-0660 socket needs a matching trusted
+foreground deployment can use a short writable prefix and the installed normal
+layout. On Linux, explicitly provision protected parents and final-user-owned
+mode-0700 state/runtime leaves for custom paths or a dedicated daemon identity.
+A mode-0660 socket needs a matching trusted
 group, a mode-0750 runtime leaf and safe traversal; that group has full daemon
 authority. Do not use raw database/socket paths in shared `/tmp`.
 

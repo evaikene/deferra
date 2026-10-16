@@ -30,6 +30,8 @@ set_tests_properties(jobu-sdk-test PROPERTIES TIMEOUT 600
 # it never builds or borrows these targets to satisfy an external consumer.
 add_executable(jobu-sdk-core-probe EXCLUDE_FROM_ALL sdk-consumer/core.cpp sdk-consumer/core_main.cpp)
 target_link_libraries(jobu-sdk-core-probe PRIVATE JobU::core)
+add_executable(jobu-sdk-jobu-probe EXCLUDE_FROM_ALL sdk-consumer/jobu.cpp)
+target_link_libraries(jobu-sdk-jobu-probe PRIVATE JobU::jobu)
 foreach(component client cli http sqlite)
     if(TARGET JobU::jobu-${component})
         add_executable(jobu-sdk-${component}-probe EXCLUDE_FROM_ALL sdk-consumer/${component}.cpp)

@@ -25,9 +25,15 @@ needed for a service already started as `jobu`.
 
 `jobud.service.in` is source data with placeholders. Use the generated
 `jobud.service`, which quotes/escapes systemd command arguments. Installation
-and TGZ extraction never create an account, active config, state/runtime data,
+and TGZ extraction never create an account, active config, database,
 reload the service manager, enable/start or restart a daemon. Selecting `system`
 installs the vendor unit file; activation remains a separate administrator action.
+Runtime/full installs provision missing directories only for exact normal
+private-prefix defaults, preserving existing metadata. They do not choose the
+service account or assign it ownership. The system profile uses external paths:
+systemd provisions state/runtime leaves and the administrator provisions config.
+Its configuration guide is `share/jobu/configuration-README.md`; a normal custom
+prefix uses `etc/README.md`.
 
 ## System layout
 
@@ -141,7 +147,8 @@ For example, configure a fresh build with `CMAKE_INSTALL_PREFIX=/opt/jobu` and
 `/opt/jobu/var/lib` and `/opt/jobu/var/run`. Explicit `JB_JOBU_*DIR` overrides are
 available. Keep the UNIX socket path short enough for the native limit.
 
-Install the Runtime files and provision the dedicated identity as above. Provision
+Install the Runtime files and provision the dedicated identity as above. A root
+install may already have created the normal layout with root ownership. Provision
 root-owned, non-group/world-writable parents (including `/opt/jobu/var`) and
 final-user-owned state/runtime leaves, normally mode 0700. For a new dedicated
 prefix, the directory steps are:
