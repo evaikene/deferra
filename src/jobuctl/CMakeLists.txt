@@ -14,6 +14,9 @@ add_library(jobuctl-private STATIC
     command_registry_priv.cpp
     help_priv.cpp
     command_helpers_priv.cpp
+    command_argv_priv.cpp
+    editor_command_priv.cpp
+    editor_posix_priv.cpp
     input_priv.cpp
     job_edit_priv.cpp
     job_edit_files_priv.cpp
