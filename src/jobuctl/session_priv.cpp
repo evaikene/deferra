@@ -3,6 +3,7 @@
 #include "client.hpp"
 #include "local_socket.hpp"
 #include "object_priv.hpp"
+#include "run_inspection_priv.hpp"
 #include "timer.hpp"
 
 #include <fmt/format.h>
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio> // IWYU pragma: keep for stdout macro
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -52,8 +54,23 @@ enum class SessionPhase : std::uint8_t {
     Initializing,
     Command,
     Polling,
+    InspectionList,
+    InspectionDetails,
     Finished,
 };
+
+auto is_call_phase(SessionPhase phase) noexcept -> bool
+{
+    return phase == SessionPhase::Command || phase == SessionPhase::Polling || phase == SessionPhase::InspectionList ||
+           phase == SessionPhase::InspectionDetails;
+}
+
+auto invalid_inspection_response() -> CliError
+{
+    return local_error({.category = ErrorCategory::InvalidArgument,
+                        .code     = "jobu.client.invalid_response",
+                        .message  = "JobU response is invalid"});
+}
 
 enum class SuspensionObservation : std::uint8_t {
     Pending,
@@ -277,6 +294,11 @@ struct Session::Private : jb::core::priv::ObjectPrivate {
     std::optional<ControlCallId>     active_call;
     std::optional<Uuid>              poll_id;
     std::chrono::milliseconds        poll_interval{100};
+
+    // Own callback values across enrichment calls. The summary pins the exact attempt.get identity;
+    // keep it unrendered until details succeed or terminal failure needs the partial-result fallback.
+    std::optional<RunDetails>     inspected_run;
+    std::optional<AttemptSummary> inspected_attempt;
 };
 
 Session::Session(Command command, StandardAttributeRegistry const& registry, SessionMode mode)
@@ -346,6 +368,17 @@ void Session::finish(int code, std::optional<CliError> error, std::optional<Cont
     data->poll_timer.stop();
     if (data->control) {
         data->control->close();
+    }
+
+    if (data->inspected_run) {
+        // Every failure path, including synchronous rejection, transport loss and timeout, preserves the summary.
+        if (data->result->error && data->inspected_attempt) {
+            if (auto text = format_last_attempt(*data->inspected_attempt)) {
+                fmt::print(stdout, "{}", *text);
+            }
+        }
+        fmt::print(stdout, "{}", run_output_hint(data->inspected_run->id, data->inspected_run->type));
+        std::fflush(stdout);
     }
     if (data->mode == SessionMode::Render && data->result->error) {
         print_error(data->command.json, *data->result->error);
@@ -443,10 +476,15 @@ void Session::ready(SystemInfo const& info)
 void Session::receive_reply(ControlCallId id, ControlReply const& reply)
 {
     auto* data = d_ptr<Private>();
-    if ((data->phase != SessionPhase::Command && data->phase != SessionPhase::Polling) || data->active_call != id) {
+    if (!is_call_phase(data->phase) || data->active_call != id) {
         return;
     }
     data->active_call.reset();
+
+    if (data->command.kind == CommandKind::RunGet && data->mode == SessionMode::Render && !data->command.json) {
+        receive_run_inspection(reply);
+        return;
+    }
 
     if (data->command.wait && data->command.kind == CommandKind::RunCancel) {
         if (data->phase == SessionPhase::Command) {
@@ -520,6 +558,90 @@ void Session::receive_reply(ControlCallId id, ControlReply const& reply)
     deliver_reply(reply);
 }
 
+void Session::receive_run_inspection(ControlReply const& reply)
+{
+    auto* data = d_ptr<Private>();
+    if (data->phase == SessionPhase::Command) {
+        auto const* run = std::get_if<RunDetails>(&reply);
+        if (!run || run->id != std::get<Uuid>(data->command.request)) {
+            finish(3, invalid_inspection_response());
+            return;
+        }
+        if (!print_command_result(data->command, reply, data->registry)) {
+            finish(3,
+                   local_error({.category = ErrorCategory::Internal,
+                                .code     = "jobuctl.output.invalid_reply",
+                                .message  = "Unable to render the daemon reply"}));
+            return;
+        }
+
+        // Display the successful run before starting enrichment; later failures must not hide it.
+        std::fflush(stdout);
+        data->inspected_run = *run;
+        data->phase         = SessionPhase::InspectionList;
+        request_run_inspection();
+        return;
+    }
+
+    if (data->phase == SessionPhase::InspectionList) {
+        auto const* page = std::get_if<AttemptPage>(&reply);
+        if (!page || page->items.size() > 1U ||
+            (!page->items.empty() && page->items.front().run_id != data->inspected_run->id)) {
+            finish(3, invalid_inspection_response());
+            return;
+        }
+        if (page->items.empty()) {
+            fmt::print(stdout, "Last attempt: none\n");
+            finish(0);
+            return;
+        }
+
+        data->inspected_attempt = page->items.front();
+        data->phase             = SessionPhase::InspectionDetails;
+        request_run_inspection();
+        return;
+    }
+
+    auto const* attempt  = std::get_if<AttemptDetails>(&reply);
+    auto const& selected = *data->inspected_attempt;
+    if (!attempt || attempt->run_id != selected.run_id || attempt->attempt_number != selected.attempt_number) {
+        finish(3, invalid_inspection_response());
+        return;
+    }
+    auto text = format_last_attempt(data->inspected_run->type, *attempt);
+    if (!text) {
+        finish(3, invalid_inspection_response());
+        return;
+    }
+
+    // Details may observe a newer state than the list. Print only this authoritative snapshot on success.
+    fmt::print(stdout, "{}", *text);
+    data->inspected_attempt.reset();
+    finish(0);
+}
+
+void Session::request_run_inspection()
+{
+    auto* data    = d_ptr<Private>();
+    auto  options = remaining_options(data->deadline);
+    if (!options) {
+        deadline_expired();
+        return;
+    }
+
+    // The original command and deadline never change. Only the active phase chooses a follow-up typed request.
+    auto call = data->phase == SessionPhase::InspectionList
+                  ? data->control->list_attempts(AttemptQuery{.run_id = data->inspected_run->id, .limit = 1}, *options)
+                  : data->control->get_attempt(AttemptKey{.run_id         = data->inspected_attempt->run_id,
+                                                          .attempt_number = data->inspected_attempt->attempt_number},
+                                               *options);
+    if (!call) {
+        finish(operation_exit(call.error()), local_error(call.error()));
+        return;
+    }
+    data->active_call = *call;
+}
+
 void Session::deliver_reply(ControlReply const& reply)
 {
     auto* data = d_ptr<Private>();
@@ -562,7 +684,7 @@ void Session::deliver_reply(ControlReply const& reply)
 void Session::receive_failure(ControlCallId id, ControlFailure const& failure)
 {
     auto* data = d_ptr<Private>();
-    if ((data->phase != SessionPhase::Command && data->phase != SessionPhase::Polling) || data->active_call != id) {
+    if (!is_call_phase(data->phase) || data->active_call != id) {
         return;
     }
     data->active_call.reset();
