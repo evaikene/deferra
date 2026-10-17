@@ -29,6 +29,8 @@ struct SessionResult {
 /// Owns the socket, raw RPC client, typed client, and one overall deadline; construction performs no I/O.
 /// Human Render-mode run.get composes attempt queries and preserves partial output on failure.
 /// JSON and Capture run.get retain the single requested reply without enrichment.
+/// Run output selects the latest observed Completed attempt and reads one chunk under that same deadline.
+/// Only its final chunk is rendered or captured; selection failures never deliver output bytes or create files.
 /// Destroy after signal callback stacks unwind.
 class Session final : public jb::core::Object {
 public:
@@ -56,6 +58,8 @@ private:
     void receive_failure(jb::jobu::ControlCallId id, jb::jobu::ControlFailure const& failure);
     void receive_run_inspection(jb::jobu::ControlReply const& reply);
     void request_run_inspection();
+    void receive_run_output(jb::jobu::ControlReply const& reply);
+    void request_run_output();
     void poll_wait();
     void schedule_poll();
     void deadline_expired();

@@ -592,15 +592,16 @@ constexpr CommandSpec run_output_command{
     .name             = "output",
     .kind             = CommandKind::RunOutput,
     .alias            = {},
-    .summary          = "Read one output chunk from the latest completed attempt (selection not yet available)",
+    .summary          = "Read one output chunk from the latest completed attempt",
     .operands         = "RUN_UUID",
     .maximum_operands = 1,
     .options          = output_options,
     .rules            = "Require --channel: CLI stdout/stderr or HTTP body/headers. --raw, --output-file, and --json "
                         "are mutually exclusive; each delivers one chunk only. No --request-file support; use "
-                        "attempt output --request-file FILE for a complete protocol request. This build supports "
-                        "the grammar and shared chunk delivery; run output selection is not available yet. "
-                        "Use attempt list and attempt output with an explicit attempt number.",
+                        "attempt output --request-file FILE for a complete protocol request. Lookup, newest-first "
+                        "attempt pages, and one selected output read share one overall --timeout. A pending/running "
+                        "retry may be newer than the selected attempt. No attempts or no completed attempt exits "
+                        "nonzero. Never fall back after selection or download further chunks automatically.",
     .example          = "jobuctl run output 00000000-0000-7000-8000-000000000002 --channel stderr --raw",
     .capability       = {},
     .supports_request_file = false,

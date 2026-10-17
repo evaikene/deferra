@@ -29,7 +29,7 @@ An unknown group, command, or option is an error, even alongside `--help`. An op
 | `system` | `info`, `stats` |
 | `queue` | `create` (`add`), `get`, `list`, `update`, `suspend`, `resume`, `delete`, `stats` |
 | `job` | `create` (`add`), `get`, `list`, `update`, `suspend`, `resume`, `move`, `delete`, `run-now` |
-| `run` | `get`, `list`, `cancel`, `output` (grammar only; selection is not yet available) |
+| `run` | `get`, `list`, `cancel`, `output` |
 | `attempt` | `get`, `list`, `output` |
 | `secret` | `set`, `list`, `delete` |
 | `schedule` | `validate`, `next` |
@@ -514,23 +514,35 @@ failed execution still exits 0.
 `run get RUN_UUID --json` performs only `run.get` and prints its existing result
 schema, without attempt calls or additional fields. The human output hint
 describes latest-completed output selection, which may refer to an older
-attempt than a running retry. The hint's `run output` convenience command now
-has grammar and shared chunk delivery, but its attempt selection is not yet
-available in this build. A valid invocation reports this limitation with exit
-status 1 before connecting or creating an output file. Use the existing explicit
-`attempt list` and `attempt output` commands below to retrieve captured bytes.
+attempt than a running retry.
 
-The staged grammar is `run output RUN_UUID --channel CHANNEL`, with required
-`stdout`/`stderr` or `body`/`headers`, `--offset N` (default 0, at most
-9,223,372,036,854,775,806), and `--limit N` (1–65,536, default 16,384).
+`run output RUN_UUID --channel CHANNEL` retrieves one chunk from the latest
+completed retained attempt. Use `stdout`/`stderr` for CLI runs or `body`/`headers`
+for HTTP runs. Optional slice arguments are `--offset N` (default 0, at most
+9,223,372,036,854,775,806) and `--limit N` (1–65,536, default 16,384).
 `--raw`, `--json`, and `--output-file PATH` are mutually exclusive. The shared
 delivery contract is the existing `AttemptOutputChunk`: human metadata identifies
 the selected attempt, JSON keeps the protocol chunk shape, and raw/file delivery
 writes only decoded bytes. Empty or unavailable chunks retain explicit attempt
-output behavior. These delivery contracts are ready for the later selection
-workflow; they do not make `run output` executable yet. There is no `run.output`
-RPC or capability. `--request-file` is rejected locally; `run output --help`
-still succeeds without reading supplied files or standard input.
+output behavior and succeed when retrieved successfully.
+
+The command checks run existence/type, then traverses bounded newest-first
+attempt pages until it finds a completed attempt. Multiple newer pending/running
+attempts and short pages are supported. Connection, handshake, run lookup, all
+attempt pages, and the single output read share one overall `--timeout`.
+No retained attempts and no completed retained attempt produce distinct errors
+with exit status 1, without creating an output file. An incompatible channel is
+a local input error (exit 2); a missing run retains the normal remote error.
+
+Once selected, the exact attempt is fixed. A concurrently completing retry does
+not trigger reselection. Retention removal or a read error fails normally;
+`not_captured`, `lost`, or empty output never causes fallback to an older attempt.
+These lookups observe live history rather than an atomic snapshot. One invocation
+reads one chunk, even when `next_offset` indicates more bytes. Use an explicit
+`attempt output RUN_UUID NUMBER` request to continue reading that same attempt.
+
+There is no `run.output` RPC or capability. `--request-file` is rejected locally;
+`run output --help` still succeeds without reading supplied files or standard input.
 
 The terminal default and multiple explicit states require daemon API 1.5 or
 newer. An older peer produces an unsupported-feature error before the query is

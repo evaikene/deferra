@@ -297,7 +297,10 @@ TEST_CASE("jobuctl run output help remains local despite unsupported request-fil
                                      "--json",
                                      "latest completed attempt",
                                      "one chunk only",
-                                     "selection is not available yet",
+                                     "one overall --timeout",
+                                     "pending/running",
+                                     "No attempts or no completed attempt exits nonzero",
+                                     "Never fall back after selection",
                                      "attempt output --request-file FILE"}) {
                 CHECK(result.out.find(text) != std::string::npos);
             }
@@ -307,7 +310,7 @@ TEST_CASE("jobuctl run output help remains local despite unsupported request-fil
     }
 }
 
-TEST_CASE("jobuctl run output refuses unfinished selection and request files without I/O", "[jobuctl][run]")
+TEST_CASE("jobuctl run output reaches connection handling but rejects request files without I/O", "[jobuctl][run]")
 {
     jb::test::TemporaryDirectory directory;
     auto const                   fifo   = directory.path() / "unread-output-input";
@@ -325,18 +328,16 @@ TEST_CASE("jobuctl run output refuses unfinished selection and request files wit
                                                   "--channel",
                                                   "stdout",
                                                   "--socket",
-                                                  fifo.string()};
+                                                  (directory.path() / "missing.sock").string()};
         arguments.insert(arguments.end(), delivery.begin(), delivery.end());
         auto result = run(std::move(arguments), true);
-        CHECK(result.code == 1);
+        CHECK(result.code == 3);
         CHECK(result.out.empty());
-        CHECK(result.err.find("run output selection is not available in this build") != std::string::npos);
-        CHECK(result.err.find("attempt list and attempt output") != std::string::npos);
+        CHECK(result.err.find("Daemon socket connection failed") != std::string::npos);
         if (!delivery.empty() && delivery.front() == "--json") {
             auto value = jb::core::parse_json(result.err);
             REQUIRE(value);
-            CHECK(value->as_object().at("error").as_object().at("code").as_string() ==
-                  "jobuctl.run.output_unavailable");
+            CHECK(value->as_object().at("error").as_object().at("code").as_string() == "jobuctl.connection_failed");
         }
         CHECK_FALSE(std::filesystem::exists(output));
     }
