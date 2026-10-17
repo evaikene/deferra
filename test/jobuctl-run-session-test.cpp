@@ -439,6 +439,98 @@ auto inspection_steps(RunDetails const& run, AttemptDetails const& attempt) -> s
     };
 }
 
+auto output_attempt(AttemptNumber number, AttemptState state = AttemptState::Completed) -> AttemptSummary
+{
+    auto attempt           = inspection_attempt(state);
+    attempt.attempt_number = number;
+    return attempt;
+}
+
+auto fixture_output_request(OutputChannel channel = OutputChannel::Stdout) -> AttemptOutputRequest
+{
+    auto id = Uuid::parse(fixture_id);
+    REQUIRE(id);
+    return {
+        .attempt = {.run_id = *id, .attempt_number = 7},
+        .channel = channel,
+        .offset  = 2,
+        .limit   = 4
+    };
+}
+
+auto fixture_output_chunk(AttemptOutputRequest const& request) -> AttemptOutputChunk
+{
+    return {
+        .attempt        = request.attempt,
+        .channel        = request.channel,
+        .status         = OutputStatus::Available,
+        .offset         = request.offset,
+        .bytes_returned = 4,
+        .next_offset    = request.offset + 4,
+        .retained_bytes = request.offset + 8,
+        .total_bytes    = request.offset + 12,
+        .omitted_bytes  = 4,
+        .truncated      = true,
+        .encoding       = OutputEncoding::Base64,
+        .data           = {std::byte{'A'}, std::byte{0}, std::byte{0xff}, std::byte{'Z'}}
+    };
+}
+
+auto output_command(std::filesystem::path const& path,
+                    AttemptOutputRequest const&  request,
+                    std::vector<std::string>     options = {}) -> Command
+{
+    auto encoded = attempt_output_request_to_json(request);
+    REQUIRE(encoded);
+    auto arguments = std::vector<std::string>{"run",
+                                              "output",
+                                              request.attempt.run_id.to_string(),
+                                              "--channel",
+                                              encoded->as_object().at("channel").as_string(),
+                                              "--offset",
+                                              std::to_string(request.offset),
+                                              "--limit",
+                                              std::to_string(request.limit)};
+    arguments.insert(arguments.end(), options.begin(), options.end());
+    return command_for(path, std::move(arguments));
+}
+
+/// Script exact wire parameters, including cursor-only continuations and an independently specified selected key.
+/// A supplied chunk ends the script: any fallback, attempt.get, or automatic next_offset read is unexpected.
+auto output_steps(RunDetails const&                        run,
+                  std::vector<AttemptPage> const&          pages,
+                  AttemptOutputRequest const&              request,
+                  std::optional<AttemptOutputChunk> const& chunk = std::nullopt) -> std::vector<PeerStep>
+{
+    auto encoded_run = run_details_to_json(run, StandardAttributeRegistry{});
+    auto run_params  = run_get_request_to_json(request.attempt.run_id);
+    REQUIRE(encoded_run);
+    REQUIRE(run_params);
+    auto steps = std::vector<PeerStep>{
+        handshake(),
+        {.method = "run.get", .value = *encoded_run, .params = *run_params}
+    };
+    for (auto index = std::size_t{0}; index < pages.size(); ++index) {
+        auto params = attempt_list_request_to_json(AttemptQuery{.run_id = request.attempt.run_id, .limit = 200});
+        if (index > 0) {
+            REQUIRE(pages[index - 1].next_cursor);
+            params = attempt_list_request_to_json(CursorRequest{.cursor = *pages[index - 1].next_cursor});
+        }
+        auto encoded = attempt_page_to_json(pages[index]);
+        REQUIRE(params);
+        REQUIRE(encoded);
+        steps.push_back({.method = "attempt.list", .value = *encoded, .params = *params});
+    }
+    if (chunk) {
+        auto encoded = attempt_output_chunk_to_json(*chunk);
+        auto params  = attempt_output_request_to_json(request);
+        REQUIRE(encoded);
+        REQUIRE(params);
+        steps.push_back({.method = "attempt.output", .value = *encoded, .params = *params});
+    }
+    return steps;
+}
+
 void check_once(std::string const& text, std::string_view marker)
 {
     auto const position = text.find(marker);
@@ -624,7 +716,7 @@ TEST_CASE("both output command identities share chunk rendering and binary deliv
     StandardAttributeRegistry    registry;
     jb::test::TemporaryDirectory directory;
 
-    // Exercise delivery directly: U.16 has no run-attempt selection or network orchestration yet.
+    // Exercise delivery directly, independently of the selection and network orchestration tests below.
     for (auto kind : {CommandKind::AttemptOutput, CommandKind::RunOutput}) {
         auto          command = Command{.kind = kind, .method = {}};
         StreamCapture human_output{stdout};
@@ -741,7 +833,7 @@ TEST_CASE("both output command identities preserve empty and unavailable chunk s
     }
 }
 
-TEST_CASE("unfinished run output completes locally without delivery in render or capture mode", "[jobuctl][session]")
+TEST_CASE("run output connection failures never create output files in render or capture mode", "[jobuctl][session]")
 {
     jb::test::TemporaryDirectory directory;
     auto const                   path = directory.path() / "must-not-exist.bin";
@@ -750,9 +842,9 @@ TEST_CASE("unfinished run output completes locally without delivery in render or
             command_for(directory.path() / "missing.sock",
                         {"run", "output", fixture_id, "--channel", "stdout", "--output-file", path.string()});
         auto result = run_captured(std::move(command), mode);
-        CHECK(result.result.exit_code == 1);
+        CHECK(result.result.exit_code == 3);
         REQUIRE(result.result.error);
-        CHECK(result.result.error->code == "jobuctl.run.output_unavailable");
+        CHECK(result.result.error->code == "jobuctl.connection_failed");
         CHECK_FALSE(result.result.reply);
         CHECK(result.output.empty());
         CHECK_FALSE(std::filesystem::exists(path));
@@ -760,7 +852,7 @@ TEST_CASE("unfinished run output completes locally without delivery in render or
             check_silent(result);
         }
         else {
-            CHECK(result.error.find("run output selection is not available in this build") != std::string::npos);
+            CHECK(result.error.find("Daemon socket connection failed") != std::string::npos);
         }
         CHECK(Application::instance() == nullptr);
         CHECK(ThreadCtx::current()->event_loop() == nullptr);
@@ -1281,4 +1373,547 @@ TEST_CASE("duplicate inspection replies cannot repeat partial output or completi
     check_once(output_text, "Run " + std::string{fixture_id});
     check_once(output_text, "Last attempt: 7:");
     check_once(output_text, "jobuctl run output");
+}
+
+TEST_CASE("run output selects the latest completed attempt across bounded descending pages", "[jobuctl][run-output]")
+{
+    auto pages = std::vector<AttemptPage>{
+        {.items = {output_attempt(7), output_attempt(6)}, .next_cursor = "unused"}
+    };
+    SECTION("latest attempt completed")
+    {}
+    SECTION("multiple newer attempts pending or running")
+    {
+        pages.front().items = {output_attempt(10, AttemptState::Pending),
+                               output_attempt(9, AttemptState::Running),
+                               output_attempt(8, AttemptState::Pending),
+                               output_attempt(7),
+                               output_attempt(6)};
+    }
+    SECTION("short pages continue with the cursor alone")
+    {
+        pages = {
+            {.items       = {output_attempt(10, AttemptState::Pending), output_attempt(9, AttemptState::Running)},
+             .next_cursor = "first"                                                                                                       },
+            {.items = {output_attempt(8, AttemptState::Pending)},                                                  .next_cursor = "second"},
+            {.items = {output_attempt(7), output_attempt(6)},                                                      .next_cursor = "unused"}
+        };
+    }
+    SECTION("a full maximum-sized page can contain no completed attempt")
+    {
+        auto full = AttemptPage{.next_cursor = "older"};
+        for (auto number = AttemptNumber{207}; number > 7; --number) {
+            full.items.push_back(output_attempt(number, AttemptState::Pending));
+        }
+        REQUIRE(full.items.size() == 200);
+        pages.insert(pages.begin(), std::move(full));
+    }
+
+    auto         request = fixture_output_request();
+    auto         chunk   = fixture_output_chunk(request);
+    ScriptedPeer peer{output_steps(inspection_run(JobType::Cli, RunState::Running), pages, request, chunk)};
+    auto         result = run_captured(output_command(peer.path(), request), SessionMode::Render);
+    peer.verify();
+    CHECK(result.result.exit_code == 0);
+    CHECK_FALSE(result.result.error);
+    CHECK(result.error.empty());
+    check_once(result.output, "Output " + std::string{fixture_id} + ":7 channel=stdout, status=available");
+    CHECK(result.output.find("Last attempt:") == std::string::npos);
+    CHECK(result.output.find("jobuctl run output") == std::string::npos);
+    CHECK(Application::instance() == nullptr);
+}
+
+TEST_CASE("composed run output preserves every delivery mode and channel", "[jobuctl][run-output]")
+{
+    for (auto channel : {OutputChannel::Stdout, OutputChannel::Stderr, OutputChannel::Body, OutputChannel::Headers}) {
+        for (auto encoding : {OutputEncoding::Utf8, OutputEncoding::Base64}) {
+            for (auto const* delivery : {"human", "json", "raw", "file", "capture"}) {
+                CAPTURE(channel, encoding, delivery);
+                jb::test::TemporaryDirectory directory;
+                auto const                   path    = directory.path() / "chunk.bin";
+                auto                         request = fixture_output_request(channel);
+                auto                         chunk   = fixture_output_chunk(request);
+                chunk.encoding                       = encoding;
+                if (encoding == OutputEncoding::Utf8) {
+                    chunk.data = {std::byte{'t'}, std::byte{'e'}, std::byte{'x'}, std::byte{'t'}};
+                }
+                auto type =
+                    channel == OutputChannel::Body || channel == OutputChannel::Headers ? JobType::Http : JobType::Cli;
+                ScriptedPeer peer{output_steps(inspection_run(type), {{.items = {output_attempt(7)}}}, request, chunk)};
+                auto         command  = output_command(peer.path(), request);
+                auto         mode     = SessionMode::Render;
+                auto const   selected = std::string_view{delivery};
+                if (selected == "json") {
+                    command.json = true;
+                }
+                else if (selected == "raw") {
+                    command.raw = true;
+                }
+                else if (selected == "file" || selected == "capture") {
+                    command.output_file = path;
+                    if (selected == "capture") {
+                        mode = SessionMode::Capture;
+                    }
+                }
+                auto result = run_captured(std::move(command), mode);
+                peer.verify();
+                CHECK(result.result.exit_code == 0);
+                CHECK_FALSE(result.result.error);
+                CHECK(result.error.empty());
+                auto encoded = attempt_output_chunk_to_json(chunk);
+                REQUIRE(encoded);
+                auto serialized = serialize_json(*encoded);
+                REQUIRE(serialized);
+                auto const bytes = encoding == OutputEncoding::Utf8 ? std::string{"text"} : std::string{"A\0\xffZ", 4};
+
+                if (selected == "capture") {
+                    check_silent(result);
+                    REQUIRE(result.result.reply);
+                    auto const& captured = std::get<AttemptOutputChunk>(*result.result.reply);
+                    CHECK(captured.data == chunk.data);
+                    CHECK(attempt_output_chunk_to_json(captured)->as_object() == encoded->as_object());
+                    CHECK_FALSE(std::filesystem::exists(path));
+                }
+                else if (selected == "json") {
+                    CHECK(result.output == *serialized + "\n");
+                }
+                else if (selected == "raw") {
+                    CHECK(result.output == bytes);
+                }
+                else if (selected == "file") {
+                    CHECK(result.output.empty());
+                    auto input = std::ifstream{path, std::ios::binary};
+                    REQUIRE(input);
+                    CHECK(std::string{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}} ==
+                          bytes);
+                    struct stat metadata{};
+                    REQUIRE(::stat(path.c_str(), &metadata) == 0);
+                    CHECK((metadata.st_mode & 0777) == 0600);
+                }
+                else {
+                    check_once(result.output, "Output " + std::string{fixture_id} + ":7 channel=");
+                    CHECK(result.output.find("status=available") != std::string::npos);
+                    CHECK(result.output.find("truncated=true") != std::string::npos);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("selected empty and unavailable run output chunks succeed without fallback", "[jobuctl][run-output]")
+{
+    for (auto status :
+         {OutputStatus::Available, OutputStatus::Pending, OutputStatus::NotCaptured, OutputStatus::Lost}) {
+        CAPTURE(status);
+        auto request   = fixture_output_request(OutputChannel::Body);
+        request.offset = 0;
+        auto chunk     = AttemptOutputChunk{.attempt      = request.attempt,
+                                            .channel      = request.channel,
+                                            .status       = status,
+                                            .capture_lost = status == OutputStatus::Lost};
+        auto encoded   = attempt_output_chunk_to_json(chunk);
+        REQUIRE(encoded);
+        // An older attempt is available, but the selected channel's status must never trigger a second read.
+        ScriptedPeer peer{
+            output_steps(inspection_run(JobType::Http),
+                         {{.items = {output_attempt(7), output_attempt(6)}, .next_cursor = "unused"}},
+                         request,
+                         chunk)
+        };
+        auto result = run_captured(output_command(peer.path(), request), SessionMode::Render);
+        peer.verify();
+        CHECK(result.result.exit_code == 0);
+        CHECK_FALSE(result.result.error);
+        CHECK(result.error.empty());
+        CHECK(result.output.find("status=" + encoded->as_object().at("status").as_string()) != std::string::npos);
+    }
+}
+
+TEST_CASE("run output distinguishes absent attempts from no completed attempt", "[jobuctl][run-output]")
+{
+    auto pages    = std::vector<AttemptPage>{{}};
+    auto expected = std::string{"jobuctl.run.no_attempts"};
+    SECTION("no retained attempts")
+    {}
+    SECTION("only incomplete attempts")
+    {
+        pages    = {{.items = {output_attempt(9, AttemptState::Pending), output_attempt(8, AttemptState::Running)}}};
+        expected = "jobuctl.run.no_completed_attempt";
+    }
+    SECTION("all pages contain incomplete attempts")
+    {
+        pages = {
+            {.items = {output_attempt(9, AttemptState::Running)}, .next_cursor = "older"},
+            {.items = {output_attempt(8, AttemptState::Pending)}}
+        };
+        expected = "jobuctl.run.no_completed_attempt";
+    }
+    SECTION("retention empties a continuation after an incomplete attempt was observed")
+    {
+        pages = {
+            {.items = {output_attempt(9, AttemptState::Running)}, .next_cursor = "older"},
+            {}
+        };
+        expected = "jobuctl.run.no_completed_attempt";
+    }
+
+    for (auto mode : {SessionMode::Render, SessionMode::Capture}) {
+        jb::test::TemporaryDirectory directory;
+        auto const                   path    = directory.path() / "must-not-exist.bin";
+        auto                         request = fixture_output_request();
+        ScriptedPeer                 peer{output_steps(inspection_run(), pages, request)};
+        auto result = run_captured(output_command(peer.path(), request, {"--output-file", path.string()}), mode);
+        peer.verify();
+        CHECK(result.result.exit_code == 1);
+        REQUIRE(result.result.error);
+        CHECK(result.result.error->code == expected);
+        CHECK_FALSE(result.result.reply);
+        CHECK(result.output.empty());
+        CHECK_FALSE(std::filesystem::exists(path));
+        if (mode == SessionMode::Capture) {
+            check_silent(result);
+        }
+        else {
+            CHECK(result.error.find(expected == "jobuctl.run.no_attempts"
+                                        ? "no retained attempts"
+                                        : "no completed retained attempt") != std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("run output rejects a channel incompatible with the fetched run", "[jobuctl][run-output]")
+{
+    for (auto channel : {OutputChannel::Stdout, OutputChannel::Stderr, OutputChannel::Body, OutputChannel::Headers}) {
+        CAPTURE(channel);
+        auto type = channel == OutputChannel::Body || channel == OutputChannel::Headers ? JobType::Cli : JobType::Http;
+        auto request = fixture_output_request(channel);
+        ScriptedPeer peer{output_steps(inspection_run(type), {}, request)};
+        auto         result = run_captured(output_command(peer.path(), request, {"--json"}), SessionMode::Render);
+        peer.verify();
+        CHECK(result.result.exit_code == 2);
+        CHECK(result.output.empty());
+        REQUIRE(result.result.error);
+        CHECK(result.result.error->code == "jobuctl.run.invalid_channel");
+        auto error = parse_json(result.error);
+        REQUIRE(error);
+        CHECK(error->as_object().at("error").as_object().at("code").as_string() == "jobuctl.run.invalid_channel");
+    }
+}
+
+TEST_CASE("run output rejects invalid page identity order and continuation progress", "[jobuctl][run-output]")
+{
+    auto other = Uuid::parse("00112233-4455-6677-8899-aabbccddee00");
+    REQUIRE(other);
+    auto pages = std::vector<AttemptPage>{{.items = {output_attempt(7), output_attempt(6)}}};
+    SECTION("identity after the first completed member is still validated")
+    {
+        pages.front().items.back().run_id = *other;
+    }
+    SECTION("duplicate attempt numbers within a page")
+    {
+        pages.front().items.back().attempt_number = 7;
+    }
+    SECTION("ascending attempt numbers within a page")
+    {
+        pages.front().items.back().attempt_number = 8;
+    }
+    SECTION("overlapping page boundary")
+    {
+        pages = {
+            {.items = {output_attempt(9, AttemptState::Running)}, .next_cursor = "older"},
+            {.items = {output_attempt(9)}}
+        };
+    }
+    SECTION("ascending page boundary")
+    {
+        pages = {
+            {.items = {output_attempt(9, AttemptState::Running)}, .next_cursor = "older"},
+            {.items = {output_attempt(10)}}
+        };
+    }
+    SECTION("repeated cursor even with decreasing item numbers")
+    {
+        pages = {
+            {.items = {output_attempt(9, AttemptState::Running)}, .next_cursor = "same"},
+            {.items = {output_attempt(8, AttemptState::Pending)}, .next_cursor = "same"}
+        };
+    }
+    SECTION("cursor cycle replays a previously visited page")
+    {
+        pages = {
+            {.items = {output_attempt(10, AttemptState::Running)}, .next_cursor = "first" },
+            {.items = {output_attempt(9, AttemptState::Pending)},  .next_cursor = "second"},
+            {.items = {output_attempt(10, AttemptState::Running)}, .next_cursor = "first" }
+        };
+    }
+
+    jb::test::TemporaryDirectory directory;
+    auto const                   path    = directory.path() / "must-not-exist.bin";
+    auto                         request = fixture_output_request();
+    ScriptedPeer                 peer{output_steps(inspection_run(), pages, request)};
+    auto                         result =
+        run_captured(output_command(peer.path(), request, {"--output-file", path.string()}), SessionMode::Render);
+    peer.verify();
+    CHECK(result.result.exit_code == 3);
+    REQUIRE(result.result.error);
+    CHECK(result.result.error->code == "jobu.client.invalid_response");
+    CHECK(result.output.empty());
+    CHECK_FALSE(result.result.reply);
+    CHECK_FALSE(std::filesystem::exists(path));
+}
+
+TEST_CASE("run output correlates run and chunk responses before delivery", "[jobuctl][run-output]")
+{
+    auto other = Uuid::parse("00112233-4455-6677-8899-aabbccddee00");
+    REQUIRE(other);
+    auto request = fixture_output_request();
+    auto chunk   = fixture_output_chunk(request);
+    auto steps   = output_steps(inspection_run(), {{.items = {output_attempt(7)}}}, request, chunk);
+    SECTION("run identity")
+    {
+        std::get<JsonValue::Object>(steps[1].value.data).at("id").data = other->to_string();
+        steps.resize(2);
+    }
+    SECTION("chunk run identity")
+    {
+        std::get<JsonValue::Object>(steps.back().value.data).at("run_id").data = other->to_string();
+    }
+    SECTION("chunk attempt number")
+    {
+        std::get<JsonValue::Object>(steps.back().value.data).at("attempt_number").data = std::uint64_t{6};
+    }
+    SECTION("chunk channel")
+    {
+        std::get<JsonValue::Object>(steps.back().value.data).at("channel").data = std::string{"stderr"};
+    }
+    SECTION("chunk offset")
+    {
+        --chunk.offset;
+        --*chunk.next_offset;
+        steps.back().value = *attempt_output_chunk_to_json(chunk);
+    }
+    SECTION("chunk exceeds requested limit")
+    {
+        request.limit = 3;
+        steps         = output_steps(inspection_run(), {{.items = {output_attempt(7)}}}, request, chunk);
+    }
+    SECTION("empty page with a cursor is malformed")
+    {
+        auto& fields = std::get<JsonValue::Object>(steps[2].value.data);
+        std::get<JsonValue::Array>(fields.at("items").data).clear();
+        fields.at("next_cursor").data = std::string{"invalid"};
+        steps.resize(3);
+    }
+    SECTION("page exceeds maximum size")
+    {
+        auto& items = std::get<JsonValue::Array>(std::get<JsonValue::Object>(steps[2].value.data).at("items").data);
+        items.resize(201, items.front());
+        steps.resize(3);
+    }
+    SECTION("malformed chunk")
+    {
+        std::get<JsonValue::Object>(steps.back().value.data).erase("data");
+    }
+
+    jb::test::TemporaryDirectory directory;
+    auto const                   path = directory.path() / "must-not-exist.bin";
+    ScriptedPeer                 peer{std::move(steps)};
+    auto                         result =
+        run_captured(output_command(peer.path(), request, {"--output-file", path.string()}), SessionMode::Render);
+    peer.verify();
+    CHECK(result.result.exit_code == 3);
+    REQUIRE(result.result.error);
+    CHECK(result.result.error->code == "jobu.client.invalid_response");
+    CHECK(result.output.empty());
+    CHECK_FALSE(std::filesystem::exists(path));
+}
+
+TEST_CASE("run output preserves remote malformed and transport failures without fallback", "[jobuctl][run-output]")
+{
+    auto request = fixture_output_request();
+    auto chunk   = fixture_output_chunk(request);
+    auto pages   = std::vector<AttemptPage>{
+        {.items = {output_attempt(9, AttemptState::Running)}, .next_cursor = "older" },
+        {.items = {output_attempt(7), output_attempt(6)},     .next_cursor = "unused"}
+    };
+    for (auto phase : {std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{4}}) {
+        for (auto action : {PeerAction::RemoteError, PeerAction::Reply, PeerAction::Disconnect}) {
+            for (auto mode : {SessionMode::Render, SessionMode::Capture}) {
+                CAPTURE(phase, action, mode);
+                auto steps = output_steps(inspection_run(), pages, request, chunk);
+                steps.resize(phase + 1);
+                steps.back().action = action;
+                steps.back().value  = JsonValue{};
+                if (action == PeerAction::RemoteError) {
+                    auto error = parse_json(
+                        R"({"code":-32000,"message":"retention removed fixture","data":{"category":"not_found","code":"jobu.fixture.removed"}})");
+                    REQUIRE(error);
+                    steps.back().value = *error;
+                }
+
+                jb::test::TemporaryDirectory directory;
+                auto const                   path = directory.path() / "must-not-exist.bin";
+                ScriptedPeer                 peer{std::move(steps)};
+                auto                         result =
+                    run_captured(output_command(peer.path(), request, {"--output-file", path.string()}), mode);
+                peer.verify();
+                CHECK(result.result.exit_code == (action == PeerAction::RemoteError ? 1 : 3));
+                REQUIRE(result.result.error);
+                CHECK_FALSE(result.result.error->outcome_unknown);
+                CHECK_FALSE(result.result.reply);
+                CHECK(result.output.empty());
+                CHECK_FALSE(std::filesystem::exists(path));
+                if (action == PeerAction::RemoteError) {
+                    CHECK(result.result.error->kind == "remote");
+                    CHECK(result.result.error->code == "jobu.fixture.removed");
+                }
+                else if (action == PeerAction::Reply) {
+                    CHECK(result.result.error->code == "jobu.client.invalid_response");
+                }
+                if (mode == SessionMode::Capture) {
+                    check_silent(result);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("run output preserves synchronous capability failures at each method", "[jobuctl][run-output]")
+{
+    auto request = fixture_output_request();
+    auto chunk   = fixture_output_chunk(request);
+    for (auto phase : {std::size_t{1}, std::size_t{2}, std::size_t{3}}) {
+        CAPTURE(phase);
+        auto  steps   = output_steps(inspection_run(), {{.items = {output_attempt(7)}}}, request, chunk);
+        auto  missing = steps[phase].method;
+        auto& capabilities =
+            std::get<JsonValue::Array>(std::get<JsonValue::Object>(steps[0].value.data).at("capabilities").data);
+        std::erase_if(capabilities, [&](JsonValue const& item) { return item.as_string() == missing; });
+        steps.resize(phase);
+        ScriptedPeer peer{std::move(steps)};
+        auto         result = run_captured(output_command(peer.path(), request, {"--json"}), SessionMode::Render);
+        peer.verify();
+        CHECK(result.result.exit_code == 1);
+        REQUIRE(result.result.error);
+        CHECK(result.result.error->code == "jobu.client.unsupported_method");
+        CHECK(result.output.empty());
+        auto error = parse_json(result.error);
+        REQUIRE(error);
+        CHECK(error->as_object().at("error").as_object().at("code").as_string() == "jobu.client.unsupported_method");
+    }
+}
+
+TEST_CASE("run output shares one deadline through handshake lookup pages and output", "[jobuctl][run-output]")
+{
+    auto request = fixture_output_request();
+    auto chunk   = fixture_output_chunk(request);
+    auto pages   = std::vector<AttemptPage>{
+        {.items = {output_attempt(9, AttemptState::Running)}, .next_cursor = "older"},
+        {.items = {output_attempt(7)}}
+    };
+    for (auto phase : {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{4}}) {
+        CAPTURE(phase);
+        jb::test::TemporaryDirectory directory;
+        auto const                   path = directory.path() / "must-not-exist.bin";
+        StandardAttributeRegistry    registry;
+        StreamCapture                output{stdout};
+        StreamCapture                error{stderr};
+        std::optional<TimePoint>     initial_deadline;
+        std::optional<SessionResult> result;
+        auto                         observed = std::size_t{0};
+        auto                         finishes = 0;
+        {
+            Application app{0, nullptr};
+            auto*       loop = ThreadCtx::current()->event_loop();
+            REQUIRE(loop);
+            auto steps = output_steps(inspection_run(), pages, request, chunk);
+            steps.resize(phase + 1);
+            steps.back().action = PeerAction::Silence;
+            ScriptedPeer peer{
+                std::move(steps),
+                RequestObservation{.loop = loop, .observe = [&](std::string const&) {
+                                       auto deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*loop);
+                                       REQUIRE(deadline);
+                                       REQUIRE(initial_deadline);
+                                       CHECK(*deadline <= *initial_deadline);
+                                       if (observed++ == phase) {
+                                           // Expire the original timer with this call pending; no sleeps or per-call
+                                           // budget resets.
+                                           jb::core::priv::EventLoopTestAccess::fire_next_timer(*loop);
+                                       }
+                                   }}
+            };
+            Session session{output_command(peer.path(), request, {"--output-file", path.string()}), registry};
+            session.finished.connect(&app, [&](int code) {
+                ++finishes;
+                static_cast<void>(app.quit(code));
+                session.start();
+            });
+            session.start();
+            initial_deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*loop);
+            REQUIRE(initial_deadline);
+            CHECK(app.exec() == 3);
+            result = session.take_result();
+            CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*loop) == 0);
+            peer.verify();
+        }
+        auto error_text  = error.text();
+        auto output_text = output.text();
+        CHECK(observed == phase + 1);
+        CHECK(finishes == 1);
+        REQUIRE(result);
+        CHECK(result->exit_code == 3);
+        REQUIRE(result->error);
+        CHECK(result->error->code == "jobu.client.timeout");
+        CHECK_FALSE(result->error->outcome_unknown);
+        CHECK_FALSE(result->reply);
+        CHECK(output_text.empty());
+        check_once(error_text, "Overall command deadline expired");
+        CHECK_FALSE(std::filesystem::exists(path));
+    }
+}
+
+TEST_CASE("duplicate run output replies cannot reselect deliver twice or finish twice", "[jobuctl][run-output]")
+{
+    auto request = fixture_output_request();
+    auto chunk   = fixture_output_chunk(request);
+    auto steps   = output_steps(inspection_run(JobType::Cli, RunState::Running),
+                                {
+                                    {.items = {output_attempt(9, AttemptState::Running)}, .next_cursor = "older"},
+                                    {.items = {output_attempt(7), output_attempt(6)}}
+    },
+                                request,
+                                chunk);
+    for (auto& step : steps) {
+        step.action = PeerAction::Duplicate;
+    }
+    ScriptedPeer              peer{std::move(steps)};
+    StandardAttributeRegistry registry;
+    StreamCapture             output{stdout};
+    StreamCapture             error{stderr};
+    auto                      finishes = 0;
+    {
+        Application app{0, nullptr};
+        Session     session{output_command(peer.path(), request), registry};
+        session.finished.connect(&app, [&](int code) {
+            ++finishes;
+            static_cast<void>(app.quit(code));
+            session.start();
+        });
+        session.start();
+        CHECK(app.exec() == 0);
+        auto result = session.take_result();
+        REQUIRE(result);
+        CHECK(result->exit_code == 0);
+        CHECK_FALSE(result->error);
+        CHECK_FALSE(session.take_result());
+        CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*ThreadCtx::current()->event_loop()) == 0);
+    }
+    auto error_text  = error.text();
+    auto output_text = output.text();
+    peer.verify();
+    CHECK(error_text.empty());
+    CHECK(finishes == 1);
+    check_once(output_text, "Output " + std::string{fixture_id} + ":7 channel=stdout");
+    CHECK(output_text.find("Last attempt:") == std::string::npos);
 }

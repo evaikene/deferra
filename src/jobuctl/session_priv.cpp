@@ -57,16 +57,19 @@ enum class SessionPhase : std::uint8_t {
     Polling,
     InspectionList,
     InspectionDetails,
+    OutputList,
+    OutputChunk,
     Finished,
 };
 
 auto is_call_phase(SessionPhase phase) noexcept -> bool
 {
     return phase == SessionPhase::Command || phase == SessionPhase::Polling || phase == SessionPhase::InspectionList ||
-           phase == SessionPhase::InspectionDetails;
+           phase == SessionPhase::InspectionDetails || phase == SessionPhase::OutputList ||
+           phase == SessionPhase::OutputChunk;
 }
 
-auto invalid_inspection_response() -> CliError
+auto invalid_history_response() -> CliError
 {
     return local_error({.category = ErrorCategory::InvalidArgument,
                         .code     = "jobu.client.invalid_response",
@@ -163,8 +166,7 @@ auto call_command(ControlClient& client, Command const& command, ControlCallOpti
         case CommandKind::RunCancel:
             return client.cancel_run(std::get<Uuid>(command.request), options);
         case CommandKind::RunOutput:
-            // U.16 rejects this before connecting; U.17 supplies the composed selection path.
-            break;
+            return client.get_run(std::get<RunOutputRequest>(command.request).run_id, options);
         case CommandKind::AttemptGet:
             return client.get_attempt(std::get<AttemptKey>(command.request), options);
         case CommandKind::AttemptList:
@@ -304,6 +306,12 @@ struct Session::Private : jb::core::priv::ObjectPrivate {
     // keep it unrendered until details succeed or terminal failure needs the partial-result fallback.
     std::optional<RunDetails>     inspected_run;
     std::optional<AttemptSummary> inspected_attempt;
+
+    // Selection owns no history pages. The decreasing boundary proves progress across cursor calls;
+    // once selected, the exact key stays pinned even if retention or a retry changes the live history.
+    std::optional<AttemptNumber> output_before;
+    std::optional<std::string>   output_cursor;
+    std::optional<AttemptKey>    output_attempt;
 };
 
 Session::Session(Command command, StandardAttributeRegistry const& registry, SessionMode mode)
@@ -345,16 +353,6 @@ void Session::start()
 {
     auto* data = d_ptr<Private>();
     if (data->phase != SessionPhase::Idle) {
-        return;
-    }
-
-    // Grammar and shared delivery are ready before U.17's attempt selection. Never send a fabricated RPC.
-    if (data->command.kind == CommandKind::RunOutput) {
-        finish(1,
-               local_error({.category = ErrorCategory::Unsupported,
-                            .code     = "jobuctl.run.output_unavailable",
-                            .message  = "run output selection is not available in this build; use attempt list and "
-                                        "attempt output with an explicit attempt number"}));
         return;
     }
 
@@ -496,6 +494,11 @@ void Session::receive_reply(ControlCallId id, ControlReply const& reply)
     }
     data->active_call.reset();
 
+    if (data->command.kind == CommandKind::RunOutput) {
+        receive_run_output(reply);
+        return;
+    }
+
     if (data->command.kind == CommandKind::RunGet && data->mode == SessionMode::Render && !data->command.json) {
         receive_run_inspection(reply);
         return;
@@ -579,7 +582,7 @@ void Session::receive_run_inspection(ControlReply const& reply)
     if (data->phase == SessionPhase::Command) {
         auto const* run = std::get_if<RunDetails>(&reply);
         if (!run || run->id != std::get<Uuid>(data->command.request)) {
-            finish(3, invalid_inspection_response());
+            finish(3, invalid_history_response());
             return;
         }
         if (!print_command_result(data->command, reply, data->registry)) {
@@ -602,7 +605,7 @@ void Session::receive_run_inspection(ControlReply const& reply)
         auto const* page = std::get_if<AttemptPage>(&reply);
         if (!page || page->items.size() > 1U ||
             (!page->items.empty() && page->items.front().run_id != data->inspected_run->id)) {
-            finish(3, invalid_inspection_response());
+            finish(3, invalid_history_response());
             return;
         }
         if (page->items.empty()) {
@@ -620,12 +623,12 @@ void Session::receive_run_inspection(ControlReply const& reply)
     auto const* attempt  = std::get_if<AttemptDetails>(&reply);
     auto const& selected = *data->inspected_attempt;
     if (!attempt || attempt->run_id != selected.run_id || attempt->attempt_number != selected.attempt_number) {
-        finish(3, invalid_inspection_response());
+        finish(3, invalid_history_response());
         return;
     }
     auto text = format_last_attempt(data->inspected_run->type, *attempt);
     if (!text) {
-        finish(3, invalid_inspection_response());
+        finish(3, invalid_history_response());
         return;
     }
 
@@ -650,6 +653,116 @@ void Session::request_run_inspection()
                   : data->control->get_attempt(AttemptKey{.run_id         = data->inspected_attempt->run_id,
                                                           .attempt_number = data->inspected_attempt->attempt_number},
                                                *options);
+    if (!call) {
+        finish(operation_exit(call.error()), local_error(call.error()));
+        return;
+    }
+    data->active_call = *call;
+}
+
+void Session::receive_run_output(ControlReply const& reply)
+{
+    auto*       data    = d_ptr<Private>();
+    auto const& request = std::get<RunOutputRequest>(data->command.request);
+    if (data->phase == SessionPhase::Command) {
+        auto const* run = std::get_if<RunDetails>(&reply);
+        if (!run || run->id != request.run_id) {
+            finish(3, invalid_history_response());
+            return;
+        }
+        if (!output_channel_matches(run->type, request.channel)) {
+            finish(2,
+                   local_error({.category = ErrorCategory::InvalidArgument,
+                                .code     = "jobuctl.run.invalid_channel",
+                                .message  = run->type == JobType::Cli ? "CLI run output requires stdout or stderr"
+                                                                      : "HTTP run output requires body or headers"}));
+            return;
+        }
+
+        data->phase = SessionPhase::OutputList;
+        request_run_output();
+        return;
+    }
+
+    if (data->phase == SessionPhase::OutputList) {
+        auto const* page = std::get_if<AttemptPage>(&reply);
+        if (!page || page->items.size() > 200U ||
+            (page->next_cursor && (page->items.empty() || page->next_cursor == data->output_cursor))) {
+            finish(3, invalid_history_response());
+            return;
+        }
+
+        // Validate the whole page before trusting its first Completed member. Strict descent also rejects
+        // replayed/overlapping pages without accumulating every page or every previously observed cursor.
+        auto before = data->output_before;
+        for (auto const& attempt : page->items) {
+            if (attempt.run_id != request.run_id || (before && attempt.attempt_number >= *before)) {
+                finish(3, invalid_history_response());
+                return;
+            }
+            before = attempt.attempt_number;
+        }
+
+        if (auto selected = latest_completed_attempt(page->items)) {
+            data->output_attempt = AttemptKey{.run_id = selected->run_id, .attempt_number = selected->attempt_number};
+            data->output_cursor.reset();
+            data->phase = SessionPhase::OutputChunk;
+            request_run_output();
+            return;
+        }
+
+        data->output_before = before;
+        if (page->next_cursor) {
+            // Short pages can reflect the response byte budget; only the cursor decides continuation.
+            data->output_cursor = *page->next_cursor;
+            request_run_output();
+            return;
+        }
+
+        finish(1,
+               local_error(
+                   {.category = ErrorCategory::NotFound,
+                    .code     = before ? "jobuctl.run.no_completed_attempt" : "jobuctl.run.no_attempts",
+                    .message  = before ? "Run has no completed retained attempt" : "Run has no retained attempts"}));
+        return;
+    }
+
+    auto const* chunk = std::get_if<AttemptOutputChunk>(&reply);
+    if (!chunk || chunk->attempt.run_id != data->output_attempt->run_id ||
+        chunk->attempt.attempt_number != data->output_attempt->attempt_number || chunk->channel != request.channel ||
+        chunk->offset != request.offset || chunk->bytes_returned > request.limit) {
+        finish(3, invalid_history_response());
+        return;
+    }
+
+    // Intermediate lookups stay private in every delivery mode. next_offset is returned as data, never followed.
+    deliver_reply(reply);
+}
+
+void Session::request_run_output()
+{
+    auto* data    = d_ptr<Private>();
+    auto  options = remaining_options(data->deadline);
+    if (!options) {
+        deadline_expired();
+        return;
+    }
+
+    // Every page and the single pinned output read share the deadline established before connecting.
+    auto const& request = std::get<RunOutputRequest>(data->command.request);
+    auto        call    = [&]() -> Result<ControlCallId, Error> {
+        if (data->phase == SessionPhase::OutputList) {
+            if (data->output_cursor) {
+                return data->control->list_attempts(CursorRequest{.cursor = *data->output_cursor}, *options);
+            }
+            return data->control->list_attempts(AttemptQuery{.run_id = request.run_id, .limit = 200}, *options);
+        }
+        return data->control->read_attempt_output({.attempt = *data->output_attempt,
+                                                   .channel = request.channel,
+                                                   .offset  = request.offset,
+                                                   .limit   = request.limit},
+                                                  *options);
+    }();
     if (!call) {
         finish(operation_exit(call.error()), local_error(call.error()));
         return;
