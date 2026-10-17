@@ -250,8 +250,18 @@ auto parse_options(Selection const& selected) -> ParsedOptions
         }
     }
 
-    auto const maximum =
-        selected.command && !selected.help_path && !parsed.request_file ? selected.command->maximum_operands : 0;
+    auto const unsupported_file =
+        selected.command != nullptr && !selected.command->supports_request_file && parsed.request_file;
+    if (unsupported_file && !parsed.help && !selected.help_path) {
+        // Reject composed work before request-file mode bypasses builders or changes operand limits.
+        parsed.error = "run output does not support --request-file; use attempt output --request-file FILE "
+                       "for a complete protocol request";
+        return parsed;
+    }
+
+    auto const maximum = selected.command && !selected.help_path && (!parsed.request_file || unsupported_file)
+                           ? selected.command->maximum_operands
+                           : 0;
     if (operands > maximum) {
         parsed.error = "unexpected extra operand";
     }
@@ -329,7 +339,7 @@ auto parse_command_line(int argc, char* argv[], StandardAttributeRegistry const&
     if (!built.command) {
         return {.error = std::move(built.error), .usage = std::move(selected.usage), .json_requested = json_requested};
     }
-    // The registry's canonical capability is also the wire method, including for aliases.
+    // Direct commands retain their canonical wire method; composed commands deliberately have none.
     built.command->kind        = selected.command->kind;
     built.command->method      = selected.command->capability;
     built.command->timeout     = options.timeout;

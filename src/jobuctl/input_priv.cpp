@@ -144,6 +144,9 @@ auto decode_command_request(CommandKind kind, JsonValue const& value, AttributeR
             return request_from(run_list_request_from_json(value));
         case CommandKind::RunCancel:
             return request_from(cancel_run_request_from_json(value));
+        case CommandKind::RunOutput:
+            // This CLI-only request has no wire shape; request-file mode is rejected by the parser.
+            break;
         case CommandKind::AttemptGet:
             return request_from(attempt_get_request_from_json(value));
         case CommandKind::AttemptList:

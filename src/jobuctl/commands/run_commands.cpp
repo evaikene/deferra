@@ -7,7 +7,9 @@
 
 #include <fmt/format.h>
 
+#include <cstdint>
 #include <cstdio> // IWYU pragma: keep for stdout macro
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -34,6 +36,63 @@ auto run_id_command(std::filesystem::path socket_path, CommandKind kind, std::sp
     }
     return {
         .command = Command{.socket_path = std::move(socket_path), .kind = kind, .request = std::move(id).value()}
+    };
+}
+
+auto parse_output_channel(std::string_view token) -> std::optional<OutputChannel>
+{
+    if (token == "stdout") {
+        return OutputChannel::Stdout;
+    }
+    if (token == "stderr") {
+        return OutputChannel::Stderr;
+    }
+    if (token == "body") {
+        return OutputChannel::Body;
+    }
+    if (token == "headers") {
+        return OutputChannel::Headers;
+    }
+    return std::nullopt;
+}
+
+auto parse_run_output(std::filesystem::path socket_path, std::span<CommandLineArgument const> arguments)
+    -> CommandBuildResult
+{
+    if (arguments.empty() || arguments.front().kind() != CommandLineArgumentKind::Positional) {
+        return parse_failure("run output requires one run UUID");
+    }
+    auto id = Uuid::parse(arguments.front().token());
+    if (!id || id->to_string() != arguments.front().token()) {
+        return parse_failure("run output requires a canonical run UUID");
+    }
+
+    auto fields = JsonValue::Object{};
+    if (auto error = append_output_options(fields, arguments.subspan(1), "run output")) {
+        return parse_failure(std::move(*error));
+    }
+    auto const channel_field = fields.find("channel");
+    if (channel_field == fields.end()) {
+        return parse_failure("run output requires --channel stdout, stderr, body, or headers");
+    }
+    auto channel = parse_output_channel(channel_field->second.as_string());
+    if (!channel) {
+        return parse_failure("run output --channel must be stdout, stderr, body, or headers");
+    }
+
+    // There is no attempt identity yet, so no public output request can be decoded here. Keep its final bounds.
+    auto request = RunOutputRequest{.run_id = *id, .channel = *channel};
+    if (auto offset = fields.find("offset"); offset != fields.end()) {
+        request.offset = offset->second.as_uint();
+        if (request.offset > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() - 1)) {
+            return parse_failure("run output --offset must not exceed INT64_MAX - 1");
+        }
+    }
+    if (auto limit = fields.find("limit"); limit != fields.end()) {
+        request.limit = static_cast<std::size_t>(limit->second.as_uint());
+    }
+    return {
+        .command = Command{.socket_path = std::move(socket_path), .kind = CommandKind::RunOutput, .request = request}
     };
 }
 
@@ -197,6 +256,9 @@ auto parse_run_command(std::filesystem::path                socket_path,
                        StandardAttributeRegistry const&     registry) -> CommandBuildResult
 {
     static_cast<void>(registry);
+    if (action == "output") {
+        return parse_run_output(std::move(socket_path), arguments);
+    }
     if (action == "get") {
         return run_id_command(std::move(socket_path), CommandKind::RunGet, arguments);
     }

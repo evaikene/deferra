@@ -12,10 +12,13 @@ namespace jb::jobuctl::detail {
 
 namespace {
 
-void append_options(std::string& text, std::span<OptionSpec const> options, bool root)
+void append_options(std::string& text, std::span<OptionSpec const> options, bool root, bool request_file = true)
 {
     for (auto const& spec : options) {
         if (!root && spec.option.long_name == "version") {
+            continue;
+        }
+        if (!request_file && spec.option.long_name == "request-file") {
             continue;
         }
         auto spelling = fmt::format("--{}", spec.option.long_name);
@@ -90,7 +93,7 @@ auto render_help(HelpCommand const& command) -> std::string
     }
 
     text += "\nGlobal options:\n";
-    append_options(text, global_options(), command.group.empty());
+    append_options(text, global_options(), command.group.empty(), leaf == nullptr || leaf->supports_request_file);
     text += "\nOptions end at --; subsequent tokens are positional data where accepted.\n";
     if (leaf) {
         text += fmt::format("\nExample:\n  {}\n", leaf->example);

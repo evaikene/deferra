@@ -12,6 +12,7 @@
 #include "local_server.hpp"
 #include "local_socket.hpp"
 #include "management_json.hpp"
+#include "output_priv.hpp"
 #include "session_priv.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_event_loop_backend.hpp"
@@ -29,7 +30,9 @@
 #include <cstdio> // IWYU pragma: keep for stdout/stderr macros
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iterator>
 #include <latch>
 #include <memory>
 #include <optional>
@@ -39,6 +42,7 @@
 #include <variant>
 #include <vector>
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 using namespace jb::core;
@@ -596,6 +600,170 @@ TEST_CASE("capture never delivers attempt bytes or creates the requested output 
         REQUIRE(captured.result.reply);
         CHECK(std::get<AttemptOutputChunk>(*captured.result.reply).data == chunk.data);
         CHECK_FALSE(std::filesystem::exists(path));
+    }
+}
+
+TEST_CASE("both output command identities share chunk rendering and binary delivery", "[jobuctl][output]")
+{
+    auto id = Uuid::parse(fixture_id);
+    REQUIRE(id);
+    auto chunk = AttemptOutputChunk{
+        .attempt        = {.run_id = *id, .attempt_number = 7},
+        .channel        = OutputChannel::Stderr,
+        .status         = OutputStatus::Available,
+        .offset         = 2,
+        .bytes_returned = 4,
+        .next_offset    = 6,
+        .retained_bytes = 8,
+        .total_bytes    = 12,
+        .omitted_bytes  = 4,
+        .truncated      = true,
+        .encoding       = OutputEncoding::Base64,
+        .data           = {std::byte{'A'}, std::byte{0}, std::byte{0xff}, std::byte{'Z'}},
+    };
+    StandardAttributeRegistry    registry;
+    jb::test::TemporaryDirectory directory;
+
+    // Exercise delivery directly: U.16 has no run-attempt selection or network orchestration yet.
+    for (auto kind : {CommandKind::AttemptOutput, CommandKind::RunOutput}) {
+        auto          command = Command{.kind = kind, .method = {}};
+        StreamCapture human_output{stdout};
+        auto          printed = print_command_result(command, ControlReply{chunk}, registry);
+        auto          human   = human_output.text();
+        REQUIRE(printed);
+        CHECK(human.find("Output " + std::string{fixture_id} + ":7 channel=stderr, status=available") !=
+              std::string::npos);
+        CHECK(human.find("offset=2, bytes_returned=4, retained_bytes=8") != std::string::npos);
+        CHECK(human.find("total_bytes=12, omitted_bytes=4, next_offset=6, truncated=true") != std::string::npos);
+        CHECK(human.find("encoding=base64\nData: QQD/Wg==\n") != std::string::npos);
+
+        for (auto encoding : {OutputEncoding::Base64, OutputEncoding::Utf8}) {
+            auto encoded_chunk     = chunk;
+            encoded_chunk.encoding = encoding;
+            if (encoding == OutputEncoding::Utf8) {
+                encoded_chunk.data = {std::byte{'t'}, std::byte{'e'}, std::byte{'x'}, std::byte{'t'}};
+            }
+            auto encoded = attempt_output_chunk_to_json(encoded_chunk);
+            REQUIRE(encoded);
+            auto serialized = serialize_json(*encoded);
+            REQUIRE(serialized);
+            command.json = true;
+            StreamCapture json_output{stdout};
+            printed   = print_command_result(command, ControlReply{encoded_chunk}, registry);
+            auto json = json_output.text();
+            REQUIRE(printed);
+            CHECK(json == *serialized + "\n");
+        }
+
+        command.json = false;
+        command.raw  = true;
+        StreamCapture raw_output{stdout};
+        auto          delivered = write_output_chunk(command, chunk);
+        auto          raw       = raw_output.text();
+        REQUIRE(delivered);
+        CHECK(raw == std::string{"A\0\xffZ", 4});
+
+        command.raw         = false;
+        auto const path     = directory.path() / (kind == CommandKind::RunOutput ? "run.bin" : "attempt.bin");
+        command.output_file = path;
+        StreamCapture file_output{stdout};
+        delivered        = write_output_chunk(command, chunk);
+        auto file_stdout = file_output.text();
+        REQUIRE(delivered);
+        CHECK(file_stdout.empty());
+        struct stat metadata{};
+        REQUIRE(::stat(path.c_str(), &metadata) == 0);
+        CHECK((metadata.st_mode & 0777) == 0600);
+        auto input = std::ifstream{path, std::ios::binary};
+        REQUIRE(input);
+        auto bytes = std::string{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
+        CHECK(bytes == raw);
+
+        auto refused = write_output_chunk(command, chunk);
+        REQUIRE_FALSE(refused);
+        CHECK(refused.error().code == "jobuctl.output.open_failed");
+        auto unchanged = std::ifstream{path, std::ios::binary};
+        REQUIRE(unchanged);
+        CHECK(std::string{std::istreambuf_iterator<char>{unchanged}, std::istreambuf_iterator<char>{}} == bytes);
+        CHECK(command.kind == kind);
+    }
+}
+
+TEST_CASE("both output command identities preserve empty and unavailable chunk success", "[jobuctl][output]")
+{
+    auto id = Uuid::parse(fixture_id);
+    REQUIRE(id);
+    StandardAttributeRegistry registry;
+    for (auto kind : {CommandKind::AttemptOutput, CommandKind::RunOutput}) {
+        for (auto status :
+             {OutputStatus::Available, OutputStatus::Pending, OutputStatus::NotCaptured, OutputStatus::Lost}) {
+            jb::test::TemporaryDirectory directory;
+            auto                         chunk = AttemptOutputChunk{
+                .attempt       = {.run_id = *id, .attempt_number = 3},
+                .channel       = OutputChannel::Body,
+                .status        = status,
+                .total_bytes   = 0,
+                .omitted_bytes = 0,
+                .capture_lost  = status == OutputStatus::Lost,
+                .encoding      = OutputEncoding::Utf8,
+            };
+            auto encoded = attempt_output_chunk_to_json(chunk);
+            REQUIRE(encoded);
+            auto          command = Command{.kind = kind, .method = {}};
+            StreamCapture human_output{stdout};
+            auto          printed = print_command_result(command, ControlReply{chunk}, registry);
+            auto          human   = human_output.text();
+            REQUIRE(printed);
+            CHECK(human.find("status=" + encoded->as_object().at("status").as_string()) != std::string::npos);
+
+            command.json = true;
+            StreamCapture json_output{stdout};
+            printed   = print_command_result(command, ControlReply{chunk}, registry);
+            auto json = json_output.text();
+            REQUIRE(printed);
+            auto serialized = serialize_json(*encoded);
+            REQUIRE(serialized);
+            CHECK(json == *serialized + "\n");
+
+            command.json = false;
+            command.raw  = true;
+            StreamCapture raw_output{stdout};
+            auto          delivered = write_output_chunk(command, chunk);
+            auto          raw       = raw_output.text();
+            REQUIRE(delivered);
+            CHECK(raw.empty());
+
+            command.raw         = false;
+            command.output_file = directory.path() / "empty.bin";
+            REQUIRE(write_output_chunk(command, chunk));
+            CHECK(std::filesystem::file_size(*command.output_file) == 0);
+        }
+    }
+}
+
+TEST_CASE("unfinished run output completes locally without delivery in render or capture mode", "[jobuctl][session]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   path = directory.path() / "must-not-exist.bin";
+    for (auto mode : {SessionMode::Render, SessionMode::Capture}) {
+        auto command =
+            command_for(directory.path() / "missing.sock",
+                        {"run", "output", fixture_id, "--channel", "stdout", "--output-file", path.string()});
+        auto result = run_captured(std::move(command), mode);
+        CHECK(result.result.exit_code == 1);
+        REQUIRE(result.result.error);
+        CHECK(result.result.error->code == "jobuctl.run.output_unavailable");
+        CHECK_FALSE(result.result.reply);
+        CHECK(result.output.empty());
+        CHECK_FALSE(std::filesystem::exists(path));
+        if (mode == SessionMode::Capture) {
+            check_silent(result);
+        }
+        else {
+            CHECK(result.error.find("run output selection is not available in this build") != std::string::npos);
+        }
+        CHECK(Application::instance() == nullptr);
+        CHECK(ThreadCtx::current()->event_loop() == nullptr);
     }
 }
 

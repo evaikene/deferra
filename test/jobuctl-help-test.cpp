@@ -244,12 +244,12 @@ TEST_CASE("jobuctl executable prints local help with blocked or closed stdin", "
 TEST_CASE("jobuctl help reaches every registered command and alias without a daemon", "[jobuctl][help]")
 {
     auto const actions = std::vector<std::string>{
-        "system info",       "system stats",  "queue create",   "queue add",    "queue get",   "queue list",
-        "queue update",      "queue suspend", "queue resume",   "queue delete", "queue stats", "job create",
-        "job add",           "job get",       "job list",       "job update",   "job suspend", "job resume",
-        "job move",          "job delete",    "job run-now",    "run get",      "run list",    "run cancel",
-        "attempt get",       "attempt list",  "attempt output", "secret set",   "secret list", "secret delete",
-        "schedule validate", "schedule next",
+        "system info",   "system stats",      "queue create",  "queue add",      "queue get",   "queue list",
+        "queue update",  "queue suspend",     "queue resume",  "queue delete",   "queue stats", "job create",
+        "job add",       "job get",           "job list",      "job update",     "job suspend", "job resume",
+        "job move",      "job delete",        "job run-now",   "run get",        "run list",    "run cancel",
+        "run output",    "attempt get",       "attempt list",  "attempt output", "secret set",  "secret list",
+        "secret delete", "schedule validate", "schedule next",
     };
     for (auto const& path : actions) {
         auto const separator = path.find(' ');
@@ -257,9 +257,97 @@ TEST_CASE("jobuctl help reaches every registered command and alias without a dae
         CAPTURE(path);
         CHECK(result.code == 0);
         CHECK(result.out.starts_with("Usage:\n"));
-        CHECK(result.out.find("--request-file") != std::string::npos);
+        CHECK((result.out.find("\n  --request-file FILE\n") != std::string::npos) == (path != "run output"));
         CHECK(result.out.find(jb::jobu::detail::default_socket_path) != std::string::npos);
         CHECK(result.err.empty());
+    }
+}
+
+TEST_CASE("jobuctl run output help remains local despite unsupported request-file input", "[jobuctl][help][run]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   fifo   = directory.path() / "unread-output-input";
+    auto const                   output = directory.path() / "must-not-exist.bin";
+    REQUIRE(::mkfifo(fifo.c_str(), 0600) == 0);
+    for (auto blocked : {false, true}) {
+        for (auto const& arguments : std::vector<std::vector<std::string>>{
+                 {"run", "output", "--help"},
+                 {"help", "run", "output"},
+                 {"-h", "run", "output"},
+                 {"run", "output", "--request-file", fifo.string(), "--socket", fifo.string(), "--help"},
+                 {"run", "output", "--request-file", (directory.path() / "missing.json").string(), "--help"},
+                 {"run", "output", "--request-file", "-", "--help"},
+                 {"run",
+                  "output", "00000000-0000-7000-8000-000000000001",
+                  "--request-file", fifo.string(),
+                  "--channel", "stdout",
+                  "--output-file", output.string(),
+                  "--help"}
+        }) {
+            CAPTURE(arguments, blocked);
+            auto result = run(arguments, blocked);
+            CHECK(result.code == 0);
+            CHECK(result.err.empty());
+            for (auto const* text : {"RUN_UUID",
+                                     "--channel CHANNEL",
+                                     "--offset N",
+                                     "--limit N",
+                                     "--raw",
+                                     "--output-file PATH",
+                                     "--json",
+                                     "latest completed attempt",
+                                     "one chunk only",
+                                     "selection is not available yet",
+                                     "attempt output --request-file FILE"}) {
+                CHECK(result.out.find(text) != std::string::npos);
+            }
+            CHECK(result.out.find("\n  --request-file FILE\n") == std::string::npos);
+            CHECK_FALSE(std::filesystem::exists(output));
+        }
+    }
+}
+
+TEST_CASE("jobuctl run output refuses unfinished selection and request files without I/O", "[jobuctl][run]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   fifo   = directory.path() / "unread-output-input";
+    auto const                   output = directory.path() / "must-not-exist.bin";
+    REQUIRE(::mkfifo(fifo.c_str(), 0600) == 0);
+    for (auto const& delivery : std::vector<std::vector<std::string>>{
+             {},
+             {"--raw"},
+             {"--json"},
+             {"--output-file", output.string()}
+    }) {
+        auto arguments = std::vector<std::string>{"run",
+                                                  "output",
+                                                  "00000000-0000-7000-8000-000000000001",
+                                                  "--channel",
+                                                  "stdout",
+                                                  "--socket",
+                                                  fifo.string()};
+        arguments.insert(arguments.end(), delivery.begin(), delivery.end());
+        auto result = run(std::move(arguments), true);
+        CHECK(result.code == 1);
+        CHECK(result.out.empty());
+        CHECK(result.err.find("run output selection is not available in this build") != std::string::npos);
+        CHECK(result.err.find("attempt list and attempt output") != std::string::npos);
+        if (!delivery.empty() && delivery.front() == "--json") {
+            auto value = jb::core::parse_json(result.err);
+            REQUIRE(value);
+            CHECK(value->as_object().at("error").as_object().at("code").as_string() ==
+                  "jobuctl.run.output_unavailable");
+        }
+        CHECK_FALSE(std::filesystem::exists(output));
+    }
+    for (auto const& path : {fifo.string(), std::string{"-"}, (directory.path() / "missing.json").string()}) {
+        auto result = run({"run", "output", "--request-file", path, "--output-file", output.string(), "--json"}, true);
+        // JSON and file modes conflict too; request-file rejection takes precedence without reading input.
+        CHECK(result.code == 2);
+        CHECK(result.out.empty());
+        CHECK(result.err.find("run output does not support --request-file") != std::string::npos);
+        CHECK(result.err.find("attempt output --request-file FILE") != std::string::npos);
+        CHECK_FALSE(std::filesystem::exists(output));
     }
 }
 

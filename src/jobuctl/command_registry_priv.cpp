@@ -185,7 +185,7 @@ constexpr std::array run_list{
 };
 constexpr std::array attempt_list{limit,
                                   value_option("cursor", "TOKEN", "Continue a page; excludes RUN_ID and --limit.")};
-constexpr std::array attempt_output{
+constexpr std::array output_options{
     value_option("channel", "CHANNEL", "CLI stdout/stderr or HTTP body/headers; required."),
     value_option("offset", "N", "Retained-byte offset; default: 0."),
     value_option("limit", "N", "Raw chunk size, 1..65536; default: 16384."),
@@ -587,6 +587,25 @@ constexpr CommandSpec run_cancel_command{
     .capability       = "run.cancel",
     .build            = parse_run_command,
 };
+constexpr CommandSpec run_output_command{
+    .group            = "run",
+    .name             = "output",
+    .kind             = CommandKind::RunOutput,
+    .alias            = {},
+    .summary          = "Read one output chunk from the latest completed attempt (selection not yet available)",
+    .operands         = "RUN_UUID",
+    .maximum_operands = 1,
+    .options          = output_options,
+    .rules            = "Require --channel: CLI stdout/stderr or HTTP body/headers. --raw, --output-file, and --json "
+                        "are mutually exclusive; each delivers one chunk only. No --request-file support; use "
+                        "attempt output --request-file FILE for a complete protocol request. This build supports "
+                        "the grammar and shared chunk delivery; run output selection is not available yet. "
+                        "Use attempt list and attempt output with an explicit attempt number.",
+    .example          = "jobuctl run output 00000000-0000-7000-8000-000000000002 --channel stderr --raw",
+    .capability       = {},
+    .supports_request_file = false,
+    .build                 = parse_run_command,
+};
 constexpr CommandSpec attempt_get_command{
     .group            = "attempt",
     .name             = "get",
@@ -623,7 +642,7 @@ constexpr CommandSpec attempt_output_command{
     .summary          = "Read one retained output chunk",
     .operands         = "RUN_UUID NUMBER",
     .maximum_operands = 2,
-    .options          = attempt_output,
+    .options          = output_options,
     .rules =
         "Require --channel. --raw, --output-file, and --json are mutually exclusive; each delivers one chunk only.",
     .example    = "jobuctl attempt output 00000000-0000-7000-8000-000000000002 1 --channel stdout --raw",
@@ -702,14 +721,14 @@ constexpr CommandSpec schedule_next_command{
 };
 
 constexpr std::array commands{
-    system_info_command,       system_stats_command,  queue_create_command,  queue_get_command,
-    queue_list_command,        queue_update_command,  queue_suspend_command, queue_resume_command,
-    queue_delete_command,      queue_stats_command,   job_create_command,    job_get_command,
-    job_list_command,          job_update_command,    job_suspend_command,   job_resume_command,
-    job_move_command,          job_delete_command,    job_run_now_command,   run_get_command,
-    run_list_command,          run_cancel_command,    attempt_get_command,   attempt_list_command,
-    attempt_output_command,    secret_set_command,    secret_list_command,   secret_delete_command,
-    schedule_validate_command, schedule_next_command,
+    system_info_command,   system_stats_command,      queue_create_command,  queue_get_command,
+    queue_list_command,    queue_update_command,      queue_suspend_command, queue_resume_command,
+    queue_delete_command,  queue_stats_command,       job_create_command,    job_get_command,
+    job_list_command,      job_update_command,        job_suspend_command,   job_resume_command,
+    job_move_command,      job_delete_command,        job_run_now_command,   run_get_command,
+    run_list_command,      run_cancel_command,        run_output_command,    attempt_get_command,
+    attempt_list_command,  attempt_output_command,    secret_set_command,    secret_list_command,
+    secret_delete_command, schedule_validate_command, schedule_next_command,
 };
 
 } // namespace

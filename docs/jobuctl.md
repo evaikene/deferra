@@ -29,7 +29,7 @@ An unknown group, command, or option is an error, even alongside `--help`. An op
 | `system` | `info`, `stats` |
 | `queue` | `create` (`add`), `get`, `list`, `update`, `suspend`, `resume`, `delete`, `stats` |
 | `job` | `create` (`add`), `get`, `list`, `update`, `suspend`, `resume`, `move`, `delete`, `run-now` |
-| `run` | `get`, `list`, `cancel` |
+| `run` | `get`, `list`, `cancel`, `output` (grammar only; selection is not yet available) |
 | `attempt` | `get`, `list`, `output` |
 | `secret` | `set`, `list`, `delete` |
 | `schedule` | `validate`, `next` |
@@ -74,7 +74,15 @@ Global options also work before or after the command path:
 | `--timeout MS` | Set the positive network deadline in milliseconds; default 5000. It includes connection, handshake, the command, and any requested wait. Interactive editing gives fetch and submission separate full budgets; editor time is excluded. |
 | `--request-file FILE` | Read a complete JSON params object from `FILE`, or use `-` for standard input. |
 
-`--request-file` is available for every command listed above. It cannot be combined with command operands or command-specific request options. Global options, supported `--wait`, and `attempt output` delivery options remain available. The file must contain one JSON object, with no trailing non-whitespace text, and is limited to the configured RPC body size (1 MiB by default). Request fields follow the public method's strict JSON contract. For example:
+`--request-file` is available for every command listed above except `run output`,
+which composes existing RPCs and has no complete protocol request of its own.
+Use `attempt output --request-file FILE` to supply an explicit output request.
+Request files cannot be combined with command operands or command-specific
+request options. Global options, supported `--wait`, and `attempt output`
+delivery options remain available. The file must contain one JSON object, with
+no trailing non-whitespace text, and is limited to the configured RPC body size
+(1 MiB by default). Request fields follow the public method's strict JSON
+contract. For example:
 
 ```sh
 printf '{"limit":20}\n' > queue-list.json
@@ -506,9 +514,23 @@ failed execution still exits 0.
 `run get RUN_UUID --json` performs only `run.get` and prints its existing result
 schema, without attempt calls or additional fields. The human output hint
 describes latest-completed output selection, which may refer to an older
-attempt than a running retry. The hint's `run output` convenience command is
-not yet available in this build; use the existing explicit `attempt list` and
-`attempt output` commands below to retrieve captured bytes.
+attempt than a running retry. The hint's `run output` convenience command now
+has grammar and shared chunk delivery, but its attempt selection is not yet
+available in this build. A valid invocation reports this limitation with exit
+status 1 before connecting or creating an output file. Use the existing explicit
+`attempt list` and `attempt output` commands below to retrieve captured bytes.
+
+The staged grammar is `run output RUN_UUID --channel CHANNEL`, with required
+`stdout`/`stderr` or `body`/`headers`, `--offset N` (default 0, at most
+9,223,372,036,854,775,806), and `--limit N` (1–65,536, default 16,384).
+`--raw`, `--json`, and `--output-file PATH` are mutually exclusive. The shared
+delivery contract is the existing `AttemptOutputChunk`: human metadata identifies
+the selected attempt, JSON keeps the protocol chunk shape, and raw/file delivery
+writes only decoded bytes. Empty or unavailable chunks retain explicit attempt
+output behavior. These delivery contracts are ready for the later selection
+workflow; they do not make `run output` executable yet. There is no `run.output`
+RPC or capability. `--request-file` is rejected locally; `run output --help`
+still succeeds without reading supplied files or standard input.
 
 The terminal default and multiple explicit states require daemon API 1.5 or
 newer. An older peer produces an unsupported-feature error before the query is

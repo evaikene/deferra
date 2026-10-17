@@ -1,6 +1,7 @@
 #include "session_priv.hpp"
 
 #include "client.hpp"
+#include "command_helpers_priv.hpp"
 #include "local_socket.hpp"
 #include "object_priv.hpp"
 #include "run_inspection_priv.hpp"
@@ -104,6 +105,7 @@ auto is_mutation(CommandKind kind) noexcept -> bool
         case CommandKind::JobList:
         case CommandKind::RunGet:
         case CommandKind::RunList:
+        case CommandKind::RunOutput:
         case CommandKind::AttemptGet:
         case CommandKind::AttemptList:
         case CommandKind::AttemptOutput:
@@ -160,6 +162,9 @@ auto call_command(ControlClient& client, Command const& command, ControlCallOpti
             return client.list_runs(std::get<RunListRequest>(command.request), options);
         case CommandKind::RunCancel:
             return client.cancel_run(std::get<Uuid>(command.request), options);
+        case CommandKind::RunOutput:
+            // U.16 rejects this before connecting; U.17 supplies the composed selection path.
+            break;
         case CommandKind::AttemptGet:
             return client.get_attempt(std::get<AttemptKey>(command.request), options);
         case CommandKind::AttemptList:
@@ -340,6 +345,16 @@ void Session::start()
 {
     auto* data = d_ptr<Private>();
     if (data->phase != SessionPhase::Idle) {
+        return;
+    }
+
+    // Grammar and shared delivery are ready before U.17's attempt selection. Never send a fabricated RPC.
+    if (data->command.kind == CommandKind::RunOutput) {
+        finish(1,
+               local_error({.category = ErrorCategory::Unsupported,
+                            .code     = "jobuctl.run.output_unavailable",
+                            .message  = "run output selection is not available in this build; use attempt list and "
+                                        "attempt output with an explicit attempt number"}));
         return;
     }
 
@@ -651,7 +666,7 @@ void Session::deliver_reply(ControlReply const& reply)
         return;
     }
 
-    if (data->command.kind == CommandKind::AttemptOutput && (data->command.raw || data->command.output_file)) {
+    if (is_output_command(data->command.kind) && (data->command.raw || data->command.output_file)) {
         auto const* chunk = std::get_if<AttemptOutputChunk>(&reply);
         if (!chunk) {
             finish(3,
