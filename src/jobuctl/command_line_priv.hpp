@@ -51,7 +51,14 @@ enum class CommandKind : std::uint8_t {
     ScheduleNext,
 };
 
-/// Owning requests for the currently registered CLI methods. CommandKind identifies repeated result types.
+/// A bare update selects local editing; the inspected revision is obtained only by the coordinator's job.get.
+struct InteractiveJobUpdate {
+    jb::core::Uuid             job_id;
+    std::optional<std::string> editor;
+};
+
+/// Owning requests for the currently registered CLI methods and local editing workflow.
+/// CommandKind identifies repeated result types; InteractiveJobUpdate must be dispatched before entering a Session.
 using CommandRequest = std::variant<std::monostate,
                                     jb::jobu::QueueSelector,
                                     jb::jobu::CreateQueueRequest,
@@ -74,6 +81,7 @@ using CommandRequest = std::variant<std::monostate,
                                     jb::jobu::QueueStatisticsListRequest,
                                     jb::jobu::CronScheduleInput,
                                     jb::jobu::ScheduleNextRequest,
+                                    InteractiveJobUpdate,
                                     std::string>;
 
 /// Raw secret input is selected during parsing but read only after local help has been resolved.

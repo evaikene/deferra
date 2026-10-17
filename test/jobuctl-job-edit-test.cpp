@@ -228,6 +228,97 @@ TEST_CASE("Job edit formatting preserves escapes and JSON scalar representations
     CHECK_FALSE(non_finite);
 }
 
+TEST_CASE("Interactive drafts show instructions and preserve JSON values and no-op semantics", "[jobuctl][edit]")
+{
+    auto value = parsed(R"({"text":"jobu: literal\njobu: escaped newline","jobu: property":"value"})");
+    auto draft = format_job_edit_draft(value);
+    REQUIRE(draft);
+    CHECK(draft->starts_with("jobu: Lines starting with jobu: are ignored"));
+    CHECK(draft->find("jobu: Keep job_id and expected_revision unchanged.\n") != std::string::npos);
+    CHECK(draft->find("jobu: Omitted fields leave server values unchanged.\n") != std::string::npos);
+    CHECK(draft->find("jobu: Exit without effective changes to cancel the update.\n") != std::string::npos);
+    CHECK_FALSE(parse_json(*draft));
+    auto decoded = parse_job_edit_draft(*draft);
+    REQUIRE(decoded);
+    CHECK(*decoded == value);
+
+    StandardAttributeRegistry registry;
+    auto                      baseline = baseline_for(sample_job(registry), registry);
+    auto                      editable = format_job_edit_draft(baseline.value());
+    REQUIRE(editable);
+    auto unchanged = prepare_job_update(baseline, *editable, registry);
+    REQUIRE(unchanged);
+    CHECK_FALSE(*unchanged);
+    auto notes_only = prepare_job_update(baseline, "jobu: a new operator note\n" + *editable, registry);
+    REQUIRE(notes_only);
+    CHECK_FALSE(*notes_only);
+}
+
+TEST_CASE("Only exact physical jobu: line prefixes are ignored", "[jobuctl][edit]")
+{
+    auto expected = parsed(R"({"text":"jobu: literal\njobu: escaped newline","jobu: property":"value"})");
+    for (auto const ending : {std::string_view{"\n"}, std::string_view{"\r\n"}}) {
+        auto text = std::string{};
+        for (auto const* line : {"jobu: heading",
+                                 "{",
+                                 "jobu:",
+                                 R"("text":"jobu: literal\njobu: escaped newline",)",
+                                 "jobu: a note between members",
+                                 R"("jobu: property":"value")",
+                                 "}"}) {
+            text += line;
+            text += ending;
+        }
+        text          += "jobu:trailing note without a final newline";
+        auto original  = text;
+        auto decoded   = parse_job_edit_draft(text);
+        REQUIRE(decoded);
+        CHECK(*decoded == expected);
+        CHECK(text == original);
+    }
+
+    for (auto const* prefix : {" jobu:", "\tjobu:", "Jobu:", "JOBU:", "jobu"}) {
+        auto rejected = parse_job_edit_draft(std::string{prefix} + " note\n{}");
+        REQUIRE_FALSE(rejected);
+        CHECK(rejected.error().code == "jobuctl.edit.invalid_json");
+    }
+    CHECK_FALSE(parse_job_edit_draft("{}jobu: inline text"));
+    CHECK_FALSE(parse_job_edit_draft("jobu: only notes\njobu: no JSON object"));
+    CHECK_FALSE(parse_job_edit_draft("jobu: notes\n[1,2,3]"));
+}
+
+TEST_CASE("Interactive instructions count toward the existing size and nesting limits", "[jobuctl][edit]")
+{
+    auto value = parsed(R"({"text":""})");
+    auto small = format_job_edit_draft(value);
+    REQUIRE(small);
+    // Fill exactly the remaining complete-draft budget; even the instruction bytes count toward 16 MiB.
+    object(value).at("text") = make_json(std::string(max_job_edit_draft_bytes - small->size(), 'x'));
+    auto exact               = format_job_edit_draft(value);
+    REQUIRE(exact);
+    CHECK(exact->size() == max_job_edit_draft_bytes);
+    REQUIRE(parse_job_edit_draft(*exact));
+    std::get<std::string>(object(value).at("text").data).push_back('x');
+    REQUIRE(format_job_edit_json(value));
+    auto oversized = format_job_edit_draft(value);
+    REQUIRE_FALSE(oversized);
+    CHECK(oversized.error().code == "jobuctl.edit.too_large");
+
+    auto notes = std::string{"jobu:"};
+    notes.append(max_job_edit_draft_bytes - notes.size() - 3, 'x');
+    notes += "\n{}";
+    REQUIRE(parse_job_edit_draft(notes));
+    notes.push_back(' ');
+    auto rejected = parse_job_edit_draft(notes);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == "jobuctl.edit.too_large");
+
+    auto too_deep = "jobu: notes\n{\"nested\":" + serialized(nested_arrays(JsonLimits{}.max_depth)) + "}";
+    auto depth    = parse_job_edit_draft(too_deep);
+    REQUIRE_FALSE(depth);
+    CHECK(depth.error().code == "jobuctl.edit.invalid_json");
+}
+
 TEST_CASE("Job edit formatting and parsing enforce byte and nesting limits", "[jobuctl][edit]")
 {
     // Quotes and the final newline consume three bytes. The next byte must fail even though compact JSON fits.

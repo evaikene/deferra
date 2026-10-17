@@ -5,6 +5,7 @@
 #include "input_priv.hpp"
 #include "management_json.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <utility>
@@ -285,6 +286,57 @@ auto format_job_edit_json(JsonValue const& value) -> Result<std::string, Error>
     return format_compact_json(*compact);
 }
 
+auto format_job_edit_draft(JsonValue const& value) -> Result<std::string, Error>
+{
+    auto json = format_job_edit_json(value);
+    if (!json) {
+        return Result<std::string, Error>::failure(std::move(json).error());
+    }
+
+    auto draft = std::string{"jobu: Lines starting with jobu: are ignored (case-sensitive, column 1).\n"
+                             "jobu: Keep job_id and expected_revision unchanged.\n"
+                             "jobu: Omitted fields leave server values unchanged.\n"
+                             "jobu: Exit without effective changes to cancel the update.\n\n"};
+    if (!append_fragment(draft, *json)) {
+        return Result<std::string, Error>::failure(draft_too_large());
+    }
+    return Result<std::string, Error>::success(std::move(draft));
+}
+
+auto parse_job_edit_draft(std::string_view draft) -> Result<JsonValue, Error>
+{
+    if (draft.size() > max_job_edit_draft_bytes) {
+        return Result<JsonValue, Error>::failure(draft_too_large());
+    }
+
+    // Apply the convention only to physical line prefixes. JSON string contents and escaped newlines stay intact.
+    // Preserve positions in a private copy; the saved draft remains unchanged even when parsing fails.
+    auto json  = std::string{draft};
+    auto begin = std::size_t{0};
+    while (begin < draft.size()) {
+        auto newline = draft.find('\n', begin);
+        auto end     = newline == std::string_view::npos ? draft.size() : newline;
+        if (draft.substr(begin, end - begin).starts_with("jobu:")) {
+            if (end > begin && draft[end - 1] == '\r') {
+                --end;
+            }
+            std::fill_n(json.data() + begin, end - begin, ' ');
+        }
+        if (newline == std::string_view::npos) {
+            break;
+        }
+        begin = newline + 1;
+    }
+
+    auto parsed = parse_json(json);
+    if (!parsed || !parsed->is_object()) {
+        return Result<JsonValue, Error>::failure(
+            edit_error("jobuctl.edit.invalid_json",
+                       "Job edit draft must contain one valid JSON object after ignoring jobu: lines"));
+    }
+    return parsed;
+}
+
 auto serialize_job_edit_request(JsonValue const& params) -> Result<std::string, Error>
 {
     auto compact = serialize_edit_json(params);
@@ -305,13 +357,9 @@ auto prepare_job_update(JobEditBaseline const& baseline, std::string_view draft,
 {
     using EditResult = Result<std::optional<PreparedJobUpdate>, Error>;
 
-    if (draft.size() > max_job_edit_draft_bytes) {
-        return EditResult::failure(draft_too_large());
-    }
-    auto parsed = parse_json(draft);
-    if (!parsed || !parsed->is_object()) {
-        return EditResult::failure(
-            edit_error("jobuctl.edit.invalid_json", "Job edit draft must contain one valid JSON object"));
+    auto parsed = parse_job_edit_draft(draft);
+    if (!parsed) {
+        return EditResult::failure(std::move(parsed).error());
     }
 
     auto const& original = baseline.value().as_object();

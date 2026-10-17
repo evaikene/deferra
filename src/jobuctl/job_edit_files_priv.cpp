@@ -107,7 +107,7 @@ auto JobEditFiles::create(JsonValue const& draft, std::filesystem::path const& p
     -> Result<JobEditFiles, JobEditFileFailure>
 {
     using Creation = Result<JobEditFiles, JobEditFileFailure>;
-    auto text      = format_job_edit_json(draft);
+    auto text      = format_job_edit_draft(draft);
     if (!text) {
         return Creation::failure({.error = std::move(text).error()});
     }

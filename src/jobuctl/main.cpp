@@ -4,6 +4,7 @@
 #include "command_line_priv.hpp"
 #include "help_priv.hpp"
 #include "input_priv.hpp"
+#include "job_edit_workflow_priv.hpp"
 #include "output_priv.hpp"
 #include "run_session_priv.hpp"
 
@@ -41,7 +42,10 @@ auto main(int argc, char* argv[]) -> int
     }
 
     auto command = std::move(std::get<Command>(*parsed.action));
-    auto loaded  = load_request_file(command, registry);
+    if (std::holds_alternative<InteractiveJobUpdate>(command.request)) {
+        return run_job_edit(std::move(command), registry);
+    }
+    auto loaded = load_request_file(command, registry);
     if (!loaded) {
         print_error(command.json, local_error(loaded.error()));
         return 2;

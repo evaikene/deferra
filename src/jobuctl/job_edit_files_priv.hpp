@@ -43,7 +43,7 @@ struct JobEditFileFailure {
 /// Call cleanup() explicitly after success, no-op, or cancellation; failures can use artifacts() for recovery.
 class JobEditFiles final {
 public:
-    /// Formats before creating files; an empty parent selects the system temporary directory.
+    /// Formats an interactive draft with jobu: instructions before creating files; an empty parent selects system temp.
     /// Creates a 0700 directory and exclusive 0600 draft, closing the draft before returning.
     [[nodiscard]] static auto create(jb::core::JsonValue const&   draft,
                                      std::filesystem::path const& parent = {},

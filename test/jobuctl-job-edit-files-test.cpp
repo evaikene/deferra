@@ -146,7 +146,11 @@ TEST_CASE("Edit files are private, closed before editing, and retained by defaul
         CHECK_FALSE(paths.request);
         auto text = files.read_draft();
         REQUIRE(text);
-        CHECK(serialized(parsed(*text)) == serialized(fixture.baseline.value()));
+        CHECK(text->starts_with("jobu:"));
+        auto decoded = parse_job_edit_draft(*text);
+        REQUIRE(decoded);
+        CHECK(serialized(*decoded) == serialized(fixture.baseline.value()));
+        CHECK_FALSE(load_json_object(paths.draft));
         CHECK(text->back() == '\n');
 
         auto moved = std::move(files);
@@ -189,6 +193,7 @@ TEST_CASE("Safe atomic saves are accepted without changing the edited bytes", "[
     auto    old_inode   = metadata(paths.draft).st_ino;
     auto    replacement = paths.directory / "atomic-save.tmp";
     auto    edited      = std::string{
+        "jobu: editor note\r\n"
         " {\"job_id\":\"00112233-4455-6677-8899-aabbccddeeff\",\"expected_revision\":7,\"priority\":50} \n"};
     write_text(replacement, edited);
     REQUIRE(::rename(replacement.c_str(), paths.draft.c_str()) == 0);
@@ -703,6 +708,8 @@ TEST_CASE("Recovery preserves connection settings and the existing request-file 
     CHECK_FALSE(invalid->retry_command);
     CHECK_FALSE(invalid->paths.request);
     CHECK(invalid->instructions.find("every explicitly present field") != std::string::npos);
+    CHECK(invalid->instructions.find("removing any jobu: instruction lines") != std::string::npos);
+    CHECK(invalid->instructions.find("strict JSON") != std::string::npos);
     paths.request.reset();
     auto no_request = format_job_edit_recovery(command, JobEditRecoveryReason::SubmissionFailed, paths);
     REQUIRE(no_request);
