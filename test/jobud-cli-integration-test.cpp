@@ -825,6 +825,110 @@ TEST_CASE("run list CLI defaults select terminal history while raw requests reta
     CHECK(paged_ids == terminal_ids);
 }
 
+TEST_CASE("operator HTTP admission composes with failed run inspection and output during retry",
+          "[jobud][usability][integration]")
+{
+    DaemonFixture            fixture{2, false};
+    jb::test::HttpTestServer server;
+    fixture.queue("operator-http");
+    auto const first_body  = std::string{"first failed response"};
+    auto const second_body = std::string{"second failed response"};
+    server.enqueue_response({
+        .status_code = 503,
+        .reason      = "Unavailable",
+        .body        = ByteBuffer{as_bytes(first_body).begin(), as_bytes(first_body).end()}
+    });
+    server.enqueue_response({
+        .status_code                = 503,
+        .reason                     = "Unavailable",
+        .body                       = ByteBuffer{as_bytes(second_body).begin(), as_bytes(second_body).end()},
+        .pause_after_response_bytes = 0
+    });
+    server.release_responses();
+
+    // Keep the occurrence unstarted while checking that rejected replacement cannot change either record.
+    auto       created = json(fixture.control({"job",          "create",
+                                               "--queue-name", "operator-http",
+                                               "--type",       "http",
+                                               "--at",         "2100-01-01T00:00:00Z",
+                                               "--url",        server.url("/operator"),
+                                               "--method",     "pOsT",
+                                               "--body",       "operator request",
+                                               "--attribute",  "job.timeout=30000",
+                                               "--attribute",  "retry.max_attempts=2",
+                                               "--attribute",  "retry.initial_delay=0",
+                                               "--attribute",  "retry.max_delay=0",
+                                               "--json"}));
+    auto const job_id  = created.as_object().at("id").as_string();
+    CHECK(created.as_object().at("payload").as_object().at("method").as_string() == "POST");
+    auto runs = json(fixture.control({"run", "list", "--all", "--job-id", job_id, "--json"}));
+    REQUIRE(runs.as_object().at("items").as_array().size() == 1);
+    auto const run_id       = runs.as_object().at("items").as_array().front().as_object().at("id").as_string();
+    auto       original_run = json(fixture.control({"run", "get", run_id, "--json"}));
+    CHECK(original_run.as_object().at("payload") == created.as_object().at("payload"));
+
+    auto  replacement    = json(R"({"job_id":"","expected_revision":1,"payload":{}})");
+    auto& fields         = std::get<JsonValue::Object>(replacement.data);
+    fields.at("job_id")  = text(job_id);
+    fields.at("payload") = created.as_object().at("payload");
+    std::get<JsonValue::Object>(fields.at("payload").data).at("method") = text("OPTIONS");
+    auto encoded                                                        = serialize_json(replacement);
+    REQUIRE(encoded);
+    auto const path = fixture.directory.path() / "unsupported-update.json";
+    write_file(path, *encoded);
+    auto rejected = fixture.control({"job", "update", "--request-file", path.string(), "--json"}, 1);
+    CHECK(rejected.find("jobu.job.invalid_payload") != std::string::npos);
+    CHECK(json(fixture.control({"job", "get", job_id, "--json"})) == created);
+    CHECK(json(fixture.control({"run", "get", run_id, "--json"})) == original_run);
+    CHECK(server.requests().empty());
+
+    static_cast<void>(
+        fixture.control({"job", "update", job_id, "--revision", "1", "--at", "2000-01-01T00:00:00Z", "--json"}));
+    // Only the second response body is held. Its request proves retry dispatch without guessing a delay.
+    REQUIRE(server.wait_for_requests(2, 5s));
+    REQUIRE(server.wait_for_response_segments(1, 5s));
+    auto const requests = server.requests();
+    REQUIRE(requests.size() == 2);
+    for (auto const& request : requests) {
+        CHECK(request.method == "POST");
+        CHECK(request.target == "/operator");
+        CHECK(as_string_view(request.body) == "operator request");
+    }
+    auto        attempts = json(fixture.control({"attempt", "list", run_id, "--json"}));
+    auto const& items    = attempts.as_object().at("items").as_array();
+    REQUIRE(items.size() == 2);
+    CHECK(items.front().as_object().at("attempt_number").as_uint() == 2);
+    CHECK(items.front().as_object().at("state").as_string() == "running");
+    CHECK(items.back().as_object().at("state").as_string() == "completed");
+    auto active = fixture.control({"run", "get", run_id});
+    CHECK(active.find("Last attempt: 2: state=running, outcome=none") != std::string::npos);
+    CHECK(active.find(first_body) == std::string::npos);
+
+    // One requested byte range comes from the completed failure, even though retry two is newer.
+    auto output = json(
+        fixture.control({"run", "output", run_id, "--channel", "body", "--offset", "6", "--limit", "6", "--json"}));
+    auto const& chunk = output.as_object();
+    CHECK(chunk.at("attempt_number").as_uint() == 1);
+    CHECK(chunk.at("channel").as_string() == "body");
+    CHECK(chunk.at("status").as_string() == "available");
+    CHECK(chunk.at("offset").as_uint() == 6);
+    CHECK(chunk.at("bytes_returned").as_uint() == 6);
+    CHECK(chunk.at("data").as_string() == first_body.substr(6, 6));
+    CHECK(chunk.at("next_offset").as_uint() == 12);
+
+    server.release_response_segment();
+    fixture.until([&] { return fixture.run_state(run_id) == "failed"; });
+    auto failed = fixture.control({"run", "get", run_id});
+    CHECK(failed.find("Last attempt: 2: state=completed, outcome=failed") != std::string::npos);
+    CHECK(failed.find("status=503") != std::string::npos);
+    CHECK(failed.find(second_body) == std::string::npos);
+    auto final_output = json(fixture.control({"run", "output", run_id, "--channel", "body", "--json"}));
+    CHECK(final_output.as_object().at("attempt_number").as_uint() == 2);
+    CHECK(final_output.as_object().at("data").as_string() == second_body);
+    CHECK(final_output.as_object().at("next_offset").is_null());
+    CHECK(fixture.control({"run", "output", run_id, "--channel", "body", "--raw"}) == second_body);
+}
+
 TEST_CASE("daemon executes complete jobuctl CLI payload and persists exact context", "[jobud][cli][integration]")
 {
     require_execution_environment();

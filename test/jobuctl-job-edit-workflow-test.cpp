@@ -4,11 +4,13 @@
 #include "command_argv_priv.hpp"
 #include "command_line_priv.hpp"
 #include "database.hpp"
+#include "domain_storage_priv.hpp"
 #include "event_loop.hpp"
 #include "event_thread.hpp"
 #include "framing.hpp"
 #include "input_priv.hpp"
 #include "job_edit_priv.hpp"
+#include "job_validation_priv.hpp"
 #include "json.hpp"
 #include "local_server.hpp"
 #include "local_socket.hpp"
@@ -16,7 +18,9 @@
 #include "management_json.hpp"
 #include "protocol.hpp"
 #include "protocol_priv.hpp"
+#include "query.hpp"
 #include "run_session_priv.hpp"
+#include "secret_service.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
@@ -177,6 +181,11 @@ enum class Submission : std::uint8_t {
     DisconnectAfterUpdate
 };
 
+enum class InitialJob : std::uint8_t {
+    Cli,
+    LegacyHttp
+};
+
 /// All service/database/socket state belongs to the worker event loop. Main-thread calls synchronize via posts/latches.
 struct PeerState {
     explicit PeerState(std::filesystem::path const& directory)
@@ -184,7 +193,7 @@ struct PeerState {
               jb::db::sqlite::Options{.database_file = directory / "jobs.sqlite"})}
     {}
 
-    auto initialize() -> bool
+    auto initialize(InitialJob initial_job) -> bool
     {
         auto opened = database.open();
         if (!opened) {
@@ -203,9 +212,21 @@ struct PeerState {
             error = queue.error().message;
             return false;
         }
-        auto payload = parse_json(R"({"command":"/bin/true"})");
+        auto const legacy_http = initial_job == InitialJob::LegacyHttp;
+        if (legacy_http) {
+            SecretService secrets{database, time};
+            auto          secret = secrets.set({.name = "workflow.token"});
+            if (!secret) {
+                error = secret.error().message;
+                return false;
+            }
+        }
+        auto payload = parse_json(legacy_http ? R"({"url":"http://127.0.0.1/legacy","method":"GET",
+                                            "headers":[{"name":"X-Token","value":{"secret":"workflow.token"}}]})"
+                                              : R"({"command":"/bin/true"})");
         auto created = service->create_job({.queue    = queue->id,
                                             .name     = "original",
+                                            .type     = legacy_http ? JobType::Http : JobType::Cli,
                                             .schedule = OnceSchedule{.planned_at = UtcTimePoint{1h}},
                                             .payload  = std::move(payload).value()});
         if (!created) {
@@ -213,6 +234,31 @@ struct PeerState {
             return false;
         }
         job = std::move(created).value();
+        if (legacy_http) {
+            return seed_legacy_http_payload();
+        }
+        return true;
+    }
+
+    auto seed_legacy_http_payload() -> bool
+    {
+        // Only fixture setup bypasses new-input admission. The unchanged reference was registered
+        // by create_job; both legacy records still pass the production pre-admission serializer.
+        std::get<JsonValue::Object>(job.payload.data).at("method").data = std::string{"get"};
+        auto payload = jb::jobu::detail::validate_and_serialize_job_payload(JobType::Http, job.payload);
+        if (!payload) {
+            error = "Unable to serialize legacy HTTP fixture";
+            return false;
+        }
+        for (auto const* sql : {"UPDATE jobu_jobs SET payload_json = :payload WHERE id = :job_id",
+                                "UPDATE jobu_runs SET payload_json = :payload WHERE job_id = :job_id"}) {
+            jb::db::Query query{database};
+            if (!query.prepare(sql) || !query.bind_value(":payload", std::string{payload->serialized()}) ||
+                !query.bind_value(":job_id", jb::jobu::detail::uuid_to_storage(job.id)) || !query.exec()) {
+                error = "Unable to seed legacy HTTP fixture";
+                return false;
+            }
+        }
         return true;
     }
 
@@ -314,14 +360,14 @@ struct PeerSnapshot {
 
 class ServicePeer final {
 public:
-    ServicePeer()
+    explicit ServicePeer(InitialJob initial_job = InitialJob::Cli)
     {
         REQUIRE(_thread.start());
         // Watched I/O is created after run() adopts the worker's context, never in about_to_start.
         std::latch ready{1};
-        REQUIRE(_thread.as_event_loop()->post([this, &ready] {
+        REQUIRE(_thread.as_event_loop()->post([this, &ready, initial_job] {
             _state = std::make_unique<PeerState>(_directory.path());
-            if (_state->initialize()) {
+            if (_state->initialize(initial_job)) {
                 _state->listener.new_connection.connect(&_state->listener, [this] {
                     _state->socket = _state->listener.take_next_connection();
                     _state->framer = StreamFramer{};
@@ -383,6 +429,35 @@ public:
                      .connections = state.connections};
         });
         return value;
+    }
+
+    /// Read both stored documents on their owner loop; callers never borrow a database or query.
+    auto payload_documents() -> std::array<std::string, 2>
+    {
+        auto documents = std::array<std::string, 2>{};
+        synchronize([&documents](PeerState& state) {
+            jb::db::Query query{state.database};
+            if (!query.prepare("SELECT j.payload_json,r.payload_json FROM jobu_jobs j "
+                               "JOIN jobu_runs r ON r.job_id=j.id WHERE j.id=:job_id") ||
+                !query.bind_value(":job_id", jb::jobu::detail::uuid_to_storage(state.job.id)) || !query.exec()) {
+                state.error = "Unable to query stored payload documents";
+                return;
+            }
+            auto row = query.next();
+            if (!row || !*row) {
+                state.error = "Missing stored payload documents";
+                return;
+            }
+            for (auto index = std::size_t{0}; index < documents.size(); ++index) {
+                auto const* text = std::get_if<std::string>(&query.value(index));
+                if (!text) {
+                    state.error = "Invalid stored payload document";
+                    return;
+                }
+                documents[index] = *text;
+            }
+        });
+        return documents;
     }
 
 private:
@@ -515,6 +590,88 @@ TEST_CASE("interactive update uses two scoped sessions and submits only the edit
     }
     else {
         CHECK(result.output.find("priority=50") != std::string::npos);
+    }
+}
+
+TEST_CASE("interactive metadata edits preserve legacy HTTP payloads through success and conflict",
+          "[jobuctl][edit][workflow][usability]")
+{
+    ServicePeer                  peer{InitialJob::LegacyHttp};
+    jb::test::TemporaryDirectory files;
+    auto const                   original  = peer.snapshot().job;
+    auto const                   documents = peer.payload_documents();
+    CHECK(original.payload.as_object().at("method").as_string() == "get");
+    CHECK(documents[0] == documents[1]);
+    auto const command     = edit_command(peer);
+    auto       draft_path  = std::filesystem::path{};
+    auto       edited_text = std::string{};
+    auto       conflict    = false;
+    SECTION("successful metadata update")
+    {}
+    SECTION("another operator wins")
+    {
+        conflict = true;
+    }
+
+    auto result =
+        run_workflow(command, test_io(files.path(), [&](auto, auto const& draft) {
+                         CHECK(Application::instance() == nullptr);
+                         CHECK(ThreadCtx::current()->event_loop() == nullptr);
+                         draft_path            = draft;
+                         auto const projection = read_draft(draft);
+                         CHECK(projection.as_object().at("payload") == original.payload);
+                         CHECK(projection.as_object().at("expected_revision").as_uint() == original.revision);
+                         edit_priority(draft);
+                         edited_text = read_text(draft);
+                         if (conflict) {
+                             // The second operator advances the revision while the displayed baseline stays fixed.
+                             peer.synchronize([&](PeerState& state) {
+                                 auto changed = state.service->update_job(
+                                     {.job_id = original.id, .expected_revision = original.revision, .priority = 99});
+                                 if (!changed) {
+                                     state.error = changed.error().message;
+                                 }
+                             });
+                         }
+                         return Result<void, Error>::success();
+                     }));
+
+    auto snapshot = peer.snapshot();
+    check_methods(snapshot, true);
+    CHECK(snapshot.job.revision == original.revision + 1);
+    CHECK(snapshot.job.priority == (conflict ? 99 : 50));
+    CHECK(snapshot.job.payload == original.payload);
+    // Definition and eligible unstarted run are separate durable observations, including exact spelling.
+    CHECK(peer.payload_documents() == documents);
+    REQUIRE(snapshot.updates.size() == 1);
+    auto const& submitted = snapshot.updates.front();
+    CHECK(submitted.as_object().size() == 3);
+    CHECK(submitted.as_object().at("job_id").as_string() == original.id.to_string());
+    CHECK(submitted.as_object().at("expected_revision").as_uint() == original.revision);
+    CHECK(submitted.as_object().at("priority").as_uint() == 50);
+    CHECK_FALSE(submitted.as_object().contains("payload"));
+    CHECK(result.error.find("http://127.0.0.1/legacy") == std::string::npos);
+    if (conflict) {
+        CHECK(result.code == 1);
+        CHECK(result.output.empty());
+        CHECK(result.error.find("jobu.job.revision_conflict") != std::string::npos);
+        CHECK(result.error.find("manually reconcile") != std::string::npos);
+        CHECK(result.error.find("old revision") != std::string::npos);
+        CHECK(read_text(draft_path) == edited_text);
+        auto retained = parsed(read_text(draft_path.parent_path() / "update-request.json"));
+        CHECK(retained == submitted);
+        StandardAttributeRegistry registry;
+        auto                      recovered = load_recovery_request(result.error, registry);
+        auto request = update_job_request_to_json(std::get<UpdateJobRequest>(recovered.request), registry);
+        REQUIRE(request);
+        CHECK(serialized(*request) == serialized(submitted));
+        CHECK(peer.snapshot().methods == snapshot.methods);
+    }
+    else {
+        CHECK(result.code == 0);
+        CHECK(result.error.empty());
+        CHECK(parsed(result.output).as_object().at("payload") == original.payload);
+        CHECK_FALSE(std::filesystem::exists(draft_path.parent_path()));
     }
 }
 
