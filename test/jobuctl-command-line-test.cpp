@@ -109,6 +109,19 @@ TEST_CASE("jobuctl selects only bare job updates for interactive editing", "[job
     CHECK(parse({"job", "update", job_id, "--revision", "7"}).error ==
           "job update requires at least one mutable field");
 
+    for (auto const& fields : std::vector<std::vector<std::string>>{
+             {"--name", "changed"},
+             {"--clear-name"},
+             {"--attribute", "retry.max_attempts=2"},
+             {"--at", "2099-01-01T00:00:00Z"},
+             {"--cron", "@daily"}
+    }) {
+        auto arguments = std::vector<std::string>{"job", "update", job_id};
+        arguments.insert(arguments.end(), fields.begin(), fields.end());
+        CAPTURE(fields);
+        CHECK(parse(std::move(arguments)).error == "job update requires --revision");
+    }
+
     for (auto const& suffix : std::vector<std::vector<std::string>>{
              {"--editor", ""},
              {"--editor", "one", "--editor", "two"},

@@ -71,7 +71,7 @@ Global options also work before or after the command path:
 | Option | Behavior |
 | --- | --- |
 | `--json` | Print one compact JSON result on standard output for a successful remote command. |
-| `--timeout MS` | Set the positive overall deadline in milliseconds; default 5000. It includes connection, handshake, the command, and any requested wait. |
+| `--timeout MS` | Set the positive network deadline in milliseconds; default 5000. It includes connection, handshake, the command, and any requested wait. Interactive editing gives fetch and submission separate full budgets; editor time is excluded. |
 | `--request-file FILE` | Read a complete JSON params object from `FILE`, or use `-` for standard input. |
 
 `--request-file` is available for every command listed above. It cannot be combined with command operands or command-specific request options. Global options, supported `--wait`, and `attempt output` delivery options remain available. The file must contain one JSON object, with no trailing non-whitespace text, and is limited to the configured RPC body size (1 MiB by default). Request fields follow the public method's strict JSON contract. For example:
@@ -83,7 +83,7 @@ jobuctl queue list --request-file queue-list.json
 
 Help and version finish without reading a request file or standard input. `--json` does not change help into JSON.
 
-Queue operations select a queue with exactly one of `--id UUID` or `--name NAME`. Job creation and moving use exactly one of `--queue-id UUID` or `--queue-name NAME`. Job update, move, and delete require `--revision N`; use the current revision shown by `job get`.
+Queue operations select a queue with exactly one of `--id UUID` or `--name NAME`. Job creation and moving use exactly one of `--queue-id UUID` or `--queue-name NAME`. Flag-based job updates, moves, and deletes require `--revision N`; use the current revision shown by `job get`. A bare `job update UUID` instead [opens an interactive draft](#interactive-job-updates) and captures the inspected revision.
 
 For example:
 
@@ -145,7 +145,7 @@ jobuctl queue update --name reports --history-retention-seconds 0
 jobuctl queue update --name reports --inherit-history-retention
 ```
 
-Job create/update accept repeated `--attribute NAME=JSON_VALUE` for distinct registered job attributes. JSON values keep their types, so a numeric value is written as `--attribute retry.max_attempts=2`. On update, supplied attributes replace those named values; omitted attributes remain unchanged. `job update` still requires the current `--revision`, and `--clear-name` explicitly clears the name. A stale revision is returned as a conflict; the CLI does not fetch a newer revision and retry.
+Job create/update accept repeated `--attribute NAME=JSON_VALUE` for distinct registered job attributes. JSON values keep their types, so a numeric value is written as `--attribute retry.max_attempts=2`. On update, supplied attributes replace those named values; omitted attributes remain unchanged. Flag-based `job update` requires the current `--revision`, and `--clear-name` explicitly clears the name. Interactive editing captures the revision shown in its draft. A stale revision is returned as a conflict; the CLI does not fetch a newer revision and retry.
 
 For CLI jobs, repeat `--arg`, `--arg-secret`, `--env`, `--env-secret`,
 `--unset-env`, and `--expected-exit-code` as needed. For HTTP jobs, use `--url`,
@@ -196,6 +196,254 @@ command fail. Both commands submit suspension once and use read requests while
 waiting. The same overall `--timeout` applies. A timeout after an observed
 suspension reply means the final state was not confirmed; inspect the resource
 before deciding what to do next.
+
+## Interactive job updates
+
+Run a bare update to inspect and edit a job definition:
+
+```sh
+jobuctl job update JOB_UUID
+jobuctl job update JOB_UUID --editor 'code --wait'
+jobuctl --timeout 10000 job update JOB_UUID --json > updated-job.json
+```
+
+This mode takes no mutation flags, `--revision`, or `--request-file`.
+`--editor COMMAND` is exclusive to interactive updates. A mutation flag without
+a revision remains an error, and a revision without any mutation is also an
+error. Scripts can use either existing noninteractive form:
+
+```sh
+jobuctl job update JOB_UUID --revision 7 --priority 50
+jobuctl job update --request-file update-request.json
+jobuctl job update --request-file - < update-request.json
+```
+
+A request file contains `job_id`, `expected_revision`, and the fields to update.
+It takes no positional UUID and sends every explicitly present field through
+the ordinary strict JSON decoder; it does not repeat the interactive diff.
+
+Interactive editing requires terminal stdin and stderr and an openable
+foreground controlling terminal. A pipe or redirected stderr is refused before
+fetching the job. Redirected stdout is allowed: the editor uses the controlling
+terminal for all three standard descriptors, keeping final stdout available for
+the command result.
+
+### Editor selection and waiting
+
+Selection uses `--editor`, then nonempty `VISUAL`, then nonempty `EDITOR`, then
+`vi`. An explicit empty command is invalid. For example:
+
+```sh
+VISUAL='code --wait' jobuctl job update JOB_UUID
+jobuctl job update JOB_UUID --editor '"/opt/My Editor/bin/editor" --wait'
+```
+
+The outer quotes in these examples belong to your shell. The selected command
+is split into arguments without running a shell. Single quotes preserve their
+contents literally; double quotes preserve whitespace and allow backslash
+escapes for `"`, `\`, `$`, backtick, and newline. Outside quotes, a backslash
+escapes the next character; a backslash-newline continues the command. Adjacent
+quoted and unquoted fragments form one argument. Unterminated quotes, a trailing
+backslash, NUL, or an empty executable are rejected. Variables, substitutions,
+globs, pipes, redirection, and shell operators are not evaluated. Use an explicit
+wrapper executable if your editor needs shell behavior. The absolute draft path
+is appended as one argument.
+
+A graphical editor must wait until editing finishes, for example `code --wait`.
+An editor process that immediately exits cannot tell the CLI when a background
+window is saved. Nonzero editor exit, signal termination, or launch failure
+cancels without submitting an update and returns nonzero. Exiting successfully
+without effective changes is a successful no-op.
+
+### Draft and update semantics
+
+The CLI fetches one definition, retains its baseline, and destroys the network
+session before opening the editor. Fetch and submission each receive the full
+`--timeout`, including connection and handshake. File work and editor time use
+neither budget. There is no automatic refresh, retry, merge, or second editor
+pass.
+
+The draft begins with `jobu:` instructions so they remain visible inside a
+terminal editor. Every physical line starting with the exact case-sensitive
+bytes `jobu:` in column 1 is ignored during draft parsing, wherever it occurs.
+Indenting the prefix or changing its case makes it ordinary input. A `jobu:` key
+or value inside JSON remains data. Instruction-only changes are a no-op; parsing
+never rewrites the saved file. This convention applies only to interactive
+drafts. Request files and `update-request.json` remain strict JSON.
+
+The JSON contains `job_id`, `expected_revision`, and writable definition fields.
+Keep identity and revision present and unchanged. Response-only properties,
+unknown fields, and invalid retained values are rejected. Secret references stay
+references; the CLI does not fetch or expand secret values.
+
+| Edit | Meaning |
+| --- | --- |
+| Leave a value unchanged or reorder object keys | Omit it from the update |
+| Remove a writable top-level property | Leave the server value unchanged |
+| Change `name`, `type`, `priority`, or `schedule` | Replace the complete changed value |
+| Set `name` to `null` | Clear the name |
+| Change or add an attribute | Send that entry as an attribute patch |
+| Remove an attribute entry | Leave that server attribute unchanged |
+| Change `payload` | Replace the whole payload; no recursive merge |
+
+Array order matters. Schedule replacement uses the normal request schema;
+symbolic `at: "now"` remains creation-only. Null is valid only where that schema
+allows it. Queue moves and lifecycle changes use their separate commands.
+An unchanged legacy HTTP payload is omitted from the minimal update, preserving
+its exact method spelling. Explicit payload replacement uses current admission
+and canonicalizes supported HTTP methods.
+
+No effective change prints `No changes; no update submitted` on stderr, exits 0,
+and produces no stdout or update RPC, including with `--json`. A successful
+mutation prints the ordinary update result.
+
+### Retained files and recovery
+
+The CLI creates a private mode-0700 directory and mode-0600 `draft.json`. It
+accepts a safe editor atomic save, then reopens without following symlinks and
+requires an owner-only regular file owned by the current user. Missing, empty,
+unsafe, or invalid saved drafts fail without submission. Generated/read drafts,
+including instructions, are bounded by 16 MiB and normal JSON depth limits.
+Compact requests retain the ordinary 1 MiB request-file limit and existing
+payload/RPC limits.
+
+Once a valid minimal update exists, the CLI writes and closes
+`update-request.json` before submitting. That strict JSON contains only the
+original identity/revision and changed fields. It is the recovery request;
+submitting the complete draft could replace an unchanged legacy payload.
+
+| Outcome | Files and next action |
+| --- | --- |
+| Success, no-op, or editor cancellation/launch failure | Clean known files and the empty directory |
+| Invalid, missing, or unsafe saved draft | Retain available evidence; correct the draft into a valid minimal strict JSON request before submitting |
+| Failure saving a complete minimal request | Retain the draft; no update is sent and no ready recovery command is advertised |
+| Rejected or failed submission | Retain draft and minimal request; inspect the error before retrying |
+| Revision conflict | Fetch the current definition and manually reconcile; the saved request still has the old revision |
+| Unknown outcome | Inspect current server state before any retry; the update may already have succeeded |
+
+Recovery messages identify the retained directory/draft and, only when complete,
+the minimal request and a POSIX-shell-quoted command preserving socket and
+timeout. For example:
+
+```sh
+'jobuctl' '--socket' '/private/jobud.sock' '--timeout' '5000' 'job' 'update' '--request-file' '/private/edit/update-request.json'
+```
+
+The CLI displays this command; it never executes it. A conflict is not fixed by
+blindly retrying the old revision, and an unknown outcome needs inspection first.
+For an invalid draft there may be no minimal request: remove `jobu:` instruction
+lines and deliberately select the intended changed fields when preparing a
+strict JSON request. Request-file mode sends all present fields.
+
+Diagnostics do not print draft contents. Keep retained files private because
+edited payloads can contain literal sensitive values. Paths and command text
+escape terminal controls for display, separately from shell quoting; if a path
+contains controls, displayed escapes are not literal filename bytes.
+Cleanup removes only known files and attempts to remove the empty directory.
+Unexpected editor backups remain, with the retained directory reported. Cleanup
+failure returns nonzero even after a successful mutation has printed its result;
+inspect the result/server state before deciding on another mutation.
+
+### Manual editor verification checklist
+
+This checklist prepares the maintainer-assisted Linux U.20 gate. Automated tests
+use in-process editor seams and do not establish real terminal/editor acceptance.
+Record source commit, OS, terminal, terminal-editor version, waiting GUI-editor
+version (or unavailable), and pass/fail/pending plus observations for each case.
+Use no real secrets. An unavailable prerequisite leaves its case pending.
+
+As an ordinary user, start a disposable daemon in terminal A:
+
+```sh
+umask 077
+jobu_edit=$(mktemp -d /tmp/jobu-edit-check.XXXXXX)
+printf 'Checklist directory: %s\n' "$jobu_edit"
+jobud --no-config --socket "$jobu_edit/jobud.sock" --database "$jobu_edit/jobu.sqlite3"
+```
+
+Wait for `jobud.ready`. In terminal B, replace the directory below with the
+printed path, define the helper, and create a future job that will not execute
+during editing. Copy its returned `id` into `job_id`:
+
+```sh
+jobu_edit=/tmp/jobu-edit-check.REPLACE
+ctl() { jobuctl --socket "$jobu_edit/jobud.sock" "$@"; }
+ctl queue create editor-check
+ctl job create --queue-name editor-check --type cli --at 2099-01-01T00:00:00Z \
+    --command /bin/true --name before --attribute retry.max_attempts=2 --json
+job_id=REPLACE_WITH_RETURNED_ID
+ctl job get "$job_id" --json
+```
+
+Use a future date if 2099 is no longer in the future. Repeat the helper setup in
+any additional client terminal. Read the current revision from `job get` before
+each explicit flag update; the checklist does not assume revisions stay at 1.
+
+1. Run `ctl job update "$job_id" --editor vi` (or an available terminal editor).
+   Confirm readable JSON and visible `jobu:` instructions, working input, fixed
+   identity/revision, and wait/save behavior. Change priority to 50 and save.
+   `ctl job get "$job_id" --json` must show one revision increment and priority 50.
+2. Open again and leave values unchanged; repeat after reordering object keys,
+   then after changing only a `jobu:` line. Each must report the no-op notice,
+   leave revision unchanged, and clean its edit directory. Record the draft path
+   from the editor's filename display to check cleanup after exiting.
+3. Remove the top-level `name` property and save: name stays `before` with no
+   mutation. Reopen and set `name` to null: it clears. Change
+   `retry.max_attempts` to 3 and verify other attributes remain. Removing that
+   attribute from another draft must not reset it.
+4. Change payload to `{"command":"/bin/echo","arguments":["check"]}` and
+   verify whole replacement. Separately create a future HTTP job with
+   `ctl job create --queue-name editor-check --type http --at 2099-01-01T00:00:00Z --url http://127.0.0.1:9/ --method GET --json`.
+   Edit its method to `pOsT` and confirm stored `POST`. On a disposable legacy
+   HTTP fixture prepared from pre-admission data, change only priority: the old
+   lowercase method must remain exact; explicitly replace the payload and check
+   canonicalization. Do not weaken current admission to create this fixture;
+   record the legacy case pending if no fixture is available.
+5. Try `VISUAL='vi' EDITOR='/unavailable/editor' ctl job update "$job_id"`, then
+   `VISUAL='' EDITOR='vi' ctl job update "$job_id"`. Confirm precedence and repeat
+   with `--editor` overriding both. Use the quoted-path example with a locally
+   available editor path containing spaces. With an available GUI editor, run
+   `ctl job update "$job_id" --editor 'code --wait'` and confirm it waits for save
+   and close. Record exact installed editors and any unavailable case.
+6. Exit the terminal editor nonzero (for example vi `:cq`), then interrupt it
+   with Ctrl-C as supported by that editor. Confirm no update, a nonzero status,
+   restored terminal/signal behavior, and cleanup. Run with
+   `--editor /unavailable/editor`: launch fails without mutation. Use `printf '%s\n' "$?"`
+   immediately after each command to record its status.
+7. Save invalid JSON, then a structurally valid draft with an invalid field in
+   separate runs. Expect exit 2, empty stdout, unchanged server state, and retained
+   draft bytes. Check that no complete minimal request/retry command is claimed.
+   A zero-exit editor that empties or deletes the file must also fail usefully.
+8. Run `ctl --timeout 2000 job update "$job_id"`, keep the editor open longer
+   than two seconds, then save a priority change. Submission must receive a new
+   full network budget and succeed against a responsive local daemon.
+9. Keep an edit open in terminal B. In terminal C inspect the job and run
+   `ctl job update "$job_id" --revision CURRENT_REVISION --priority 99`.
+   Save a different priority in B: expect conflict, retained draft/minimal
+   request with the old revision, and no overwrite of 99. In separate edits,
+   changing or removing identity/revision must fail locally. Manually reconcile
+   with a newly inspected definition before submitting again.
+10. Open an edit, stop terminal A's daemon with Ctrl-C, then save a change.
+    Expect nonzero, retained draft/minimal request, and an accurate recovery
+    command carrying the selected socket/timeout. Restart A with the same command
+    before continuing. Outcome-unknown behavior uses deterministic automated
+    tests, not a manual connection-loss race. Optionally leave an editor backup
+    in the protected edit directory: cleanup must preserve/report that directory.
+11. Run `ctl job update "$job_id" --json > "$jobu_edit/result.json"` while
+    stdin/stderr remain terminal descriptors. Confirm editor input still works
+    and a successful change produces only one final JSON result in that file.
+    Repeat unchanged: stdout must be empty and the notice on stderr. Recovery
+    lines remain human stderr text even in JSON mode.
+12. Run `printf '{}\n' | ctl job update "$job_id"`: expect terminal refusal,
+    no editor, and no fetch. Run a flag mutation without revision: expect a
+    syntax error. Redirect stdin from `/dev/null` for an explicit-revision update,
+    and for `ctl job update --request-file FILE` with a fresh minimal strict JSON
+    request containing `job_id`, current `expected_revision`, and `priority`:
+    both remain noninteractive. Also try `--request-file - < FILE`. Adding a
+    positional UUID to either request-file command remains a syntax error.
+
+Stop the disposable daemon before removing its test data. Preserve the completed
+record and any failed evidence; checklist preparation alone is not a passed gate.
 
 ## Runs and attempts
 
@@ -393,7 +641,8 @@ not interpolate part of a string. Environment names must be unique across
 `--env`, `--env-secret`, and `--unset-env`, regardless of order. References cannot
 target `PATH` or a `JOBU_*` environment name. The existing argument and template
 reference limits apply. These options cannot be mixed with `--request-file` or
-used for HTTP jobs. `job update` still uses a request file to replace a payload.
+used for HTTP jobs. Replace an existing payload through interactive editing or
+a complete request file; these creation flags do not apply to `job update`.
 
 ## Literal arguments
 
@@ -422,13 +671,24 @@ jobuctl queue create -- --help
 
 Human output escapes control characters in data supplied by the daemon, including names and error text. JSON mode prints exactly one result value and a newline on standard output; successful delete commands print `null`. It prints no headings or progress text. Integer values remain integers, including large revisions.
 
-On failure, standard output is empty. With `--json`, standard error contains one object with `error.kind` (`local` or `remote`), a stable string `code`, nullable `rpc_code` and `category`, safe `message`, and boolean `outcome_unknown`. A remote application error retains its domain code and category. A represented remote RPC error without application data uses `jobuctl.remote.rpc_error` as the string code.
+For an ordinary command failure, standard output is empty. With `--json`, each
+error is represented on stderr by an object with `error.kind` (`local` or
+`remote`), a stable string `code`, nullable `rpc_code` and `category`, safe
+`message`, and boolean `outcome_unknown`. A remote application error retains its
+domain code and category. A represented remote RPC error without application
+data uses `jobuctl.remote.rpc_error` as the string code.
+
+Interactive no-op has no stdout result and prints a human stderr notice.
+Interactive failures can add human recovery lines alongside the JSON error;
+stderr as a whole is not necessarily one JSON document. If cleanup fails after
+a successful update, stdout already contains the normal result and the exit
+status is nonzero. See [retained files and recovery](#retained-files-and-recovery).
 
 | Exit status | Meaning |
 | --- | --- |
-| 0 | Successful remote operation or local help/version. |
-| 1 | Represented operation failure, such as not found, revision conflict, or an unsupported capability. |
-| 2 | Syntax, local request decoding, or request-file input failure. |
-| 3 | Connection, protocol, or deadline failure. |
+| 0 | Successful remote operation, interactive no-op, or local help/version. |
+| 1 | Represented operation failure, such as not found, revision conflict, or an unsupported capability; editor cancellation/nonzero exit. |
+| 2 | Syntax, local request decoding, request-file input, terminal preflight, editor-command parsing, or draft preparation failure. |
+| 3 | Connection, protocol, deadline, or editor launch failure; cleanup failure after an otherwise successful operation. |
 
-For a mutation, `outcome_unknown: true` means the request may have reached the daemon without an observed result. Check the resource or replay with an explicit idempotency key before deciding whether to repeat it. The CLI does not retry mutations automatically.
+For a mutation, `outcome_unknown: true` means the request may have reached the daemon without an observed result. Check the resource before deciding whether to repeat it. Creation requests with a retained explicit idempotency key support replay; job updates have no such key. For an interactive update, inspect current state and manually reconcile before any retry. The CLI does not retry mutations automatically.
