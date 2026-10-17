@@ -80,8 +80,8 @@ Use `attempt output --request-file FILE` to supply an explicit output request.
 Request files cannot be combined with command operands or command-specific
 request options. Global options, supported `--wait`, and `attempt output`
 delivery options remain available. The file must contain one JSON object, with
-no trailing non-whitespace text, and is limited to the configured RPC body size
-(1 MiB by default). Request fields follow the public method's strict JSON
+no trailing non-whitespace text, and is limited to 1 MiB, the client's default
+RPC body limit. Request fields follow the public method's strict JSON
 contract. For example:
 
 ```sh
@@ -352,107 +352,6 @@ Unexpected editor backups remain, with the retained directory reported. Cleanup
 failure returns nonzero even after a successful mutation has printed its result;
 inspect the result/server state before deciding on another mutation.
 
-### Manual editor verification checklist
-
-This checklist prepares the maintainer-assisted Linux U.20 gate. Automated tests
-use in-process editor seams and do not establish real terminal/editor acceptance.
-Record source commit, OS, terminal, terminal-editor version, waiting GUI-editor
-version (or unavailable), and pass/fail/pending plus observations for each case.
-Use no real secrets. An unavailable prerequisite leaves its case pending.
-
-As an ordinary user, start a disposable daemon in terminal A:
-
-```sh
-umask 077
-jobu_edit=$(mktemp -d /tmp/jobu-edit-check.XXXXXX)
-printf 'Checklist directory: %s\n' "$jobu_edit"
-jobud --no-config --socket "$jobu_edit/jobud.sock" --database "$jobu_edit/jobu.sqlite3"
-```
-
-Wait for `jobud.ready`. In terminal B, replace the directory below with the
-printed path, define the helper, and create a future job that will not execute
-during editing. Copy its returned `id` into `job_id`:
-
-```sh
-jobu_edit=/tmp/jobu-edit-check.REPLACE
-ctl() { jobuctl --socket "$jobu_edit/jobud.sock" "$@"; }
-ctl queue create editor-check
-ctl job create --queue-name editor-check --type cli --at 2099-01-01T00:00:00Z \
-    --command /bin/true --name before --attribute retry.max_attempts=2 --json
-job_id=REPLACE_WITH_RETURNED_ID
-ctl job get "$job_id" --json
-```
-
-Use a future date if 2099 is no longer in the future. Repeat the helper setup in
-any additional client terminal. Read the current revision from `job get` before
-each explicit flag update; the checklist does not assume revisions stay at 1.
-
-1. Run `ctl job update "$job_id" --editor vi` (or an available terminal editor).
-   Confirm readable JSON and visible `jobu:` instructions, working input, fixed
-   identity/revision, and wait/save behavior. Change priority to 50 and save.
-   `ctl job get "$job_id" --json` must show one revision increment and priority 50.
-2. Open again and leave values unchanged; repeat after reordering object keys,
-   then after changing only a `jobu:` line. Each must report the no-op notice,
-   leave revision unchanged, and clean its edit directory. Record the draft path
-   from the editor's filename display to check cleanup after exiting.
-3. Remove the top-level `name` property and save: name stays `before` with no
-   mutation. Reopen and set `name` to null: it clears. Change
-   `retry.max_attempts` to 3 and verify other attributes remain. Removing that
-   attribute from another draft must not reset it.
-4. Change payload to `{"command":"/bin/echo","arguments":["check"]}` and
-   verify whole replacement. Separately create a future HTTP job with
-   `ctl job create --queue-name editor-check --type http --at 2099-01-01T00:00:00Z --url http://127.0.0.1:9/ --method GET --json`.
-   Edit its method to `pOsT` and confirm stored `POST`. On a disposable legacy
-   HTTP fixture prepared from pre-admission data, change only priority: the old
-   lowercase method must remain exact; explicitly replace the payload and check
-   canonicalization. Do not weaken current admission to create this fixture;
-   record the legacy case pending if no fixture is available.
-5. Try `VISUAL='vi' EDITOR='/unavailable/editor' ctl job update "$job_id"`, then
-   `VISUAL='' EDITOR='vi' ctl job update "$job_id"`. Confirm precedence and repeat
-   with `--editor` overriding both. Use the quoted-path example with a locally
-   available editor path containing spaces. With an available GUI editor, run
-   `ctl job update "$job_id" --editor 'code --wait'` and confirm it waits for save
-   and close. Record exact installed editors and any unavailable case.
-6. Exit the terminal editor nonzero (for example vi `:cq`), then interrupt it
-   with Ctrl-C as supported by that editor. Confirm no update, a nonzero status,
-   restored terminal/signal behavior, and cleanup. Run with
-   `--editor /unavailable/editor`: launch fails without mutation. Use `printf '%s\n' "$?"`
-   immediately after each command to record its status.
-7. Save invalid JSON, then a structurally valid draft with an invalid field in
-   separate runs. Expect exit 2, empty stdout, unchanged server state, and retained
-   draft bytes. Check that no complete minimal request/retry command is claimed.
-   A zero-exit editor that empties or deletes the file must also fail usefully.
-8. Run `ctl --timeout 2000 job update "$job_id"`, keep the editor open longer
-   than two seconds, then save a priority change. Submission must receive a new
-   full network budget and succeed against a responsive local daemon.
-9. Keep an edit open in terminal B. In terminal C inspect the job and run
-   `ctl job update "$job_id" --revision CURRENT_REVISION --priority 99`.
-   Save a different priority in B: expect conflict, retained draft/minimal
-   request with the old revision, and no overwrite of 99. In separate edits,
-   changing or removing identity/revision must fail locally. Manually reconcile
-   with a newly inspected definition before submitting again.
-10. Open an edit, stop terminal A's daemon with Ctrl-C, then save a change.
-    Expect nonzero, retained draft/minimal request, and an accurate recovery
-    command carrying the selected socket/timeout. Restart A with the same command
-    before continuing. Outcome-unknown behavior uses deterministic automated
-    tests, not a manual connection-loss race. Optionally leave an editor backup
-    in the protected edit directory: cleanup must preserve/report that directory.
-11. Run `ctl job update "$job_id" --json > "$jobu_edit/result.json"` while
-    stdin/stderr remain terminal descriptors. Confirm editor input still works
-    and a successful change produces only one final JSON result in that file.
-    Repeat unchanged: stdout must be empty and the notice on stderr. Recovery
-    lines remain human stderr text even in JSON mode.
-12. Run `printf '{}\n' | ctl job update "$job_id"`: expect terminal refusal,
-    no editor, and no fetch. Run a flag mutation without revision: expect a
-    syntax error. Redirect stdin from `/dev/null` for an explicit-revision update,
-    and for `ctl job update --request-file FILE` with a fresh minimal strict JSON
-    request containing `job_id`, current `expected_revision`, and `priority`:
-    both remain noninteractive. Also try `--request-file - < FILE`. Adding a
-    positional UUID to either request-file command remains a syntax error.
-
-Stop the disposable daemon before removing its test data. Preserve the completed
-record and any failed evidence; checklist preparation alone is not a passed gate.
-
 ## Runs and attempts
 
 `job run-now JOB_UUID` creates a manual run from an eligible unfinished job
@@ -466,8 +365,9 @@ Manual replay records are retained with their runs and retired atomically when
 cleanup purges terminal history. After retirement, the same key is a new request
 subject to current eligibility; it cannot reopen a terminal definition. Creation
 keys also follow [resource lifetimes](protocol/methods/job.md), so an old retry
-can become a new creation after its key retires. The daemon currently performs
-no automatic history cleanup.
+can become a new creation after its key retires. The daemon applies
+[automatic history retention](operations.md#retention-and-replay-lifetimes);
+replay records remain available only for their documented resource lifetimes.
 
 ```sh
 jobuctl job run-now JOB_UUID --idempotency-key manual-42 --json

@@ -79,7 +79,8 @@ preserves its original creation scope and saved response.
 
 After retirement, reusing a creation key is a new request and can create a
 different definition. A key has no fixed expiry measured from creation time.
-The daemon currently performs no automatic history cleanup.
+The daemon applies [automatic history retention](../../operations.md#retention-and-replay-lifetimes);
+retained replay records follow the resource lifetimes above.
 
 ## Get and list (`job.get`, `job.list`)
 
