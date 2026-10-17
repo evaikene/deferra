@@ -1,5 +1,6 @@
 #include "output_priv.hpp"
 
+#include "command_helpers_priv.hpp"
 #include "commands/commands_priv.hpp"
 #include "control_json.hpp"
 #include "history_json.hpp"
@@ -152,7 +153,7 @@ auto encoded_reply(Command const& command, ControlReply const& reply, AttributeR
             return attempt_page_to_json(*page);
         }
     }
-    else if (command.kind == CommandKind::AttemptOutput) {
+    else if (is_output_command(command.kind)) {
         if (auto const* chunk = std::get_if<AttemptOutputChunk>(&reply)) {
             return attempt_output_chunk_to_json(*chunk);
         }
@@ -347,7 +348,7 @@ auto print_command_result(Command const& command, ControlReply const& reply, Sta
         return print_run_result(command, reply, registry);
     }
     if (command.kind == CommandKind::AttemptGet || command.kind == CommandKind::AttemptList ||
-        command.kind == CommandKind::AttemptOutput) {
+        is_output_command(command.kind)) {
         return print_attempt_result(command, reply);
     }
     if (command.kind == CommandKind::SecretSet || command.kind == CommandKind::SecretList ||
@@ -363,7 +364,7 @@ auto write_output_chunk(Command const& command, AttemptOutputChunk const& chunk)
         return Result<void, Error>::failure(
             {.category = ErrorCategory::InvalidArgument, .code = std::move(code), .message = std::move(message)});
     };
-    if (command.kind != CommandKind::AttemptOutput || (!command.raw && !command.output_file)) {
+    if (!is_output_command(command.kind) || (!command.raw && !command.output_file)) {
         return failure("jobuctl.output.invalid_mode", "Output delivery mode is invalid");
     }
 

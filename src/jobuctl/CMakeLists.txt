@@ -23,6 +23,7 @@ add_library(jobuctl-private STATIC
     job_edit_recovery_priv.cpp
     job_edit_workflow_priv.cpp
     output_priv.cpp
+    run_inspection_priv.cpp
     session_priv.cpp
     run_session_priv.cpp
     commands/system_commands.cpp
