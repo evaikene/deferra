@@ -3,8 +3,10 @@
 
 #include "attribute_registry.hpp"
 #include "command_line_priv.hpp"
+#include "framing.hpp"
 #include "input_priv.hpp"
 #include "job_edit_priv.hpp"
+#include "job_payload_admission_priv.hpp"
 #include "json.hpp"
 #include "management.hpp"
 #include "management_json.hpp"
@@ -215,6 +217,118 @@ TEST_CASE("Safe atomic saves are accepted without changing the edited bytes", "[
 
     REQUIRE(files.cleanup());
     CHECK_FALSE(std::filesystem::exists(paths.directory));
+    REQUIRE(files.cleanup());
+}
+
+TEST_CASE("Compact recovery requests remain loadable when readable JSON exceeds the request-file limit",
+          "[jobuctl][edit][files]")
+{
+    Fixture fixture;
+    auto    nested = JsonValue{.data = JsonValue::Array(12000, JsonValue{.data = std::string{"x"}})};
+    // Additive payload data is valid, but indentation at this depth makes its readable form exceed 1 MiB.
+    for (auto depth = 0; depth < 48; ++depth) {
+        auto layer = JsonValue::Array{};
+        layer.push_back(std::move(nested));
+        nested = JsonValue{.data = std::move(layer)};
+    }
+    auto payload = fixture.baseline.value().as_object().at("payload");
+    std::get<JsonValue::Object>(payload.data).emplace("extra", std::move(nested));
+    auto admitted = jb::jobu::detail::normalize_submitted_job_payload(JobType::Http, std::move(payload));
+    REQUIRE(admitted);
+    auto draft                                            = fixture.baseline.value();
+    std::get<JsonValue::Object>(draft.data).at("payload") = std::move(admitted).value();
+    auto readable                                         = format_job_edit_json(draft);
+    REQUIRE(readable);
+    auto const request_file_limit = jb::rpc::FramingLimits{}.max_body_bytes;
+    REQUIRE(readable->size() > request_file_limit);
+
+    auto files = fixture.create();
+    write_text(files.artifacts().draft, *readable);
+    auto edited = files.read_draft();
+    REQUIRE(edited);
+    auto prepared = prepare_job_update(fixture.baseline, *edited, fixture.registry);
+    REQUIRE(prepared);
+    REQUIRE(*prepared);
+    auto const& update         = **prepared;
+    auto        pretty_request = format_job_edit_json(update.params);
+    REQUIRE(pretty_request);
+    REQUIRE(pretty_request->size() > request_file_limit);
+    auto compact = serialized(update.params);
+    REQUIRE(compact.size() < request_file_limit);
+
+    REQUIRE(files.write_request(update));
+    auto paths = files.artifacts();
+    REQUIRE(paths.request);
+    CHECK(read_text(paths.draft) == *readable);
+    CHECK(read_text(*paths.request) == compact);
+    auto loaded = load_json_object(*paths.request);
+    REQUIRE(loaded);
+    CHECK(serialized(*loaded) == compact);
+
+    auto retry = Command{.kind = CommandKind::JobUpdate, .request_file = paths.request};
+    REQUIRE(load_request_file(retry, fixture.registry));
+    auto outgoing = update_job_request_to_json(std::get<UpdateJobRequest>(retry.request), fixture.registry);
+    REQUIRE(outgoing);
+    CHECK(serialized(*outgoing) == compact);
+    REQUIRE(files.cleanup());
+}
+
+TEST_CASE("Recovery files use the inclusive request-file limit without changing draft allowance",
+          "[jobuctl][edit][files]")
+{
+    auto const limit = jb::rpc::FramingLimits{}.max_body_bytes;
+    for (auto const bytes : {limit - 1, limit, limit + 1}) {
+        Fixture fixture;
+        auto    files                                          = fixture.create();
+        auto    original                                       = read_text(files.artifacts().draft);
+        // Synthetic params isolate this file boundary from the smaller domain payload/name limits.
+        auto    params                                         = parsed(R"({"padding":""})");
+        auto    overhead                                       = serialized(params).size();
+        std::get<JsonValue::Object>(params.data).at("padding") = JsonValue{.data = std::string(bytes - overhead, 'x')};
+        auto update                                            = PreparedJobUpdate{.params = std::move(params)};
+        auto written                                           = files.write_request(update);
+        if (bytes <= limit) {
+            REQUIRE(written);
+            REQUIRE(files.artifacts().request);
+            CHECK(std::filesystem::file_size(*files.artifacts().request) == bytes);
+            CHECK(load_json_object(*files.artifacts().request));
+        }
+        else {
+            REQUIRE_FALSE(written);
+            CHECK(written.error().code == "jobuctl.edit.request_too_large");
+            CHECK_FALSE(files.artifacts().request);
+            CHECK_FALSE(std::filesystem::exists(files.artifacts().directory / "update-request.json"));
+            CHECK(read_text(files.artifacts().draft) == original);
+        }
+        REQUIRE(files.cleanup());
+    }
+}
+
+TEST_CASE("Recovery serialization rejects invalid encoding and excessive nesting before file creation",
+          "[jobuctl][edit][files]")
+{
+    Fixture fixture;
+    auto    files    = fixture.create();
+    auto    original = read_text(files.artifacts().draft);
+    auto    update   = fixture.update();
+    SECTION("invalid UTF-8")
+    {
+        update.params = JsonValue{.data = std::string{"\xff"}};
+    }
+    SECTION("excessive depth")
+    {
+        for (auto depth = std::size_t{0}; depth <= JsonLimits{}.max_depth; ++depth) {
+            auto layer = JsonValue::Array{};
+            layer.push_back(std::move(update.params));
+            update.params = JsonValue{.data = std::move(layer)};
+        }
+    }
+    auto written = files.write_request(update);
+    REQUIRE_FALSE(written);
+    CHECK(written.error().code == "jobuctl.edit.invalid_json");
+    CHECK_FALSE(files.artifacts().request);
+    CHECK_FALSE(std::filesystem::exists(files.artifacts().directory / "update-request.json"));
+    CHECK(read_text(files.artifacts().draft) == original);
     REQUIRE(files.cleanup());
 }
 

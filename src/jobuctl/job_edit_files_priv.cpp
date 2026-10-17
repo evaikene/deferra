@@ -274,7 +274,7 @@ auto JobEditFiles::write_request(PreparedJobUpdate const& update) -> Result<void
         return Result<void, Error>::failure(
             file_error("jobuctl.edit.write_failed", "A minimal update request already exists"));
     }
-    auto text = format_job_edit_json(update.params);
+    auto text = serialize_job_edit_request(update.params);
     if (!text) {
         return Result<void, Error>::failure(std::move(text).error());
     }

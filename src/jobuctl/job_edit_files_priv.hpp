@@ -62,7 +62,8 @@ public:
     /// Metadata and I/O errors never modify the draft. JSON validation remains prepare_job_update()'s responsibility.
     [[nodiscard]] auto read_draft() const -> jb::core::Result<std::string, jb::core::Error>;
 
-    /// Writes only the prepared minimal params, exclusively and once; never overwrites the edited draft.
+    /// Writes compact prepared minimal params within the request-file byte limit, exclusively and once.
+    /// Never overwrites the edited draft. Serialization/size failures create no request file.
     /// Failed/partial request files are not advertised as submit-ready. Existing RPC/payload limits are unchanged.
     [[nodiscard]] auto write_request(PreparedJobUpdate const& update) -> jb::core::Result<void, jb::core::Error>;
 
