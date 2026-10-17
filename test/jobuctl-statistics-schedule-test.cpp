@@ -259,11 +259,19 @@ TEST_CASE("jobuctl exposes every advertised daemon method", "[jobuctl][integrati
         advertised.insert(capability.as_string());
     }
     CHECK(advertised.size() == info.as_object().at("capabilities").as_array().size());
-    auto registered = std::set<std::string>{};
+    auto registered        = std::set<std::string>{};
+    auto composed_commands = std::size_t{0};
     for (auto const& command : jb::jobuctl::detail::command_specs()) {
-        registered.emplace(command.capability);
+        // Composed CLI commands have no single advertised RPC; compare only direct method mappings.
+        if (command.capability.empty()) {
+            CHECK(command.kind == jb::jobuctl::detail::CommandKind::RunOutput);
+            CHECK_FALSE(command.supports_request_file);
+            ++composed_commands;
+            continue;
+        }
+        CHECK(registered.emplace(command.capability).second);
     }
-    CHECK(registered.size() == jb::jobuctl::detail::command_specs().size());
+    CHECK(composed_commands == 1);
     CHECK(registered == advertised);
 }
 

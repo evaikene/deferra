@@ -95,6 +95,7 @@ auto is_job_command(CommandKind kind) noexcept -> bool
         case CommandKind::RunGet:
         case CommandKind::RunList:
         case CommandKind::RunCancel:
+        case CommandKind::RunOutput:
         case CommandKind::AttemptGet:
         case CommandKind::AttemptList:
         case CommandKind::AttemptOutput:

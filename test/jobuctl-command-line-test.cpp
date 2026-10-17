@@ -1560,6 +1560,140 @@ TEST_CASE("jobuctl run commands preserve history filters and cursor-only continu
     CHECK_FALSE(parse({"--socket", "fixture.sock", "run", "get", job_id, "--wait"}).command);
 }
 
+TEST_CASE("jobuctl run output owns a CLI-only request and shares output limits", "[jobuctl][parse]")
+{
+    for (auto const& [channel, expected] : std::array{
+             std::pair{"stdout",  OutputChannel::Stdout },
+             std::pair{"stderr",  OutputChannel::Stderr },
+             std::pair{"body",    OutputChannel::Body   },
+             std::pair{"headers", OutputChannel::Headers}
+    }) {
+        auto output = parse({"run", "output", job_id, "--channel", channel});
+        REQUIRE(output.command);
+        CHECK(output.command->kind == CommandKind::RunOutput);
+        CHECK(output.command->method.empty());
+        auto const& request = std::get<RunOutputRequest>(output.command->request);
+        CHECK(request.run_id.to_string() == job_id);
+        CHECK(request.channel == expected);
+        CHECK(request.offset == 0);
+        CHECK(request.limit == 16384);
+    }
+
+    auto output = parse({"--socket",
+                         "output.sock",
+                         "run",
+                         "output",
+                         job_id,
+                         "--channel",
+                         "stderr",
+                         "--offset",
+                         "9223372036854775806",
+                         "--limit",
+                         "65536",
+                         "--timeout",
+                         "1234",
+                         "--raw"});
+    REQUIRE(output.command);
+    CHECK(output.command->socket_path == "output.sock");
+    CHECK(output.command->timeout == std::chrono::milliseconds{1234});
+    CHECK(output.command->raw);
+    auto const& request = std::get<RunOutputRequest>(output.command->request);
+    CHECK(request.offset == 9223372036854775806ULL);
+    CHECK(request.limit == 65536);
+    REQUIRE(parse({"run", "output", job_id, "--channel", "body", "--offset", "0", "--limit", "1"}).command);
+
+    for (auto const* offset : {"9223372036854775807", "18446744073709551615"}) {
+        auto invalid = parse({"run", "output", job_id, "--channel", "stderr", "--offset", offset});
+        CHECK_FALSE(invalid.command);
+        CHECK(invalid.error == "run output --offset must not exceed INT64_MAX - 1");
+    }
+    for (auto const& [option, value] : std::array{
+             std::pair{"--offset", "-1"                  },
+             std::pair{"--offset", "18446744073709551616"},
+             std::pair{"--offset", "1.5"                 },
+             std::pair{"--offset", "+1"                  },
+             std::pair{"--offset", "1x"                  },
+             std::pair{"--limit",  "0"                   },
+             std::pair{"--limit",  "65537"               },
+             std::pair{"--limit",  "-1"                  },
+             std::pair{"--limit",  "18446744073709551616"},
+             std::pair{"--limit",  "1.5"                 }
+    }) {
+        auto invalid = parse({"run", "output", job_id, "--channel", "stdout", std::string{option} + "=" + value});
+        CHECK_FALSE(invalid.command);
+        CHECK(invalid.error == (std::string_view{option} == "--offset" ? "--offset must be a nonnegative integer"
+                                                                       : "--limit must be from 1 through 65536"));
+    }
+    for (auto const* option : {"--offset", "--limit"}) {
+        auto invalid = parse({"run", "output", job_id, "--channel", "stdout", option, "-1"});
+        CHECK_FALSE(invalid.command);
+        CHECK(invalid.error == std::string{option} + " requires a value");
+    }
+
+    for (auto const& arguments : std::vector<std::vector<std::string>>{
+             {"run", "output"},
+             {"run", "output", "invalid", "--channel", "stdout"},
+             {"run", "output", "00112233-4455-6677-8899-AABBCCDDEEFF", "--channel", "stdout"},
+             {"run", "output", job_id},
+             {"run", "output", job_id, "--channel", ""},
+             {"run", "output", job_id, "--channel", "STDOUT"},
+             {"run", "output", job_id, "--channel", "unknown"},
+             {"run", "output", job_id, "1", "--channel", "stdout"},
+             {"run", "output", job_id, "--channel", "stdout", "--channel", "stderr"},
+             {"run", "output", job_id, "--channel", "stdout", "--limit", "1", "--limit", "2"},
+             {"run", "output", job_id, "--channel", "stdout", "--offset", ""},
+             {"run", "output", job_id, "--channel", "stdout", "--offset", "1", "--offset", "2"},
+             {"run", "output", job_id, "--channel", "stdout", "--wait"}
+    }) {
+        CAPTURE(arguments);
+        CHECK_FALSE(parse(arguments).command);
+    }
+}
+
+TEST_CASE("jobuctl run output rejects request files and conflicting delivery modes", "[jobuctl][parse]")
+{
+    for (auto const& arguments : std::vector<std::vector<std::string>>{
+             {"run", "output", "--request-file", "-"},
+             {"--request-file=missing.json", "run", "output"},
+             {"run", "--request-file", "missing.json", "output", job_id, "--channel", "stdout"},
+             {"run", "output", job_id, "--request-file", "missing.json", "--output-file", "out.bin"}
+    }) {
+        auto invalid = parse(arguments);
+        CHECK_FALSE(invalid.command);
+        CHECK(invalid.error.find("run output does not support --request-file") != std::string::npos);
+        CHECK(invalid.error.find("attempt output --request-file FILE") != std::string::npos);
+    }
+    for (auto const& modes : std::vector<std::vector<std::string>>{
+             {"--raw", "--json"},
+             {"--raw", "--output-file", "out.bin"},
+             {"--json", "--output-file", "out.bin"}
+    }) {
+        auto arguments = std::vector<std::string>{"run", "output", job_id, "--channel", "stdout"};
+        arguments.insert(arguments.end(), modes.begin(), modes.end());
+        auto invalid = parse(std::move(arguments));
+        CHECK_FALSE(invalid.command);
+        CHECK(invalid.error == "--raw, --output-file, and --json output modes are mutually exclusive");
+    }
+    auto file = parse({"run", "output", job_id, "--channel", "body", "--output-file", "out.bin"});
+    REQUIRE(file.command);
+    CHECK(file.command->output_file == "out.bin");
+    CHECK_FALSE(file.command->request_file);
+    CHECK_FALSE(parse({"run", "output", job_id, "--channel", "body", "--output-file", ""}).command);
+
+    auto const* spec = find_command("run", "output");
+    REQUIRE(spec);
+    CHECK_FALSE(spec->supports_request_file);
+    CHECK(spec->capability.empty());
+    for (auto const& command : command_specs()) {
+        if (command.kind != CommandKind::RunOutput) {
+            CHECK(command.supports_request_file);
+            CHECK_FALSE(command.capability.empty());
+        }
+    }
+    StandardAttributeRegistry registry;
+    CHECK_FALSE(decode_command_request(CommandKind::RunOutput, JsonValue{.data = JsonValue::Object{}}, registry));
+}
+
 TEST_CASE("jobuctl attempt commands keep output delivery separate from request params", "[jobuctl][parse]")
 {
     auto listed = parse({"--socket", "fixture.sock", "attempt", "list", job_id, "--limit", "3"});

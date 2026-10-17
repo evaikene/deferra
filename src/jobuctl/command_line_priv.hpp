@@ -9,6 +9,7 @@
 #include "uuid.hpp"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -41,6 +42,7 @@ enum class CommandKind : std::uint8_t {
     RunGet,
     RunList,
     RunCancel,
+    RunOutput,
     AttemptGet,
     AttemptList,
     AttemptOutput,
@@ -57,7 +59,16 @@ struct InteractiveJobUpdate {
     std::optional<std::string> editor;
 };
 
-/// Owning requests for the currently registered CLI methods and local editing workflow.
+/// CLI-only selection input; an attempt identity is chosen later by the composed session.
+/// Delivery flags remain on Command, and no protocol request can decode this type.
+struct RunOutputRequest {
+    jb::core::Uuid          run_id;
+    jb::jobu::OutputChannel channel;
+    std::uint64_t           offset{0};
+    std::size_t             limit{16384};
+};
+
+/// Owning requests for the currently registered CLI methods and local/composed workflows.
 /// CommandKind identifies repeated result types; InteractiveJobUpdate must be dispatched before entering a Session.
 using CommandRequest = std::variant<std::monostate,
                                     jb::jobu::QueueSelector,
@@ -82,6 +93,7 @@ using CommandRequest = std::variant<std::monostate,
                                     jb::jobu::CronScheduleInput,
                                     jb::jobu::ScheduleNextRequest,
                                     InteractiveJobUpdate,
+                                    RunOutputRequest,
                                     std::string>;
 
 /// Raw secret input is selected during parsing but read only after local help has been resolved.
@@ -95,7 +107,7 @@ struct SecretInput {
     std::filesystem::path file;
 };
 
-/// Parsed remote work owns its data; method refers only to a static method-name literal.
+/// Parsed work owns its data; method borrows a static RPC name, or is empty for a composed command.
 struct Command {
     std::filesystem::path                socket_path;
     CommandKind                          kind{CommandKind::SystemInfo};

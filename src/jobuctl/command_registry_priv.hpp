@@ -36,7 +36,8 @@ struct CommandSpec {
     std::span<OptionSpec const> options;
     std::string_view            rules;
     std::string_view            example;
-    std::string_view            capability;
+    std::string_view            capability; // Empty when a composed command has no single RPC counterpart.
+    bool                        supports_request_file{true};
     CommandBuilder              build;
 };
 

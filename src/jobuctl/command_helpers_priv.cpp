@@ -37,7 +37,7 @@ auto parse_unsigned(std::string_view text, std::uint64_t minimum, std::uint64_t 
 
 auto is_output_command(CommandKind kind) -> bool
 {
-    return kind == CommandKind::AttemptOutput;
+    return kind == CommandKind::AttemptOutput || kind == CommandKind::RunOutput;
 }
 
 auto output_channel_matches(JobType type, OutputChannel channel) -> bool

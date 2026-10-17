@@ -402,6 +402,7 @@ TEST_CASE("run output hints and predicates identify the existing output contract
     }
     CHECK(run_output_hint(id, static_cast<JobType>(255)).empty());
     CHECK(is_output_command(CommandKind::AttemptOutput));
+    CHECK(is_output_command(CommandKind::RunOutput));
     for (auto kind : {CommandKind::AttemptGet,
                       CommandKind::AttemptList,
                       CommandKind::RunGet,
