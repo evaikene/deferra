@@ -1079,6 +1079,10 @@ add_executable(jobuctl-command-line-test jobuctl-command-line-test.cpp support/t
 target_link_libraries(jobuctl-command-line-test PRIVATE jobuctl-private jobu-paths-private Catch2::Catch2WithMain)
 add_test(NAME jobuctl-command-line-test COMMAND $<TARGET_FILE:jobuctl-command-line-test>)
 
+add_executable(jobuctl-run-inspection-test jobuctl-run-inspection-test.cpp)
+target_link_libraries(jobuctl-run-inspection-test PRIVATE jobuctl-private Catch2::Catch2WithMain)
+add_test(NAME jobuctl-run-inspection-test COMMAND $<TARGET_FILE:jobuctl-run-inspection-test>)
+
 add_executable(jobuctl-job-edit-test jobuctl-job-edit-test.cpp)
 target_link_libraries(jobuctl-job-edit-test PRIVATE jobuctl-private Catch2::Catch2WithMain)
 add_test(NAME jobuctl-job-edit-test COMMAND $<TARGET_FILE:jobuctl-job-edit-test>)

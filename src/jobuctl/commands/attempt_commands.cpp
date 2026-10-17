@@ -92,24 +92,8 @@ auto parse_output(std::filesystem::path socket_path, std::span<CommandLineArgume
     if (!identity) {
         return parse_failure("attempt output requires a run UUID and positive attempt number");
     }
-    for (auto const& argument : arguments.subspan(2)) {
-        auto value = option_value(argument);
-        if (!value) {
-            return parse_failure("attempt output requires nonempty option values");
-        }
-        auto const name = argument.name();
-        if (name == "offset" || name == "limit") {
-            auto maximum = name == "offset" ? UINT64_MAX : std::uint64_t{65536};
-            auto number  = parse_unsigned(*value, name == "offset" ? 0 : 1, maximum);
-            if (!number) {
-                return parse_failure(name == "offset" ? "--offset must be a nonnegative integer"
-                                                      : "--limit must be from 1 through 65536");
-            }
-            identity->emplace(std::string{name}, JsonValue{.data = *number});
-        }
-        else {
-            identity->emplace("channel", JsonValue{.data = std::string{*value}});
-        }
+    if (auto error = append_output_options(*identity, arguments.subspan(2), "attempt output")) {
+        return parse_failure(std::move(*error));
     }
     auto request = attempt_output_request_from_json(JsonValue{.data = std::move(*identity)});
     if (!request) {
@@ -222,7 +206,7 @@ auto print_attempt_result(Command const& command, ControlReply const& value) -> 
         fmt::print(stdout, "{}", text);
         return true;
     }
-    if (command.kind == CommandKind::AttemptOutput) {
+    if (is_output_command(command.kind)) {
         auto const* chunk = std::get_if<AttemptOutputChunk>(&value);
         if (!chunk) {
             return false;

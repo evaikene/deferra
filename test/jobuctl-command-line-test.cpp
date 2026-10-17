@@ -1617,6 +1617,74 @@ TEST_CASE("jobuctl attempt commands keep output delivery separate from request p
     CHECK(file.command->output_file == std::filesystem::path{"out.bin"});
 }
 
+TEST_CASE("jobuctl shared output parsing preserves channel defaults and numeric boundaries", "[jobuctl][parse]")
+{
+    for (auto const* channel : {"stdout", "stderr", "body", "headers"}) {
+        auto output = parse({"attempt", "output", job_id, "1", "--channel", channel});
+        REQUIRE(output.command);
+        auto const& request = std::get<AttemptOutputRequest>(output.command->request);
+        CHECK(request.offset == 0);
+        CHECK(request.limit == 16384);
+        auto encoded = attempt_output_request_to_json(request);
+        REQUIRE(encoded);
+        CHECK(encoded->as_object().at("channel").as_string() == channel);
+    }
+
+    for (auto const& [offset, limit] : std::array{
+             std::pair{"0",                   "1"    },
+             std::pair{"9223372036854775806", "65536"}
+    }) {
+        auto output =
+            parse({"attempt", "output", job_id, "2", "--channel", "stderr", "--offset", offset, "--limit", limit});
+        REQUIRE(output.command);
+        auto const& request = std::get<AttemptOutputRequest>(output.command->request);
+        CHECK(std::to_string(request.offset) == offset);
+        CHECK(std::to_string(request.limit) == limit);
+    }
+
+    // The lexical parser accepts uint64 values, but the public codec preserves its stricter storage offset bound.
+    for (auto const* offset : {"9223372036854775807", "18446744073709551615"}) {
+        auto output = parse({"attempt", "output", job_id, "2", "--channel", "stderr", "--offset", offset});
+        CHECK_FALSE(output.command);
+        CHECK(output.error == "attempt output identity or channel is invalid");
+    }
+
+    for (auto const& option : std::array{
+             std::pair{"--offset", "-1"                  },
+             std::pair{"--offset", "18446744073709551616"},
+             std::pair{"--offset", "1.5"                 },
+             std::pair{"--offset", "+1"                  },
+             std::pair{"--offset", "1x"                  },
+             std::pair{"--limit",  "0"                   },
+             std::pair{"--limit",  "65537"               },
+             std::pair{"--limit",  "-1"                  },
+             std::pair{"--limit",  "18446744073709551616"},
+             std::pair{"--limit",  "1.5"                 }
+    }) {
+        // Attached values reach domain validation even when they start with a dash.
+        auto output = parse(
+            {"attempt", "output", job_id, "2", "--channel", "stderr", std::string{option.first} + "=" + option.second});
+        CHECK_FALSE(output.command);
+        CHECK(output.error == (std::string_view{option.first} == "--offset" ? "--offset must be a nonnegative integer"
+                                                                            : "--limit must be from 1 through 65536"));
+    }
+
+    for (auto const* option : {"--offset", "--limit"}) {
+        auto output = parse({"attempt", "output", job_id, "1", "--channel", "stdout", option, "-1"});
+        CHECK_FALSE(output.command);
+        CHECK(output.error == std::string{option} + " requires a value");
+    }
+
+    for (auto const* channel : {"", "STDOUT", "unknown"}) {
+        CHECK_FALSE(parse({"attempt", "output", job_id, "1", "--channel", channel}).command);
+    }
+    CHECK_FALSE(parse({"attempt", "output", job_id, "1"}).command);
+    CHECK_FALSE(parse({"attempt", "output", job_id, "1", "--channel", "stdout", "--offset", ""}).command);
+    CHECK_FALSE(parse({"attempt", "output", job_id, "1", "--channel", "stdout", "--channel", "stderr"}).command);
+    CHECK_FALSE(
+        parse({"attempt", "output", job_id, "1", "--channel", "stdout", "--limit", "1", "--limit", "2"}).command);
+}
+
 TEST_CASE("jobuctl request files decode run and output methods with strict public codecs", "[jobuctl][input]")
 {
     jb::test::TemporaryDirectory directory;
