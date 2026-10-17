@@ -47,7 +47,8 @@ void print_recovery(Command const& command, JobEditFiles const& files, JobEditRe
     auto const paths  = files.artifacts();
     auto       advice = format_job_edit_recovery(command, reason, paths);
     print_retained_directory(paths.directory);
-    fmt::print(stderr, "Retained draft: {}\n", escape_human(paths.draft.string()));
+    auto const* draft_label = reason == JobEditRecoveryReason::MissingDraft ? "Missing draft" : "Retained draft";
+    fmt::print(stderr, "{}: {}\n", draft_label, escape_human(paths.draft.string()));
     if (!advice) {
         print_error(command.json, local_error(advice.error()));
         return;
@@ -160,7 +161,12 @@ auto run_job_edit(Command command, jb::jobu::StandardAttributeRegistry const& re
     // Editor exit zero is only permission to inspect the saved file; invalid work remains available for recovery.
     auto draft = files.read_draft();
     if (!draft) {
-        print_recovery(command, files, JobEditRecoveryReason::InvalidDraft);
+        // Use the read result; a second filesystem probe could observe a different file.
+        auto reason = JobEditRecoveryReason::InvalidDraft;
+        if (draft.error().code == "jobuctl.edit.missing_draft") {
+            reason = JobEditRecoveryReason::MissingDraft;
+        }
+        print_recovery(command, files, reason);
         return fail_locally(command.json, draft.error());
     }
     auto prepared = prepare_job_update(*baseline, *draft, registry);

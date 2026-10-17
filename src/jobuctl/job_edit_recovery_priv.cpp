@@ -38,6 +38,13 @@ auto format_job_edit_recovery(Command const& command, JobEditRecoveryReason reas
     -> Result<JobEditRecoveryAdvice, Error>
 {
     auto advice = JobEditRecoveryAdvice{.paths = std::move(paths)};
+    if (reason == JobEditRecoveryReason::MissingDraft) {
+        advice.paths.request.reset();
+        advice.instructions = "No complete minimal request is available. The draft file is missing. "
+                              "Start a new interactive edit to recreate the intended changes.";
+        return Result<JobEditRecoveryAdvice, Error>::success(std::move(advice));
+    }
+
     if (reason == JobEditRecoveryReason::InvalidDraft || !advice.paths.request) {
         advice.paths.request.reset();
         advice.instructions =
@@ -51,6 +58,7 @@ auto format_job_edit_recovery(Command const& command, JobEditRecoveryReason reas
 
     switch (reason) {
         case JobEditRecoveryReason::InvalidDraft:
+        case JobEditRecoveryReason::MissingDraft:
             break;
         case JobEditRecoveryReason::SubmissionFailed:
             advice.instructions = "The edited draft and minimal update request are retained. The command below submits "

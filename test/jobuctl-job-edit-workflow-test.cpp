@@ -792,10 +792,22 @@ TEST_CASE("invalid saved drafts are retained unchanged without mutation", "[jobu
     CHECK(result.error.find(sensitive) == std::string::npos);
     CHECK(result.error.find(draft_path.string()) != std::string::npos);
     CHECK(result.error.find("Recovery command:") == std::string::npos);
-    CHECK(result.error.find("select only intended changed fields") != std::string::npos);
+    CHECK(result.error.find("Minimal update request:") == std::string::npos);
+    CHECK(result.error.find("No complete minimal request is available") != std::string::npos);
     CHECK(std::filesystem::exists(draft_path.parent_path()));
     CHECK_FALSE(std::filesystem::exists(draft_path.parent_path() / "update-request.json"));
-    if (!missing) {
+    if (missing) {
+        CHECK(result.error.find("jobuctl.edit.missing_draft") != std::string::npos);
+        CHECK(result.error.find("Missing draft: " + draft_path.string()) != std::string::npos);
+        CHECK(result.error.find("Retained draft:") == std::string::npos);
+        CHECK(result.error.find("Correct the retained draft") == std::string::npos);
+        CHECK(result.error.find("Start a new interactive edit") != std::string::npos);
+        CHECK_FALSE(std::filesystem::exists(draft_path));
+        CHECK(std::filesystem::is_empty(draft_path.parent_path()));
+    }
+    else {
+        CHECK(result.error.find("Retained draft: " + draft_path.string()) != std::string::npos);
+        CHECK(result.error.find("select only intended changed fields") != std::string::npos);
         CHECK(read_text(draft_path) == bytes);
     }
     auto snapshot = peer.snapshot();

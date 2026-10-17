@@ -323,15 +323,16 @@ submitting the complete draft could replace an unchanged legacy payload.
 | Outcome | Files and next action |
 | --- | --- |
 | Success, no-op, or editor cancellation/launch failure | Clean known files and the empty directory |
-| Invalid, missing, or unsafe saved draft | Retain available evidence; correct the draft into a valid minimal strict JSON request before submitting |
+| Missing saved draft | Retain the directory and report the missing draft path; start a new interactive edit to recreate changes |
+| Invalid or unsafe saved draft | Retain available evidence; correct the draft into a valid minimal strict JSON request before submitting |
 | Failure saving a complete minimal request | Retain the draft; no update is sent and no ready recovery command is advertised |
 | Rejected or failed submission | Retain draft and minimal request; inspect the error before retrying |
 | Revision conflict | Fetch the current definition and manually reconcile; the saved request still has the old revision |
 | Unknown outcome | Inspect current server state before any retry; the update may already have succeeded |
 
-Recovery messages identify the retained directory/draft and, only when complete,
-the minimal request and a POSIX-shell-quoted command preserving socket and
-timeout. For example:
+Recovery messages identify the retained directory and label the draft path as
+retained or missing. Only a complete minimal request gets a path and a
+POSIX-shell-quoted command preserving socket and timeout. For example:
 
 ```sh
 'jobuctl' '--socket' '/private/jobud.sock' '--timeout' '5000' 'job' 'update' '--request-file' '/private/edit/update-request.json'
