@@ -729,6 +729,16 @@ TEST_CASE("Recovery preserves connection settings and the existing request-file 
     CHECK(invalid->instructions.find("strict JSON") != std::string::npos);
     CHECK(invalid->instructions.find("original job_id and expected_revision") != std::string::npos);
     CHECK(invalid->instructions.find("select only intended changed fields") != std::string::npos);
+
+    auto missing = format_job_edit_recovery(command, JobEditRecoveryReason::MissingDraft, paths);
+    REQUIRE(missing);
+    CHECK_FALSE(missing->retry_command);
+    CHECK_FALSE(missing->paths.request);
+    CHECK(missing->instructions.find("No complete minimal request is available") != std::string::npos);
+    CHECK(missing->instructions.find("The draft file is missing") != std::string::npos);
+    CHECK(missing->instructions.find("Start a new interactive edit") != std::string::npos);
+    CHECK(missing->instructions.find("Correct the retained draft") == std::string::npos);
+
     paths.request.reset();
     auto no_request = format_job_edit_recovery(command, JobEditRecoveryReason::SubmissionFailed, paths);
     REQUIRE(no_request);

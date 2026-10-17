@@ -14,6 +14,7 @@ namespace jb::jobuctl::detail {
 
 enum class JobEditRecoveryReason : std::uint8_t {
     InvalidDraft,
+    MissingDraft,
     SubmissionFailed,
     RevisionConflict,
     OutcomeUnknown
@@ -35,6 +36,7 @@ struct JobEditRecoveryAdvice {
 /// Preserves the resolved socket and timeout with the existing request-file syntax (no positional job ID).
 /// Only a complete minimal request gets a command. Conflict/unknown-outcome instructions require inspection
 /// and reconciliation before retry; invalid drafts are never advertised as ready-to-submit requests.
+/// A missing draft requires a new edit rather than correction of a retained file.
 [[nodiscard]] auto
 format_job_edit_recovery(Command const& command, JobEditRecoveryReason reason, JobEditArtifacts paths)
     -> jb::core::Result<JobEditRecoveryAdvice, jb::core::Error>;
