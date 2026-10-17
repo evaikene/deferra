@@ -37,6 +37,7 @@
 #include <fstream>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -331,7 +332,7 @@ public:
         return log;
     }
 
-    void control_info()
+    auto control(std::vector<std::string> arguments) -> std::string
     {
         Process                    client;
         std::optional<ProcessExit> result;
@@ -339,18 +340,19 @@ public:
         client.standard_output.connect(&app, [&](ByteBuffer const& bytes) { output.append(as_string_view(bytes)); });
         client.standard_error.connect(&app, [&](ByteBuffer const& bytes) { output.append(as_string_view(bytes)); });
         client.finished.connect(&app, [&](ProcessExit const& value) { result = value; });
-        REQUIRE(client.start({
-            .executable        = JOBUCTL_EXECUTABLE,
-            .arguments         = {"--socket", socket_path.string(), "system", "info"},
-            .timeout           = 5s,
-            .termination_grace = 0ms
-        }));
+        arguments.insert(arguments.begin(), {"--socket", socket_path.string()});
+        REQUIRE(client.start({.executable        = JOBUCTL_EXECUTABLE,
+                              .arguments         = std::move(arguments),
+                              .timeout           = 5s,
+                              .termination_grace = 0ms}));
         until([&] { return result.has_value(); });
         INFO(output);
         REQUIRE(result->kind == ProcessExitKind::Exited);
         REQUIRE(result->exit_code == 0);
-        REQUIRE(output.find("API version: 1.5") != std::string::npos);
+        return output;
     }
+
+    void control_info() { REQUIRE(control({"system", "info"}).find("API version: 1.5") != std::string::npos); }
 
     auto rpc(std::string_view method, JsonValue parameters) -> JsonValue
     {
@@ -544,6 +546,77 @@ void require_interrupted(CrashFixture& fixture, RecoveryRunFixture before, bool 
 }
 
 } // namespace
+
+TEST_CASE("operator history selects both failed and interrupted records before cursor paging",
+          "[jobud][usability][history][integration]")
+{
+    CrashFixture fixture;
+    auto         queue      = recovery_queue(recovery_id(1), QueueState::Suspended);
+    queue.history_retention = 0s;
+    fixture.storage.insert_queue(queue);
+
+    // Seed representative durable histories while the daemon is stopped. Suspension keeps the
+    // interleaved scheduled row stable; this scenario verifies querying, not interruption generation.
+    auto seed = [&](std::uint32_t suffix, RunState state, JobState job_state) {
+        auto job  = fixture.storage.make_job(recovery_id(suffix), queue.id, JobType::Http);
+        job.state = job_state;
+        fixture.storage.insert_job(job);
+        auto run = fixture.storage.make_run(recovery_id(suffix + 1), job, state);
+        fixture.storage.insert_run(run);
+        return run.run.id.to_string();
+    };
+    auto const succeeded   = seed(10, RunState::Succeeded, JobState::Succeeded);
+    auto const failed      = seed(20, RunState::Failed, JobState::Failed);
+    auto const scheduled   = seed(30, RunState::Scheduled, JobState::Active);
+    auto const interrupted = seed(40, RunState::Interrupted, JobState::Failed);
+    auto const cancelled   = seed(50, RunState::Cancelled, JobState::Cancelled);
+    fixture.start();
+
+    auto ids = [](JsonValue const& page) {
+        auto selected = std::set<std::string>{};
+        for (auto const& item : page.as_object().at("items").as_array()) {
+            CHECK(selected.insert(item.as_object().at("id").as_string()).second);
+        }
+        return selected;
+    };
+    auto const terminal = std::set<std::string>{succeeded, failed, interrupted, cancelled};
+    auto const failures = std::set<std::string>{failed, interrupted};
+    auto const all      = std::set<std::string>{succeeded, failed, scheduled, interrupted, cancelled};
+    CHECK(ids(json(fixture.control({"run", "list", "--json"}))) == terminal);
+    CHECK(ids(json(fixture.control({"run", "list", "--state", "failed", "--state", "interrupted", "--json"}))) ==
+          failures);
+    CHECK(ids(json(fixture.control({"run", "list", "--state", "failed", "--json"}))) == std::set<std::string>{failed});
+    CHECK(ids(json(fixture.control({"run", "list", "--state", "interrupted", "--json"}))) ==
+          std::set<std::string>{interrupted});
+    CHECK(ids(json(fixture.control({"run", "list", "--all", "--json"}))) == all);
+    CHECK(ids(fixture.rpc("run.list", json("{}"))) == all);
+    auto const path = fixture.storage.directory.path() / "unfiltered.json";
+    {
+        auto file = std::ofstream{path};
+        file << "{}";
+        file.close();
+        REQUIRE(file);
+    }
+    CHECK(ids(json(fixture.control({"run", "list", "--request-file", path.string(), "--json"}))) == all);
+
+    auto page =
+        json(fixture.control({"run", "list", "--state", "failed", "--state", "interrupted", "--limit", "1", "--json"}));
+    auto paged = std::set<std::string>{};
+    for (auto pages = std::size_t{0};; ++pages) {
+        REQUIRE(pages < failures.size());
+        auto const selected = ids(page);
+        REQUIRE(selected.size() == 1);
+        CHECK(failures.contains(*selected.begin()));
+        CHECK(paged.insert(*selected.begin()).second);
+        auto const& cursor = page.as_object().at("next_cursor");
+        if (cursor.is_null()) {
+            break;
+        }
+        // Cursor-only continuation must retain the initial union, including its interrupted member.
+        page = json(fixture.control({"run", "list", "--cursor", cursor.as_string(), "--json"}));
+    }
+    CHECK(paged == failures);
+}
 
 TEST_CASE("daemon crash recovers each runner under both policies and exhausted retries",
           "[jobud][recovery][integration]")
