@@ -1083,7 +1083,20 @@ add_executable(jobuctl-job-edit-test jobuctl-job-edit-test.cpp)
 target_link_libraries(jobuctl-job-edit-test PRIVATE jobuctl-private Catch2::Catch2WithMain)
 add_test(NAME jobuctl-job-edit-test COMMAND $<TARGET_FILE:jobuctl-job-edit-test>)
 
+add_executable(jobuctl-command-argv-test jobuctl-command-argv-test.cpp)
+target_link_libraries(jobuctl-command-argv-test PRIVATE jobuctl-private Catch2::Catch2WithMain)
+add_test(NAME jobuctl-command-argv-test COMMAND $<TARGET_FILE:jobuctl-command-argv-test>)
+
+add_executable(jobuctl-editor-command-test jobuctl-editor-command-test.cpp)
+target_link_libraries(jobuctl-editor-command-test PRIVATE jobuctl-private Catch2::Catch2WithMain)
+add_test(NAME jobuctl-editor-command-test COMMAND $<TARGET_FILE:jobuctl-editor-command-test>)
+
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
+    add_executable(jobuctl-editor-posix-test jobuctl-editor-posix-test.cpp)
+    target_link_libraries(jobuctl-editor-posix-test PRIVATE jobuctl-private Catch2::Catch2WithMain)
+    add_test(NAME jobuctl-editor-posix-test COMMAND $<TARGET_FILE:jobuctl-editor-posix-test>)
+    set_tests_properties(jobuctl-editor-posix-test PROPERTIES TIMEOUT 30)
+
     add_executable(jobuctl-job-edit-files-test jobuctl-job-edit-files-test.cpp support/temporary_directory.cpp)
     target_link_libraries(jobuctl-job-edit-files-test PRIVATE jobuctl-private Catch2::Catch2WithMain)
     add_test(NAME jobuctl-job-edit-files-test COMMAND $<TARGET_FILE:jobuctl-job-edit-files-test>)
