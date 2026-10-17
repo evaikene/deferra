@@ -145,6 +145,7 @@ constexpr std::array job_list{
     after,
 };
 constexpr std::array job_update{
+    value_option("editor", "COMMAND", "Editor override for bare interactive update; graphical editors must wait."),
     revision,
     value_option("name", "NAME", "Replace the job name; mutually exclusive with --clear-name."),
     flag("clear-name", "Remove the job name; mutually exclusive with --name."),
@@ -439,7 +440,8 @@ constexpr CommandSpec job_update_command{
     .operands         = "UUID",
     .maximum_operands = 1,
     .options          = job_update,
-    .rules      = "Require UUID, --revision, and at least one replacement field. Unspecified fields remain unchanged.",
+    .rules      = "Bare UUID opens an interactive draft. Flag updates require --revision and a replacement field. "
+                  "--editor is allowed only for interactive updates. Unspecified fields remain unchanged.",
     .example    = "jobuctl job update 00000000-0000-7000-8000-000000000001 --revision 1 --priority 2",
     .capability = "job.update",
     .build      = parse_job_command,

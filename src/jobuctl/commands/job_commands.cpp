@@ -602,6 +602,7 @@ auto parse_job_update(std::filesystem::path                socket_path,
 
     // The nested optional distinguishes an omitted name from an explicit --clear-name patch.
     auto revision        = std::optional<JobRevision>{};
+    auto editor          = std::optional<std::string>{};
     auto name            = std::optional<std::optional<std::string>>{};
     auto priority        = std::optional<std::int32_t>{};
     auto schedule        = std::optional<JobScheduleInput>{};
@@ -614,6 +615,13 @@ auto parse_job_update(std::filesystem::path                socket_path,
 
     for (auto index = std::size_t{0}; index < remaining.size(); ++index) {
         auto const& argument = remaining[index];
+        if (argument.name() == "editor" && argument.kind() == CommandLineArgumentKind::Option && !editor) {
+            if (!argument.value() || argument.value()->empty()) {
+                return parse_failure("--editor requires a nonempty command");
+            }
+            editor = std::string{*argument.value()};
+            continue;
+        }
         if (argument.name() == "clear-name" && argument.kind() == CommandLineArgumentKind::Option && argument.known() &&
             !argument.has_value() && !name_seen) {
             name.emplace(std::nullopt);
@@ -680,6 +688,18 @@ auto parse_job_update(std::filesystem::path                socket_path,
         return parse_failure("job update has an unknown or duplicate option");
     }
 
+    // Only the bare form opts into editing. An incomplete flag mutation must never fetch its own revision.
+    if (!revision && !name && !priority && !schedule && !timezone && attributes_json.empty()) {
+        return {
+            .command = Command{.socket_path = std::move(socket_path),
+                               .kind        = CommandKind::JobUpdate,
+                               .method      = "job.update",
+                               .request     = InteractiveJobUpdate{.job_id = *id, .editor = std::move(editor)}}
+        };
+    }
+    if (editor) {
+        return parse_failure("--editor is allowed only with a bare interactive job update");
+    }
     if (!revision) {
         return parse_failure("job update requires --revision");
     }

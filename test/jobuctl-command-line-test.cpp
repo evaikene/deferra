@@ -86,6 +86,60 @@ auto parse_cli_job_create(std::vector<std::string> options, std::string action =
 
 } // namespace
 
+TEST_CASE("jobuctl selects only bare job updates for interactive editing", "[jobuctl][parse][edit]")
+{
+    auto bare = parse({"job", "update", job_id, "--json", "--timeout", "1234", "--socket", "edit.sock"});
+    REQUIRE(bare.command);
+    CHECK(bare.command->kind == CommandKind::JobUpdate);
+    CHECK(bare.command->socket_path == "edit.sock");
+    CHECK(bare.command->timeout == std::chrono::milliseconds{1234});
+    CHECK(bare.command->json);
+    auto const& edit = std::get<InteractiveJobUpdate>(bare.command->request);
+    CHECK(edit.job_id.to_string() == job_id);
+    CHECK_FALSE(edit.editor);
+
+    auto override = parse({"job", "update", job_id, "--editor", "'editor path' --wait"});
+    REQUIRE(override.command);
+    CHECK(std::get<InteractiveJobUpdate>(override.command->request).editor == "'editor path' --wait");
+
+    auto mutation = parse({"job", "update", job_id, "--revision", "7", "--priority", "50"});
+    REQUIRE(mutation.command);
+    CHECK(std::get<UpdateJobRequest>(mutation.command->request).expected_revision == 7);
+    CHECK(parse({"job", "update", job_id, "--priority", "50"}).error == "job update requires --revision");
+    CHECK(parse({"job", "update", job_id, "--revision", "7"}).error ==
+          "job update requires at least one mutable field");
+
+    for (auto const& suffix : std::vector<std::vector<std::string>>{
+             {"--editor", ""},
+             {"--editor", "one", "--editor", "two"},
+             {"--editor", "one", "--priority", "50"},
+             {"--editor", "one", "--revision", "7"},
+             {"--editor", "one", "--request-file", "input.json"}
+    }) {
+        auto arguments = std::vector<std::string>{"job", "update", job_id};
+        arguments.insert(arguments.end(), suffix.begin(), suffix.end());
+        CHECK_FALSE(parse(std::move(arguments)).command);
+    }
+    auto file = parse({"job", "update", "--request-file", "-"});
+    REQUIRE(file.command);
+    CHECK(file.command->request_file == "-");
+    CHECK_FALSE(parse({"job", "update", job_id, "--request-file", "input.json"}).command);
+
+    // Help resolves before malformed editor configuration is interpreted or any terminal is inspected.
+    auto help = parse_action({"job", "update", "--help", "--editor", "'unterminated"});
+    REQUIRE(help.action);
+    CHECK(std::holds_alternative<HelpCommand>(*help.action));
+
+    auto literal = parse_cli_job_create({"--arg", "--editor"});
+    REQUIRE(literal.command);
+    CHECK(std::get<CreateJobRequest>(literal.command->request)
+              .payload.as_object()
+              .at("arguments")
+              .as_array()
+              .front()
+              .as_string() == "--editor");
+}
+
 TEST_CASE("jobuctl parser retains socket selection and command family errors", "[jobuctl][parse]")
 {
     auto parsed = parse({"--socket", "/tmp/custom.sock", "system", "info"});

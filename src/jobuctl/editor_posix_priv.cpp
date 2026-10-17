@@ -299,6 +299,26 @@ auto spawn_and_wait(std::span<char* const> arguments, SpawnResources const& reso
 
 } // namespace
 
+auto check_editor_terminal() -> Completion
+{
+    auto const required = [] {
+        return Completion::failure({
+            .category = ErrorCategory::InvalidArgument,
+            .code     = "jobuctl.edit.terminal_required",
+            .message  = "Interactive update requires terminal stdin/stderr and a foreground controlling terminal. "
+                        "Use explicit fields with --revision, or job update --request-file FILE.",
+        });
+    };
+    if (::isatty(STDIN_FILENO) != 1 || ::isatty(STDERR_FILENO) != 1) {
+        return required();
+    }
+    auto const terminal = Descriptor{open_foreground_terminal()};
+    if (terminal.get() < 0) {
+        return required();
+    }
+    return Completion::success();
+}
+
 auto launch_editor(std::span<std::string const> command, std::filesystem::path const& draft, EditorPosixIo io)
     -> Completion
 {

@@ -28,6 +28,10 @@ struct EditorPosixIo {
 using EditorLauncher =
     std::function<jb::core::Result<void, jb::core::Error>(std::span<std::string const>, std::filesystem::path const&)>;
 
+/// Requires terminal stdin/stderr and an openable foreground controlling terminal before any network work.
+/// Stdout may be redirected. Opens and closes only a temporary terminal descriptor; never launches a child.
+[[nodiscard]] auto check_editor_terminal() -> jb::core::Result<void, jb::core::Error>;
+
 /// Appends the absolute draft path as one argument and synchronously launches/waits for exactly one editor child.
 /// Child stdio uses the foreground controlling terminal; the child inherits the environment and parent's group.
 /// Parent SIGINT/SIGQUIT dispositions and SIGCHLD mask changes are scoped; child INT/QUIT are default and unblocked.

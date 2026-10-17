@@ -42,7 +42,8 @@ auto format_job_edit_recovery(Command const& command, JobEditRecoveryReason reas
         advice.paths.request.reset();
         advice.instructions =
             "No complete minimal request is available. Correct the retained draft into a valid update "
-            "request before using request-file mode. That mode sends every explicitly present field; "
+            "request before using request-file mode, removing any jobu: instruction lines. "
+            "That mode requires strict JSON and sends every explicitly present field; "
             "it does not repeat the interactive diff.";
         return Result<JobEditRecoveryAdvice, Error>::success(std::move(advice));
     }
