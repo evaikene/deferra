@@ -2,6 +2,7 @@
 #include "job_edit_recovery_priv.hpp"
 
 #include "attribute_registry.hpp"
+#include "command_argv_priv.hpp"
 #include "command_line_priv.hpp"
 #include "framing.hpp"
 #include "input_priv.hpp"
@@ -702,6 +703,22 @@ TEST_CASE("Recovery preserves connection settings and the existing request-file 
         if (reason == JobEditRecoveryReason::OutcomeUnknown) {
             CHECK(advice->instructions.find("Inspect current server state before any retry") != std::string::npos);
         }
+
+        // Feed the displayed quoting through the real CLI parser without executing it.
+        auto arguments = parse_command_argv(*advice->retry_command);
+        REQUIRE(arguments);
+        auto argv = std::vector<char*>{};
+        for (auto& argument : *arguments) {
+            argv.push_back(argument.data());
+        }
+        StandardAttributeRegistry registry;
+        auto parsed_command = parse_command_line(static_cast<int>(argv.size()), argv.data(), registry);
+        REQUIRE(parsed_command.action);
+        auto const& recovered = std::get<Command>(*parsed_command.action);
+        CHECK(recovered.kind == CommandKind::JobUpdate);
+        CHECK(recovered.socket_path == command.socket_path);
+        CHECK(recovered.timeout == command.timeout);
+        CHECK(recovered.request_file == paths.request);
     }
     auto invalid = format_job_edit_recovery(command, JobEditRecoveryReason::InvalidDraft, paths);
     REQUIRE(invalid);
@@ -710,30 +727,10 @@ TEST_CASE("Recovery preserves connection settings and the existing request-file 
     CHECK(invalid->instructions.find("every explicitly present field") != std::string::npos);
     CHECK(invalid->instructions.find("removing any jobu: instruction lines") != std::string::npos);
     CHECK(invalid->instructions.find("strict JSON") != std::string::npos);
+    CHECK(invalid->instructions.find("original job_id and expected_revision") != std::string::npos);
+    CHECK(invalid->instructions.find("select only intended changed fields") != std::string::npos);
     paths.request.reset();
     auto no_request = format_job_edit_recovery(command, JobEditRecoveryReason::SubmissionFailed, paths);
     REQUIRE(no_request);
     CHECK_FALSE(no_request->retry_command);
-
-    auto arguments = std::vector<std::string>{"jobuctl",
-                                              "--socket",
-                                              command.socket_path.string(),
-                                              "--timeout",
-                                              "12345",
-                                              "job",
-                                              "update",
-                                              "--request-file",
-                                              "/tmp/edit's directory/update-request.json"};
-    auto argv      = std::vector<char*>{};
-    for (auto& argument : arguments) {
-        argv.push_back(argument.data());
-    }
-    StandardAttributeRegistry registry;
-    auto                      parsed_command = parse_command_line(static_cast<int>(argv.size()), argv.data(), registry);
-    REQUIRE(parsed_command.action);
-    auto const& recovered = std::get<Command>(*parsed_command.action);
-    CHECK(recovered.kind == CommandKind::JobUpdate);
-    CHECK(recovered.socket_path == command.socket_path);
-    CHECK(recovered.timeout == command.timeout);
-    CHECK(recovered.request_file == "/tmp/edit's directory/update-request.json");
 }

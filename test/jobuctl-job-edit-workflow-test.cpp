@@ -1,10 +1,13 @@
 #include "job_edit_workflow_priv.hpp"
 
 #include "application.hpp"
+#include "command_argv_priv.hpp"
+#include "command_line_priv.hpp"
 #include "database.hpp"
 #include "event_loop.hpp"
 #include "event_thread.hpp"
 #include "framing.hpp"
+#include "input_priv.hpp"
 #include "job_edit_priv.hpp"
 #include "json.hpp"
 #include "local_server.hpp"
@@ -419,6 +422,29 @@ auto run_workflow(Command command, JobEditWorkflowIo io) -> WorkflowResult
     return {.code = code, .output = std::move(printed), .error = std::move(errors)};
 }
 
+/// Decode the actual displayed command and load its request, without executing a shell or another mutation.
+auto load_recovery_request(std::string_view diagnostic, StandardAttributeRegistry const& registry) -> Command
+{
+    constexpr auto prefix   = std::string_view{"Recovery command: "};
+    auto const     position = diagnostic.find(prefix);
+    REQUIRE(position != std::string_view::npos);
+    diagnostic.remove_prefix(position + prefix.size());
+    auto arguments = parse_command_argv(diagnostic.substr(0, diagnostic.find('\n')));
+    REQUIRE(arguments);
+    auto argv = std::vector<char*>{};
+    for (auto& argument : *arguments) {
+        argv.push_back(argument.data());
+    }
+
+    auto parsed_command = parse_command_line(static_cast<int>(argv.size()), argv.data(), registry);
+    REQUIRE(parsed_command.action);
+    REQUIRE(std::holds_alternative<Command>(*parsed_command.action));
+    auto command = std::get<Command>(std::move(*parsed_command.action));
+    REQUIRE(command.kind == CommandKind::JobUpdate);
+    REQUIRE(load_request_file(command, registry));
+    return command;
+}
+
 auto test_io(std::filesystem::path const& parent, EditorLauncher launch) -> JobEditWorkflowIo
 {
     return {.check_terminal   = [] { return Result<void, Error>::success(); },
@@ -470,6 +496,7 @@ TEST_CASE("interactive update uses two scoped sessions and submits only the edit
                                    return Result<void, Error>::success();
                                }));
     CHECK(result.code == 0);
+    CHECK(result.error.empty());
     CHECK(launches == 1);
     CHECK_FALSE(std::filesystem::exists(draft_path.parent_path()));
     auto snapshot = peer.snapshot();
@@ -495,8 +522,15 @@ TEST_CASE("interactive no-op cleans files without an update or stdout", "[jobuct
 {
     ServicePeer                  peer;
     jb::test::TemporaryDirectory files;
+    auto                         command    = edit_command(peer);
     auto                         draft_path = std::filesystem::path{};
-    auto result = run_workflow(edit_command(peer), test_io(files.path(), [&](auto, auto const& draft) {
+    SECTION("JSON mode")
+    {}
+    SECTION("human mode")
+    {
+        command.json = false;
+    }
+    auto result = run_workflow(command, test_io(files.path(), [&](auto, auto const& draft) {
                                    draft_path = draft;
                                    return Result<void, Error>::success();
                                }));
@@ -554,17 +588,32 @@ TEST_CASE("invalid saved drafts are retained unchanged without mutation", "[jobu
     auto                         draft_path = std::filesystem::path{};
     auto                         bytes      = std::string{};
     auto                         missing    = false;
+    auto const                   sensitive  = std::string{"literal-sensitive-edit-value"};
     auto result = run_workflow(edit_command(peer), test_io(files.path(), [&](auto, auto const& draft) {
                                    draft_path = draft;
                                    SECTION("invalid JSON")
                                    {
-                                       write_text(draft, "{sensitive-invalid-json");
+                                       write_text(draft, "{" + sensitive);
                                    }
                                    SECTION("invalid revision")
                                    {
                                        auto value = read_draft(draft);
                                        std::get<JsonValue::Object>(value.data).at("expected_revision") =
                                            JsonValue{.data = std::uint64_t{2}};
+                                       write_text(draft, serialized(value));
+                                   }
+                                   SECTION("invalid attribute value")
+                                   {
+                                       auto  value      = read_draft(draft);
+                                       auto& attributes = std::get<JsonValue::Object>(
+                                           std::get<JsonValue::Object>(value.data).at("attributes").data);
+                                       attributes.at("retry.max_attempts") = JsonValue{.data = sensitive};
+                                       write_text(draft, serialized(value));
+                                   }
+                                   SECTION("unknown property containing sensitive input")
+                                   {
+                                       auto value = read_draft(draft);
+                                       std::get<JsonValue::Object>(value.data).emplace(sensitive, JsonValue{});
                                        write_text(draft, serialized(value));
                                    }
                                    SECTION("empty file")
@@ -583,9 +632,10 @@ TEST_CASE("invalid saved drafts are retained unchanged without mutation", "[jobu
                                }));
     CHECK(result.code == 2);
     CHECK(result.output.empty());
-    CHECK(result.error.find("sensitive-invalid-json") == std::string::npos);
+    CHECK(result.error.find(sensitive) == std::string::npos);
     CHECK(result.error.find(draft_path.string()) != std::string::npos);
     CHECK(result.error.find("Recovery command:") == std::string::npos);
+    CHECK(result.error.find("select only intended changed fields") != std::string::npos);
     CHECK(std::filesystem::exists(draft_path.parent_path()));
     CHECK_FALSE(std::filesystem::exists(draft_path.parent_path() / "update-request.json"));
     if (!missing) {
@@ -639,36 +689,66 @@ TEST_CASE("real revision conflict preserves another edit and the original minima
 {
     ServicePeer                  peer;
     jb::test::TemporaryDirectory files;
-    auto                         draft_path = std::filesystem::path{};
-    auto result = run_workflow(edit_command(peer), test_io(files.path(), [&](auto, auto const& draft) {
-                                   draft_path = draft;
-                                   edit_priority(draft);
-                                   // Another operator commits while this draft still holds revision 1. No workflow
-                                   // refresh is permitted.
-                                   peer.synchronize([](PeerState& state) {
-                                       auto changed = state.service->update_job(
-                                           {.job_id = state.job.id, .expected_revision = 1, .priority = 99});
-                                       if (!changed) {
-                                           state.error = changed.error().message;
-                                       }
-                                   });
-                                   return Result<void, Error>::success();
-                               }));
+    auto const                   parent = files.path() / "operator's $HOME; edit files";
+    REQUIRE(std::filesystem::create_directory(parent));
+    auto       command    = edit_command(peer);
+    auto       draft_path = std::filesystem::path{};
+    auto const sensitive  = std::string{"literal-sensitive-payload-value"};
+    auto const original   = peer.snapshot().job;
+    SECTION("JSON error and recovery")
+    {}
+    SECTION("human error and recovery")
+    {
+        command.json = false;
+    }
+    auto result = run_workflow(
+        command,
+        test_io(parent, [&](auto, auto const& draft) {
+            draft_path = draft;
+            edit_priority(draft);
+            auto  value   = read_draft(draft);
+            auto& payload = std::get<JsonValue::Object>(std::get<JsonValue::Object>(value.data).at("payload").data);
+            payload.emplace("arguments", JsonValue{.data = JsonValue::Array{JsonValue{.data = sensitive}}});
+            write_text(draft, serialized(value));
+            // Another operator commits while this draft still holds revision 1. No workflow
+            // refresh is permitted.
+            peer.synchronize([](PeerState& state) {
+                auto changed =
+                    state.service->update_job({.job_id = state.job.id, .expected_revision = 1, .priority = 99});
+                if (!changed) {
+                    state.error = changed.error().message;
+                }
+            });
+            return Result<void, Error>::success();
+        }));
     CHECK(result.code == 1);
     CHECK(result.output.empty());
     CHECK(result.error.find("jobu.job.revision_conflict") != std::string::npos);
     CHECK(result.error.find("manually reconcile") != std::string::npos);
     CHECK(result.error.find("old revision") != std::string::npos);
+    CHECK(result.error.find(sensitive) == std::string::npos);
     auto snapshot = peer.snapshot();
     check_methods(snapshot, true);
     CHECK(snapshot.job.revision == 2);
     CHECK(snapshot.job.priority == 99);
+    CHECK(snapshot.job.payload == original.payload);
     auto request = parsed(read_text(draft_path.parent_path() / "update-request.json"));
     CHECK(request == snapshot.updates.front());
-    CHECK(request.as_object().size() == 3);
+    CHECK(request.as_object().size() == 4);
     CHECK(request.as_object().at("expected_revision").as_uint() == 1);
     CHECK(request.as_object().at("priority").as_uint() == 50);
     CHECK(std::filesystem::exists(draft_path));
+
+    StandardAttributeRegistry registry;
+    auto                      recovered = load_recovery_request(result.error, registry);
+    CHECK(recovered.socket_path == command.socket_path);
+    CHECK(recovered.timeout == command.timeout);
+    auto outgoing = update_job_request_to_json(std::get<UpdateJobRequest>(recovered.request), registry);
+    REQUIRE(outgoing);
+    // The codec uses signed priority, while parsing its nonnegative JSON token produces unsigned storage.
+    CHECK(serialized(*outgoing) == serialized(request));
+    CHECK(read_text(*recovered.request_file).find(sensitive) != std::string::npos);
+    CHECK(peer.snapshot().methods == snapshot.methods);
 }
 
 TEST_CASE("failed submission retains draft and minimal request including uncertain outcomes",
@@ -682,6 +762,7 @@ TEST_CASE("failed submission retains draft and minimal request including uncerta
     auto                         outcome_unknown   = false;
     auto                         refusal           = false;
     auto                         remote_failure    = false;
+    auto const                   sensitive         = std::string{"literal-sensitive-payload-value"};
     SECTION("connection refused before submission")
     {
         refusal = true;
@@ -705,12 +786,15 @@ TEST_CASE("failed submission retains draft and minimal request including uncerta
     auto result = run_workflow(edit_command(peer), test_io(files.path(), [&](auto, auto const& draft) {
                                    draft_path = draft;
                                    edit_priority(draft);
+                                   auto  value   = read_draft(draft);
+                                   auto& payload = std::get<JsonValue::Object>(
+                                       std::get<JsonValue::Object>(value.data).at("payload").data);
+                                   payload.emplace("arguments",
+                                                   JsonValue{.data = JsonValue::Array{JsonValue{.data = sensitive}}});
                                    if (remote_failure) {
-                                       auto value = read_draft(draft);
-                                       std::get<JsonValue::Object>(value.data).at("payload") =
-                                           parsed(R"({"command":""})");
-                                       write_text(draft, serialized(value));
+                                       payload.at("command") = JsonValue{.data = std::string{}};
                                    }
+                                   write_text(draft, serialized(value));
                                    if (refusal) {
                                        peer.synchronize([](PeerState& state) { state.listener.close(); });
                                    }
@@ -720,6 +804,7 @@ TEST_CASE("failed submission retains draft and minimal request including uncerta
     CHECK(result.output.empty());
     CHECK(result.error.find("Minimal update request:") != std::string::npos);
     CHECK(result.error.find("Recovery command:") != std::string::npos);
+    CHECK(result.error.find(sensitive) == std::string::npos);
     if (outcome_unknown) {
         CHECK(result.error.find("\"outcome_unknown\":true") != std::string::npos);
         CHECK(result.error.find("Inspect current server state before any retry") != std::string::npos);
@@ -731,11 +816,17 @@ TEST_CASE("failed submission retains draft and minimal request including uncerta
     auto request = parsed(read_text(draft_path.parent_path() / "update-request.json"));
     CHECK(request.as_object().at("expected_revision").as_uint() == 1);
     CHECK(request.as_object().at("priority").as_uint() == 50);
-    CHECK(request.as_object().contains("payload") == remote_failure);
+    CHECK(request.as_object().contains("payload"));
     CHECK(std::filesystem::exists(draft_path));
     if (!refusal) {
         CHECK(request == snapshot.updates.front());
     }
+    StandardAttributeRegistry registry;
+    auto                      recovered = load_recovery_request(result.error, registry);
+    auto outgoing = update_job_request_to_json(std::get<UpdateJobRequest>(recovered.request), registry);
+    REQUIRE(outgoing);
+    CHECK(serialized(*outgoing) == serialized(request));
+    CHECK(peer.snapshot().methods == snapshot.methods);
 }
 
 TEST_CASE("terminal and editor configuration failures precede fetching", "[jobuctl][edit][workflow]")
@@ -798,17 +889,43 @@ TEST_CASE("cleanup preserves unexpected editor backups and reports the retained 
     ServicePeer                  peer;
     jb::test::TemporaryDirectory files;
     auto                         draft_path = std::filesystem::path{};
+    auto                         changed    = false;
+    SECTION("no-op cleanup")
+    {}
+    SECTION("cleanup after a committed update")
+    {
+        changed = true;
+    }
     auto result = run_workflow(edit_command(peer), test_io(files.path(), [&](auto, auto const& draft) {
                                    draft_path = draft;
+                                   if (changed) {
+                                       edit_priority(draft);
+                                   }
                                    write_text(draft.parent_path() / "editor.backup", "backup");
                                    return Result<void, Error>::success();
                                }));
     CHECK(result.code == 3);
-    CHECK(result.output.empty());
+    if (changed) {
+        auto reply = parsed(result.output);
+        CHECK(reply.as_object().at("revision").as_uint() == 2);
+        CHECK(reply.as_object().at("priority").as_uint() == 50);
+    }
+    else {
+        CHECK(result.output.empty());
+    }
+    auto const error_start = result.error.find("{\"error\":");
+    REQUIRE(error_start != std::string::npos);
+    auto error =
+        parsed(std::string_view{result.error}.substr(error_start, result.error.find('\n', error_start) - error_start));
+    CHECK(error.as_object().at("error").as_object().at("code").as_string() == "jobuctl.edit.cleanup_failed");
     CHECK(result.error.find("Retained edit directory:") != std::string::npos);
     CHECK(std::filesystem::exists(draft_path.parent_path() / "editor.backup"));
     CHECK_FALSE(std::filesystem::exists(draft_path));
-    check_methods(peer.snapshot(), false);
+    CHECK_FALSE(std::filesystem::exists(draft_path.parent_path() / "update-request.json"));
+    auto snapshot = peer.snapshot();
+    check_methods(snapshot, changed);
+    CHECK(snapshot.job.revision == (changed ? 2 : 1));
+    CHECK(snapshot.job.priority == (changed ? 50 : 0));
 }
 
 TEST_CASE("failure to save the minimal request prevents submission and preserves the draft",

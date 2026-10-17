@@ -45,8 +45,11 @@ constexpr std::array globals{
     value_option("socket",
                  "PATH",
                  "Override the compiled daemon socket default. May precede or follow the command path."),
-    flag("json", "Print one compact JSON result; errors use one JSON object on standard error."),
-    value_option("timeout", "MS", "Overall command deadline in positive milliseconds; default: 5000."),
+    flag("json", "Print one compact JSON result; errors use JSON on stderr. Interactive notices remain human text."),
+    value_option("timeout",
+                 "MS",
+                 "Overall network deadline in positive milliseconds; default: 5000. Interactive fetch/submit each "
+                 "get this budget; editor time is excluded."),
     value_option("request-file", "FILE", "Read complete JSON params from FILE, or - for standard input."),
     flag("help", "Show local help without contacting a daemon.", 'h'),
     flag("version", "Show the local executable version (root only)."),
@@ -146,7 +149,7 @@ constexpr std::array job_list{
 };
 constexpr std::array job_update{
     value_option("editor", "COMMAND", "Editor override for bare interactive update; graphical editors must wait."),
-    revision,
+    value_option("revision", "N", "Required current revision for flag updates; interactive editing captures it."),
     value_option("name", "NAME", "Replace the job name; mutually exclusive with --clear-name."),
     flag("clear-name", "Remove the job name; mutually exclusive with --name."),
     priority,
@@ -440,11 +443,22 @@ constexpr CommandSpec job_update_command{
     .operands         = "UUID",
     .maximum_operands = 1,
     .options          = job_update,
-    .rules      = "Bare UUID opens an interactive draft. Flag updates require --revision and a replacement field. "
-                  "--editor is allowed only for interactive updates. Unspecified fields remain unchanged.",
-    .example    = "jobuctl job update 00000000-0000-7000-8000-000000000001 --revision 1 --priority 2",
-    .capability = "job.update",
-    .build      = parse_job_command,
+    .rules            = "Bare UUID opens an interactive draft with jobu: instruction lines. Keep job_id and "
+                        "expected_revision unchanged; only effective changes are submitted. No changes means no update.\n"
+                        "Interactive editing requires terminal stdin/stderr and a foreground controlling terminal; "
+                        "stdout may be redirected. Fetch and submission each get a full --timeout.\n"
+                        "Editor precedence: --editor, nonempty VISUAL, nonempty EDITOR, then vi. Commands are parsed "
+                        "without shell evaluation; graphical editors must wait (for example code --wait). "
+                        "--editor is allowed only for interactive updates.\n"
+                        "Flag updates require --revision and a replacement field. Unspecified fields remain unchanged. "
+                        "Use job update --request-file FILE without a positional UUID for strict JSON params.\n"
+                        "Invalid drafts and failed submissions retain recovery files. Conflicts require manual "
+                        "reconciliation; inspect server state before retrying an unknown outcome.",
+    .example          = "jobuctl job update 00000000-0000-7000-8000-000000000001\n"
+                        "  jobuctl job update 00000000-0000-7000-8000-000000000001 --revision 1 --priority 2\n"
+                        "  jobuctl job update --request-file update-request.json",
+    .capability       = "job.update",
+    .build            = parse_job_command,
 };
 
 constexpr CommandSpec job_suspend_command{

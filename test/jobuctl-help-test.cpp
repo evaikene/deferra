@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <poll.h>
 #include <string>
 #include <sys/stat.h>
@@ -280,6 +281,95 @@ TEST_CASE("jobuctl run list help explains terminal history without opening suppl
                              "cursor-only continuation"}) {
         CAPTURE(text);
         CHECK(result.out.find(text) != std::string::npos);
+    }
+}
+
+TEST_CASE("jobuctl interactive update help precedes input terminal and editor processing", "[jobuctl][help][edit]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   fifo = directory.path() / "unread-edit-input";
+    REQUIRE(::mkfifo(fifo.c_str(), 0600) == 0);
+
+    for (auto const blocked : {false, true}) {
+        for (auto const& arguments : std::vector<std::vector<std::string>>{
+                 {"job", "update", "--socket", fifo.string(), "--editor", "'unterminated", "--help"},
+                 {"job", "update", "--socket", fifo.string(), "--request-file", fifo.string(), "--json", "--help"},
+                 {"job", "update", "--request-file", (directory.path() / "missing.json").string(), "--help"}
+        }) {
+            CAPTURE(blocked, arguments);
+            auto result = run(arguments, blocked);
+            CHECK(result.code == 0);
+            CHECK(result.err.empty());
+            for (auto const* text : {"Bare UUID opens an interactive draft",
+                                     "jobu:",
+                                     "expected_revision unchanged",
+                                     "No changes means no update",
+                                     "terminal stdin/stderr",
+                                     "stdout may be redirected",
+                                     "full --timeout",
+                                     "--editor, nonempty VISUAL, nonempty EDITOR, then vi",
+                                     "without shell evaluation",
+                                     "code --wait",
+                                     "Flag updates require --revision",
+                                     "without a positional UUID",
+                                     "manual reconciliation",
+                                     "unknown outcome"}) {
+                CAPTURE(text);
+                CHECK(result.out.find(text) != std::string::npos);
+            }
+        }
+    }
+}
+
+TEST_CASE("jobuctl refuses bare nonterminal updates but preserves scripted update modes", "[jobuctl][edit]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   endpoint = directory.path() / "missing.sock";
+    auto const                   id       = std::string{"00000000-0000-7000-8000-000000000001"};
+    auto const                   request  = directory.path() / "update.json";
+    {
+        auto file = std::ofstream{request};
+        REQUIRE(file);
+        file << R"({"job_id":")" << id << R"(","expected_revision":7,"priority":50})";
+        file.close();
+        REQUIRE(file);
+    }
+
+    for (auto const blocked : {false, true}) {
+        auto bare =
+            run({"--socket", endpoint.string(), "job", "update", id, "--editor", "'unterminated", "--json"}, blocked);
+        CHECK(bare.code == 2);
+        CHECK(bare.out.empty());
+        auto error = jb::core::parse_json(bare.err);
+        REQUIRE(error);
+        auto const& fields = error->as_object().at("error").as_object();
+        CHECK(fields.at("code").as_string() == "jobuctl.edit.terminal_required");
+        CHECK(fields.at("message").as_string().find("--revision") != std::string::npos);
+        CHECK(fields.at("message").as_string().find("--request-file FILE") != std::string::npos);
+
+        auto missing_revision = run({"job", "update", id, "--priority", "50"}, blocked);
+        CHECK(missing_revision.code == 2);
+        CHECK(missing_revision.out.empty());
+        CHECK(missing_revision.err.find("requires --revision") != std::string::npos);
+
+        // Valid noninteractive requests reach connection handling without a TTY or an editor.
+        for (auto arguments : std::vector<std::vector<std::string>>{
+                 {"job", "update", id, "--revision", "7", "--priority", "50"},
+                 {"job", "update", "--request-file", request.string()}
+        }) {
+            arguments.insert(arguments.end(), {"--socket", endpoint.string(), "--json"});
+            auto result = run(arguments, blocked);
+            CHECK(result.code == 3);
+            CHECK(result.out.empty());
+            auto failure = jb::core::parse_json(result.err);
+            REQUIRE(failure);
+            CHECK(failure->as_object().at("error").as_object().at("code").as_string() == "jobuctl.connection_failed");
+        }
+
+        auto mixed = run({"job", "update", id, "--request-file", request.string()}, blocked);
+        CHECK(mixed.code == 2);
+        CHECK(mixed.out.empty());
+        CHECK(mixed.err.find("Usage:\n") != std::string::npos);
     }
 }
 
