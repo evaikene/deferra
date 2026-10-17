@@ -14,6 +14,7 @@
 #include "management_json.hpp"
 #include "session_priv.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
+#include "support/fake_event_loop_backend.hpp"
 #include "support/temporary_directory.hpp"
 #include "system_info.hpp"
 #include "thread_context.hpp"
@@ -28,10 +29,12 @@
 #include <cstdio> // IWYU pragma: keep for stdout/stderr macros
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <latch>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -113,9 +116,15 @@ enum class PeerAction : std::uint8_t {
 };
 
 struct PeerStep {
-    std::string method;
-    JsonValue   value;
-    PeerAction  action{PeerAction::Reply};
+    std::string              method;
+    JsonValue                value;
+    PeerAction               action{PeerAction::Reply};
+    std::optional<JsonValue> params;
+};
+
+struct RequestObservation {
+    EventLoop*                              loop;
+    std::function<void(std::string const&)> observe;
 };
 
 auto handshake() -> PeerStep
@@ -127,7 +136,8 @@ auto handshake() -> PeerStep
                            "job.get", "queue.list",
                            "queue.delete", "queue.suspend",
                            "queue.get", "run.cancel",
-                           "run.get", "attempt.output"}
+                           "run.get", "attempt.list",
+                           "attempt.get", "attempt.output"}
     };
     return {.method = "system.info", .value = system_info_to_json(info)};
 }
@@ -136,8 +146,9 @@ auto handshake() -> PeerStep
 /// Readiness and join synchronize all access to worker-owned state. No timing sleeps or worker assertions.
 class ScriptedPeer {
 public:
-    explicit ScriptedPeer(std::vector<PeerStep> steps)
+    explicit ScriptedPeer(std::vector<PeerStep> steps, std::optional<RequestObservation> observation = std::nullopt)
         : _steps{std::move(steps)}
+        , _observation{std::move(observation)}
     {
         REQUIRE(_thread.start());
         // about_to_start precedes EventLoop::run() adopting this thread; perform I/O from a loop task instead.
@@ -217,50 +228,82 @@ private:
                 _error = "unexpected method";
                 return;
             }
-            if (step.action == PeerAction::Silence) {
-                continue;
-            }
-            if (step.action == PeerAction::Disconnect) {
-                _socket->abort();
-                return;
+            if (step.params) {
+                // Compare the wire shape, independent of in-memory signed/unsigned integer alternatives.
+                auto expected = serialize_json(*step.params);
+                auto actual   = serialize_json(fields.at("params"));
+                if (!expected || !actual || *expected != *actual) {
+                    _error = "unexpected request parameters for " + step.method;
+                    return;
+                }
             }
 
-            auto response = JsonValue{
-                .data = JsonValue::Object{{"jsonrpc", JsonValue{.data = std::string{"2.0"}}},
-                                          {"id", fields.at("id")},
-                                          {step.action == PeerAction::RemoteError ? "error" : "result", step.value}}
-            };
-            auto encoded = serialize_json(response);
-            if (!encoded) {
-                _error = "unserializable response";
-                return;
+            // Gate a response through an owner-loop observation when testing timer continuity. All peer I/O
+            // still runs on its worker, and the observing task completes before the next request can arrive.
+            auto respond = [this, id = fields.at("id"), step] { send_response(id, step); };
+            if (_observation) {
+                if (!_observation->loop->post([this, method = step.method, respond = std::move(respond)] {
+                        _observation->observe(method);
+                        if (!_thread.as_event_loop()->post(respond)) {
+                            std::terminate();
+                        }
+                    })) {
+                    _error = "unable to post request observation";
+                    return;
+                }
             }
-            auto frame = frame_message(*encoded);
-            if (!frame) {
-                _error = "unframeable response";
-                return;
-            }
-            auto bytes = *frame;
-            if (step.action == PeerAction::Duplicate) {
-                bytes.insert(bytes.end(), frame->begin(), frame->end());
-            }
-            if (_socket->write(bytes) != bytes.size()) {
-                _error = "response write failed";
-                return;
+            else {
+                respond();
             }
         }
     }
 
-    jb::test::TemporaryDirectory _directory;
-    std::vector<PeerStep>        _steps;
-    std::size_t                  _next_step{0};
-    std::string                  _error;
-    StreamFramer                 _framer;
-    std::unique_ptr<LocalServer> _listener;
-    std::unique_ptr<LocalSocket> _socket;
-    std::latch                   _ready{1};
-    bool                         _stopped{false};
-    EventThread                  _thread;
+    void send_response(JsonValue const& id, PeerStep const& step)
+    {
+        if (step.action == PeerAction::Silence) {
+            return;
+        }
+        if (step.action == PeerAction::Disconnect) {
+            _socket->abort();
+            return;
+        }
+
+        auto response = JsonValue{
+            .data = JsonValue::Object{{"jsonrpc", JsonValue{.data = std::string{"2.0"}}},
+                                      {"id", id},
+                                      {step.action == PeerAction::RemoteError ? "error" : "result", step.value}}
+        };
+        auto encoded = serialize_json(response);
+        if (!encoded) {
+            _error = "unserializable response";
+            return;
+        }
+        auto frame = frame_message(*encoded);
+        if (!frame) {
+            _error = "unframeable response";
+            return;
+        }
+        auto bytes = *frame;
+        if (step.action == PeerAction::Duplicate) {
+            bytes.insert(bytes.end(), frame->begin(), frame->end());
+        }
+        if (_socket->write(bytes) != bytes.size()) {
+            _error = "response write failed";
+            return;
+        }
+    }
+
+    jb::test::TemporaryDirectory      _directory;
+    std::vector<PeerStep>             _steps;
+    std::optional<RequestObservation> _observation;
+    std::size_t                       _next_step{0};
+    std::string                       _error;
+    StreamFramer                      _framer;
+    std::unique_ptr<LocalServer>      _listener;
+    std::unique_ptr<LocalSocket>      _socket;
+    std::latch                        _ready{1};
+    bool                              _stopped{false};
+    EventThread                       _thread;
 };
 
 auto command_for(std::filesystem::path const& path, std::vector<std::string> arguments) -> Command
@@ -324,6 +367,79 @@ auto fixture_job() -> JobDefinition
             .payload    = *payload,
             .created_at = *at,
             .updated_at = *at};
+}
+
+auto inspection_run(JobType type = JobType::Cli, RunState state = RunState::Failed) -> RunDetails
+{
+    auto       job  = fixture_job();
+    auto const at   = std::get<OnceSchedule>(job.schedule).planned_at;
+    auto       run  = RunDetails{};
+    run.id          = job.id;
+    run.job_id      = job.id;
+    run.queue_id    = job.queue_id;
+    run.planned_at  = at;
+    run.runnable_at = at;
+    run.started_at  = at;
+    run.type        = type;
+    run.state       = state;
+    run.attributes  = std::move(job.attributes);
+    run.payload     = std::move(job.payload);
+    if (state == RunState::Failed || state == RunState::Succeeded) {
+        run.completed_at = at;
+    }
+    if (type == JobType::Http) {
+        auto payload = parse_json(R"({"url":"http://localhost/","method":"GET"})");
+        REQUIRE(payload);
+        run.payload = *payload;
+    }
+    return run;
+}
+
+auto inspection_attempt(AttemptState state = AttemptState::Completed) -> AttemptDetails
+{
+    auto run               = inspection_run();
+    auto attempt           = AttemptDetails{};
+    attempt.run_id         = run.id;
+    attempt.attempt_number = 7;
+    attempt.due_at         = run.planned_at;
+    attempt.state          = state;
+    if (state != AttemptState::Pending) {
+        attempt.started_at = run.planned_at;
+    }
+    if (state == AttemptState::Completed) {
+        attempt.completed_at = run.planned_at;
+        attempt.outcome      = AttemptOutcome::Failed;
+    }
+    return attempt;
+}
+
+auto inspection_steps(RunDetails const& run, AttemptDetails const& attempt) -> std::vector<PeerStep>
+{
+    auto encoded_run = run_details_to_json(run, StandardAttributeRegistry{});
+    auto page        = attempt_page_to_json({.items = {attempt}, .next_cursor = "older-attempts"});
+    auto details     = attempt_details_to_json(attempt);
+    auto run_params  = run_get_request_to_json(run.id);
+    auto list_params = attempt_list_request_to_json(AttemptQuery{.run_id = run.id, .limit = 1});
+    auto get_params  = attempt_get_request_to_json({.run_id = run.id, .attempt_number = attempt.attempt_number});
+    REQUIRE(encoded_run);
+    REQUIRE(page);
+    REQUIRE(details);
+    REQUIRE(run_params);
+    REQUIRE(list_params);
+    REQUIRE(get_params);
+    return {
+        handshake(),
+        {.method = "run.get",      .value = *encoded_run, .params = *run_params },
+        {.method = "attempt.list", .value = *page,        .params = *list_params},
+        {.method = "attempt.get",  .value = *details,     .params = *get_params }
+    };
+}
+
+void check_once(std::string const& text, std::string_view marker)
+{
+    auto const position = text.find(marker);
+    CHECK(position != std::string::npos);
+    CHECK(position == text.rfind(marker));
 }
 
 } // namespace
@@ -638,4 +754,363 @@ TEST_CASE("duplicate peer replies cannot replace a captured result or finish twi
     CHECK_FALSE(result->error);
     REQUIRE(result->reply);
     CHECK(std::get<SystemInfo>(*result->reply).daemon_version == "scoped-fixture");
+}
+
+TEST_CASE("human run inspection handles an empty attempt page without fetching details", "[jobuctl][inspection]")
+{
+    auto steps = inspection_steps(inspection_run(), inspection_attempt());
+    auto empty = attempt_page_to_json(AttemptPage{});
+    REQUIRE(empty);
+    steps[2].value = *empty;
+    steps.resize(3);
+    ScriptedPeer peer{std::move(steps)};
+    auto         rendered = run_captured(command_for(peer.path(), {"run", "get", fixture_id}), SessionMode::Render);
+    peer.verify();
+    CHECK(rendered.result.exit_code == 0);
+    CHECK_FALSE(rendered.result.reply);
+    CHECK_FALSE(rendered.result.error);
+    CHECK(rendered.error.empty());
+    CHECK(rendered.output.starts_with("Run " + std::string{fixture_id} + ": state=failed"));
+    check_once(rendered.output, "Last attempt: none\n");
+    check_once(rendered.output, "jobuctl run output " + std::string{fixture_id} + " --channel stderr");
+}
+
+TEST_CASE("human run inspection renders the newest attempt with bounded runner diagnostics", "[jobuctl][inspection]")
+{
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        for (auto state : {AttemptState::Pending, AttemptState::Running, AttemptState::Completed}) {
+            for (auto failed : {false, true}) {
+                CAPTURE(type, state, failed);
+                auto run_state = RunState::RetryWait;
+                if (state == AttemptState::Completed) {
+                    run_state = failed ? RunState::Failed : RunState::Succeeded;
+                }
+                auto run     = inspection_run(type, run_state);
+                auto attempt = inspection_attempt(state);
+                if (state == AttemptState::Completed) {
+                    attempt.outcome = failed ? AttemptOutcome::Failed : AttemptOutcome::Succeeded;
+                }
+                // Even a hostile result attached to an incomplete attempt must not invent completion diagnostics.
+                auto result = parse_json(
+                    type == JobType::Cli
+                        ? R"({"exit_code":17,"outcome":"unexpected_exit","message":"ATTEMPT_CONTENT","data":"ATTEMPT_CONTENT"})"
+                        : R"({"status":503,"outcome":"unexpected_status","error_category":"timeout","message":"ATTEMPT_CONTENT","body":"ATTEMPT_CONTENT"})");
+                REQUIRE(result);
+                attempt.result     = *result;
+                auto         steps = inspection_steps(run, attempt);
+                // The page has a cursor to older attempts: human inspection still requests only number 7.
+                ScriptedPeer peer{std::move(steps)};
+                auto rendered = run_captured(command_for(peer.path(), {"run", "get", fixture_id}), SessionMode::Render);
+                peer.verify();
+                CHECK(rendered.result.exit_code == 0);
+                CHECK_FALSE(rendered.result.error);
+                CHECK(rendered.error.empty());
+                check_once(rendered.output, "Last attempt: 7:");
+                auto expected = std::string_view{"state=pending, outcome=none"};
+                if (state == AttemptState::Running) {
+                    expected = "state=running, outcome=none";
+                }
+                else if (state == AttemptState::Completed) {
+                    expected = failed ? "state=completed, outcome=failed" : "state=completed, outcome=succeeded";
+                }
+                CHECK(rendered.output.find(expected) != std::string::npos);
+                auto const diagnostic = std::string_view{type == JobType::Cli ? "exit_code=17" : "status=503"};
+                CHECK((rendered.output.find(diagnostic) != std::string::npos) == (state == AttemptState::Completed));
+                CHECK(rendered.output.find("ATTEMPT_CONTENT") == std::string::npos);
+                CHECK(rendered.output.find(type == JobType::Cli ? "--channel stderr" : "--channel body") !=
+                      std::string::npos);
+                CHECK(rendered.output.find("older than a running retry") != std::string::npos);
+            }
+        }
+    }
+}
+
+TEST_CASE("inspection details supersede the earlier attempt snapshot", "[jobuctl][inspection]")
+{
+    auto completed = inspection_attempt();
+    auto result    = parse_json(R"({"exit_code":9})");
+    REQUIRE(result);
+    completed.result = *result;
+    auto steps =
+        inspection_steps(inspection_run(JobType::Cli, RunState::RetryWait), inspection_attempt(AttemptState::Running));
+    auto details = attempt_details_to_json(completed);
+    REQUIRE(details);
+    steps[3].value = *details;
+    ScriptedPeer peer{std::move(steps)};
+    auto         rendered = run_captured(command_for(peer.path(), {"run", "get", fixture_id}), SessionMode::Render);
+    peer.verify();
+    CHECK(rendered.result.exit_code == 0);
+    CHECK(rendered.error.empty());
+    check_once(rendered.output, "Last attempt: 7: state=completed, outcome=failed");
+    CHECK(rendered.output.find("state=running") == std::string::npos);
+    CHECK(rendered.output.find("exit_code=9") != std::string::npos);
+}
+
+TEST_CASE("run inspection retains each successful partial result on query failure", "[jobuctl][inspection]")
+{
+    for (auto phase : {std::size_t{1}, std::size_t{2}, std::size_t{3}}) {
+        for (auto action : {PeerAction::RemoteError, PeerAction::Reply, PeerAction::Silence, PeerAction::Disconnect}) {
+            CAPTURE(phase, action);
+            auto steps = inspection_steps(inspection_run(), inspection_attempt(AttemptState::Running));
+            steps.resize(phase + 1);
+            auto& failure  = steps.back();
+            failure.action = action;
+            failure.value  = JsonValue{}; // A null result is invalid for each of these three typed methods.
+            if (action == PeerAction::RemoteError) {
+                auto error = parse_json(
+                    R"({"code":-32000,"message":"retention removed fixture","data":{"category":"not_found","code":"jobu.fixture.removed"}})");
+                REQUIRE(error);
+                failure.value = *error;
+            }
+            ScriptedPeer peer{std::move(steps)};
+            auto rendered = run_captured(command_for(peer.path(), {"run", "get", fixture_id, "--timeout", "200"}),
+                                         SessionMode::Render);
+            peer.verify();
+            CHECK(rendered.result.exit_code == (action == PeerAction::RemoteError ? 1 : 3));
+            REQUIRE(rendered.result.error);
+            CHECK_FALSE(rendered.result.error->outcome_unknown);
+            CHECK_FALSE(rendered.result.reply);
+            CHECK_FALSE(rendered.error.empty());
+            CHECK((rendered.output.find("Run " + std::string{fixture_id}) != std::string::npos) == (phase > 1));
+            if (phase == 3) {
+                check_once(rendered.output, "Last attempt: 7: state=running, outcome=none");
+            }
+            else {
+                CHECK(rendered.output.find("Last attempt:") == std::string::npos);
+            }
+            if (action == PeerAction::RemoteError) {
+                CHECK(rendered.result.error->code == "jobu.fixture.removed");
+                check_once(rendered.error, "retention removed fixture");
+            }
+            else if (action == PeerAction::Reply) {
+                CHECK(rendered.result.error->code == "jobu.client.invalid_response");
+            }
+            else if (action == PeerAction::Silence) {
+                CHECK(rendered.result.error->code == "jobu.client.timeout");
+            }
+        }
+    }
+}
+
+TEST_CASE("run inspection preserves partial data on synchronous capability rejection", "[jobuctl][inspection]")
+{
+    for (auto phase : {std::size_t{1}, std::size_t{2}, std::size_t{3}}) {
+        CAPTURE(phase);
+        auto  steps        = inspection_steps(inspection_run(), inspection_attempt());
+        auto  missing      = steps[phase].method;
+        auto& fields       = std::get<JsonValue::Object>(steps[0].value.data);
+        auto& capabilities = std::get<JsonValue::Array>(fields.at("capabilities").data);
+        std::erase_if(capabilities, [&](JsonValue const& item) { return item.as_string() == missing; });
+        steps.resize(phase);
+        ScriptedPeer peer{std::move(steps)};
+        auto         rendered = run_captured(command_for(peer.path(), {"run", "get", fixture_id}), SessionMode::Render);
+        peer.verify();
+        CHECK(rendered.result.exit_code == 1);
+        REQUIRE(rendered.result.error);
+        CHECK(rendered.result.error->code == "jobu.client.unsupported_method");
+        CHECK_FALSE(rendered.result.error->outcome_unknown);
+        CHECK((rendered.output.find("Run " + std::string{fixture_id}) != std::string::npos) == (phase > 1));
+        if (phase == 3) {
+            check_once(rendered.output, "Last attempt: 7: state=completed, outcome=failed");
+        }
+        else {
+            CHECK(rendered.output.find("Last attempt:") == std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("run inspection rejects mismatched identities and oversized attempt pages", "[jobuctl][inspection]")
+{
+    auto other = Uuid::parse("00112233-4455-6677-8899-aabbccddee00");
+    REQUIRE(other);
+    for (auto const* scenario : {"run identity", "summary identity", "page limit", "details run", "details number"}) {
+        CAPTURE(scenario);
+        auto run     = inspection_run();
+        auto attempt = inspection_attempt();
+        auto steps   = inspection_steps(run, attempt);
+        auto phase   = std::size_t{3};
+        if (std::string_view{scenario} == "run identity") {
+            run.id       = *other;
+            auto encoded = run_details_to_json(run, StandardAttributeRegistry{});
+            REQUIRE(encoded);
+            steps[1].value = *encoded;
+            phase          = 1;
+        }
+        else if (std::string_view{scenario} == "summary identity" || std::string_view{scenario} == "page limit") {
+            auto page = AttemptPage{.items = {attempt}};
+            if (std::string_view{scenario} == "summary identity") {
+                page.items[0].run_id = *other;
+            }
+            else {
+                --attempt.attempt_number;
+                page.items.push_back(attempt);
+            }
+            auto encoded = attempt_page_to_json(page);
+            REQUIRE(encoded);
+            steps[2].value = *encoded;
+            phase          = 2;
+        }
+        else {
+            if (std::string_view{scenario} == "details run") {
+                attempt.run_id = *other;
+            }
+            else {
+                ++attempt.attempt_number;
+            }
+            auto encoded = attempt_details_to_json(attempt);
+            REQUIRE(encoded);
+            steps[3].value = *encoded;
+        }
+        steps.resize(phase + 1);
+        ScriptedPeer peer{std::move(steps)};
+        auto         rendered = run_captured(command_for(peer.path(), {"run", "get", fixture_id}), SessionMode::Render);
+        peer.verify();
+        CHECK(rendered.result.exit_code == 3);
+        REQUIRE(rendered.result.error);
+        CHECK(rendered.result.error->code == "jobu.client.invalid_response");
+        if (phase == 3) {
+            check_once(rendered.output, "Last attempt: 7:");
+        }
+        else {
+            CHECK(rendered.output.find("Last attempt:") == std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("JSON and captured run get retain their single-call contracts", "[jobuctl][inspection]")
+{
+    for (auto mode : {SessionMode::Capture, SessionMode::Render}) {
+        for (auto json : {false, true}) {
+            if (mode == SessionMode::Render && !json) {
+                continue;
+            }
+            CAPTURE(mode, json);
+            auto steps       = inspection_steps(inspection_run(), inspection_attempt());
+            auto encoded_run = steps[1].value;
+            // A peer without enrichment capabilities still supports both fast paths.
+            steps[0].value   = system_info_to_json({
+                .daemon_version = "run-only",
+                .api_version    = {.major = 1,    .minor = 5},
+                .capabilities   = {"system.info", "run.get" }
+            });
+            steps.resize(2);
+            ScriptedPeer peer{std::move(steps)};
+            auto         arguments = std::vector<std::string>{"run", "get", fixture_id};
+            if (json) {
+                arguments.emplace_back("--json");
+            }
+            auto captured = run_captured(command_for(peer.path(), std::move(arguments)), mode);
+            peer.verify();
+            CHECK(captured.result.exit_code == 0);
+            CHECK_FALSE(captured.result.error);
+            CHECK(captured.error.empty());
+            if (mode == SessionMode::Capture) {
+                check_silent(captured);
+                REQUIRE(captured.result.reply);
+                CHECK(std::get<RunDetails>(*captured.result.reply).state == RunState::Failed);
+            }
+            else {
+                auto value = parse_json(captured.output);
+                REQUIRE(value);
+                CHECK(serialize_json(*value).value() == serialize_json(encoded_run).value());
+                CHECK_FALSE(captured.result.reply);
+            }
+        }
+    }
+}
+
+TEST_CASE("run inspection keeps the initial deadline through every query and finishes once", "[jobuctl][inspection]")
+{
+    StandardAttributeRegistry    registry;
+    StreamCapture                output{stdout};
+    StreamCapture                error{stderr};
+    std::vector<TimePoint>       observed_deadlines;
+    std::optional<TimePoint>     initial_deadline;
+    std::optional<SessionResult> result;
+    auto                         finishes = 0;
+    {
+        Application app{0, nullptr};
+        auto*       loop = ThreadCtx::current()->event_loop();
+        REQUIRE(loop);
+        auto steps          = inspection_steps(inspection_run(), inspection_attempt(AttemptState::Running));
+        steps.back().action = PeerAction::Silence;
+        ScriptedPeer peer{
+            std::move(steps),
+            RequestObservation{.loop = loop, .observe = [&](std::string const& method) {
+                                   auto deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*loop);
+                                   CHECK(deadline);
+                                   if (deadline && initial_deadline) {
+                                       CHECK(*deadline <= *initial_deadline);
+                                   }
+                                   if (deadline) {
+                                       observed_deadlines.push_back(*deadline);
+                                   }
+                                   if (method == "attempt.get") {
+                                       // Expire the original session timer deterministically while the final call is
+                                       // pending.
+                                       jb::core::priv::EventLoopTestAccess::fire_next_timer(*loop);
+                                   }
+                               }}
+        };
+        Session session{command_for(peer.path(), {"run", "get", fixture_id}), registry};
+        session.finished.connect(&app, [&](int code) {
+            ++finishes;
+            static_cast<void>(app.quit(code));
+        });
+        session.start();
+        initial_deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*loop);
+        REQUIRE(initial_deadline);
+        CHECK(app.exec() == 3);
+        result = session.take_result();
+        CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*loop) == 0);
+        peer.verify();
+    }
+    auto error_text  = error.text();
+    auto output_text = output.text();
+    CHECK(observed_deadlines.size() == 4);
+    CHECK(finishes == 1);
+    REQUIRE(result);
+    CHECK(result->exit_code == 3);
+    REQUIRE(result->error);
+    CHECK(result->error->code == "jobu.client.timeout");
+    CHECK_FALSE(result->error->outcome_unknown);
+    check_once(error_text, "Overall command deadline expired");
+    check_once(output_text, "Last attempt: 7: state=running, outcome=none");
+}
+
+TEST_CASE("duplicate inspection replies cannot repeat partial output or completion", "[jobuctl][inspection]")
+{
+    auto steps = inspection_steps(inspection_run(), inspection_attempt());
+    for (auto& step : steps) {
+        step.action = PeerAction::Duplicate;
+    }
+    ScriptedPeer              peer{std::move(steps)};
+    StandardAttributeRegistry registry;
+    StreamCapture             output{stdout};
+    StreamCapture             error{stderr};
+    auto                      finishes = 0;
+    {
+        Application app{0, nullptr};
+        Session     session{command_for(peer.path(), {"run", "get", fixture_id}), registry};
+        session.finished.connect(&app, [&](int code) {
+            ++finishes;
+            static_cast<void>(app.quit(code));
+            session.start();
+        });
+        session.start();
+        CHECK(app.exec() == 0);
+        auto result = session.take_result();
+        REQUIRE(result);
+        CHECK(result->exit_code == 0);
+        CHECK_FALSE(result->error);
+        CHECK_FALSE(session.take_result());
+    }
+    auto error_text  = error.text();
+    auto output_text = output.text();
+    peer.verify();
+    CHECK(error_text.empty());
+    CHECK(finishes == 1);
+    check_once(output_text, "Run " + std::string{fixture_id});
+    check_once(output_text, "Last attempt: 7:");
+    check_once(output_text, "jobuctl run output");
 }

@@ -40,6 +40,8 @@ namespace {
 enum class PeerBehavior : std::uint8_t {
     EmptyPage,
     RunPage,
+    RunInspection,
+    RunInspectionRemoved,
     RemoteError,
     InvalidInfo,
     InvalidResult,
@@ -133,6 +135,8 @@ auto run_session(PeerBehavior             behavior,
                                                                  "job.suspend",
                                                                  "run.cancel",
                                                                  "run.get",
+                                                                 "attempt.list",
+                                                                 "attempt.get",
                                                                  "attempt.output",
                                                                  "queue.create",
                                                                  "queue.delete",
@@ -180,6 +184,10 @@ auto run_session(PeerBehavior             behavior,
                                   .attributes  = *attributes,
                                   .payload     = *payload,
                                   .state       = RunState::Running};
+                if (behavior == PeerBehavior::RunInspection || behavior == PeerBehavior::RunInspectionRemoved) {
+                    run.state        = RunState::Failed;
+                    run.completed_at = *at;
+                }
                 if (method == "run.cancel") {
                     auto result =
                         cancel_run_result_to_json({.run = run, .disposition = CancelDisposition::Requested}, registry);
@@ -199,6 +207,48 @@ auto run_session(PeerBehavior             behavior,
                     auto result = run_details_to_json(run, registry);
                     REQUIRE(result);
                     response.emplace("result", std::move(*result));
+                }
+            }
+            else if (method == "attempt.list" || method == "attempt.get") {
+                REQUIRE((behavior == PeerBehavior::RunInspection || behavior == PeerBehavior::RunInspectionRemoved));
+                auto id = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff");
+                auto at = parse_utc_timestamp("2030-01-01T00:00:00Z");
+                REQUIRE(id);
+                REQUIRE(at);
+                auto attempt           = AttemptDetails{};
+                attempt.run_id         = *id;
+                attempt.attempt_number = 4;
+                attempt.due_at         = *at;
+                attempt.started_at     = *at;
+                attempt.state          = AttemptState::Running;
+                auto const& params     = fields.at("params").as_object();
+                CHECK(params.at("run_id").as_string() == id->to_string());
+                if (method == "attempt.list") {
+                    CHECK(params.size() == 2);
+                    CHECK(params.at("limit").as_uint() == 1);
+                    auto result = attempt_page_to_json({.items = {attempt}, .next_cursor = "older"});
+                    REQUIRE(result);
+                    response.emplace("result", std::move(*result));
+                }
+                else if (behavior == PeerBehavior::RunInspectionRemoved) {
+                    auto error = parse_json(
+                        R"({"code":-32000,"message":"Attempt removed","data":{"category":"not_found","code":"jobu.fixture.removed"}})");
+                    REQUIRE(error);
+                    response.emplace("error", std::move(*error));
+                }
+                else {
+                    CHECK(params.size() == 2);
+                    CHECK(params.at("attempt_number").as_uint() == 4);
+                    // The attempt finishes between list/get; only the returned details should be rendered.
+                    attempt.state        = AttemptState::Completed;
+                    attempt.completed_at = *at;
+                    attempt.outcome      = AttemptOutcome::Failed;
+                    auto result          = parse_json(R"({"exit_code":17,"message":"ATTEMPT_CONTENT"})");
+                    REQUIRE(result);
+                    attempt.result = *result;
+                    auto encoded   = attempt_details_to_json(attempt);
+                    REQUIRE(encoded);
+                    response.emplace("result", std::move(*encoded));
                 }
             }
             else if (method == "attempt.output") {
@@ -365,6 +415,43 @@ TEST_CASE("jobuctl session preserves handshake ordering and human output", "[job
     CHECK(exchange.exit->exit_code == EXIT_SUCCESS);
     CHECK(exchange.output == "No queues\n");
     CHECK(exchange.error.empty());
+}
+
+TEST_CASE("jobuctl executable composes human run inspection and retains partial failures", "[jobuctl][session][run]")
+{
+    auto const id = std::string{"00112233-4455-6677-8899-aabbccddeeff"};
+    for (auto behavior : {PeerBehavior::RunInspection, PeerBehavior::RunInspectionRemoved}) {
+        CAPTURE(behavior);
+        auto exchange = run_session(behavior, {"run", "get", id});
+        CHECK(exchange.methods == std::vector<std::string>{"system.info", "run.get", "attempt.list", "attempt.get"});
+        CHECK(exchange.output.starts_with("Run " + id + ": state=failed"));
+        auto const section = std::string{"Last attempt: 4:"};
+        CHECK(exchange.output.find(section) != std::string::npos);
+        CHECK(exchange.output.find(section) == exchange.output.rfind(section));
+        CHECK(exchange.output.find("jobuctl run output " + id + " --channel stderr") != std::string::npos);
+        CHECK(exchange.output.find("ATTEMPT_CONTENT") == std::string::npos);
+        if (behavior == PeerBehavior::RunInspection) {
+            CHECK(exchange.exit->exit_code == 0);
+            CHECK(exchange.error.empty());
+            CHECK(exchange.output.find("state=completed, outcome=failed") != std::string::npos);
+            CHECK(exchange.output.find("exit_code=17") != std::string::npos);
+            CHECK(exchange.output.find("state=running") == std::string::npos);
+        }
+        else {
+            CHECK(exchange.exit->exit_code == 1);
+            CHECK(exchange.error.find("Attempt removed") != std::string::npos);
+            CHECK(exchange.output.find("state=running, outcome=none") != std::string::npos);
+        }
+    }
+
+    auto json = run_session(PeerBehavior::RunInspection, {"run", "get", id}, {"--json"});
+    CHECK(json.methods == std::vector<std::string>{"system.info", "run.get"});
+    CHECK(json.exit->exit_code == 0);
+    CHECK(json.error.empty());
+    auto result = parse_json(json.output);
+    REQUIRE(result);
+    CHECK(result->as_object().at("state").as_string() == "failed");
+    CHECK_FALSE(result->as_object().contains("attempts"));
 }
 
 TEST_CASE("jobuctl run list sends the selected wire shape and preserves the result schema", "[jobuctl][session][run]")

@@ -488,6 +488,28 @@ selected states using AND. `--limit` is 1–200, default 100. The result contain
 run summaries, without payload, result, attempts, or output. Full run details
 are available through `run get`.
 
+Human `run get RUN_UUID` prints the run details, then retrieves its newest
+attempt with `attempt.list` (limit 1) and `attempt.get`. The compact Last attempt
+section shows its number, durable state/outcome, available start/completion
+times, and bounded diagnostics such as a CLI exit code or HTTP status. Pending
+and running attempts remain explicit. If the attempt changes between queries,
+the fetched details supply the section's state. Captured output bytes and the
+full attempt result are not included.
+
+No attempts prints `Last attempt: none` and succeeds. Failure to retrieve the
+attempt list or details preserves the run information already printed and any
+available attempt summary, reports the normal error on stderr, and exits
+nonzero. Connection, handshake, and all three queries share one overall
+`--timeout`; enrichment does not start a new budget. Successfully inspecting a
+failed execution still exits 0.
+
+`run get RUN_UUID --json` performs only `run.get` and prints its existing result
+schema, without attempt calls or additional fields. The human output hint
+describes latest-completed output selection, which may refer to an older
+attempt than a running retry. The hint's `run output` convenience command is
+not yet available in this build; use the existing explicit `attempt list` and
+`attempt output` commands below to retrieve captured bytes.
+
 The terminal default and multiple explicit states require daemon API 1.5 or
 newer. An older peer produces an unsupported-feature error before the query is
 sent. A single explicit `--state` uses the compatible scalar form, and `--all`

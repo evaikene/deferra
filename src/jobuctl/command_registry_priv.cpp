@@ -542,14 +542,17 @@ constexpr CommandSpec run_get_command{
     .name             = "get",
     .kind             = CommandKind::RunGet,
     .alias            = {},
-    .summary          = "Show a retained run",
+    .summary          = "Show a retained run and its last attempt",
     .operands         = "RUN_UUID",
     .maximum_operands = 1,
     .options          = {},
-    .rules            = {},
-    .example          = "jobuctl run get 00000000-0000-7000-8000-000000000002",
-    .capability       = "run.get",
-    .build            = parse_run_command,
+    .rules      = "Human output retrieves the newest attempt and bounded diagnostics, without reading output bytes. "
+                  "All queries share one overall --timeout. Enrichment failures preserve available run/attempt "
+                  "information and exit nonzero. No attempts is valid; a failed execution is data, not a command "
+                  "failure. --json performs only run.get and keeps the existing result schema.",
+    .example    = "jobuctl run get 00000000-0000-7000-8000-000000000002",
+    .capability = "run.get",
+    .build      = parse_run_command,
 };
 constexpr CommandSpec run_list_command{
     .group            = "run",

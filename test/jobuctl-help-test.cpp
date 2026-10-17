@@ -284,6 +284,28 @@ TEST_CASE("jobuctl run list help explains terminal history without opening suppl
     }
 }
 
+TEST_CASE("jobuctl run get help explains composition before touching input or sockets", "[jobuctl][help][run]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   fifo = directory.path() / "unread-run-input";
+    REQUIRE(::mkfifo(fifo.c_str(), 0600) == 0);
+    auto result = run({"run", "get", "--socket", fifo.string(), "--request-file", fifo.string(), "--help"});
+    CHECK(result.code == 0);
+    CHECK(result.err.empty());
+    for (auto const* text : {"newest attempt",
+                             "bounded diagnostics",
+                             "without reading output bytes",
+                             "one overall --timeout",
+                             "preserve available run/attempt",
+                             "exit nonzero",
+                             "No attempts is valid",
+                             "failed execution is data",
+                             "--json performs only run.get"}) {
+        CAPTURE(text);
+        CHECK(result.out.find(text) != std::string::npos);
+    }
+}
+
 TEST_CASE("jobuctl interactive update help precedes input terminal and editor processing", "[jobuctl][help][edit]")
 {
     jb::test::TemporaryDirectory directory;
