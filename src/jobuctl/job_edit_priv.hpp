@@ -48,6 +48,12 @@ struct PreparedJobUpdate {
 [[nodiscard]] auto format_job_edit_json(jb::core::JsonValue const& value)
     -> jb::core::Result<std::string, jb::core::Error>;
 
+/// Serializes minimal recovery params as compact JSON within the ordinary request-file byte limit.
+/// Preserves the normal JSON depth limit. Does not replace request decoding, RPC framing, or payload validation.
+/// Returns fixed, input-safe errors; performs no file I/O and does not use the larger human draft allowance.
+[[nodiscard]] auto serialize_job_edit_request(jb::core::JsonValue const& params)
+    -> jb::core::Result<std::string, jb::core::Error>;
+
 /// Parses at most 16 MiB of edited JSON and validates all retained fields before selecting changes.
 /// Identity/revision are mandatory and fixed. Omitted fields/attributes mean no update; payload/schedule changes
 /// replace the whole value. Validation uses the existing update codecs, leaving domain admission to the server.

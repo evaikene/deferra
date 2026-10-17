@@ -1,6 +1,7 @@
 #include "job_edit_priv.hpp"
 
 #include "command_line_priv.hpp"
+#include "framing.hpp"
 #include "input_priv.hpp"
 #include "management_json.hpp"
 
@@ -55,6 +56,21 @@ auto within_depth_limit(JsonValue const& value, std::size_t depth = 0) -> bool
         }
     }
     return true;
+}
+
+auto serialize_edit_json(JsonValue const& value) -> Result<std::string, Error>
+{
+    // Reject excessive nesting before entering the serializer's recursive tree conversion.
+    if (!within_depth_limit(value)) {
+        return Result<std::string, Error>::failure(
+            edit_error("jobuctl.edit.invalid_json", "Job edit JSON exceeds the nesting limit"));
+    }
+    auto compact = serialize_json(value);
+    if (!compact) {
+        return Result<std::string, Error>::failure(
+            edit_error("jobuctl.edit.invalid_json", "Job edit JSON cannot be serialized"));
+    }
+    return compact;
 }
 
 auto same_json_value(JsonValue const& left, JsonValue const& right) -> bool
@@ -259,20 +275,29 @@ auto JobEditBaseline::from_job(JobDefinition const& job, AttributeRegistry const
 
 auto format_job_edit_json(JsonValue const& value) -> Result<std::string, Error>
 {
-    // Reject excessive nesting before entering the serializer's recursive tree conversion.
-    if (!within_depth_limit(value)) {
-        return Result<std::string, Error>::failure(
-            edit_error("jobuctl.edit.invalid_json", "Job edit JSON exceeds the nesting limit"));
-    }
-    auto compact = serialize_json(value);
+    auto compact = serialize_edit_json(value);
     if (!compact) {
-        return Result<std::string, Error>::failure(
-            edit_error("jobuctl.edit.invalid_json", "Job edit JSON cannot be serialized"));
+        return Result<std::string, Error>::failure(std::move(compact).error());
     }
     if (compact->size() > max_job_edit_draft_bytes) {
         return Result<std::string, Error>::failure(draft_too_large());
     }
     return format_compact_json(*compact);
+}
+
+auto serialize_job_edit_request(JsonValue const& params) -> Result<std::string, Error>
+{
+    auto compact = serialize_edit_json(params);
+    if (!compact) {
+        return Result<std::string, Error>::failure(std::move(compact).error());
+    }
+    // Recovery is consumed by ordinary request-file mode. Draft indentation and its larger allowance cannot
+    // enter this artifact; full RPC framing and domain payload limits still apply when it is submitted.
+    if (compact->size() > jb::rpc::FramingLimits{}.max_body_bytes) {
+        return Result<std::string, Error>::failure(
+            edit_error("jobuctl.edit.request_too_large", "Minimal update request exceeds the request-file size limit"));
+    }
+    return compact;
 }
 
 auto prepare_job_update(JobEditBaseline const& baseline, std::string_view draft, AttributeRegistry const& registry)

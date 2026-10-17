@@ -1084,6 +1084,11 @@ target_link_libraries(jobuctl-job-edit-test PRIVATE jobuctl-private Catch2::Catc
 add_test(NAME jobuctl-job-edit-test COMMAND $<TARGET_FILE:jobuctl-job-edit-test>)
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
+    add_executable(jobuctl-job-edit-files-test jobuctl-job-edit-files-test.cpp support/temporary_directory.cpp)
+    target_link_libraries(jobuctl-job-edit-files-test PRIVATE jobuctl-private Catch2::Catch2WithMain)
+    add_test(NAME jobuctl-job-edit-files-test COMMAND $<TARGET_FILE:jobuctl-job-edit-files-test>)
+    set_tests_properties(jobuctl-job-edit-files-test PROPERTIES TIMEOUT 30)
+
     add_executable(jobuctl-help-test jobuctl-help-test.cpp support/temporary_directory.cpp)
     target_link_libraries(jobuctl-help-test PRIVATE core jobu-paths-private Catch2::Catch2WithMain)
     target_compile_definitions(jobuctl-help-test PRIVATE JOBUCTL_EXECUTABLE="$<TARGET_FILE:jobuctl>")
