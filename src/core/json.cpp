@@ -409,9 +409,9 @@ auto encode_json(JsonValue const& value, CodecJson& output) -> std::optional<Jso
         value.data);
 }
 
-} // anonymous namespace
-
-auto parse_json(std::string_view text, JsonLimits limits) -> jb::core::Result<JsonValue, jb::core::Error>
+// Keep both entry points on the same SAX validation path; only comment token handling differs.
+auto parse_json_text(std::string_view text, JsonLimits limits, bool ignore_comments)
+    -> jb::core::Result<JsonValue, jb::core::Error>
 {
     using Result = jb::core::Result<JsonValue, jb::core::Error>;
 
@@ -421,7 +421,12 @@ auto parse_json(std::string_view text, JsonLimits limits) -> jb::core::Result<Js
 
     JsonSaxParser parser{limits};
     try {
-        auto const parsed = CodecJson::sax_parse(text.begin(), text.end(), &parser);
+        auto const parsed = CodecJson::sax_parse(text.begin(),
+                                                 text.end(),
+                                                 &parser,
+                                                 CodecJson::input_format_t::json,
+                                                 true,
+                                                 ignore_comments);
         if (parsed && parser.has_result()) {
             return Result::success(parser.take_result());
         }
@@ -431,6 +436,18 @@ auto parse_json(std::string_view text, JsonLimits limits) -> jb::core::Result<Js
         // Codec exception text can contain input fragments; translate it to a fixed project-owned error instead.
         return Result::failure(make_json_error(JsonFailure::Internal));
     }
+}
+
+} // anonymous namespace
+
+auto parse_json(std::string_view text, JsonLimits limits) -> jb::core::Result<JsonValue, jb::core::Error>
+{
+    return parse_json_text(text, limits, false);
+}
+
+auto parse_json_with_comments(std::string_view text, JsonLimits limits) -> jb::core::Result<JsonValue, jb::core::Error>
+{
+    return parse_json_text(text, limits, true);
 }
 
 auto serialize_json(JsonValue const& value) -> jb::core::Result<std::string, jb::core::Error>

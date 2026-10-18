@@ -49,7 +49,7 @@ auto format_job_edit_recovery(Command const& command, JobEditRecoveryReason reas
         advice.paths.request.reset();
         advice.instructions =
             "No complete minimal request is available. Correct the retained draft into a valid update "
-            "request before using request-file mode, removing any jobu: instruction lines. "
+            "request before using request-file mode, removing all JSONC comments. "
             "Keep the original job_id and expected_revision and select only intended changed fields. "
             "That mode requires strict JSON and sends every explicitly present field; "
             "it does not repeat the interactive diff.";

@@ -563,7 +563,8 @@ TEST_CASE("interactive update uses two scoped sessions and submits only the edit
                                    CHECK(std::vector<std::string>(argv.begin(), argv.end()) ==
                                          std::vector<std::string>{"fake editor", "--wait"});
                                    draft_path = draft;
-                                   CHECK(read_text(draft).starts_with("jobu:"));
+                                   CHECK(draft.filename() == "draft.jsonc");
+                                   CHECK(read_text(draft).starts_with("// JSONC draft:"));
                                    auto projection = read_draft(draft);
                                    CHECK(projection.as_object().at("job_id").as_string() == original.id.to_string());
                                    CHECK(projection.as_object().at("expected_revision").as_uint() == original.revision);

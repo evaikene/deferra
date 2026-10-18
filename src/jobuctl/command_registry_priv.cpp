@@ -443,7 +443,7 @@ constexpr CommandSpec job_update_command{
     .operands         = "UUID",
     .maximum_operands = 1,
     .options          = job_update,
-    .rules            = "Bare UUID opens an interactive draft with jobu: instruction lines. Keep job_id and "
+    .rules            = "Bare UUID opens an interactive draft.jsonc with // instruction comments. Keep job_id and "
                         "expected_revision unchanged; only effective changes are submitted. No changes means no update.\n"
                         "Interactive editing requires terminal stdin/stderr and a foreground controlling terminal; "
                         "stdout may be redirected. Fetch and submission each get a full --timeout.\n"

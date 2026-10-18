@@ -4,7 +4,7 @@ message("** Setting up ${TARGET}")
 
 # Find {fmt}
 find_package(fmt CONFIG REQUIRED)
-find_package(nlohmann_json CONFIG REQUIRED)
+find_package(nlohmann_json 3.9.0 CONFIG REQUIRED)
 set_property(GLOBAL PROPERTY JOBU_FMT_VERSION "${fmt_VERSION}")
 set_property(GLOBAL PROPERTY JOBU_JSON_VERSION "${nlohmann_json_VERSION}")
 

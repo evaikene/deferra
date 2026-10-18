@@ -9,6 +9,8 @@ using ParseResult     = jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 using SerializeResult = jb::core::Result<std::string, jb::core::Error>;
 
 static_assert(std::is_same_v<decltype(&jb::core::parse_json), ParseResult (*)(std::string_view, jb::core::JsonLimits)>);
+static_assert(std::is_same_v<decltype(&jb::core::parse_json_with_comments),
+                             ParseResult (*)(std::string_view, jb::core::JsonLimits)>);
 static_assert(std::is_same_v<decltype(&jb::core::serialize_json), SerializeResult (*)(jb::core::JsonValue const&)>);
 static_assert(std::is_default_constructible_v<jb::core::JsonNull>);
 

@@ -233,10 +233,10 @@ TEST_CASE("Interactive drafts show instructions and preserve JSON values and no-
     auto value = parsed(R"({"text":"jobu: literal\njobu: escaped newline","jobu: property":"value"})");
     auto draft = format_job_edit_draft(value);
     REQUIRE(draft);
-    CHECK(draft->starts_with("jobu: Lines starting with jobu: are ignored"));
-    CHECK(draft->find("jobu: Keep job_id and expected_revision unchanged.\n") != std::string::npos);
-    CHECK(draft->find("jobu: Omitted fields leave server values unchanged.\n") != std::string::npos);
-    CHECK(draft->find("jobu: Exit without effective changes to cancel the update.\n") != std::string::npos);
+    CHECK(draft->starts_with("// JSONC draft: comments are ignored; trailing commas are not allowed.\n"));
+    CHECK(draft->find("// Keep job_id and expected_revision unchanged.\n") != std::string::npos);
+    CHECK(draft->find("// Omitted fields leave server values unchanged.\n") != std::string::npos);
+    CHECK(draft->find("// Exit without effective changes to cancel the update.\n") != std::string::npos);
     CHECK_FALSE(parse_json(*draft));
     auto decoded = parse_job_edit_draft(*draft);
     REQUIRE(decoded);
@@ -249,27 +249,29 @@ TEST_CASE("Interactive drafts show instructions and preserve JSON values and no-
     auto unchanged = prepare_job_update(baseline, *editable, registry);
     REQUIRE(unchanged);
     CHECK_FALSE(*unchanged);
-    auto notes_only = prepare_job_update(baseline, "jobu: a new operator note\n" + *editable, registry);
+    auto notes_only =
+        prepare_job_update(baseline, "// a new operator note\n" + *editable + "/* closing note */", registry);
     REQUIRE(notes_only);
     CHECK_FALSE(*notes_only);
 }
 
-TEST_CASE("Only exact physical jobu: line prefixes are ignored", "[jobuctl][edit]")
+TEST_CASE("Interactive drafts accept JSONC comments without changing saved bytes or string contents", "[jobuctl][edit]")
 {
-    auto expected = parsed(R"({"text":"jobu: literal\njobu: escaped newline","jobu: property":"value"})");
+    auto expected = parsed(R"({"text":"// literal\n/* escaped newline */","jobu: property":"https://example.test"})");
     for (auto const ending : {std::string_view{"\n"}, std::string_view{"\r\n"}}) {
         auto text = std::string{};
-        for (auto const* line : {"jobu: heading",
+        for (auto const* line : {"// heading",
                                  "{",
-                                 "jobu:",
-                                 R"("text":"jobu: literal\njobu: escaped newline",)",
-                                 "jobu: a note between members",
-                                 R"("jobu: property":"value")",
+                                 "  // indented note",
+                                 R"("text":"// literal\n/* escaped newline */", // inline note)",
+                                 "\t/* block comment",
+                                 "between members */",
+                                 R"("jobu: property" /* key */ : "https://example.test")",
                                  "}"}) {
             text += line;
             text += ending;
         }
-        text          += "jobu:trailing note without a final newline";
+        text          += "// trailing note without a final newline";
         auto original  = text;
         auto decoded   = parse_job_edit_draft(text);
         REQUIRE(decoded);
@@ -277,14 +279,17 @@ TEST_CASE("Only exact physical jobu: line prefixes are ignored", "[jobuctl][edit
         CHECK(text == original);
     }
 
-    for (auto const* prefix : {" jobu:", "\tjobu:", "Jobu:", "JOBU:", "jobu"}) {
-        auto rejected = parse_job_edit_draft(std::string{prefix} + " note\n{}");
+    for (auto const* text : {"jobu: legacy note\n{}",
+                             "// only notes\n/* no object */",
+                             "// notes\n[1,2,3]",
+                             "{} /* unfinished",
+                             "{} // note\n{}",
+                             "{\"priority\":1, // trailing comma\n}"}) {
+        CAPTURE(text);
+        auto rejected = parse_job_edit_draft(text);
         REQUIRE_FALSE(rejected);
         CHECK(rejected.error().code == "jobuctl.edit.invalid_json");
     }
-    CHECK_FALSE(parse_job_edit_draft("{}jobu: inline text"));
-    CHECK_FALSE(parse_job_edit_draft("jobu: only notes\njobu: no JSON object"));
-    CHECK_FALSE(parse_job_edit_draft("jobu: notes\n[1,2,3]"));
 }
 
 TEST_CASE("Interactive instructions count toward the existing size and nesting limits", "[jobuctl][edit]")
@@ -304,7 +309,7 @@ TEST_CASE("Interactive instructions count toward the existing size and nesting l
     REQUIRE_FALSE(oversized);
     CHECK(oversized.error().code == "jobuctl.edit.too_large");
 
-    auto notes = std::string{"jobu:"};
+    auto notes = std::string{"//"};
     notes.append(max_job_edit_draft_bytes - notes.size() - 3, 'x');
     notes += "\n{}";
     REQUIRE(parse_job_edit_draft(notes));
@@ -313,7 +318,7 @@ TEST_CASE("Interactive instructions count toward the existing size and nesting l
     REQUIRE_FALSE(rejected);
     CHECK(rejected.error().code == "jobuctl.edit.too_large");
 
-    auto too_deep = "jobu: notes\n{\"nested\":" + serialized(nested_arrays(JsonLimits{}.max_depth)) + "}";
+    auto too_deep = "// notes\n{\"nested\":" + serialized(nested_arrays(JsonLimits{}.max_depth)) + "}";
     auto depth    = parse_job_edit_draft(too_deep);
     REQUIRE_FALSE(depth);
     CHECK(depth.error().code == "jobuctl.edit.invalid_json");

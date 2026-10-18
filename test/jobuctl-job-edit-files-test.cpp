@@ -139,6 +139,7 @@ TEST_CASE("Edit files are private, closed before editing, and retained by defaul
         }});
         paths      = files.artifacts();
         CHECK(paths.directory.is_absolute());
+        CHECK(paths.draft.filename() == "draft.jsonc");
         CHECK(metadata(paths.directory).st_uid == ::geteuid());
         CHECK((metadata(paths.directory).st_mode & 0777) == 0700);
         CHECK(metadata(paths.draft).st_uid == ::geteuid());
@@ -147,7 +148,7 @@ TEST_CASE("Edit files are private, closed before editing, and retained by defaul
         CHECK_FALSE(paths.request);
         auto text = files.read_draft();
         REQUIRE(text);
-        CHECK(text->starts_with("jobu:"));
+        CHECK(text->starts_with("// JSONC draft:"));
         auto decoded = parse_job_edit_draft(*text);
         REQUIRE(decoded);
         CHECK(serialized(*decoded) == serialized(fixture.baseline.value()));
@@ -186,6 +187,29 @@ TEST_CASE("A completed draft and minimal request both survive a failure return",
     CHECK_FALSE(params.as_object().contains("payload"));
 }
 
+TEST_CASE("Request-file mode rejects JSONC comments regardless of the filename", "[jobuctl][edit][files]")
+{
+    Fixture fixture;
+    auto    path = fixture.root.path() / "request.jsonc";
+    auto    json = serialized(fixture.update().params);
+
+    Command command;
+    command.kind         = CommandKind::JobUpdate;
+    command.request_file = path;
+    write_text(path, json);
+    REQUIRE(load_request_file(command, fixture.registry));
+
+    for (auto const* comment : {"// operator note\n", "/* operator note */"}) {
+        auto text = comment + json;
+        REQUIRE(prepare_job_update(fixture.baseline, text, fixture.registry));
+        write_text(path, text);
+        auto loaded = load_request_file(command, fixture.registry);
+        REQUIRE_FALSE(loaded);
+        CHECK(loaded.error().code == "jobuctl.input.invalid_json");
+        CHECK(read_text(path) == text);
+    }
+}
+
 TEST_CASE("Safe atomic saves are accepted without changing the edited bytes", "[jobuctl][edit][files]")
 {
     Fixture fixture;
@@ -194,7 +218,7 @@ TEST_CASE("Safe atomic saves are accepted without changing the edited bytes", "[
     auto    old_inode   = metadata(paths.draft).st_ino;
     auto    replacement = paths.directory / "atomic-save.tmp";
     auto    edited      = std::string{
-        "jobu: editor note\r\n"
+        "// editor note\r\n"
         " {\"job_id\":\"00112233-4455-6677-8899-aabbccddeeff\",\"expected_revision\":7,\"priority\":50} \n"};
     write_text(replacement, edited);
     REQUIRE(::rename(replacement.c_str(), paths.draft.c_str()) == 0);
@@ -576,7 +600,7 @@ TEST_CASE("Initial file failures clean known files and report unexpected retaine
     if (keep_backup) {
         REQUIRE_FALSE(files.error().retained_directory.empty());
         CHECK(read_text(files.error().retained_directory / "unexpected.bak") == "backup");
-        CHECK_FALSE(std::filesystem::exists(files.error().retained_directory / "draft.json"));
+        CHECK_FALSE(std::filesystem::exists(files.error().retained_directory / "draft.jsonc"));
     }
     else {
         CHECK(files.error().retained_directory.empty());
@@ -645,10 +669,10 @@ TEST_CASE("Cleanup preserves unowned request entries and replaced directories", 
         auto moved = fixture.root.path() / "moved";
         std::filesystem::rename(paths.directory, moved);
         REQUIRE(std::filesystem::create_directory(paths.directory));
-        write_text(paths.directory / "draft.json", "unrelated");
+        write_text(paths.directory / "draft.jsonc", "unrelated");
         CHECK_FALSE(files.cleanup());
-        CHECK(read_text(paths.directory / "draft.json") == "unrelated");
-        CHECK(std::filesystem::exists(moved / "draft.json"));
+        CHECK(read_text(paths.directory / "draft.jsonc") == "unrelated");
+        CHECK(std::filesystem::exists(moved / "draft.jsonc"));
     }
 }
 
@@ -686,7 +710,7 @@ TEST_CASE("Recovery preserves connection settings and the existing request-file 
 {
     auto command = Command{.socket_path = "/tmp/daemon's socket", .timeout = std::chrono::milliseconds{12345}};
     auto paths   = JobEditArtifacts{.directory = "/tmp/edit's directory",
-                                    .draft     = "/tmp/edit's directory/draft.json",
+                                    .draft     = "/tmp/edit's directory/draft.jsonc",
                                     .request   = "/tmp/edit's directory/update-request.json"};
     for (auto reason : {JobEditRecoveryReason::SubmissionFailed,
                         JobEditRecoveryReason::RevisionConflict,
@@ -725,7 +749,7 @@ TEST_CASE("Recovery preserves connection settings and the existing request-file 
     CHECK_FALSE(invalid->retry_command);
     CHECK_FALSE(invalid->paths.request);
     CHECK(invalid->instructions.find("every explicitly present field") != std::string::npos);
-    CHECK(invalid->instructions.find("removing any jobu: instruction lines") != std::string::npos);
+    CHECK(invalid->instructions.find("removing all JSONC comments") != std::string::npos);
     CHECK(invalid->instructions.find("strict JSON") != std::string::npos);
     CHECK(invalid->instructions.find("original job_id and expected_revision") != std::string::npos);
     CHECK(invalid->instructions.find("select only intended changed fields") != std::string::npos);

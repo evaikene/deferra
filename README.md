@@ -29,8 +29,8 @@ Windows is not a runtime target.
 ## Requirements
 
 Building JobU requires CMake 3.20 or newer, a C++20 compiler, fmt, SQLite,
-libcurl 7.85 or newer, nlohmann/json, Catch2 3.x, OpenSSL for tests, and Ninja
-or another CMake-supported build tool.
+libcurl 7.85 or newer, nlohmann/json 3.9.0 or newer, Catch2 3.x, OpenSSL for tests,
+and Ninja or another CMake-supported build tool.
 
 Linux command execution requires a libc providing `_Fork()`, kernel pidfd
 support, and `PR_SET_NO_NEW_PRIVS`. macOS command execution uses kqueue process
