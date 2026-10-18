@@ -271,12 +271,11 @@ session before opening the editor. Fetch and submission each receive the full
 neither budget. There is no automatic refresh, retry, merge, or second editor
 pass.
 
-The draft begins with `jobu:` instructions so they remain visible inside a
-terminal editor. Every physical line starting with the exact case-sensitive
-bytes `jobu:` in column 1 is ignored during draft parsing, wherever it occurs.
-Indenting the prefix or changing its case makes it ordinary input. A `jobu:` key
-or value inside JSON remains data. Instruction-only changes are a no-op; parsing
-never rewrites the saved file. This convention applies only to interactive
+The `draft.jsonc` file begins with `//` instruction comments so they remain visible
+inside the editor. Interactive drafts accept `//` line comments and `/* ... */`
+block comments wherever JSON permits whitespace. Comment markers inside strings
+remain data. Trailing commas are rejected. Comment-only changes are a no-op;
+parsing never rewrites the saved file. Comment support applies only to interactive
 drafts. Request files and `update-request.json` remain strict JSON.
 
 The JSON contains `job_id`, `expected_revision`, and writable definition fields.
@@ -307,7 +306,7 @@ mutation prints the ordinary update result.
 
 ### Retained files and recovery
 
-The CLI creates a private mode-0700 directory and mode-0600 `draft.json`. It
+The CLI creates a private mode-0700 directory and mode-0600 `draft.jsonc`. It
 accepts a safe editor atomic save, then reopens without following symlinks and
 requires an owner-only regular file owned by the current user. Missing, empty,
 unsafe, or invalid saved drafts fail without submission. Generated/read drafts,
@@ -340,8 +339,8 @@ POSIX-shell-quoted command preserving socket and timeout. For example:
 
 The CLI displays this command; it never executes it. A conflict is not fixed by
 blindly retrying the old revision, and an unknown outcome needs inspection first.
-For an invalid draft there may be no minimal request: remove `jobu:` instruction
-lines and deliberately select the intended changed fields when preparing a
+For an invalid draft there may be no minimal request: remove all JSONC comments
+and deliberately select the intended changed fields when preparing a
 strict JSON request. Request-file mode sends all present fields.
 
 Diagnostics do not print draft contents. Keep retained files private because

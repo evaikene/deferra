@@ -134,12 +134,26 @@ struct JsonLimits {
 /// tokens containing a fraction or exponent become double. Invalid syntax, UTF-8, duplicate members, excessive depth,
 /// integer overflow, and non-finite floating-point results are reported with stable `core.json.*` errors. Returned
 /// errors never contain the input body.
+/// Comments and trailing commas are rejected; use parse_json_with_comments() for explicitly comment-enabled input.
 ///
 /// @param text Complete JSON text to parse; the returned tree does not borrow from it.
 /// @param limits Container-nesting limits for this parse.
 /// @return The owning JSON tree, or a dependency-independent error.
 ///
 [[nodiscard]] auto parse_json(std::string_view text, JsonLimits limits = {})
+    -> jb::core::Result<JsonValue, jb::core::Error>;
+
+/// Parses one complete JSON value with line and block comments treated as whitespace.
+///
+/// Accepts `//` line comments and `/* ... */` block comments outside strings. Trailing commas are rejected.
+/// Applies the same value, UTF-8, duplicate-member, numeric and depth checks as parse_json(), including UTF-8
+/// validation of comments. Comments are discarded from the returned tree; the supplied text is never modified.
+///
+/// @param text Complete comment-enabled JSON text; the returned tree does not borrow from it.
+/// @param limits Container-nesting limits for this parse.
+/// @return The owning JSON tree, or the same dependency-independent errors as parse_json().
+///
+[[nodiscard]] auto parse_json_with_comments(std::string_view text, JsonLimits limits = {})
     -> jb::core::Result<JsonValue, jb::core::Error>;
 
 /// Serializes an owning JSON tree to deterministic JSON text.

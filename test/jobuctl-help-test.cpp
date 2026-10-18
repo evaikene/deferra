@@ -412,7 +412,7 @@ TEST_CASE("jobuctl interactive update help precedes input terminal and editor pr
             CHECK(result.code == 0);
             CHECK(result.err.empty());
             for (auto const* text : {"Bare UUID opens an interactive draft",
-                                     "jobu:",
+                                     "draft.jsonc with // instruction comments",
                                      "expected_revision unchanged",
                                      "No changes means no update",
                                      "terminal stdin/stderr",

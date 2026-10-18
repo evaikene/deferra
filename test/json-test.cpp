@@ -240,6 +240,70 @@ TEST_CASE("JSON parsing rejects invalid syntax and trailing roots", "[core][json
     }
 }
 
+TEST_CASE("Comment-enabled JSON parsing preserves values and leaves strict parsing unchanged", "[core][json]")
+{
+    auto const plain = std::string_view{
+        R"({"url":"https://example.test/a//b","text":"/* literal */\n// escaped newline","// key":-1})"};
+    auto expected = parse_json(plain);
+    REQUIRE(expected);
+
+    auto const text    = std::string{"// heading\r\n/* block\ncomment */\n"} +
+                         R"({"url" /* key */ : "https://example.test/a//b", // member
+                          "text":"/* literal */\n// escaped newline", "// key": /* value */ -1})" +
+                         " // trailing comment without a final newline";
+    auto       decoded = parse_json_with_comments(text);
+    REQUIRE(decoded);
+    CHECK(*decoded == *expected);
+    CHECK_FALSE(parse_json(text));
+
+    auto uncommented = parse_json_with_comments(plain);
+    REQUIRE(uncommented);
+    CHECK(*uncommented == *expected);
+    auto scalar = parse_json_with_comments("/* scalar */ 42 // trailing");
+    REQUIRE(scalar);
+    CHECK(scalar->as_uint() == 42);
+}
+
+TEST_CASE("Comment-enabled JSON retains syntax and value validation", "[core][json]")
+{
+    struct InvalidInput {
+        std::string_view text;
+        std::string_view code;
+    };
+
+    for (auto const& input : {
+             InvalidInput{.text = "// only a comment",                          .code = "core.json.syntax"          },
+             InvalidInput{.text = "{} /* unfinished",                           .code = "core.json.syntax"          },
+             InvalidInput{.text = "/* note */ [1,]",                            .code = "core.json.syntax"          },
+             InvalidInput{.text = R"({"value":1, /* note */})",                 .code = "core.json.syntax"          },
+             InvalidInput{.text = "{} // note\n true",                          .code = "core.json.syntax"          },
+             InvalidInput{.text = "/* note */ 1/* split token */2",             .code = "core.json.syntax"          },
+             InvalidInput{.text = R"({"key":1, /* duplicate */ "\u006bey":2})", .code = "core.json.duplicate_member"},
+             InvalidInput{.text = "/* note */ 18446744073709551616",            .code = "core.json.integer_overflow"},
+             InvalidInput{.text = "/* note */ -9223372036854775809",            .code = "core.json.integer_overflow"},
+             InvalidInput{.text = "/* note */ 1e9999",                          .code = "core.json.non_finite"      },
+             InvalidInput{.text = "// invalid UTF-8: \xc3\x28\n{}",             .code = "core.json.invalid_utf8"    },
+             InvalidInput{.text = R"(/* note */ "\uD800")",                     .code = "core.json.syntax"          },
+    }) {
+        CAPTURE(input.text);
+        auto result = parse_json_with_comments(input.text);
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == input.code);
+    }
+
+    auto boundary = parse_json_with_comments("/* note */ [{}]", {.max_depth = 2});
+    REQUIRE(boundary);
+    auto beyond = parse_json_with_comments(R"(/* note */ [{"nested": /* value */ []}])", {.max_depth = 2});
+    REQUIRE_FALSE(beyond);
+    CHECK(beyond.error().code == "core.json.depth_limit");
+
+    auto sensitive = parse_json_with_comments(R"(// private-comment-marker
+        {"private-member-marker":})");
+    REQUIRE_FALSE(sensitive);
+    CHECK_FALSE(contains(sensitive.error().message, "private-comment-marker"));
+    CHECK_FALSE(contains(sensitive.error().message, "private-member-marker"));
+}
+
 TEST_CASE("JSON parsing rejects invalid UTF-8 and malformed Unicode escapes", "[core][json]")
 {
     auto const invalid_utf8 = std::array{

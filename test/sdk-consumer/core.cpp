@@ -27,6 +27,11 @@ auto check_core_sdk() -> int
         return 2;
     }
 
+    auto commented = jb::core::parse_json_with_comments("// SDK consumer\n{\"answer\":42}");
+    if (!commented || *commented != *parsed || jb::core::parse_json("// SDK consumer\n{\"answer\":42}")) {
+        return 4;
+    }
+
     int              observed = 0;
     jb::core::Object receiver;
     Source           source;

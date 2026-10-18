@@ -48,15 +48,15 @@ struct PreparedJobUpdate {
 [[nodiscard]] auto format_job_edit_json(jb::core::JsonValue const& value)
     -> jb::core::Result<std::string, jb::core::Error>;
 
-/// Prepends editor-visible jobu: instructions to pretty JSON, bounding the complete draft to 16 MiB.
+/// Prepends editor-visible // instructions to pretty JSON, bounding the complete JSONC draft to 16 MiB.
 /// The result is an interactive draft; request-file input still requires strict JSON.
 [[nodiscard]] auto format_job_edit_draft(jb::core::JsonValue const& value)
     -> jb::core::Result<std::string, jb::core::Error>;
 
-/// Parses one interactive draft object, ignoring case-sensitive jobu: lines beginning in column 1.
-/// Blanks only matching line contents in a private copy, preserving line endings and all other bytes.
+/// Parses one interactive JSONC object, accepting // line comments and /* ... */ block comments outside strings.
+/// Comments may appear wherever whitespace is permitted. Trailing commas are rejected.
 /// Bounds the original input to 16 MiB before processing and retains the normal JSON depth limit.
-/// Does not modify the caller's text or accept this convention in ordinary JSON/request-file input.
+/// Does not modify the caller's text or enable comments in ordinary JSON/request-file input.
 [[nodiscard]] auto parse_job_edit_draft(std::string_view draft)
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 

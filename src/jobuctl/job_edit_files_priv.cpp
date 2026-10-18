@@ -150,7 +150,7 @@ auto JobEditFiles::create(JsonValue const& draft, std::filesystem::path const& p
         JobEditFiles files{root / leaf, parent_fd.release(), raw, std::move(io)};
         // Set the exact owner permissions even under a restrictive umask; no shared bits were ever granted.
         auto written = ::fchmod(raw, 0700) == 0
-                         ? files.write_file("draft.json", *text, false)
+                         ? files.write_file("draft.jsonc", *text, false)
                          : Result<void, Error>::failure(
                                file_error("jobuctl.edit.create_failed", "Unable to protect the edit directory"));
         if (!written) {
@@ -167,13 +167,13 @@ auto JobEditFiles::create(JsonValue const& draft, std::filesystem::path const& p
 auto JobEditFiles::artifacts() const -> JobEditArtifacts
 {
     return {.directory = _directory,
-            .draft     = _directory / "draft.json",
+            .draft     = _directory / "draft.jsonc",
             .request   = _request_ready ? std::optional{_directory / "update-request.json"} : std::nullopt};
 }
 
 auto JobEditFiles::read_draft() const -> Result<std::string, Error>
 {
-    Descriptor file{::openat(_directory_fd, "draft.json", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)};
+    Descriptor file{::openat(_directory_fd, "draft.jsonc", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)};
     if (file.get() < 0) {
         if (errno == ENOENT) {
             return Result<std::string, Error>::failure({.category = ErrorCategory::InvalidArgument,
@@ -318,7 +318,7 @@ auto JobEditFiles::cleanup() -> Result<void, Error>
         return Result<void, Error>::failure(cleanup_error());
     }
     if (_draft_present) {
-        if (!remove_file("draft.json", false)) {
+        if (!remove_file("draft.jsonc", false)) {
             return Result<void, Error>::failure(cleanup_error());
         }
         _draft_present = false;

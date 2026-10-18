@@ -293,10 +293,10 @@ auto format_job_edit_draft(JsonValue const& value) -> Result<std::string, Error>
         return Result<std::string, Error>::failure(std::move(json).error());
     }
 
-    auto draft = std::string{"jobu: Lines starting with jobu: are ignored (case-sensitive, column 1).\n"
-                             "jobu: Keep job_id and expected_revision unchanged.\n"
-                             "jobu: Omitted fields leave server values unchanged.\n"
-                             "jobu: Exit without effective changes to cancel the update.\n\n"};
+    auto draft = std::string{"// JSONC draft: comments are ignored; trailing commas are not allowed.\n"
+                             "// Keep job_id and expected_revision unchanged.\n"
+                             "// Omitted fields leave server values unchanged.\n"
+                             "// Exit without effective changes to cancel the update.\n\n"};
     if (!append_fragment(draft, *json)) {
         return Result<std::string, Error>::failure(draft_too_large());
     }
@@ -309,30 +309,10 @@ auto parse_job_edit_draft(std::string_view draft) -> Result<JsonValue, Error>
         return Result<JsonValue, Error>::failure(draft_too_large());
     }
 
-    // Apply the convention only to physical line prefixes. JSON string contents and escaped newlines stay intact.
-    // Preserve positions in a private copy; the saved draft remains unchanged even when parsing fails.
-    auto json  = std::string{draft};
-    auto begin = std::size_t{0};
-    while (begin < draft.size()) {
-        auto newline = draft.find('\n', begin);
-        auto end     = newline == std::string_view::npos ? draft.size() : newline;
-        if (draft.substr(begin, end - begin).starts_with("jobu:")) {
-            if (end > begin && draft[end - 1] == '\r') {
-                --end;
-            }
-            std::fill_n(json.data() + begin, end - begin, ' ');
-        }
-        if (newline == std::string_view::npos) {
-            break;
-        }
-        begin = newline + 1;
-    }
-
-    auto parsed = parse_json(json);
+    auto parsed = parse_json_with_comments(draft);
     if (!parsed || !parsed->is_object()) {
         return Result<JsonValue, Error>::failure(
-            edit_error("jobuctl.edit.invalid_json",
-                       "Job edit draft must contain one valid JSON object after ignoring jobu: lines"));
+            edit_error("jobuctl.edit.invalid_json", "Job edit draft must contain one valid JSONC object"));
     }
     return parsed;
 }
