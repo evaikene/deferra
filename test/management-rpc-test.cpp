@@ -553,6 +553,7 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
 
         auto created = decode_queue(endpoint.call("queue.create", create_params), fixture.registry);
         CHECK(created.id == first_id);
+        CHECK(created.revision == 1);
         CHECK(created.name == "alpha");
         CHECK(created.weight == 2U);
         CHECK(created.concurrency_limit == 3U);
@@ -564,8 +565,14 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         CHECK(rescans.pending());
         rescans.clear_pending();
 
+        // Prepare a later durable revision without implementing U.25/U.26 mutation rules here.
+        {
+            Query query{fixture.database};
+            REQUIRE(query.exec("UPDATE jobu_queues SET revision = 7"));
+        }
         auto replayed = decode_queue(endpoint.call("queue.create", create_params), fixture.registry);
         CHECK(replayed.id == first_id);
+        CHECK(replayed.revision == 1);
         CHECK(replayed.name == created.name);
         CHECK(replayed.weight == created.weight);
         CHECK(replayed.created_at == created.created_at);
@@ -576,6 +583,7 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         auto by_name =
             decode_queue(endpoint.call("queue.get", encode_selector(std::string{"alpha"})), fixture.registry);
         CHECK(by_name.id == first_id);
+        CHECK(by_name.revision == 7);
         CHECK(rescans.request_count() == 2U);
 
         auto list_params = queue_list_request_to_json({.page = {.limit = 1}});
@@ -585,6 +593,7 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         REQUIRE(page);
         REQUIRE(page->items.size() == 1U);
         CHECK(page->items.front().id == first_id);
+        CHECK(page->items.front().revision == 7);
         CHECK_FALSE(page->next_after_id);
         CHECK(rescans.request_count() == 2U);
 
@@ -598,15 +607,18 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         REQUIRE(update_params);
         auto updated = decode_queue(endpoint.call("queue.update", std::move(update_params).value()), fixture.registry);
         CHECK(updated.weight == 5U);
+        CHECK(updated.revision == 7);
         CHECK(std::get<std::int64_t>(updated.defaults.at("retry.max_attempts").data) == 6);
         CHECK(rescans.request_count() == 3U);
 
         auto selector  = encode_selector(first_id);
         auto suspended = decode_queue(endpoint.call("queue.suspend", selector), fixture.registry);
         CHECK(suspended.state == QueueState::Suspended);
+        CHECK(suspended.revision == 7);
         CHECK(rescans.request_count() == 4U);
         auto resumed = decode_queue(endpoint.call("queue.resume", selector), fixture.registry);
         CHECK(resumed.state == QueueState::Active);
+        CHECK(resumed.revision == 7);
         CHECK(rescans.request_count() == 5U);
         suspended = decode_queue(endpoint.call("queue.suspend", selector), fixture.registry);
         CHECK(suspended.state == QueueState::Suspended);
@@ -639,9 +651,11 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         CHECK(page->items[0].id == first_id);
         CHECK(page->items[0].name == "alpha");
         CHECK(page->items[0].state == QueueState::Deleted);
+        CHECK(page->items[0].revision == 7);
         CHECK(page->items[1].id == second_id);
         CHECK(page->items[1].name == "alpha");
         CHECK(page->items[1].state == QueueState::Active);
+        CHECK(page->items[1].revision == 1);
         CHECK(rescans.request_count() == 8U);
     }
 }

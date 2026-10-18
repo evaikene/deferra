@@ -2,6 +2,7 @@
 #include "retention_repository_priv.hpp"
 
 #include "domain_storage_priv.hpp"
+#include "json.hpp"
 #include "management.hpp"
 #include "query.hpp"
 #include "run_repository_priv.hpp"
@@ -393,6 +394,53 @@ TEST_CASE("Deleted queue cleanup reaches once cron manual and moved historical o
     CHECK(f.record("queue.create", {}, "new").resource_id == new_queue.id);
     auto reused = f.queue("old");
     CHECK(reused.id != old_queue.id);
+}
+
+TEST_CASE("Queue retirement validates creation revision independently of the tombstone",
+          "[jobu][retention][lifetime][revision]")
+{
+    auto const* representation = GENERATE("1", "missing", "null", "0", "7", "1.0", "\"1\"");
+    CAPTURE(representation);
+    LifetimeFixture f;
+    auto            queue = f.queue();
+    f.delete_queue(queue);
+
+    // The retained owner may have advanced since creation; its replay must remain revision 1.
+    f.sql("UPDATE jobu_queues SET revision = 7");
+    auto record = f.record("queue.create", {}, "queue");
+    auto parsed = parse_json(record.result_json);
+    REQUIRE(parsed);
+    auto& object = std::get<JsonValue::Object>(parsed->data);
+    if (std::string_view{representation} == "missing") {
+        object.erase("revision");
+    }
+    else {
+        auto revision = parse_json(representation);
+        REQUIRE(revision);
+        object.at("revision") = *revision;
+    }
+    auto result_json = serialize_json(*parsed);
+    REQUIRE(result_json);
+    auto removed = f.records.erase_matching(record);
+    REQUIRE(removed);
+    REQUIRE(*removed == 1);
+    record.result_json = *result_json;
+    REQUIRE(f.records.insert(record));
+
+    auto before = storage_snapshot(f.storage.database);
+    auto result =
+        f.retention.purge_next_batch(UtcTimePoint{50s}, 1s, 100, {.phase = RetentionSweepPhase::DeletedQueues});
+    if (std::string_view{representation} == "1") {
+        REQUIRE(result);
+        CHECK(result->purged.queues == 1);
+        CHECK(result->purged.idempotency_records == 1);
+        CHECK(f.count("jobu_queues") == 0);
+        CHECK(f.count("jobu_idempotency") == 0);
+    }
+    else {
+        check_relationship_failure(result);
+        CHECK(storage_snapshot(f.storage.database) == before);
+    }
 }
 
 TEST_CASE("Unrelated scoped replay records survive deleted owner retirement", "[jobu][retention][lifetime]")

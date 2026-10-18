@@ -5,6 +5,7 @@
 #include "utc_timestamp.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <chrono>
 #include <cstddef>
@@ -60,6 +61,7 @@ auto sample_queue(std::string name = "default") -> Queue
 {
     return {
         .id                    = parse_uuid("00112233-4455-6677-8899-aabbccddeeff"),
+        .revision              = 7,
         .name                  = std::move(name),
         .state                 = QueueState::Suspended,
         .weight                = 3,
@@ -140,9 +142,10 @@ TEST_CASE("Queue JSON uses the stable shape and round trips owning values", "[jo
     auto                      encoded = valid_queue_json(registry);
     auto const&               wire    = encoded.as_object();
 
-    REQUIRE(wire.size() == 12U);
+    REQUIRE(wire.size() == 13U);
     CHECK(wire.at("id").as_string() == "00112233-4455-6677-8899-aabbccddeeff");
     CHECK(wire.at("name").as_string() == "default");
+    CHECK(wire.at("revision").as_uint() == 7U);
     CHECK(wire.at("state").as_string() == "suspended");
     CHECK(wire.at("weight").as_uint() == 3U);
     CHECK(wire.at("concurrency_limit").as_uint() == 4U);
@@ -163,6 +166,7 @@ TEST_CASE("Queue JSON uses the stable shape and round trips owning values", "[jo
     REQUIRE(decoded);
     CHECK(decoded->id == parse_uuid("00112233-4455-6677-8899-aabbccddeeff"));
     CHECK(decoded->name == "default");
+    CHECK(decoded->revision == 7U);
     CHECK(decoded->state == QueueState::Suspended);
     CHECK(decoded->weight == 3U);
     CHECK(decoded->concurrency_limit == 4U);
@@ -187,6 +191,71 @@ TEST_CASE("Queue JSON uses the stable shape and round trips owning values", "[jo
     REQUIRE(minimal_decoded);
     CHECK_FALSE(minimal_decoded->history_retention);
     CHECK_FALSE(minimal_decoded->deleted_at);
+}
+
+TEST_CASE("Queue revisions round trip exactly across the full wire range", "[jobu][management][json][queue][revision]")
+{
+    auto const revision = GENERATE(QueueRevision{1},
+                                   QueueRevision{7},
+                                   QueueRevision{9007199254740993ULL},
+                                   static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max()));
+    CAPTURE(revision);
+    StandardAttributeRegistry registry;
+    auto                      queue = sample_queue();
+    queue.revision                  = revision;
+
+    auto encoded = queue_to_json(queue, registry);
+    REQUIRE(encoded);
+    auto text = serialize_json(*encoded);
+    REQUIRE(text);
+    auto parsed = parse_json(*text);
+    REQUIRE(parsed);
+    auto decoded = queue_from_json(*parsed, registry);
+    REQUIRE(decoded);
+    CHECK(decoded->revision == revision);
+
+    // Both integer representations are valid; floating-point values are not.
+    object(*encoded).at("revision") = make_json(static_cast<std::int64_t>(revision));
+    decoded                         = queue_from_json(*encoded, registry);
+    REQUIRE(decoded);
+    CHECK(decoded->revision == revision);
+}
+
+TEST_CASE("Queue results and list items require a valid revision", "[jobu][management][json][queue][revision]")
+{
+    auto const* representation =
+        GENERATE("null", "0", "-1", "9223372036854775808", "18446744073709551615", "true", "\"1\"", "1.0", "[]", "{}");
+    CAPTURE(representation);
+    StandardAttributeRegistry registry;
+    auto                      revision = parse_json(representation);
+    REQUIRE(revision);
+    auto queue                   = valid_queue_json(registry);
+    object(queue).at("revision") = *revision;
+    check_invalid_response(queue_from_json(queue, registry));
+
+    auto page = queue_page_to_json({.items = {sample_queue()}}, registry);
+    REQUIRE(page);
+    auto& item                  = std::get<JsonValue::Array>(object(*page).at("items").data).front();
+    object(item).at("revision") = *revision;
+    check_invalid_response(queue_page_from_json(*page, registry));
+
+    object(queue).erase("revision");
+    check_invalid_response(queue_from_json(queue, registry));
+    object(item).erase("revision");
+    check_invalid_response(queue_page_from_json(*page, registry));
+}
+
+TEST_CASE("Queue result encoding rejects out-of-range revisions", "[jobu][management][json][queue][revision]")
+{
+    auto const revision = GENERATE(QueueRevision{0},
+                                   static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max()) + 1U,
+                                   std::numeric_limits<QueueRevision>::max());
+    CAPTURE(revision);
+    StandardAttributeRegistry registry;
+    auto                      queue = sample_queue();
+    queue.revision                  = revision;
+    check_invalid_response(queue_to_json(queue, registry));
+    check_invalid_response(queue_page_to_json({.items = {queue}}, registry));
 }
 
 TEST_CASE("Queue JSON covers every stable enum spelling", "[jobu][management][json][queue][enum]")
@@ -332,7 +401,9 @@ TEST_CASE("Queue page JSON round trips and is forward compatible", "[jobu][manag
     REQUIRE(decoded);
     REQUIRE(decoded->items.size() == 2U);
     CHECK(decoded->items[0].name == "first");
+    CHECK(decoded->items[0].revision == 7U);
     CHECK(decoded->items[1].name == "second");
+    CHECK(decoded->items[1].revision == 7U);
     REQUIRE(decoded->next_after_id);
     CHECK(*decoded->next_after_id == next);
 

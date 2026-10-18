@@ -13,8 +13,10 @@ namespace jb::jobu::detail {
 [[nodiscard]] auto validate_queue_create_idempotency_request(std::string_view         request_json,
                                                              AttributeRegistry const& attributes)
     -> jb::core::Result<void, jb::core::Error>;
+/// Encodes the original revision-1 queue creation snapshot, independently of later owner changes.
 [[nodiscard]] auto encode_queue_idempotency_result(Queue const& queue, AttributeRegistry const& attributes)
     -> jb::core::Result<std::string, jb::core::Error>;
+/// Requires a complete creation snapshot with revision 1; missing metadata is a corrupt record.
 [[nodiscard]] auto decode_queue_idempotency_result(std::string_view result_json, AttributeRegistry const& attributes)
     -> jb::core::Result<Queue, jb::core::Error>;
 

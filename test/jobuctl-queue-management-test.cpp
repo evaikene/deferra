@@ -297,7 +297,7 @@ auto queue_summary(std::string_view id,
                    std::uint32_t    concurrency,
                    std::string_view recovery) -> std::string
 {
-    return fmt::format("Queue {}: name={}, state={}, weight={}, concurrency_limit={}, recovery_policy={}\n",
+    return fmt::format("Queue {}: name={}, revision=1, state={}, weight={}, concurrency_limit={}, recovery_policy={}\n",
                        id,
                        name,
                        state,

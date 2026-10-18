@@ -578,7 +578,9 @@ auto encode_queue_idempotency_result(Queue const& queue, AttributeRegistry const
     auto retention = encode_retention(queue.history_retention);
     auto created   = encode_time(queue.created_at);
     auto updated   = encode_time(queue.updated_at);
-    if (!defaults || !retention || !created || !updated || queue.runnable_wait_warning.count() < 0) {
+    // A create replay records the original revision, never the owner's current configuration.
+    if (!defaults || !retention || !created || !updated || queue.revision != 1 ||
+        queue.runnable_wait_warning.count() < 0) {
         return CodecResult<std::string>::failure(invalid_record("invalid_queue_result"));
     }
     auto deleted =
@@ -595,6 +597,7 @@ auto encode_queue_idempotency_result(Queue const& queue, AttributeRegistry const
         {"id",                        json_string(queue.id.to_string())                                         },
         {"name",                      json_string(queue.name)                                                   },
         {"recovery_policy",           json_string(std::string{recovery_policy_text(queue.recovery_policy)})     },
+        {"revision",                  json_uint(queue.revision)                                                 },
         {"runnable_wait_warning_ms",  json_uint(static_cast<std::uint64_t>(queue.runnable_wait_warning.count()))},
         {"state",                     json_string(std::string{queue_state_text(queue.state)})                   },
         {"updated_at",                std::move(updated).value()                                                },
@@ -618,6 +621,7 @@ auto decode_queue_idempotency_result(std::string_view result_json, AttributeRegi
                                        "id",
                                        "name",
                                        "recovery_policy",
+                                       "revision",
                                        "runnable_wait_warning_ms",
                                        "state",
                                        "updated_at",
@@ -630,6 +634,7 @@ auto decode_queue_idempotency_result(std::string_view result_json, AttributeRegi
         return CodecResult<Queue>::failure(std::move(valid).error());
     }
     auto id            = uuid_member(**object, "id");
+    auto revision      = unsigned_member(**object, "revision");
     auto name          = text_member(**object, "name");
     auto weight        = unsigned_member(**object, "weight");
     auto concurrency   = unsigned_member(**object, "concurrency_limit");
@@ -643,12 +648,14 @@ auto decode_queue_idempotency_result(std::string_view result_json, AttributeRegi
     auto created   = time_member(**object, "created_at");
     auto updated   = time_member(**object, "updated_at");
     auto deleted   = nullable_time(**object, "deleted_at");
-    if (!id || !name || !weight || !concurrency || !recovery || !defaults || !retention || !warning || !state ||
-        !created || !updated || !deleted || *state != "active" || deleted->has_value() || *created != *updated) {
+    if (!id || !revision || *revision != 1 || !name || !weight || !concurrency || !recovery || !defaults ||
+        !retention || !warning || !state || !created || !updated || !deleted || *state != "active" ||
+        deleted->has_value() || *created != *updated) {
         return CodecResult<Queue>::failure(invalid_record("invalid_queue_result"));
     }
     return CodecResult<Queue>::success({
         .id                    = *id,
+        .revision              = *revision,
         .name                  = std::move(name).value(),
         .state                 = QueueState::Active,
         .weight                = static_cast<std::uint32_t>(*weight),

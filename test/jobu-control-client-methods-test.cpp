@@ -501,6 +501,100 @@ TEST_CASE("Every distinct typed result decodes into its public reply alternative
     CHECK(received.size() == cases.size());
 }
 
+TEST_CASE("All typed queue replies preserve revision and reject missing or invalid tokens", "[jobu][client][queue]")
+{
+    Fixture fixture;
+    fixture.initialize();
+    auto id = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff");
+    REQUIRE(id);
+    auto queue = Queue{.id = *id, .revision = 9007199254740993ULL, .name = "queue"};
+    auto raw   = encoded(queue_to_json(queue, fixture.attributes));
+
+    struct QueueCase {
+        Submit submit;
+        bool   list;
+        bool   mutation;
+    };
+
+    auto cases = std::vector<QueueCase>{
+        {.submit   = [&](auto& client) { return client.create_queue({.name = "queue"}); },
+         .list     = false,
+         .mutation = true                                                                                                            },
+        {.submit = [&](auto& client) { return client.get_queue(*id); },                              .list = false, .mutation = false},
+        {.submit   = [](auto& client) { return client.list_queues(QueueListRequest{}); },
+         .list     = true,
+         .mutation = false                                                                                                           },
+        {.submit   = [&](auto& client) { return client.update_queue({.queue = *id, .weight = 2}); },
+         .list     = false,
+         .mutation = true                                                                                                            },
+        {.submit = [&](auto& client) { return client.suspend_queue(*id); },                          .list = false, .mutation = true },
+        {.submit = [&](auto& client) { return client.resume_queue(*id); },                           .list = false, .mutation = true },
+    };
+
+    auto received = std::size_t{0};
+    auto failures = std::vector<ControlFailure>{};
+    fixture.typed->reply_received.connect(fixture.typed.get(), [&](ControlCallId, ControlReply const& reply) {
+        if (auto const* result = std::get_if<Queue>(&reply)) {
+            CHECK(result->revision == queue.revision);
+        }
+        else {
+            auto const* page = std::get_if<QueuePage>(&reply);
+            REQUIRE(page != nullptr);
+            REQUIRE(page->items.size() == 1U);
+            CHECK(page->items.front().revision == queue.revision);
+        }
+        ++received;
+    });
+    fixture.typed->call_failed.connect(fixture.typed.get(), [&](ControlCallId, ControlFailure const& failure) {
+        failures.push_back(failure);
+    });
+
+    for (auto const& test : cases) {
+        auto wrap = [&](JsonValue value) {
+            if (test.list) {
+                return JsonValue{
+                    .data = JsonValue::Object{
+                                              {"items", JsonValue{.data = JsonValue::Array{std::move(value)}}},
+                                              {"next_after_id", JsonValue{}},
+                                              }
+                };
+            }
+            return value;
+        };
+        auto call = test.submit(*fixture.typed);
+        REQUIRE(call);
+        static_cast<void>(fixture.device.take_written_data());
+        fixture.device.inject_input(success(*call + 1U, wrap(raw)));
+        fixture.drain_tasks();
+
+        for (auto const* representation :
+             {"missing", "null", "0", "-1", "9223372036854775808", "true", "\"1\"", "1.0"}) {
+            CAPTURE(representation, test.list, test.mutation);
+            auto  malformed = raw;
+            auto& object    = std::get<JsonValue::Object>(malformed.data);
+            if (std::string_view{representation} == "missing") {
+                object.erase("revision");
+            }
+            else {
+                auto revision = parse_json(representation);
+                REQUIRE(revision);
+                object.at("revision") = *revision;
+            }
+            auto rejected = test.submit(*fixture.typed);
+            REQUIRE(rejected);
+            static_cast<void>(fixture.device.take_written_data());
+            auto const before = failures.size();
+            fixture.device.inject_input(success(*rejected + 1U, wrap(std::move(malformed))));
+            fixture.drain_tasks();
+            REQUIRE(failures.size() == before + 1U);
+            CHECK(failures.back().kind == ControlFailureKind::Local);
+            CHECK(std::get<Error>(failures.back().error).code == "jobu.client.invalid_response");
+            CHECK(failures.back().outcome_unknown == test.mutation);
+        }
+    }
+    CHECK(received == cases.size());
+}
+
 TEST_CASE("Remote errors stay observed and malformed mutation replies stay uncertain", "[jobu][client]")
 {
     Fixture fixture;
