@@ -537,7 +537,9 @@ auto queue_to_json(Queue const& queue, AttributeRegistry const& registry)
     auto       defaults = attribute_set_to_json(queue.defaults, registry, AttributeScope::QueueDefault);
     auto       created  = encode_time(queue.created_at);
     auto       updated  = encode_time(queue.updated_at);
-    if (!state || !recovery || !defaults || !created || !updated || queue.weight == 0 || queue.concurrency_limit == 0 ||
+    if (!state || !recovery || !defaults || !created || !updated || queue.revision == 0 ||
+        queue.revision > static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max()) || queue.weight == 0 ||
+        queue.concurrency_limit == 0 ||
         (queue.history_retention && *queue.history_retention < std::chrono::seconds::zero()) ||
         queue.runnable_wait_warning < std::chrono::milliseconds::zero()) {
         return invalid<jb::core::JsonValue>(false);
@@ -562,6 +564,7 @@ auto queue_to_json(Queue const& queue, AttributeRegistry const& registry)
             {"id",                        make_json(queue.id.to_string())                                          },
             {"name",                      make_json(queue.name)                                                    },
             {"recovery_policy",           make_json(std::string{*recovery})                                        },
+            {"revision",                  make_json(queue.revision)                                                },
             {"runnable_wait_warning_ms",  make_json(static_cast<std::int64_t>(queue.runnable_wait_warning.count()))},
             {"state",                     make_json(std::string{*state})                                           },
             {"updated_at",                std::move(*updated)                                                      },
@@ -578,6 +581,7 @@ auto queue_from_json(jb::core::JsonValue const& value, AttributeRegistry const& 
     }
     auto const& object      = value.as_object();
     auto const* id          = find_member(object, "id");
+    auto const* revision    = find_member(object, "revision");
     auto const* name        = find_member(object, "name");
     auto const* state       = find_member(object, "state");
     auto const* weight      = find_member(object, "weight");
@@ -589,16 +593,17 @@ auto queue_from_json(jb::core::JsonValue const& value, AttributeRegistry const& 
     auto const* created     = find_member(object, "created_at");
     auto const* updated     = find_member(object, "updated_at");
     auto const* deleted     = find_member(object, "deleted_at");
-    if (!id || !name || !state || !weight || !concurrency || !recovery || !defaults || !retention || !warning ||
-        !created || !updated || !deleted || !name->is_string()) {
+    if (!id || !revision || !name || !state || !weight || !concurrency || !recovery || !defaults || !retention ||
+        !warning || !created || !updated || !deleted || !name->is_string()) {
         return invalid<Queue>(false);
     }
 
     auto result = Queue{};
-    if (!decode_uuid(*id, result.id) || !queue_state_from_json(*state, result.state) ||
-        !decode_unsigned(*weight, result.weight) || result.weight == 0 ||
-        !decode_unsigned(*concurrency, result.concurrency_limit) || result.concurrency_limit == 0 ||
-        !recovery_policy_from_json(*recovery, result.recovery_policy) ||
+    if (!decode_uuid(*id, result.id) || !decode_unsigned(*revision, result.revision) || result.revision == 0 ||
+        result.revision > static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max()) ||
+        !queue_state_from_json(*state, result.state) || !decode_unsigned(*weight, result.weight) ||
+        result.weight == 0 || !decode_unsigned(*concurrency, result.concurrency_limit) ||
+        result.concurrency_limit == 0 || !recovery_policy_from_json(*recovery, result.recovery_policy) ||
         !decode_nullable_seconds(*retention, result.history_retention) ||
         (result.history_retention && *result.history_retention < std::chrono::seconds::zero())) {
         return invalid<Queue>(false);

@@ -432,9 +432,10 @@ auto recovery_policy_text(RecoveryPolicy policy) noexcept -> std::string_view
 void print_queue(Queue const& queue)
 {
     fmt::print(stdout,
-               "Queue {}: name={}, state={}, weight={}, concurrency_limit={}, recovery_policy={}\n",
+               "Queue {}: name={}, revision={}, state={}, weight={}, concurrency_limit={}, recovery_policy={}\n",
                queue.id.to_string(),
                escape_human(queue.name),
+               queue.revision,
                queue_state_text(queue.state),
                queue.weight,
                queue.concurrency_limit,

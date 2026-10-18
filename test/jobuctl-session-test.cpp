@@ -279,6 +279,7 @@ auto run_session(PeerBehavior             behavior,
                 REQUIRE(id);
                 REQUIRE(at);
                 auto queue = Queue{.id         = *id,
+                                   .revision   = 7,
                                    .name       = "reports",
                                    .state      = QueueState::Suspending,
                                    .created_at = *at,
@@ -543,6 +544,16 @@ TEST_CASE("jobuctl JSON mode emits one typed result or structured error", "[jobu
         CHECK(exchange.exit->exit_code == 0);
         CHECK(exchange.output == "{\"items\":[],\"next_after_id\":null}\n");
         CHECK(exchange.error.empty());
+    }
+    SECTION("queue revision survives JSON rendering")
+    {
+        auto exchange = run_session(PeerBehavior::EmptyPage, {"queue", "get", "--name", "reports"}, {"--json"});
+        CHECK(exchange.exit->exit_code == 0);
+        CHECK(exchange.error.empty());
+        auto value = parse_json(exchange.output);
+        REQUIRE(value);
+        CHECK(value->as_object().at("revision").as_uint() == 7U);
+        CHECK(value->as_object().at("name").as_string() == "reports");
     }
     SECTION("remote application error")
     {

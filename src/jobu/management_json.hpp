@@ -23,7 +23,7 @@ namespace jb::jobu {
 /// Encodes a queue result using the stable management wire shape.
 ///
 /// Queue-default attributes are encoded through @p registry at AttributeScope::QueueDefault. UUIDs and timestamps use
-/// their canonical textual forms.
+/// their canonical textual forms. Revision is an exact integer from 1 through INT64_MAX.
 ///
 /// @param queue Queue value to encode without retaining it.
 /// @param registry Attribute registry borrowed for this conversion.
@@ -36,6 +36,7 @@ namespace jb::jobu {
 ///
 /// Every known field is mandatory and validated. Unknown members are ignored for forward compatibility. Queue-default
 /// attributes are decoded through @p registry at AttributeScope::QueueDefault.
+/// Revision must be an exact integer from 1 through INT64_MAX; omission never uses Queue's construction default.
 ///
 /// @param value JSON result object to decode without retaining references to it.
 /// @param registry Attribute registry borrowed for this conversion.

@@ -63,7 +63,10 @@ TEST_CASE("Published protocol results use production decoders", "[jobu][protocol
 {
     auto const attributes = StandardAttributeRegistry{};
 
-    REQUIRE(queue_page_from_json(example("queue-list.result.json"), attributes));
+    auto queues = queue_page_from_json(example("queue-list.result.json"), attributes);
+    REQUIRE(queues);
+    REQUIRE(queues->items.size() == 1U);
+    CHECK(queues->items.front().revision == 7);
     REQUIRE(job_page_from_json(example("job-list.result.json"), attributes));
     REQUIRE(run_page_from_json(example("run-list.result.json")));
     REQUIRE(attempt_page_from_json(example("attempt-list.result.json")));

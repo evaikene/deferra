@@ -1,1 +1,1 @@
-{"items":[],"next_after_id":null}
+{"items":[{"id":"00112233-4455-6677-8899-aabbccddeeff","revision":7,"name":"reports","state":"active","weight":1,"concurrency_limit":2,"recovery_policy":"fail_interrupted","defaults":{},"history_retention_seconds":null,"runnable_wait_warning_ms":10000,"created_at":"2026-10-18T08:00:00.000000Z","updated_at":"2026-10-18T09:00:00.000000Z","deleted_at":null}],"next_after_id":null}

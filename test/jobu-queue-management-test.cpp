@@ -5,6 +5,8 @@
 #include "attribute_registry.hpp"
 #include "database.hpp"
 #include "domain_storage_priv.hpp"
+#include "idempotency_codec_priv.hpp"
+#include "json.hpp"
 #include "query.hpp"
 #include "queue_repository_priv.hpp"
 #include "run_repository_priv.hpp"
@@ -29,6 +31,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 using namespace jb::core;
@@ -345,7 +348,15 @@ TEST_CASE("Queue create idempotency replays canonical results and rolls back rec
     auto original = service.create_queue(original_request);
     REQUIRE(original);
     CHECK(original->id == sequence_id(1));
+    CHECK(original->revision == 1);
     REQUIRE(service.update_queue({.queue = original->id, .name = "renamed"}));
+
+    // U.24 verifies snapshot independence without introducing the later mutation-increment contract.
+    execute(fixture.database, "UPDATE jobu_queues SET revision = 7");
+    auto current = service.get_queue(original->id);
+    REQUIRE(current);
+    CHECK(current->name == "renamed");
+    CHECK(current->revision == 7);
 
     auto explicit_defaults = CreateQueueRequest{
         .name                  = "replay",
@@ -360,6 +371,7 @@ TEST_CASE("Queue create idempotency replays canonical results and rolls back rec
     auto replay = service.create_queue(explicit_defaults);
     REQUIRE(replay);
     CHECK(replay->id == original->id);
+    CHECK(replay->revision == 1);
     CHECK(replay->name == "replay");
     CHECK(replay->weight == 1);
     CHECK(count_rows(fixture.database, "jobu_queues") == 1);
@@ -389,6 +401,56 @@ TEST_CASE("Queue create idempotency replays canonical results and rolls back rec
         CHECK(count_rows(fixture.database, "jobu_queues") == 1);
         CHECK(count_rows(fixture.database, "jobu_idempotency") == 1);
     }
+}
+
+TEST_CASE("Queue creation snapshots require the original revision", "[jobu][queue][idempotency][revision]")
+{
+    auto const* representation = GENERATE("null",
+                                          "0",
+                                          "-1",
+                                          "2",
+                                          "7",
+                                          "9223372036854775808",
+                                          "18446744073709551615",
+                                          "true",
+                                          "\"1\"",
+                                          "1.0",
+                                          "[]",
+                                          "{}");
+    CAPTURE(representation);
+    ServiceFixture    fixture{{sequence_id(1)}};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              queue = service.create_queue({.name = "snapshot"});
+    REQUIRE(queue);
+    auto encoded = detail::encode_queue_idempotency_result(*queue, fixture.registry);
+    REQUIRE(encoded);
+    auto decoded = detail::decode_queue_idempotency_result(*encoded, fixture.registry);
+    REQUIRE(decoded);
+    CHECK(decoded->revision == 1);
+
+    auto parsed = parse_json(*encoded);
+    REQUIRE(parsed);
+    auto invalid = parse_json(representation);
+    REQUIRE(invalid);
+    auto& object          = std::get<JsonValue::Object>(parsed->data);
+    object.at("revision") = *invalid;
+    auto malformed        = serialize_json(*parsed);
+    REQUIRE(malformed);
+    require_error(detail::decode_queue_idempotency_result(*malformed, fixture.registry),
+                  ErrorCategory::Internal,
+                  "jobu.idempotency.invalid_record");
+
+    object.erase("revision");
+    auto missing = serialize_json(*parsed);
+    REQUIRE(missing);
+    require_error(detail::decode_queue_idempotency_result(*missing, fixture.registry),
+                  ErrorCategory::Internal,
+                  "jobu.idempotency.invalid_record");
+
+    queue->revision = 7;
+    require_error(detail::encode_queue_idempotency_result(*queue, fixture.registry),
+                  ErrorCategory::Internal,
+                  "jobu.idempotency.invalid_record");
 }
 
 TEST_CASE("Queue create idempotency replay does not require a fresh UUID", "[jobu][queue][idempotency]")

@@ -301,7 +301,8 @@ public:
 
     /// Creates one active queue in an immediate transaction.
     /// @param request Queue configuration consumed after validation. An optional idempotency key durably replays the
-    /// original successful result when the normalized request matches.
+    /// original successful revision-1 result when the normalized request matches. Replay is not a current read;
+    /// use get_queue() to obtain the current configuration and revision.
     /// @return Committed or replayed queue, or a validation, idempotency, name-conflict, generator, attribute, or
     /// database Error.
     ///
