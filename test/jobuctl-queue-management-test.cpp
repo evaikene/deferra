@@ -466,16 +466,16 @@ auto main(int argc, char* argv[]) -> int
     }
 
     auto       suspended         = run_success(argv[2], socket_path, {"queue", "suspend", "--id", *queue_id, "--wait"});
-    auto const suspended_summary = queue_summary(*queue_id, "renamed", "suspended", 4, 5, "retry_interrupted", 2);
+    auto const suspended_summary = queue_summary(*queue_id, "renamed", "suspended", 4, 5, "retry_interrupted", 4);
     if (!suspended || *suspended != suspended_summary) {
         return fail("queue suspend did not print the durable suspended state");
     }
     auto resumed = run_success(argv[2], socket_path, {"queue", "resume", "--name", "renamed"});
-    if (!resumed || *resumed != updated_summary) {
+    if (!resumed || *resumed != queue_summary(*queue_id, "renamed", "active", 4, 5, "retry_interrupted", 5)) {
         return fail("queue resume did not print the durable active state");
     }
     suspended = run_success(argv[2], socket_path, {"queue", "suspend", "--name", "renamed"});
-    if (!suspended || *suspended != suspended_summary) {
+    if (!suspended || *suspended != queue_summary(*queue_id, "renamed", "suspended", 4, 5, "retry_interrupted", 7)) {
         return fail("queue did not suspend again before deletion");
     }
 
@@ -495,7 +495,7 @@ auto main(int argc, char* argv[]) -> int
         return fail("jobud did not reopen the durable queue database before the deadline");
     }
 
-    auto const deleted_summary = queue_summary(*queue_id, "renamed", "deleted", 4, 5, "retry_interrupted", 2);
+    auto const deleted_summary = queue_summary(*queue_id, "renamed", "deleted", 4, 5, "retry_interrupted", 8);
     auto       after_restart   = run_success(argv[2], reopen_socket, {"queue", "list", "--include-deleted"});
     if (!after_restart || after_restart->find(deleted_summary) == std::string::npos ||
         after_restart->find(other_summary) == std::string::npos) {

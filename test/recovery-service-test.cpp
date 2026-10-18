@@ -1169,3 +1169,35 @@ TEST_CASE("Recovery checks timing presence before repair and again after committ
         fixture.storage.require_run(running);
     }
 }
+
+TEST_CASE("Startup drains empty queues once and preserves exhausted lifecycle tokens",
+          "[jobu][recovery][service][revision][sqlite]")
+{
+    auto const     state    = GENERATE(QueueState::Active, QueueState::Suspending, QueueState::Suspended);
+    auto const     revision = GENERATE(9223372036854775806ULL, 9223372036854775807ULL);
+    ServiceFixture fixture;
+    auto           queue = recovery_queue(recovery_id(1), state);
+    queue.revision       = revision;
+    fixture.storage.insert_queue(queue);
+    auto recovered = fixture.recover();
+    if (state == QueueState::Suspending && revision == 9223372036854775807ULL) {
+        REQUIRE_FALSE(recovered);
+        CHECK(recovered.error().code == "jobu.queue.revision_exhausted");
+        CHECK(fixture.queue(queue.id).state == queue.state);
+        CHECK(fixture.queue(queue.id).revision == revision);
+        CHECK(fixture.queue(queue.id).updated_at == queue.updated_at);
+    }
+    else {
+        REQUIRE(recovered);
+        auto const transitions = state == QueueState::Suspending ? 1U : 0U;
+        CHECK(recovered->suspended_queues == transitions);
+        CHECK(fixture.queue(queue.id).revision == revision + transitions);
+        CHECK(fixture.queue(queue.id).state == (transitions == 1 ? QueueState::Suspended : state));
+        auto const current = fixture.queue(queue.id);
+        auto       again   = fixture.recover();
+        REQUIRE(again);
+        CHECK(again->suspended_queues == 0);
+        CHECK(fixture.queue(queue.id).revision == current.revision);
+        CHECK(fixture.queue(queue.id).updated_at == current.updated_at);
+    }
+}

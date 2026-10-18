@@ -339,14 +339,17 @@ public:
     /// @param selector Existing queue UUID or exact user-facing name, borrowed only for this call.
     /// @return Committed queue. Active queues pass through suspending and complete immediately when no running work is
     /// present; suspending queues complete when running work has drained. Suspended queues are returned unchanged.
-    /// Deleted, not-found, state-conflict, and database failures are reported as Error values.
+    /// Each actual state transition advances the revision once, so an idle active queue advances twice.
+    /// Deleted, not-found, state-conflict, revision-exhaustion, and database failures are reported as Error values.
+    /// A failure rolls back both transitions and their timing changes.
     ///
     [[nodiscard]] auto suspend_queue(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>;
 
     /// Resumes a suspending or suspended queue without changing its jobs or runs.
     /// @param selector Existing queue UUID or exact user-facing name, borrowed only for this call.
     /// @return Committed active queue, the unchanged queue when already active, or a deleted, not-found,
-    /// state-conflict, or database Error.
+    /// state-conflict, revision-exhaustion, or database Error. An actual transition advances the revision once;
+    /// an already-active queue keeps its revision, including at the maximum revision.
     ///
     [[nodiscard]] auto resume_queue(QueueSelector const& selector) -> jb::core::Result<Queue, jb::core::Error>;
 
@@ -354,7 +357,8 @@ public:
     /// @param selector Existing queue UUID or exact user-facing name, borrowed only for this call.
     /// @return Success after pending work is cancelled, current secret references are removed, and the active name is
     /// released. Not-found, not-suspended, running-work, revision-exhausted, state, invariant, and database failures
-    /// are returned as Error values. Definitions and terminal history remain durable for retention.
+    /// are returned as Error values. The queue tombstone advances its revision once in the same transaction.
+    /// Definitions and terminal history remain durable for retention.
     ///
     [[nodiscard]] auto delete_queue(QueueSelector const& selector) -> jb::core::Result<void, jb::core::Error>;
 

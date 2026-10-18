@@ -49,15 +49,23 @@ public:
                                               QueueRevision                      expected_revision,
                                               SerializedAttributeDocument const* defaults)
         -> jb::core::Result<bool, jb::core::Error>;
+    /// Changes a live queue only at the expected state and revision, advancing its revision exactly once.
+    /// False means no row matched; both revisions must be valid storage values.
     [[nodiscard]] auto set_state(jb::core::Uuid const&  id,
                                  QueueState             expected_state,
                                  QueueState             next_state,
+                                 QueueRevision          expected_revision,
+                                 QueueRevision          next_revision,
                                  jb::core::UtcTimePoint updated_at) -> jb::core::Result<bool, jb::core::Error>;
     [[nodiscard]] auto count_non_deleted_jobs(jb::core::Uuid const& queue_id)
         -> jb::core::Result<std::size_t, jb::core::Error>;
+    /// Tombstones a suspended queue only at expected_revision, advancing its revision exactly once.
+    /// The caller owns the transaction containing related cleanup. False means no row matched.
     [[nodiscard]] auto mark_deleted(jb::core::Uuid const&  id,
                                     std::string_view       internal_name,
                                     std::string_view       original_name,
+                                    QueueRevision          expected_revision,
+                                    QueueRevision          next_revision,
                                     jb::core::UtcTimePoint deleted_at) -> jb::core::Result<bool, jb::core::Error>;
 
 private:

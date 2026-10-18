@@ -578,3 +578,51 @@ TEST_CASE("Reference replacement failure retains its fatal cause when rollback a
     fixture.storage.reopen();
     CHECK(storage_snapshot(fixture.storage.database) == before);
 }
+
+TEST_CASE("Idle queue suspension rolls back both revisions after a second-transition write failure",
+          "[jobu][management][fault][revision][sqlite]")
+{
+    Fixture fixture;
+    auto    queue = recovery_queue(recovery_id(1));
+    fixture.storage.insert_queue(queue);
+    auto const  before       = storage_snapshot(fixture.storage.database);
+    std::size_t transitions  = 0;
+    fixture.faults->classify = [&transitions](std::string_view sql) {
+        if (sql.starts_with("UPDATE jobu_queues SET state = :next_state")) {
+            return ++transitions == 2 ? std::string{"queue.second_transition"} : std::string{"queue.update"};
+        }
+        return boundary(sql);
+    };
+    fixture.arm({.boundary = "queue.second_transition", .operation = Operation::Execute, .phase = Phase::AfterSuccess});
+    auto result = fixture.service.suspend_queue(queue.id);
+    REQUIRE_FALSE(result);
+    fixture.require_faults_fired();
+    CHECK(transitions == 2);
+    CHECK(fixture.committed == 0);
+    CHECK(storage_snapshot(fixture.storage.database) == before);
+    fixture.faults->classify = boundary;
+}
+
+TEST_CASE("An exhausted busy queue keeps its existing suspension without a write",
+          "[jobu][management][lifecycle][revision][sqlite]")
+{
+    Fixture fixture;
+    auto    queue  = recovery_queue(recovery_id(1), QueueState::Suspending);
+    queue.revision = 9223372036854775807ULL;
+    fixture.storage.insert_queue(queue);
+    auto job = fixture.storage.make_job(recovery_id(2), queue.id);
+    fixture.storage.insert_job(job);
+    fixture.storage.insert_run(fixture.storage.make_run(recovery_id(3), job, RunState::Running));
+    auto const before    = storage_snapshot(fixture.storage.database);
+    auto       unchanged = fixture.service.suspend_queue(queue.id);
+    REQUIRE(unchanged);
+    CHECK(unchanged->state == QueueState::Suspending);
+    CHECK(unchanged->revision == queue.revision);
+    CHECK(unchanged->updated_at == queue.updated_at);
+    CHECK(storage_snapshot(fixture.storage.database) == before);
+    auto resume = fixture.service.resume_queue(queue.id);
+    REQUIRE_FALSE(resume);
+    CHECK(resume.error().code == "jobu.queue.revision_exhausted");
+    CHECK(storage_snapshot(fixture.storage.database) == before);
+    CHECK(fixture.failures.empty());
+}

@@ -1157,7 +1157,17 @@ auto ManagementService::suspend_queue_impl(QueueSelector const& selector) -> jb:
     if (queue.state == QueueState::Active) {
         // Establish the suspension gate before consulting durable occupancy.
         // Completion processing finishes the transition later when work remains.
-        auto transitioned = data->queues.set_state(queue.id, QueueState::Active, QueueState::Suspending, now);
+        if (queue.revision >= kMaximumPersistedQueueRevision) {
+            return ServiceResult<Queue>::failure(queue_revision_exhausted());
+        }
+        auto const expected_revision = queue.revision;
+        auto const next_revision     = expected_revision + 1;
+        auto       transitioned      = data->queues.set_state(queue.id,
+                                                              QueueState::Active,
+                                                              QueueState::Suspending,
+                                                              expected_revision,
+                                                              next_revision,
+                                                              now);
         if (!transitioned) {
             return ServiceResult<Queue>::failure(std::move(transitioned).error());
         }
@@ -1165,6 +1175,7 @@ auto ManagementService::suspend_queue_impl(QueueSelector const& selector) -> jb:
             return ServiceResult<Queue>::failure(data->persisted_error(queue_state_conflict()));
         }
         queue.state      = QueueState::Suspending;
+        queue.revision   = next_revision;
         queue.updated_at = now;
     }
 
@@ -1173,7 +1184,18 @@ auto ManagementService::suspend_queue_impl(QueueSelector const& selector) -> jb:
         return ServiceResult<Queue>::failure(std::move(running).error());
     }
     if (*running == 0) {
-        auto transitioned = data->queues.set_state(queue.id, QueueState::Suspending, QueueState::Suspended, now);
+        // An idle suspend advances twice. Failure here rolls back the initial gate and timing as well.
+        if (queue.revision >= kMaximumPersistedQueueRevision) {
+            return ServiceResult<Queue>::failure(queue_revision_exhausted());
+        }
+        auto const expected_revision = queue.revision;
+        auto const next_revision     = expected_revision + 1;
+        auto       transitioned      = data->queues.set_state(queue.id,
+                                                              QueueState::Suspending,
+                                                              QueueState::Suspended,
+                                                              expected_revision,
+                                                              next_revision,
+                                                              now);
         if (!transitioned) {
             return ServiceResult<Queue>::failure(std::move(transitioned).error());
         }
@@ -1181,6 +1203,7 @@ auto ManagementService::suspend_queue_impl(QueueSelector const& selector) -> jb:
             return ServiceResult<Queue>::failure(data->persisted_error(queue_state_conflict()));
         }
         queue.state      = QueueState::Suspended;
+        queue.revision   = next_revision;
         queue.updated_at = now;
     }
 
@@ -1245,8 +1268,14 @@ auto ManagementService::resume_queue_impl(QueueSelector const& selector) -> jb::
     }
 
     if (queue.state != QueueState::Active) {
-        auto const expected_state = queue.state;
-        auto       transitioned   = data->queues.set_state(queue.id, expected_state, QueueState::Active, now);
+        if (queue.revision >= kMaximumPersistedQueueRevision) {
+            return ServiceResult<Queue>::failure(queue_revision_exhausted());
+        }
+        auto const expected_state    = queue.state;
+        auto const expected_revision = queue.revision;
+        auto const next_revision     = expected_revision + 1;
+        auto       transitioned =
+            data->queues.set_state(queue.id, expected_state, QueueState::Active, expected_revision, next_revision, now);
         if (!transitioned) {
             return ServiceResult<Queue>::failure(std::move(transitioned).error());
         }
@@ -1254,6 +1283,7 @@ auto ManagementService::resume_queue_impl(QueueSelector const& selector) -> jb::
             return ServiceResult<Queue>::failure(data->persisted_error(queue_state_conflict()));
         }
         queue.state      = QueueState::Active;
+        queue.revision   = next_revision;
         queue.updated_at = now;
     }
 
@@ -1308,7 +1338,7 @@ auto ManagementService::delete_queue_impl(QueueSelector const& selector) -> jb::
     }
 
     // Preflight every destructive condition before changing related tables,
-    // including revision capacity for all job tombstones in this queue.
+    // including revision capacity for the queue and all its job tombstones.
     auto running = data->runs.count_running_for_queue(queue.id);
     if (!running) {
         return ServiceResult<void>::failure(std::move(running).error());
@@ -1326,6 +1356,9 @@ auto ManagementService::delete_queue_impl(QueueSelector const& selector) -> jb::
     }
     if (*exhausted) {
         return ServiceResult<void>::failure(job_revision_exhausted());
+    }
+    if (queue.revision >= kMaximumPersistedQueueRevision) {
+        return ServiceResult<void>::failure(queue_revision_exhausted());
     }
 
     // Settle the old scope before changing eligibility. The same sample reopens the new scope.
@@ -1353,7 +1386,8 @@ auto ManagementService::delete_queue_impl(QueueSelector const& selector) -> jb::
     }
 
     auto internal_name = queue.name + "-deleted#" + queue.id.to_string();
-    auto deleted_queue = data->queues.mark_deleted(queue.id, internal_name, queue.name, now);
+    auto deleted_queue =
+        data->queues.mark_deleted(queue.id, internal_name, queue.name, queue.revision, queue.revision + 1, now);
     if (!deleted_queue) {
         return ServiceResult<void>::failure(std::move(deleted_queue).error());
     }
