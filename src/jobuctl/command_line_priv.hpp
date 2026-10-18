@@ -4,6 +4,7 @@
 #include "control_json.hpp"
 #include "history.hpp"
 #include "management.hpp"
+#include "queue_selector_priv.hpp"
 #include "secret.hpp"
 #include "statistics_json.hpp"
 #include "uuid.hpp"
@@ -113,6 +114,9 @@ struct Command {
     CommandKind                          kind{CommandKind::SystemInfo};
     std::string_view                     method{"system.info"};
     CommandRequest                       request;
+    /// Agrees with the typed request's selector; absent for raw request files and cursor-only stats.
+    /// A later resolution phase consumes this intent once; the request remains the field-value authority.
+    std::optional<QueueSelectorIntent>   queue_selector_intent;
     std::optional<std::filesystem::path> request_file;
     std::optional<SecretInput>           secret_input;
     std::chrono::milliseconds            timeout{5000};

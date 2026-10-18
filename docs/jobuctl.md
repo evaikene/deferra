@@ -91,7 +91,33 @@ jobuctl queue list --request-file queue-list.json
 
 Help and version finish without reading a request file or standard input. `--json` does not change help into JSON.
 
-Queue operations select a queue with exactly one of `--id UUID` or `--name NAME`. Job creation and moving use exactly one of `--queue-id UUID` or `--queue-name NAME`. Flag-based job updates, moves, and deletes require `--revision N`; use the current revision shown by `job get`. A bare `job update UUID` instead [opens an interactive draft](#interactive-job-updates) and captures the inspected revision.
+`queue get`, `update`, `suspend`, `resume`, `delete`, and initial `stats` accept
+one positional `SELECTOR`, or the explicit aliases `--id UUID` and `--name NAME`.
+These forms are mutually exclusive, even if they identify the same queue.
+
+| Selector | Meaning |
+|---|---|
+| `reports` | Exact queue name |
+| An exact 8-4-4-4-12 hexadecimal UUID, in either hex case | Queue ID |
+| `id:UUID` | Explicit ID; a malformed UUID is a local error |
+| `name:NAME` | Explicit exact name, including UUID-shaped names |
+| `name:id:reports` / `name:name:reports` | Literal `id:reports` / `name:reports` |
+| `team:reports` | Exact name containing a colon |
+
+Prefixes are case-sensitive and interpreted once. Names are not trimmed or
+case-normalized; quote spaces as usual, for example `queue get 'night reports'`.
+Use `queue get name:-reports` or `queue get -- -reports` for an option-looking
+name. Alias values are literal: `--name id:reports` selects the name `id:reports`,
+and `--id` requires the UUID itself. `queue create NAME` keeps a literal name,
+including prefix-looking names; `queue list` takes no selector.
+
+UUID/name collision checks and name-to-UUID pinning are pending U.30. Currently,
+a bare UUID selects only by ID, without a name probe or fallback. Use `id:UUID`
+or `name:NAME` to state intent explicitly. Request-file selectors remain raw
+protocol values: `queue_name` is literal, `queue_id` must be a UUID, and neither
+field undergoes CLI prefix interpretation or inferred selection.
+
+Job creation and moving use exactly one of `--queue-id UUID` or `--queue-name NAME`. Flag-based job updates, moves, and deletes require `--revision N`; use the current revision shown by `job get`. A bare `job update UUID` instead [opens an interactive draft](#interactive-job-updates) and captures the inspected revision.
 
 For example:
 
@@ -136,6 +162,14 @@ following the raw `job.list` API. Request-file input cannot be combined with
 
 ## Queue and job configuration
 
+Queue updates require the inspected `--revision N` (1 through `9223372036854775807`)
+and at least one replacement field. Use `--new-name NAME` to rename;
+`--name NAME` always selects. Omitted fields stay unchanged. A bare
+`queue update SELECTOR` does not open an editor yet; interactive queue editing
+arrives in U.33. The CLI does not fetch a missing revision or retry a stale one.
+For identity continuity after a read, retain both its UUID and revision and use
+`id:UUID`: revision equality alone cannot protect against name reuse.
+
 Queue create/update accept `--recovery-policy fail_interrupted|retry_interrupted`, `--history-retention-seconds N`, `--runnable-wait-warning-ms N`, and `--defaults-file FILE`. Retention `0` means unlimited. Omit retention at creation to inherit the daemon policy; use `--inherit-history-retention` on update to restore inheritance. These two update options are mutually exclusive. The warning delay is nonnegative milliseconds. A defaults file contains a JSON object of registered queue default attributes; `{}` clears all queue defaults on update. Omitted update fields stay unchanged.
 
 The daemon automatically purges eligible terminal history and emits runnable-wait
@@ -149,8 +183,11 @@ changing these settings.
 printf '{"retry.max_attempts":2}\n' > queue-defaults.json
 jobuctl queue create reports \
     --defaults-file queue-defaults.json --history-retention-seconds 86400
-jobuctl queue update --name reports --history-retention-seconds 0
-jobuctl queue update --name reports --inherit-history-retention
+# Use the revision from the preceding get; fetch again before a separate update.
+jobuctl queue get reports
+jobuctl queue update reports --revision 6 --history-retention-seconds 0
+jobuctl queue get reports
+jobuctl queue update reports --revision 7 --inherit-history-retention
 ```
 
 Job create/update accept repeated `--attribute NAME=JSON_VALUE` for distinct registered job attributes. JSON values keep their types, so a numeric value is written as `--attribute retry.max_attempts=2`. On update, supplied attributes replace those named values; omitted attributes remain unchanged. Flag-based `job update` requires the current `--revision`, and `--clear-name` explicitly clears the name. Interactive editing captures the revision shown in its draft. A stale revision is returned as a conflict; the CLI does not fetch a newer revision and retry.
@@ -486,7 +523,7 @@ jobuctl attempt output RUN_UUID 1 --channel stdout --output-file chunk.bin
 ## Retained statistics
 
 `system stats` summarizes runs across queues; `queue stats` requires exactly one
-initial selector, `--id UUID` or `--name NAME`. Both accept `--job-id UUID`,
+initial selector, positional `SELECTOR`, `--id UUID`, or `--name NAME`. Both accept `--job-id UUID`,
 `--type cli|http`, `--origin scheduled|manual`, `--planned-from UTC`,
 `--planned-to UTC`, `--group-by none|queue|job|type|origin|state`, and `--limit N`
 (1–200, default 100). `system stats` also accepts `--queue-id UUID` as a filter.
@@ -496,7 +533,7 @@ resolved upper bound.
 
 ```sh
 jobuctl system stats --group-by state --json
-jobuctl queue stats --name reports \
+jobuctl queue stats reports \
     --planned-from 2030-01-01T00:00:00Z --planned-to 2030-01-02T00:00:00Z \
     --group-by job --limit 20
 ```

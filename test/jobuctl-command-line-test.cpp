@@ -12,6 +12,7 @@
 #include "json.hpp"
 #include "management_json.hpp"
 #include "payload_template_priv.hpp"
+#include "queue_selector_priv.hpp"
 #include "statistics_json.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/temporary_directory.hpp"
@@ -824,7 +825,7 @@ TEST_CASE("jobuctl parser preserves queue selectors and deletion rendering ident
 
     auto duplicate = parse({"--socket", "fixture.sock", "queue", "get", "--id", job_id, "--name", "queue"});
     CHECK_FALSE(duplicate.command);
-    CHECK(duplicate.error == "expected exactly one valid --id or --name selector");
+    CHECK(duplicate.error == "expected exactly one selector: SELECTOR, --id UUID, or --name NAME");
 }
 
 TEST_CASE("jobuctl parser preserves job identity revisions and signed priority", "[jobuctl][parse]")
@@ -1940,7 +1941,7 @@ TEST_CASE("CLI cron flags and request files preserve timezone omission", "[jobuc
     CHECK(rendered.find("daemon default") != std::string::npos);
 }
 
-TEST_CASE("Explicit queue updates require a bounded revision without changing selector grammar",
+TEST_CASE("Explicit queue updates require a bounded revision with positional selectors",
           "[jobuctl][parse][queue][revision]")
 {
     auto fields = std::vector<std::string>{"queue", "update", "--name", "protected", "--weight", "2"};
@@ -1962,9 +1963,235 @@ TEST_CASE("Explicit queue updates require a bounded revision without changing se
     CHECK_FALSE(parse({"queue", "update", "--name", "protected", "--revision", "1"}).command);
     CHECK_FALSE(parse({"queue", "update", "--name", "protected", "--revision", "1", "--revision", "1", "--weight", "2"})
                     .command);
-    CHECK_FALSE(parse({"queue", "update", "protected", "--revision", "1", "--weight", "2"}).command);
+    CHECK(parse({"queue", "update", "protected", "--revision", "1", "--weight", "2"}).command);
     CHECK_FALSE(parse({"queue", "update", "--request-file", "input.json", "--revision", "1"}).command);
     auto by_id = parse({"queue", "update", "--id", job_id, "--revision", "7", "--weight", "2"});
     REQUIRE(by_id.command);
     CHECK(std::get<UpdateQueueRequest>(by_id.command->request).expected_revision == 7);
+}
+
+TEST_CASE("Queue commands share owning positional and explicit selector intent", "[jobuctl][parse][queue][selector]")
+{
+    auto const lower = std::string{"abcdef01-abcd-7000-abcd-0123456789ab"};
+    auto const upper = std::string{"ABCDEF01-ABCD-7000-ABCD-0123456789AB"};
+
+    struct SelectorCase {
+        std::vector<std::string> arguments;
+        QueueSelectionForm       form;
+        std::string              value;
+    };
+
+    auto const cases = std::vector<SelectorCase>{
+        {.arguments = {"reports"},                              .form = QueueSelectionForm::ExactName,  .value = "reports"      },
+        {.arguments = {lower},                                  .form = QueueSelectionForm::InferredId, .value = lower          },
+        {.arguments = {upper},                                  .form = QueueSelectionForm::InferredId, .value = lower          },
+        {.arguments = {"id:" + lower},                          .form = QueueSelectionForm::ExplicitId, .value = lower          },
+        {.arguments = {"id:" + upper},                          .form = QueueSelectionForm::ExplicitId, .value = lower          },
+        {.arguments = {"name:" + upper},                        .form = QueueSelectionForm::ExactName,  .value = upper          },
+        {.arguments = {"name:id:reports"},                      .form = QueueSelectionForm::ExactName,  .value = "id:reports"   },
+        {.arguments = {"name:name:reports"},                    .form = QueueSelectionForm::ExactName,  .value = "name:reports" },
+        {.arguments = {"team:reports"},                         .form = QueueSelectionForm::ExactName,  .value = "team:reports" },
+        {.arguments = {"ID:reports"},                           .form = QueueSelectionForm::ExactName,  .value = "ID:reports"   },
+        {.arguments = {"Name:reports"},                         .form = QueueSelectionForm::ExactName,  .value = "Name:reports" },
+        {.arguments = {"night reports"},                        .form = QueueSelectionForm::ExactName,  .value = "night reports"},
+        {.arguments = {" reports "},                            .form = QueueSelectionForm::ExactName,  .value = " reports "    },
+        {.arguments = {"name:-reports"},                        .form = QueueSelectionForm::ExactName,  .value = "-reports"     },
+        {.arguments = {"name:--help"},                          .form = QueueSelectionForm::ExactName,  .value = "--help"       },
+        {.arguments = {"--name", upper},                        .form = QueueSelectionForm::ExactName,  .value = upper          },
+        {.arguments = {"--name", "id:reports"},                 .form = QueueSelectionForm::ExactName,  .value = "id:reports"   },
+        {.arguments = {"--name", "name:reports"},               .form = QueueSelectionForm::ExactName,  .value = "name:reports" },
+        {.arguments = {"--name=--help"},                        .form = QueueSelectionForm::ExactName,  .value = "--help"       },
+        {.arguments = {"--id", upper},                          .form = QueueSelectionForm::ExplicitId, .value = lower          },
+        {.arguments = {"abcdef01-abcd-7000-abcd-0123456789az"},
+         .form      = QueueSelectionForm::ExactName,
+         .value     = "abcdef01-abcd-7000-abcd-0123456789az"                                                                    },
+    };
+
+    for (auto const* action : {"get", "update", "suspend", "resume", "delete", "stats"}) {
+        for (auto const& scenario : cases) {
+            CAPTURE(action, scenario.arguments);
+            auto arguments = std::vector<std::string>{"queue", action};
+            arguments.insert(arguments.end(), scenario.arguments.begin(), scenario.arguments.end());
+            if (std::string_view{action} == "update") {
+                arguments.insert(arguments.end(), {"--revision", "6", "--new-name", "name:replacement"});
+            }
+            auto parsed = parse(std::move(arguments));
+            REQUIRE(parsed.command);
+            REQUIRE(parsed.command->queue_selector_intent);
+            CHECK(parsed.command->queue_selector_intent->form == scenario.form);
+            // parse() has already destroyed argv and lexer storage, including the original uppercase spelling.
+            auto const original = scenario.arguments.front() == "--name=--help" ? "--help" : scenario.arguments.back();
+            CHECK(parsed.command->queue_selector_intent->original_text == original);
+
+            auto const* selector = std::get_if<QueueSelector>(&parsed.command->request);
+            if (auto const* update = std::get_if<UpdateQueueRequest>(&parsed.command->request)) {
+                selector = &update->queue;
+                CHECK(update->name == "name:replacement");
+                CHECK(update->expected_revision == 6);
+            }
+            else if (auto const* stats = std::get_if<QueueStatisticsListRequest>(&parsed.command->request)) {
+                selector = &std::get<QueueStatisticsQuery>(*stats).selector;
+            }
+            REQUIRE(selector);
+            if (scenario.form == QueueSelectionForm::ExactName) {
+                CHECK(std::get<std::string>(*selector) == scenario.value);
+            }
+            else {
+                CHECK(std::get<Uuid>(*selector).to_string() == scenario.value);
+            }
+        }
+
+        // A terminator is still lexical, and must preserve help-looking operands as data.
+        auto arguments = std::vector<std::string>{"queue", action};
+        if (std::string_view{action} == "update") {
+            arguments.insert(arguments.end(), {"--revision", "6", "--weight", "2"});
+        }
+        arguments.insert(arguments.end(), {"--", "--help"});
+        auto literal = parse(std::move(arguments));
+        REQUIRE(literal.command);
+        REQUIRE(literal.command->queue_selector_intent);
+        CHECK(literal.command->queue_selector_intent->form == QueueSelectionForm::ExactName);
+        CHECK(literal.command->queue_selector_intent->original_text == "--help");
+    }
+}
+
+TEST_CASE("Queue selectors reject empty malformed and conflicting forms", "[jobuctl][parse][queue][selector]")
+{
+    for (auto const* action : {"get", "update", "suspend", "resume", "delete", "stats"}) {
+        for (auto const& selection : std::vector<std::vector<std::string>>{
+                 {},
+                 {""},
+                 {"name:"},
+                 {"id:"},
+                 {"id:not-a-uuid"},
+                 {"id:id:" + std::string{job_id}},
+                 {"id:name:reports"},
+                 {"--id", "id:" + std::string{job_id}},
+                 {"--id", "not-a-uuid"},
+                 {"--name", ""},
+                 {"--id", ""},
+                 {"reports", "reports"},
+                 {job_id, "--id", job_id},
+                 {"--id", job_id, job_id},
+                 {"reports", "--name", "reports"},
+                 {"--name", "reports", "reports"},
+                 {"--id", job_id, "--name", job_id},
+                 {"--name", "reports", "--name", "reports"}
+        }) {
+            CAPTURE(action, selection);
+            auto arguments = std::vector<std::string>{"queue", action};
+            arguments.insert(arguments.end(), selection.begin(), selection.end());
+            if (std::string_view{action} == "update") {
+                arguments.insert(arguments.end(), {"--revision", "6", "--weight", "2"});
+            }
+            CHECK_FALSE(parse(std::move(arguments)).command);
+        }
+    }
+    for (auto const& selection : std::vector<std::vector<std::string>>{
+             {"reports"},
+             {"id:" + std::string{job_id}},
+             {"--id", job_id},
+             {"--name", "reports"}
+    }) {
+        auto arguments = std::vector<std::string>{"queue", "update"};
+        arguments.insert(arguments.end(), selection.begin(), selection.end());
+        CHECK(parse(arguments).error == "queue update requires --revision with the inspected queue revision");
+        arguments.insert(arguments.end(), {"--revision", "6"});
+        CHECK(parse(std::move(arguments)).error == "queue update requires at least one mutable field");
+    }
+    CHECK_FALSE(parse({"queue", "list", "reports"}).command);
+    auto created = parse({"queue", "create", "name:id:reports"});
+    REQUIRE(created.command);
+    CHECK(std::get<CreateQueueRequest>(created.command->request).name == "name:id:reports");
+    CHECK_FALSE(created.command->queue_selector_intent);
+}
+
+TEST_CASE("Queue statistics keep cursor continuation free of selector intent", "[jobuctl][parse][queue][selector]")
+{
+    auto continuation = parse({"queue", "stats", "--cursor", "token"});
+    REQUIRE(continuation.command);
+    CHECK_FALSE(continuation.command->queue_selector_intent);
+    for (auto const& selection : std::vector<std::vector<std::string>>{
+             {"reports"},
+             {"id:" + std::string{job_id}},
+             {"--id", job_id},
+             {"--name", "reports"},
+             {"--limit", "2"},
+             {"--group-by", "job"},
+             {"--job-id", job_id},
+             {"--type", "cli"},
+             {"--origin", "manual"},
+             {"--planned-from", "2030-01-01T00:00:00Z"},
+             {"--planned-to", "2030-01-02T00:00:00Z"}
+    }) {
+        auto arguments = std::vector<std::string>{"queue", "stats", "--cursor", "token"};
+        arguments.insert(arguments.end(), selection.begin(), selection.end());
+        CHECK_FALSE(parse(std::move(arguments)).command);
+    }
+    auto filtered = parse({"queue", "stats", "reports", "--group-by", "state", "--limit", "2", "--job-id", job_id});
+    REQUIRE(filtered.command);
+    auto const& query = std::get<QueueStatisticsQuery>(std::get<QueueStatisticsListRequest>(filtered.command->request));
+    CHECK(std::get<std::string>(query.selector) == "reports");
+    CHECK(query.statistics.group_by == StatisticsGroupBy::State);
+    CHECK(query.statistics.limit == 2);
+    CHECK(query.statistics.job_id == Uuid::parse(job_id).value());
+}
+
+TEST_CASE("Queue request files bypass CLI selector interpretation and intent", "[jobuctl][input][queue][selector]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   path = directory.path() / "queue-request.json";
+    StandardAttributeRegistry    registry;
+    for (auto const* action : {"get", "update", "suspend", "resume", "delete", "stats"}) {
+        for (auto const* name : {"id:reports", "name:reports", "ABCDEF01-ABCD-7000-ABCD-0123456789AB"}) {
+            CAPTURE(action, name);
+            {
+                std::ofstream file{path};
+                file << R"({"queue_name":")" << name << '"';
+                if (std::string_view{action} == "update") {
+                    file << R"(,"expected_revision":6,"weight":2)";
+                }
+                file << "}";
+            }
+            auto raw = parse({"queue", action, "--request-file", path.string()});
+            REQUIRE(raw.command);
+            CHECK_FALSE(raw.command->queue_selector_intent);
+            REQUIRE(load_request_file(*raw.command, registry));
+            CHECK_FALSE(raw.command->queue_selector_intent);
+            auto const* selector = std::get_if<QueueSelector>(&raw.command->request);
+            if (auto const* update = std::get_if<UpdateQueueRequest>(&raw.command->request)) {
+                selector = &update->queue;
+            }
+            else if (auto const* stats = std::get_if<QueueStatisticsListRequest>(&raw.command->request)) {
+                selector = &std::get<QueueStatisticsQuery>(*stats).selector;
+            }
+            REQUIRE(selector);
+            CHECK(std::get<std::string>(*selector) == name);
+        }
+        for (auto const& extra : std::vector<std::vector<std::string>>{
+                 {"reports"},
+                 {"--id", job_id},
+                 {"--name", "reports"}
+        }) {
+            auto arguments = std::vector<std::string>{"queue", action, "--request-file", path.string()};
+            arguments.insert(arguments.end(), extra.begin(), extra.end());
+            CHECK_FALSE(parse(std::move(arguments)).command);
+        }
+
+        for (auto const* invalid : {R"({"queue_id":"id:00000000-0000-7000-8000-000000000001"})",
+                                    R"({/* comment */"queue_name":"reports"})",
+                                    R"({"queue_name":"reports","selector":"reports"})"}) {
+            {
+                std::ofstream file{path};
+                auto          document = std::string{invalid};
+                if (std::string_view{action} == "update") {
+                    document.insert(document.size() - 1, R"(,"expected_revision":6,"weight":2)");
+                }
+                file << document;
+            }
+            auto raw = parse({"queue", action, "--request-file", path.string()});
+            REQUIRE(raw.command);
+            CHECK_FALSE(load_request_file(*raw.command, registry));
+        }
+    }
 }

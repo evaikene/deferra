@@ -55,8 +55,9 @@ constexpr std::array globals{
     flag("version", "Show the local executable version (root only)."),
 };
 
-constexpr auto id            = value_option("id", "UUID", "Select a queue by ID; mutually exclusive with --name.");
-constexpr auto name_selector = value_option("name", "NAME", "Select a queue by name; mutually exclusive with --id.");
+constexpr auto id = value_option("id", "UUID", "Explicit ID alias; excludes a positional SELECTOR and --name.");
+constexpr auto name_selector =
+    value_option("name", "NAME", "Literal exact-name alias; excludes a positional SELECTOR and --id.");
 constexpr auto queue_id =
     value_option("queue-id", "UUID", "Select a queue by ID; mutually exclusive with --queue-name.");
 constexpr auto queue_name =
@@ -233,8 +234,11 @@ constexpr std::array schedule_next{
 };
 constexpr std::array schedule_validate{timezone};
 
-constexpr std::string_view select_queue = "Supply exactly one of --id or --name.";
-constexpr std::string_view job_uuid     = "UUID is the job ID.";
+constexpr std::string_view select_queue =
+    "Supply one positional SELECTOR, --id UUID, or --name NAME. Bare UUIDs select IDs; other text selects exact names. "
+    "Use id:UUID or name:NAME to be explicit; prefixes are case-sensitive and interpreted once. "
+    "UUID/name collision checks are not yet available.";
+constexpr std::string_view job_uuid = "UUID is the job ID.";
 
 // Each canonical leaf owns its alias and dispatch strategy. Adding an alias cannot introduce a new wire method.
 constexpr CommandSpec system_info_command{
@@ -284,11 +288,11 @@ constexpr CommandSpec queue_get_command{
     .kind             = CommandKind::QueueGet,
     .alias            = {},
     .summary          = "Show a queue",
-    .operands         = {},
-    .maximum_operands = 0,
+    .operands         = "[SELECTOR]",
+    .maximum_operands = 1,
     .options          = queue_selector,
     .rules            = select_queue,
-    .example          = "jobuctl queue get --name reports",
+    .example          = "jobuctl queue get reports",
     .capability       = "queue.get",
     .build            = parse_queue_command,
 };
@@ -314,12 +318,15 @@ constexpr CommandSpec queue_update_command{
     .kind             = CommandKind::QueueUpdate,
     .alias            = {},
     .summary          = "Update a queue",
-    .operands         = {},
-    .maximum_operands = 0,
+    .operands         = "[SELECTOR]",
+    .maximum_operands = 1,
     .options          = queue_update,
-    .rules            = "Supply exactly one of --id or --name, --revision, and at least one replacement field. "
-                        "Unspecified fields remain unchanged. Stale revisions fail without automatic retry.",
-    .example          = "jobuctl queue update --name reports --revision 1 --weight 2",
+    .rules            = "Supply one positional SELECTOR, --id UUID, or --name NAME. Bare UUIDs select IDs; "
+                        "use id:UUID or name:NAME to be explicit. Prefixes are case-sensitive and interpreted once. "
+                        "Require --revision and at least one replacement field; --new-name changes the name. "
+                        "Unspecified fields remain unchanged. Stale revisions fail without automatic retry. "
+                        "UUID/name collision checks and interactive queue editing are not yet available.",
+    .example          = "jobuctl queue update reports --revision 1 --weight 2",
     .capability       = "queue.update",
     .build            = parse_queue_command,
 };
@@ -330,11 +337,11 @@ constexpr CommandSpec queue_suspend_command{
     .kind             = CommandKind::QueueSuspend,
     .alias            = {},
     .summary          = "Suspend a queue",
-    .operands         = {},
-    .maximum_operands = 0,
+    .operands         = "[SELECTOR]",
+    .maximum_operands = 1,
     .options          = queue_suspend,
     .rules            = select_queue,
-    .example          = "jobuctl queue suspend --name reports",
+    .example          = "jobuctl queue suspend reports",
     .capability       = "queue.suspend",
     .build            = parse_queue_command,
 };
@@ -345,11 +352,11 @@ constexpr CommandSpec queue_resume_command{
     .kind             = CommandKind::QueueResume,
     .alias            = {},
     .summary          = "Resume a queue",
-    .operands         = {},
-    .maximum_operands = 0,
+    .operands         = "[SELECTOR]",
+    .maximum_operands = 1,
     .options          = queue_selector,
     .rules            = select_queue,
-    .example          = "jobuctl queue resume --name reports",
+    .example          = "jobuctl queue resume reports",
     .capability       = "queue.resume",
     .build            = parse_queue_command,
 };
@@ -360,24 +367,29 @@ constexpr CommandSpec queue_delete_command{
     .kind             = CommandKind::QueueDelete,
     .alias            = {},
     .summary          = "Delete a queue",
-    .operands         = {},
-    .maximum_operands = 0,
+    .operands         = "[SELECTOR]",
+    .maximum_operands = 1,
     .options          = queue_selector,
     .rules            = select_queue,
-    .example          = "jobuctl queue delete --name reports",
+    .example          = "jobuctl queue delete reports",
     .capability       = "queue.delete",
     .build            = parse_queue_command,
 };
 constexpr CommandSpec queue_stats_command{
-    .group      = "queue",
-    .name       = "stats",
-    .kind       = CommandKind::QueueStats,
-    .summary    = "Summarize one queue's retained history",
-    .options    = queue_stats,
-    .rules      = "Initially require exactly one of --id or --name. --cursor alone continues a page.",
-    .example    = "jobuctl queue stats --name reports --group-by job",
-    .capability = "queue.stats",
-    .build      = parse_queue_statistics_command,
+    .group            = "queue",
+    .name             = "stats",
+    .kind             = CommandKind::QueueStats,
+    .summary          = "Summarize one queue's retained history",
+    .operands         = "[SELECTOR]",
+    .maximum_operands = 1,
+    .options          = queue_stats,
+    .rules            = "Initially supply one positional SELECTOR, --id UUID, or --name NAME. Bare UUIDs select IDs; "
+                        "use id:UUID or name:NAME to be explicit. Prefixes are case-sensitive and interpreted once. "
+                        "--cursor alone continues a page, without selectors or filters. "
+                        "UUID/name collision checks are not yet available.",
+    .example          = "jobuctl queue stats reports --group-by job",
+    .capability       = "queue.stats",
+    .build            = parse_queue_statistics_command,
 };
 
 constexpr CommandSpec job_create_command{

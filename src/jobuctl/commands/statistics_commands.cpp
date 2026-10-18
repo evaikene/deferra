@@ -2,6 +2,8 @@
 
 #include "command_helpers_priv.hpp"
 #include "json.hpp"
+#include "management_json.hpp"
+#include "queue_selector_priv.hpp"
 #include "statistics_json.hpp"
 
 #include <fmt/format.h>
@@ -17,13 +19,17 @@ using namespace jb::jobu;
 
 namespace {
 
-auto statistics_params(std::span<CommandLineArgument const> arguments, bool queue_scope) -> std::optional<JsonValue>
+auto statistics_params(std::span<CommandLineArgument const> arguments, bool queue_scope)
+    -> std::optional<JsonValue::Object>
 {
     auto fields  = JsonValue::Object{};
     auto planned = JsonValue::Object{};
 
-    // Match the public request shape so its strict decoder owns filter, selector, and cursor rules.
+    // Match the public request shape; queue selection is supplied separately by the shared CLI grammar.
     for (auto const& argument : arguments) {
+        if (queue_scope && is_queue_selector_argument(argument)) {
+            continue;
+        }
         auto value = option_value(argument);
         if (!value) {
             return std::nullopt;
@@ -41,13 +47,7 @@ auto statistics_params(std::span<CommandLineArgument const> arguments, bool queu
         }
         else {
             auto wire_name = std::string{name};
-            if (queue_scope && name == "id") {
-                wire_name = "queue_id";
-            }
-            else if (queue_scope && name == "name") {
-                wire_name = "queue_name";
-            }
-            else if (name == "queue-id" || name == "job-id" || name == "group-by") {
+            if (name == "queue-id" || name == "job-id" || name == "group-by") {
                 wire_name[wire_name.find('-')] = '_';
             }
             fields.emplace(std::move(wire_name), JsonValue{.data = std::string{*value}});
@@ -56,7 +56,7 @@ auto statistics_params(std::span<CommandLineArgument const> arguments, bool queu
     if (!planned.empty()) {
         fields.emplace("planned", JsonValue{.data = std::move(planned)});
     }
-    return JsonValue{.data = std::move(fields)};
+    return fields;
 }
 
 auto duration_text(StatisticsDuration const& duration) -> std::string
@@ -80,7 +80,7 @@ auto parse_system_statistics_command(std::filesystem::path                socket
     if (!params) {
         return parse_failure("system stats options are invalid");
     }
-    auto request = system_statistics_request_from_json(*params);
+    auto request = system_statistics_request_from_json(JsonValue{.data = std::move(*params)});
     if (!request) {
         return parse_failure("system stats filters, window, or cursor are invalid");
     }
@@ -99,18 +99,37 @@ auto parse_queue_statistics_command(std::filesystem::path                socket_
     if (action != "stats") {
         return parse_failure("unknown queue command");
     }
+    auto selector = parse_queue_selector(arguments);
+    if (!selector.error.empty()) {
+        return parse_failure(std::move(selector.error));
+    }
     auto params = statistics_params(arguments, true);
     if (!params) {
         return parse_failure("queue stats options are invalid");
     }
-    auto request = queue_statistics_request_from_json(*params);
+    if (selector.selector) {
+        auto selection = queue_selector_to_json(selector.selector->selector);
+        if (!selection) {
+            return parse_failure(selection.error().message);
+        }
+        params->insert(selection->as_object().begin(), selection->as_object().end());
+    }
+
+    // The strict codec enforces initial-query versus cursor-only exclusivity, including all filters.
+    auto request = queue_statistics_request_from_json(JsonValue{.data = std::move(*params)});
     if (!request) {
         return parse_failure("queue stats selector, filters, window, or cursor are invalid");
     }
+
+    auto intent = std::optional<QueueSelectorIntent>{};
+    if (selector.selector) {
+        intent = std::move(selector.selector->intent);
+    }
     return {
-        .command = Command{.socket_path = std::move(socket_path),
-                           .kind        = CommandKind::QueueStats,
-                           .request     = std::move(request).value()}
+        .command = Command{.socket_path           = std::move(socket_path),
+                           .kind                  = CommandKind::QueueStats,
+                           .request               = std::move(request).value(),
+                           .queue_selector_intent = std::move(intent)}
     };
 }
 

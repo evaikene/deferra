@@ -603,7 +603,40 @@ TEST_CASE("Queue update help describes only explicit protected updates", "[jobuc
     REQUIRE(help.code == 0);
     CHECK(help.out.find("--revision N") != std::string::npos);
     CHECK(help.out.find("1..9223372036854775807") != std::string::npos);
-    CHECK(help.out.find("--name reports --revision 1 --weight 2") != std::string::npos);
+    CHECK(help.out.find("update reports --revision 1 --weight 2") != std::string::npos);
     CHECK(help.out.find("without automatic retry") != std::string::npos);
     CHECK(help.err.empty());
+}
+
+TEST_CASE("Queue selector help stays local before selector files or network work", "[jobuctl][help][queue][selector]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   fifo = directory.path() / "unopened-fifo";
+    REQUIRE(::mkfifo(fifo.c_str(), 0600) == 0);
+    for (auto const blocked : {false, true}) {
+        for (auto const* action : {"get", "update", "suspend", "resume", "delete", "stats"}) {
+            for (auto const& suffix : std::vector<std::vector<std::string>>{
+                     {"id:malformed", "--socket", fifo.string(), "--help"},
+                     {"--request-file", fifo.string(), "--socket", fifo.string(), "--json", "--help"}
+            }) {
+                CAPTURE(action, blocked, suffix);
+                auto arguments = std::vector<std::string>{"queue", action};
+                arguments.insert(arguments.end(), suffix.begin(), suffix.end());
+                auto result = run(std::move(arguments), blocked);
+                REQUIRE(result.code == 0);
+                CHECK(result.out.find("[SELECTOR]") != std::string::npos);
+                CHECK(result.out.find("--id UUID") != std::string::npos);
+                CHECK(result.out.find("--name NAME") != std::string::npos);
+                CHECK(result.out.find("id:UUID or name:NAME") != std::string::npos);
+                CHECK(result.out.find("case-sensitive and interpreted once") != std::string::npos);
+                CHECK(result.out.find("collision checks") != std::string::npos);
+                CHECK(result.out.find("not yet available") != std::string::npos);
+                CHECK(result.err.empty());
+            }
+        }
+        auto update = run({"queue", "update", "reports", "--defaults-file", fifo.string(), "--help"}, blocked);
+        CHECK(update.code == 0);
+        CHECK(update.out.find("--new-name NAME") != std::string::npos);
+        CHECK(update.err.empty());
+    }
 }

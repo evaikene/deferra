@@ -4,6 +4,7 @@
 #include "command_helpers_priv.hpp"
 #include "input_priv.hpp"
 #include "management_json.hpp"
+#include "queue_selector_priv.hpp"
 
 #include <fmt/format.h>
 
@@ -44,74 +45,27 @@ auto parse_defaults_file(std::string_view path, StandardAttributeRegistry const&
     return std::move(defaults).value();
 }
 
-struct SelectorResult {
-    std::optional<QueueSelector> selector;
-    std::string                  error;
-};
-
-auto selector_failure(std::string message) -> SelectorResult
-{
-    return {.selector = std::nullopt, .error = std::move(message)};
-}
-
-auto add_selector(CommandLineArgument const& argument, std::optional<QueueSelector>& selector) -> bool
-{
-    if (selector || (argument.name() != "id" && argument.name() != "name")) {
-        return false;
-    }
-    auto const value = option_value(argument);
-    if (!value) {
-        return false;
-    }
-
-    if (argument.name() == "id") {
-        auto id = Uuid::parse(*value);
-        if (!id) {
-            return false;
-        }
-        selector = QueueSelector{std::move(id).value()};
-        return true;
-    }
-
-    selector = QueueSelector{std::string{*value}};
-    return true;
-}
-
-auto parse_selector(std::span<CommandLineArgument const> arguments) -> SelectorResult
-{
-    auto selector = std::optional<QueueSelector>{};
-    for (auto const& argument : arguments) {
-        if (!add_selector(argument, selector)) {
-            return selector_failure("expected exactly one valid --id or --name selector");
-        }
-    }
-    if (!selector) {
-        return selector_failure("expected exactly one --id or --name selector");
-    }
-    return {.selector = std::move(selector), .error = {}};
-}
-
 auto make_selector_command(std::filesystem::path                socket_path,
                            CommandKind                          kind,
                            std::string_view                     method,
                            std::span<CommandLineArgument const> arguments) -> CommandBuildResult
 {
-    auto selector = parse_selector(arguments);
-    if (!selector.selector) {
+    auto selector = parse_queue_selector(arguments);
+    if (!selector.error.empty()) {
         return parse_failure(std::move(selector.error));
     }
-
-    auto params = queue_selector_to_json(*selector.selector);
-    if (!params) {
-        return parse_failure(params.error().message);
+    if (!selector.selector) {
+        return parse_failure("expected one selector: SELECTOR, --id UUID, or --name NAME");
     }
+
     return {
         .command =
             Command{
-                    .socket_path = std::move(socket_path),
-                    .kind        = kind,
-                    .method      = method,
-                    .request     = std::move(*selector.selector),
+                    .socket_path           = std::move(socket_path),
+                    .kind                  = kind,
+                    .method                = method,
+                    .request               = std::move(selector.selector->selector),
+                    .queue_selector_intent = std::move(selector.selector->intent),
                     },
         .error = {},
     };
@@ -282,7 +236,15 @@ auto parse_queue_update(std::filesystem::path                socket_path,
                         std::span<CommandLineArgument const> arguments,
                         StandardAttributeRegistry const&     registry) -> CommandBuildResult
 {
-    auto selector         = std::optional<QueueSelector>{};
+    auto selector = parse_queue_selector(arguments);
+    if (!selector.error.empty()) {
+        return parse_failure(std::move(selector.error));
+    }
+    if (!selector.selector) {
+        return parse_failure("queue update requires one selector: SELECTOR, --id UUID, or --name NAME");
+    }
+
+    // Selection is complete before parsing replacements; --name never renames a queue.
     auto new_name         = std::optional<std::string>{};
     auto weight           = std::optional<std::uint32_t>{};
     auto concurrency      = std::optional<std::uint32_t>{};
@@ -297,10 +259,7 @@ auto parse_queue_update(std::filesystem::path                socket_path,
     auto request          = UpdateQueueRequest{};
 
     for (auto const& argument : arguments) {
-        if (argument.name() == "id" || argument.name() == "name") {
-            if (!add_selector(argument, selector)) {
-                return parse_failure("queue update requires exactly one valid --id or --name selector");
-            }
+        if (is_queue_selector_argument(argument)) {
             continue;
         }
 
@@ -385,9 +344,6 @@ auto parse_queue_update(std::filesystem::path                socket_path,
         return parse_failure("queue update has an unknown or duplicate option");
     }
 
-    if (!selector) {
-        return parse_failure("queue update requires exactly one --id or --name selector");
-    }
     if (!revision_seen) {
         return parse_failure("queue update requires --revision with the inspected queue revision");
     }
@@ -396,7 +352,7 @@ auto parse_queue_update(std::filesystem::path                socket_path,
         return parse_failure("queue update requires at least one mutable field");
     }
 
-    request.queue             = std::move(*selector);
+    request.queue             = std::move(selector.selector->selector);
     request.name              = std::move(new_name);
     request.weight            = weight;
     request.concurrency_limit = concurrency;
@@ -407,10 +363,11 @@ auto parse_queue_update(std::filesystem::path                socket_path,
     return {
         .command =
             Command{
-                    .socket_path = std::move(socket_path),
-                    .kind        = CommandKind::QueueUpdate,
-                    .method      = "queue.update",
-                    .request     = std::move(request),
+                    .socket_path           = std::move(socket_path),
+                    .kind                  = CommandKind::QueueUpdate,
+                    .method                = "queue.update",
+                    .request               = std::move(request),
+                    .queue_selector_intent = std::move(selector.selector->intent),
                     },
         .error = {},
     };
