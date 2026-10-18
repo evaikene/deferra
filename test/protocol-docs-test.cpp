@@ -3,6 +3,8 @@
 #include "history_json.hpp"
 #include "json.hpp"
 #include "management_json.hpp"
+#include "protocol.hpp"
+#include "protocol_priv.hpp"
 #include "secret_json.hpp"
 #include "statistics_json.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
@@ -44,6 +46,7 @@ TEST_CASE("Published protocol requests use production decoders", "[jobu][protoco
     auto const attributes = StandardAttributeRegistry{};
 
     REQUIRE(create_queue_request_from_json(example("queue-create.params.json"), attributes));
+    REQUIRE(update_queue_request_from_json(example("queue-update.params.json"), attributes));
     REQUIRE(create_job_request_from_json(example("job-create.params.json"), attributes));
     REQUIRE(create_job_request_from_json(example("job-create-secret.params.json"), attributes));
     REQUIRE(create_job_request_from_json(example("job-create-http.params.json"), attributes));
@@ -57,6 +60,39 @@ TEST_CASE("Published protocol requests use production decoders", "[jobu][protoco
     REQUIRE(set_secret_request_from_json(example("secret-set.params.json")));
     REQUIRE(schedule_next_request_from_json(example("schedule-next.params.json")));
     REQUIRE(system_statistics_request_from_json(example("system-stats.params.json")));
+}
+
+TEST_CASE("Published protected queue update and errors preserve the API 1.6 boundary", "[jobu][protocol][docs][queue]")
+{
+    auto const attributes = StandardAttributeRegistry{};
+    auto       params     = example("queue-update.params.json");
+    auto       request    = update_queue_request_from_json(params, attributes);
+    REQUIRE(request);
+    CHECK(std::get<Uuid>(request->queue) == Uuid::parse("019a0c70-1234-7000-8000-0123456789ab").value());
+    CHECK(request->expected_revision == 6);
+    CHECK(request->concurrency_limit == 2);
+    auto encoded = update_queue_request_to_json(*request, attributes);
+    REQUIRE(encoded);
+    CHECK(*encoded == params);
+
+    // Removing protection recreates a legacy request, which must never acquire a revision implicitly.
+    std::get<JsonValue::Object>(params.data).erase("expected_revision");
+    CHECK_FALSE(update_queue_request_from_json(params, attributes));
+
+    using namespace jb::rpc;
+    auto const invalid = example("queue-update-invalid-params.error.json");
+    CHECK(invalid == detail::encode_error_response(RequestId{std::uint64_t{7}},
+                                                   detail::make_standard_error(ErrorCode::InvalidParams)));
+
+    auto const conflict = example("queue-update-conflict.error.json");
+    auto       decoded  = detail::decode_response_document(conflict);
+    REQUIRE(decoded);
+    REQUIRE(decoded->entries.size() == 1U);
+    auto const& remote = std::get<RpcError>(decoded->entries.front().payload);
+    CHECK(remote == application_error(Error{.category = ErrorCategory::Conflict,
+                                            .code     = "jobu.queue.revision_conflict",
+                                            .message  = "Queue revision does not match the expected revision"}));
+    CHECK(conflict == detail::encode_error_response(decoded->entries.front().id, remote));
 }
 
 TEST_CASE("Published protocol results use production decoders", "[jobu][protocol][docs]")

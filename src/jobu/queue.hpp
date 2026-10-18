@@ -16,6 +16,7 @@ namespace jb::jobu {
 
 /// Optimistic revision of durable queue configuration and lifecycle state.
 /// Valid persisted values range from 1 through INT64_MAX, matching SQLite's positive signed integer range.
+/// Since API 1.6; revisions are equality tokens scoped to one stable queue UUID.
 using QueueRevision = std::uint64_t;
 
 /// Durable lifecycle state of a queue.

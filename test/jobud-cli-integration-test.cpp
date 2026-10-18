@@ -560,7 +560,7 @@ public:
 
     void responsive()
     {
-        CHECK(control({"system", "info"}).find("API version: 1.5") != std::string::npos);
+        CHECK(control({"system", "info"}).find("API version: 1.6") != std::string::npos);
         CHECK(log.find("daemon-ambient-marker") == std::string::npos);
         CHECK(log.find("literal $x = value") == std::string::npos);
         if (::geteuid() == 0 && _allow_root_cli) {
@@ -1233,7 +1233,7 @@ TEST_CASE("root daemon denies CLI targets without the unsafe override", "[jobud]
 #ifdef __linux__
     CHECK(fixture.log.find("jobud.unsafe.root_daemon") != std::string::npos);
 #endif
-    CHECK(fixture.control({"system", "info"}).find("API version: 1.5") != std::string::npos);
+    CHECK(fixture.control({"system", "info"}).find("API version: 1.6") != std::string::npos);
 }
 
 TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls, and restart",

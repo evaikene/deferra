@@ -12,7 +12,7 @@ use the [foreground workflow below](#macos-foreground-operation).
 On Linux, startup resolves arguments/configuration and validates the final
 identity before constructing worker-capable objects. It prepares only permitted state/runtime
 leaves, finalizes identity, acquires endpoint/database ownership, validates
-format 4 and recovers interrupted work before admitting requests. A successful
+format 5 and recovers interrupted work before admitting requests. A successful
 post-recovery inventory is logged before runner construction and dispatch; it
 reports loaded persisted state, independently of readiness. Telemetry
 activates before dispatch; retention starts after listening. `jobud.ready`
@@ -264,7 +264,7 @@ Require `ok`, verify final-user ownership and mode 0700/0600, then deliberately
 change `database.path` to the restored file (or supply `--database` for foreground
 use). Keep the existing protected runtime/socket setup. Run `--check-config`
 under the intended identity, then start and inspect readiness and recovery logs.
-The daemon validates format 4 and domain relationships before RPC admission;
+The daemon validates format 5 and domain relationships before RPC admission;
 check mode alone never opens or validates the database.
 
 Probe `system info`, inspect known queues/jobs/runs and compare them with the
@@ -277,10 +277,23 @@ configuration to the preserved original path.
 
 ## Format rejection, recovery and troubleshooting
 
-Current format is 4. Formats 1–3 and newer formats are rejected without migration
+Current format is 5. Formats 1–4 and newer formats are rejected without migration
 or marker rewriting. Keep old data; only deliberately disposable development
 databases should be replaced with a fresh path. There is no automatic repair,
 migration, secret export or backup conversion.
+
+API 1.6 queue revisions require format 5. An existing format-4 installation
+must deliberately select a fresh database before using this daemon; startup
+never deletes, resets, or converts the old database. Preserve old data and
+backups. Any separately maintained manual format-4-to-5 SQL utility is an
+explicit offline operator procedure, outside daemon migration infrastructure.
+It is not run by startup or by these verification commands.
+
+Queue create replay retains the original revision-1 result, not the current
+configuration. Read `queue.get` before editing and retain both UUID and revision.
+Configuration updates and actual lifecycle transitions invalidate earlier
+tokens; reads, counters, and ordinary job activity do not. See the
+[protected update contract](protocol/methods/queue.md#update-queueupdate).
 
 Recovery runs before readiness. Interrupted attempts follow the queue's
 `fail_interrupted` or `retry_interrupted` policy. Abandoned open timing intervals

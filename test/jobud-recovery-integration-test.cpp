@@ -352,7 +352,7 @@ public:
         return output;
     }
 
-    void control_info() { REQUIRE(control({"system", "info"}).find("API version: 1.5") != std::string::npos); }
+    void control_info() { REQUIRE(control({"system", "info"}).find("API version: 1.6") != std::string::npos); }
 
     auto rpc(std::string_view method, JsonValue parameters) -> JsonValue
     {

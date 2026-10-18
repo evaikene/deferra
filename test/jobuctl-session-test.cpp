@@ -93,7 +93,7 @@ auto is_job_suspend_behavior(PeerBehavior behavior) noexcept -> bool
 auto run_session(PeerBehavior             behavior,
                  std::vector<std::string> command        = {"queue", "list"},
                  std::vector<std::string> global_options = {},
-                 ApiVersion               api_version    = {.major = 1, .minor = 2}) -> Exchange
+                 ApiVersion               api_version    = {.major = 1, .minor = 6}) -> Exchange
 {
     Exchange                     exchange;
     Application                  app{0, nullptr};

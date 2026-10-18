@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "error": {
+    "code": -32000,
+    "message": "Queue revision does not match the expected revision",
+    "data": {
+      "category": "conflict",
+      "code": "jobu.queue.revision_conflict"
+    }
+  }
+}

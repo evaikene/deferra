@@ -5,6 +5,11 @@ JobU requires CMake 3.20+, a C++20 compiler, fmt, nlohmann_json and libcurl
 also builds `jobud`. Developer tests additionally require Catch2 and OpenSSL.
 The default build enables tests and the C++ client example.
 
+API 1.6 uses database format 5. Older formats, including 4, are rejected
+unchanged; the daemon performs no automatic migration or reset. Before starting
+this version, deliberately choose a fresh database path and preserve existing
+data. See [format rejection and manual procedures](operations.md#format-rejection-recovery-and-troubleshooting).
+
 Use a fresh build directory when choosing an installation prefix:
 
 ```sh
@@ -180,7 +185,7 @@ One invocation generates Runtime, Development and Documentation `.tar.gz`
 archives plus a `.sha256` archive checksum, `.files.sha256` payload inventory and
 `.directories.txt` directory/mode inventory for each. Keep all three sidecars with
 their archive. Names identify JobU's project
-version, producer OS/distribution and architecture; RPC API 1.5 is a separate
+version, producer OS/distribution and architecture; RPC API 1.6 is a separate
 metadata field. Each archive contains a prefix-relative tree, without a wrapper
 directory, so components can be extracted into the same selected prefix.
 Absolute or escaping GNUInstallDirs destinations are rejected for packaging;
@@ -330,7 +335,7 @@ lookup. Optional components expose `JobU_<Component>_FOUND` without rejecting
 otherwise satisfied required components. Repeated lookups can request additional
 components.
 
-Metadata uses project version `0.1.0`, independently of RPC API 1.5. An explicit
+Metadata uses project version `0.1.0`, independently of RPC API 1.6. An explicit
 version request must match exactly; compiled archives retain CMake's architecture
 check. Consumers also need a compatible compiler, C++ runtime and external
 libraries. The SDK does not bundle these dependencies.

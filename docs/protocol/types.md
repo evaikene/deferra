@@ -12,7 +12,7 @@ an explicit `null` is accepted only where stated.
 | --- | --- | --- |
 | ID | string | Canonical non-nil UUID, for example `00112233-4455-6677-8899-aabbccddeeff` |
 | Time | string | RFC 3339 UTC with trailing `Z`; returned times have six fractional digits |
-| Revision | integer | Positive job definition revision; send it as `expected_revision` on guarded mutations |
+| Revision | integer | Exact integer from 1 through 9223372036854775807 (`INT64_MAX`); queue or job equality token sent as `expected_revision` on guarded mutations |
 | Page limit | integer | Usually 1–200, default 100; the method table states exceptions |
 | Cursor | string | Opaque server token; use alone in a continuation params object |
 | `QueueState` | string | `active`, `suspending`, `suspended`, `deleted` |
@@ -76,6 +76,7 @@ Every queue result contains:
 | Member | Type | Since | Meaning |
 | --- | --- | --- | --- |
 | `id` | ID | 1.1 | Stable queue identity |
+| `revision` | integer | 1.6 | Required optimistic revision of configuration and lifecycle state, scoped to this UUID |
 | `name` | string | 1.1 | Exact user-facing name, 1–128 UTF-8 bytes on input |
 | `state` | `QueueState` | 1.1 | Current lifecycle state |
 | `weight` | integer | 1.1 | Positive scheduling weight |
@@ -87,6 +88,13 @@ Every queue result contains:
 | `created_at` | time | 1.1 | Creation time |
 | `updated_at` | time | 1.1 | Last durable mutation time |
 | `deleted_at` | time or null | 1.1 | Soft-deletion time |
+
+Queue revisions must be retained as exact integers, never floating-point
+approximations. Queue result decoders require the member and reject invalid
+values rather than inventing revision 1. Creation starts at 1; successful
+configuration updates and actual lifecycle transitions advance it. Tokens
+are for equality comparison, not for predicting the result of a command.
+See [queue update and lifecycle rules](methods/queue.md#update-queueupdate).
 
 Every job definition result contains:
 

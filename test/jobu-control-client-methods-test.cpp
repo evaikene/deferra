@@ -98,7 +98,7 @@ struct Fixture {
 
     void drain_tasks() { REQUIRE(app.process_events(EventFlag::Tasks) != ProcessEventsResult::Failed); }
 
-    void initialize(std::uint32_t minor = 5U)
+    void initialize(std::uint32_t minor = 6U)
     {
         REQUIRE(typed->initialize());
         device.inject_input(success(1U,
@@ -140,7 +140,184 @@ struct ReplyCase {
     {}
 };
 
+auto revision_queue_methods() -> std::vector<MethodCase>
+{
+    return {
+        {"queue.create",  "name",       true,  [](auto& client) { return client.create_queue({.name = "queue"}); }    },
+        {"queue.get",     "queue_name", false, [](auto& client) { return client.get_queue(std::string{"queue"}); }    },
+        {"queue.list",    "limit",      false, [](auto& client) { return client.list_queues(QueueListRequest{}); }    },
+        {"queue.update",
+         "expected_revision",           true,
+         [](auto& client) {
+             return client.update_queue({.queue = std::string{"queue"}, .expected_revision = 1, .weight = 2});
+         }                                                                                                            },
+        {"queue.suspend", "queue_name", true,  [](auto& client) { return client.suspend_queue(std::string{"queue"}); }},
+        {"queue.resume",  "queue_name", true,  [](auto& client) { return client.resume_queue(std::string{"queue"}); } },
+    };
+}
+
 } // anonymous namespace
+
+TEST_CASE("Revision-bearing queue calls reject older peers without accepting or writing a call",
+          "[jobu][client][queue]")
+{
+    for (auto minor : {0U, 1U, 2U, 3U, 4U, 5U}) {
+        CAPTURE(minor);
+        Fixture fixture;
+        fixture.initialize(minor);
+
+        auto replies  = 0;
+        auto failures = 0;
+        fixture.typed->reply_received.connect(fixture.typed.get(),
+                                              [&](ControlCallId, ControlReply const&) { ++replies; });
+        fixture.typed->call_failed.connect(fixture.typed.get(),
+                                           [&](ControlCallId, ControlFailure const&) { ++failures; });
+
+        for (auto const& method : revision_queue_methods()) {
+            CAPTURE(method.method);
+            auto rejected = method.submit(*fixture.typed);
+            REQUIRE_FALSE(rejected);
+            CHECK(rejected.error().category == ErrorCategory::Unsupported);
+            CHECK(rejected.error().code == "jobu.client.unsupported_feature");
+            CHECK(rejected.error().message == "Queue revision support requires JobU API 1.6 or newer");
+            CHECK(fixture.device.take_written_data().empty());
+        }
+        fixture.drain_tasks();
+        CHECK(replies == 0);
+        CHECK(failures == 0);
+
+        // Neither local nor wire IDs are consumed. Queue calls with unrelated result contracts still work.
+        auto deleted = fixture.typed->delete_queue(std::string{"queue"});
+        REQUIRE(deleted);
+        CHECK(*deleted == 1U);
+        auto wire = request_body(fixture.device.take_written_data());
+        CHECK(wire.as_object().at("id").as_uint() == 2U);
+        CHECK(wire.as_object().at("method").as_string() == "queue.delete");
+        fixture.device.inject_input(success(2U, JsonValue{}));
+        fixture.drain_tasks();
+        CHECK(replies == 1);
+
+        auto stats = fixture.typed->queue_statistics(CursorRequest{.cursor = "retained-query"});
+        REQUIRE(stats);
+        CHECK(*stats == 2U);
+        wire = request_body(fixture.device.take_written_data());
+        CHECK(wire.as_object().at("id").as_uint() == 3U);
+        CHECK(wire.as_object().at("method").as_string() == "queue.stats");
+        fixture.device.inject_input(remote_error(3U));
+        fixture.drain_tasks();
+        CHECK(failures == 1);
+        CHECK(fixture.device.take_written_data().empty());
+    }
+}
+
+TEST_CASE("API 1.6 and newer accept every revision-bearing queue method", "[jobu][client][queue]")
+{
+    for (auto minor : {6U, 7U}) {
+        CAPTURE(minor);
+        Fixture fixture;
+        fixture.initialize(minor);
+        auto queue    = Queue{.id = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff").value(), .name = "queue"};
+        auto received = 0;
+        fixture.typed->reply_received.connect(fixture.typed.get(),
+                                              [&](ControlCallId, ControlReply const&) { ++received; });
+
+        for (auto const& method : revision_queue_methods()) {
+            CAPTURE(method.method);
+            auto call = method.submit(*fixture.typed);
+            REQUIRE(call);
+            auto const wire = request_body(fixture.device.take_written_data());
+            CHECK(wire.as_object().at("method").as_string() == method.method);
+            REQUIRE(method.parameter);
+            CHECK(wire.as_object().at("params").as_object().contains(std::string{*method.parameter}));
+
+            auto result = method.method == "queue.list"
+                            ? encoded(queue_page_to_json(QueuePage{.items = {queue}}, fixture.attributes))
+                            : encoded(queue_to_json(queue, fixture.attributes));
+            fixture.device.inject_input(success(wire.as_object().at("id").as_uint(), result));
+            fixture.drain_tasks();
+        }
+        CHECK(received == 6);
+        CHECK(fixture.device.take_written_data().empty());
+    }
+}
+
+TEST_CASE("Queue peer checks preserve lifecycle and request validation precedence", "[jobu][client][queue]")
+{
+    for (auto minor : {5U, 6U}) {
+        CAPTURE(minor);
+        Fixture fixture;
+        auto    check_not_ready = [&] {
+            for (auto const& method : revision_queue_methods()) {
+                auto rejected = method.submit(*fixture.typed);
+                REQUIRE_FALSE(rejected);
+                CHECK(rejected.error().code == "jobu.client.not_ready");
+            }
+            auto invalid = fixture.typed->update_queue({.queue = std::string{"queue"}, .weight = 2});
+            REQUIRE_FALSE(invalid);
+            CHECK(invalid.error().code == "jobu.client.not_ready");
+            CHECK(fixture.device.take_written_data().empty());
+        };
+        check_not_ready();
+
+        auto ready_count = 0;
+        fixture.typed->ready.connect(fixture.typed.get(), [&](SystemInfo const&) {
+            ++ready_count;
+            auto call = fixture.typed->get_queue(std::string{"queue"});
+            if (minor < 6U) {
+                REQUIRE_FALSE(call);
+                CHECK(call.error().code == "jobu.client.unsupported_feature");
+                CHECK(fixture.device.take_written_data().empty());
+            }
+            else {
+                REQUIRE(call);
+                CHECK_FALSE(fixture.device.take_written_data().empty());
+            }
+        });
+        REQUIRE(fixture.typed->initialize());
+        static_cast<void>(fixture.device.take_written_data());
+        check_not_ready();
+        fixture.device.inject_input(success(1U,
+                                            system_info_to_json(SystemInfo{
+                                                .daemon_version = "test",
+                                                .api_version    = {.major = 1, .minor = minor},
+                                                .capabilities   = all_methods()
+        })));
+        check_not_ready();
+        fixture.drain_tasks();
+        CHECK(ready_count == 1);
+
+        auto invalid = fixture.typed->update_queue({.queue = std::string{"queue"}, .weight = 2});
+        REQUIRE_FALSE(invalid);
+        CHECK(invalid.error().code == "jobu.protocol.invalid_request");
+        CHECK(fixture.device.take_written_data().empty());
+        fixture.typed->close();
+        check_not_ready();
+    }
+}
+
+TEST_CASE("Queue peer checks retain failed-handshake and capability errors", "[jobu][client][queue]")
+{
+    for (auto major : {1U, 2U}) {
+        CAPTURE(major);
+        Fixture fixture;
+        REQUIRE(fixture.typed->initialize());
+        static_cast<void>(fixture.device.take_written_data());
+        fixture.device.inject_input(success(1U,
+                                            system_info_to_json(SystemInfo{
+                                                .daemon_version = "test",
+                                                .api_version    = {.major = major, .minor = 6},
+                                                .capabilities   = {"system.info"}
+        })));
+        fixture.drain_tasks();
+
+        for (auto const& method : revision_queue_methods()) {
+            auto rejected = method.submit(*fixture.typed);
+            REQUIRE_FALSE(rejected);
+            CHECK(rejected.error().code == (major == 1U ? "jobu.client.unsupported_method" : "jobu.client.not_ready"));
+            CHECK(fixture.device.take_written_data().empty());
+        }
+    }
+}
 
 TEST_CASE("Run state sets require API 1.5 without consuming a call or writing to older peers", "[jobu][client]")
 {
@@ -420,7 +597,7 @@ TEST_CASE("Every distinct typed result decodes into its public reply alternative
     auto       cases = std::vector<ReplyCase>{
         {[](auto& client) { return client.get_system_info(); },
          system_info_to_json(SystemInfo{.daemon_version = "test",
-                                        .api_version    = {.major = 1, .minor = 5},
+                                        .api_version    = {.major = 1, .minor = 6},
                                         .capabilities   = all_methods()}),
          ControlReply{SystemInfo{}}.index()},
         {[](auto& client) { return client.system_statistics(StatisticsRequest{}); },

@@ -1601,7 +1601,7 @@ TEST_CASE("Daemon capabilities follow every registered Phase 8 server method", "
         auto               info    = endpoint.call("system.info", JsonValue{.data = JsonValue::Object{}});
         auto const&        fields  = rpc_result(info).as_object();
         auto const&        methods = fields.at("capabilities").as_array();
-        CHECK(fields.at("api_version").as_object().at("minor").as_uint() == 5);
+        CHECK(fields.at("api_version").as_object().at("minor").as_uint() == 6);
         REQUIRE(methods.size() == 30U);
         for (auto index = std::size_t{1}; index < methods.size(); ++index) {
             CHECK(methods[index - 1U].as_string() < methods[index].as_string());
@@ -2056,7 +2056,7 @@ TEST_CASE("Fatal history RPC read closes all daemon admission before teardown", 
     require_consumed_faults(*fixture.faults);
 }
 
-TEST_CASE("Daemon advertises API 1.5 and serves cron preview controls", "[jobud][control][rpc]")
+TEST_CASE("Daemon advertises API 1.6 and serves cron preview controls", "[jobud][control][rpc]")
 {
     SystemCronEngine engine;
     RuntimeFixture   fixture;
@@ -2065,7 +2065,7 @@ TEST_CASE("Daemon advertises API 1.5 and serves cron preview controls", "[jobud]
         RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
         auto               info        = endpoint.call("system.info", JsonValue{.data = JsonValue::Object{}});
         auto const&        info_fields = rpc_result(info).as_object();
-        CHECK(info_fields.at("api_version").as_object().at("minor").as_uint() == 5);
+        CHECK(info_fields.at("api_version").as_object().at("minor").as_uint() == 6);
         auto const& methods = info_fields.at("capabilities").as_array();
         for (auto const* name : {"job.run_now", "run.cancel", "schedule.validate", "schedule.next"}) {
             CHECK(std::ranges::count_if(methods,

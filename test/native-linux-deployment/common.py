@@ -155,7 +155,7 @@ class Gate:
             return None
         info = self.wait(probe, f"RPC readiness at {socket}")
         self.event("ready", socket=str(socket), info=info)
-        require(info["api_version"] == {"major": 1, "minor": 5}, "Unexpected deployed RPC API")
+        require(info["api_version"] == {"major": 1, "minor": 6}, "Unexpected deployed RPC API")
         require(info["daemon_version"] == "0.1.0", "Unexpected deployed project version")
         return info
 

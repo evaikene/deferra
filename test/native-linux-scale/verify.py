@@ -269,7 +269,7 @@ class Gate:
             require(time.monotonic() < deadline, "Native scale startup did not expose its socket")
             time.sleep(0.05)
         info = self.rpc("system.info")
-        require(info["api_version"] == {"major": 1, "minor": 5}, "Unexpected native API")
+        require(info["api_version"] == {"major": 1, "minor": 6}, "Unexpected native API")
         pid = int(self.run(["systemctl", "show", self.unit.name, "-p", "MainPID", "--value"]).stdout)
         status = Path(f"/proc/{pid}/status").read_text()
         require(f"Uid:\t{self.account.pw_uid}\t" in status, "Service did not retain its dedicated identity")

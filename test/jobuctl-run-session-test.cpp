@@ -135,7 +135,7 @@ auto handshake() -> PeerStep
 {
     auto info = SystemInfo{
         .daemon_version = "scoped-fixture",
-        .api_version    = {.major = 1, .minor = 5},
+        .api_version    = {.major = 1, .minor = 6},
         .capabilities   = {"system.info",
                            "job.get", "queue.list",
                            "queue.delete", "queue.suspend",
@@ -612,20 +612,25 @@ TEST_CASE("capture preserves remote and local failure projections", "[jobuctl][s
     CHECK(captured.result.error->message == "fixture rejection");
     CHECK_FALSE(captured.result.error->outcome_unknown);
 
-    auto info  = handshake();
-    info.value = system_info_to_json({
-        .daemon_version = "old-fixture",
-        .api_version    = {.major = 1, .minor = 2},
-        .capabilities   = {"system.info"}
-    });
-    ScriptedPeer unsupported{{std::move(info)}};
-    auto         local = run_captured(command_for(unsupported.path(), {"queue", "list"}));
-    unsupported.verify();
-    check_silent(local);
-    CHECK(local.result.exit_code == 1);
-    REQUIRE(local.result.error);
-    CHECK(local.result.error->kind == "local");
-    CHECK(local.result.error->code == "jobu.client.unsupported_method");
+    // Older peers fail the revision contract; current peers still report a missing advertised capability.
+    for (auto minor : {2U, 6U}) {
+        CAPTURE(minor);
+        auto info  = handshake();
+        info.value = system_info_to_json({
+            .daemon_version = "limited-fixture",
+            .api_version    = {.major = 1, .minor = minor},
+            .capabilities   = {"system.info"}
+        });
+        ScriptedPeer unsupported{{std::move(info)}};
+        auto         local = run_captured(command_for(unsupported.path(), {"queue", "list"}));
+        unsupported.verify();
+        check_silent(local);
+        CHECK(local.result.exit_code == 1);
+        REQUIRE(local.result.error);
+        CHECK(local.result.error->kind == "local");
+        CHECK(local.result.error->code ==
+              (minor < 6U ? "jobu.client.unsupported_feature" : "jobu.client.unsupported_method"));
+    }
 }
 
 TEST_CASE("capture preserves timeout and mutation uncertainty without printing", "[jobuctl][session][capture]")

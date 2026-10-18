@@ -19,13 +19,16 @@ method-specific fields and ignores supplied params. The result has these members
 | `daemon_version` | string | 1.0 | Executable version |
 | `api_version` | object | 1.0 | Supported API version |
 | `api_version.major` | integer | 1.0 | Protocol compatibility family; currently 1 |
-| `api_version.minor` | integer | 1.0 | Additive API version; currently 5 |
+| `api_version.minor` | integer | 1.0 | Feature/contract version; currently 6 |
 | `capabilities` | array of strings | 1.0 | Sorted unique names of registered methods |
 
 For example, send `{"jsonrpc":"2.0","id":1,"method":"system.info","params":{}}`.
 The returned `capabilities` array contains exactly the methods the daemon
 registered. A 1.x client checks the major version and the named capability
 before calling a method; exact minor-version equality is unnecessary.
+Check the minimum minor required for each request/result feature. API 1.6
+introduces the intentional incompatible pre-release `queue.update` input change
+described in the [protocol overview](../README.md).
 
 ## Retained statistics (`system.stats`)
 

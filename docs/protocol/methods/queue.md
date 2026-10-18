@@ -46,6 +46,10 @@ Create commits the queue and any idempotency record before replying. The same
 key and equivalent canonical request replay the original result while that
 record remains; a different request with that key conflicts. A lost reply
 can be reconciled by repeating the **same** keyed request.
+Since API 1.6, new queues and their recorded create snapshots have revision 1.
+Replay returns that original revision-1 snapshot even after the live queue has
+changed. Fetch `queue.get` for the current UUID, revision, and editable values
+before preparing an update.
 
 A creation key is retained while its queue is live or its deleted ownership
 and history still require it. Cleanup retires it with physical deletion of the
@@ -86,12 +90,15 @@ to fit the 512 KiB result budget.
 
 ## Update (`queue.update`)
 
-The request needs exactly one selector and at least one setting field, even if
-the supplied value equals the current value:
+Since API 1.6, the request needs exactly one selector, the inspected
+`expected_revision`, and at least one setting field, even if the supplied value
+equals the current value. This is an intentional incompatible pre-release
+change: updates without revision protection are rejected.
 
 | Params member | Type | Required | Since | Meaning |
 | --- | --- | --- | --- | --- |
 | `queue_id` or `queue_name` | ID or string | One | 1.1 | Target queue |
+| `expected_revision` | integer | Yes | 1.6 | Exact inspected token from 1 through `INT64_MAX`; must match the selected queue |
 | `name` | string | No | 1.1 | Replacement exact name |
 | `weight` | integer | No | 1.1 | Replacement positive weight |
 | `concurrency_limit` | integer | No | 1.1 | Replacement positive capacity |
@@ -102,11 +109,29 @@ the supplied value equals the current value:
 
 Omitted settings remain unchanged. Queue defaults affect jobs created after
 the update, not existing materialized job attributes. The result is the
-committed full queue object. Queue updates do not use job revisions.
+committed full queue object, with its queue revision incremented once. A valid
+nonempty same-value update also increments once. A rejected or rolled-back
+update commits no field, revision, or timing changes.
 
 ```json
-{"queue_name":"reports","history_retention_seconds":null,"defaults":{}}
+{"queue_id":"019a0c70-1234-7000-8000-0123456789ab","expected_revision":6,"concurrency_limit":2}
 ```
+
+Use the [checked update params](../examples/queue-update.params.json).
+Missing, null, zero, negative, out-of-range, fractional, boolean, or string
+revisions return Invalid params (`-32602`) before service work. A valid stale
+token returns application error `-32000` with `data.category: "conflict"` and
+`data.code: "jobu.queue.revision_conflict"`; no automatic retry occurs.
+Revision exhaustion returns `jobu.queue.revision_exhausted` with category
+`resource_exhausted`; tokens never wrap or reset. See the [error examples](../errors.md).
+
+For read-edit-write clients, retain both the returned UUID and revision, then
+submit by `queue_id`. Names may be renamed or reused, and different queues can
+have the same numerical revision. A name-based update means the queue currently
+selected by that exact name with that token; the revision alone cannot prove
+identity continuity. On conflict, fetch again and reconcile intended changes
+with the new state before preparing another request. Never silently replace
+the token and retry. CLI `id:`/`name:` prefixes are not RPC selector syntax.
 
 ## Suspend, resume, and delete
 
@@ -116,6 +141,18 @@ eligibility; it can return `suspending` while active work drains. Resume
 returns `active`. `queue.delete` requires a fully suspended queue and returns
 JSON `null` after soft-deleting it and its current jobs. Retained history
 remains addressable by ID. There is no force-delete option.
+
+Since API 1.6, each actual state transition advances the queue revision once:
+active → suspending, suspending → suspended (including automatic drain/recovery),
+suspending/suspended → active, and suspended → deleted. An idle suspension can
+complete two transitions in one transaction and advance twice. Already-suspended
+suspend and already-active resume calls retain the token. An already-suspending
+queue retains its token while running work remains; completing its drain advances
+once. Suspend/resume/delete still take selector-only params; they do not require
+`expected_revision`. A draft inspected before an actual transition becomes stale.
+Reads, job activity, counters, and history retention do not advance the token
+unless an actual queue state transition occurs; physical tombstone removal
+removes the row. Failed transactions commit no increment.
 
 ```json
 null

@@ -90,7 +90,8 @@ struct CreateQueueRequest {
 struct UpdateQueueRequest {
     /// Existing non-deleted queue to update.
     QueueSelector                                      queue;
-    /// Required inspected revision, from 1 through INT64_MAX; zero is invalid. Never refreshed automatically.
+    /// Since API 1.6: required inspected revision, from 1 through INT64_MAX; zero is invalid. Never refreshed
+    /// automatically.
     QueueRevision                                      expected_revision{0};
     /// Replacement user-facing name.
     std::optional<std::string>                         name;
