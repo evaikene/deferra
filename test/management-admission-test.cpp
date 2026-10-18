@@ -127,7 +127,7 @@ auto mutation_error(ManagementService& service, std::size_t index, std::string_v
         case 0:
             return require_error(service.create_queue({.name = "queue"}), code);
         case 1:
-            return require_error(service.update_queue({.queue = id, .weight = 2}), code);
+            return require_error(service.update_queue({.queue = id, .expected_revision = 1, .weight = 2}), code);
         case 2:
             return require_error(service.suspend_queue(id), code);
         case 3:

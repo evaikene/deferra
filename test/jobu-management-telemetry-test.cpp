@@ -289,12 +289,17 @@ TEST_CASE("Queue updates preserve wait under full capacity and wall clock correc
     auto    second = f.scheduled(f.job(queue).id);
     f.time.set_monotonic(TimePoint{1007s});
     f.time.set_utc(UtcTimePoint{1s});
-    REQUIRE(f.service->update_queue({.queue = queue.id, .concurrency_limit = 1, .runnable_wait_warning = 0ms}));
+    auto updated_queue = f.service->update_queue(
+        {.queue = queue.id, .expected_revision = queue.revision, .concurrency_limit = 1, .runnable_wait_warning = 0ms});
+    REQUIRE(updated_queue);
+    queue = *updated_queue;
     CHECK(f.timing(first.id).runnable_wait_us == 7000000);
     CHECK(f.timing(second.id).runnable_wait_us == 7000000);
     CHECK_FALSE(f.timing(first.id).open_epoch); // Due eligibility follows observed UTC, not inferred clock crossings.
     f.time.set_utc(UtcTimePoint{300s});
-    REQUIRE(f.service->update_queue({.queue = queue.id, .weight = 2}));
+    updated_queue = f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .weight = 2});
+    REQUIRE(updated_queue);
+    queue = *updated_queue;
     CHECK(f.timing(first.id).open_tick_us == 7000000);
     CHECK(f.timing(second.id).open_tick_us == 7000000);
 }
@@ -441,7 +446,9 @@ TEST_CASE("Late instrumentation remains partial and scoped pages reach the tail"
         f.storage.insert_job(job);
         f.storage.insert_run(f.storage.make_run(recovery_id(2000 + i), job));
     }
-    REQUIRE(f.service->update_queue({.queue = queue.id, .weight = 2}));
+    auto updated_queue = f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .weight = 2});
+    REQUIRE(updated_queue);
+    queue = *updated_queue;
     CHECK(f.timing(recovery_id(2000)).quality == WaitQuality::Partial);
     CHECK(f.timing(recovery_id(2204)).quality == WaitQuality::Partial);
     CHECK(f.timing(recovery_id(2204)).open_epoch);
@@ -464,6 +471,7 @@ TEST_CASE("Eligibility observation does not decode run payload or attribute snap
 
 TEST_CASE("Timing and domain write faults roll back the original open interval", "[jobu][telemetry][management][fault]")
 {
+    auto        update   = GENERATE(false, true);
     auto const* boundary = GENERATE("timing.write", "queue.write");
     auto        phase    = GENERATE(DatabaseFaultPhase::Before, DatabaseFaultPhase::AfterSuccess);
     Fixture     f;
@@ -476,7 +484,9 @@ TEST_CASE("Timing and domain write faults roll back the original open interval",
         .at    = {.boundary = boundary, .operation = DatabaseOperation::Execute, .phase = phase},
         .error = fault_error(),
     });
-    auto failed = f.service->suspend_queue(queue.id);
+    auto failed = update
+                    ? f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .weight = 2})
+                    : f.service->suspend_queue(queue.id);
     REQUIRE_FALSE(failed);
     check_safe_error(failed.error(), "db.io");
     require_consumed_faults(*f.faults);
@@ -513,7 +523,9 @@ TEST_CASE("Pending recurring cancellation creates a complete future successor", 
     auto job = f.job(queue, CronScheduleInput{.expression = schedule.expression, .timezone = schedule.timezone});
     auto run = f.scheduled(job.id);
     f.time.advance(15s);
-    REQUIRE(f.service->update_queue({.queue = queue.id, .weight = 2}));
+    auto updated_queue = f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .weight = 2});
+    REQUIRE(updated_queue);
+    queue = *updated_queue;
     f.time.advance(3s);
     REQUIRE(f.cancel(run.id));
     CHECK(f.timing(run.id).runnable_wait_us == 3000000);
@@ -537,7 +549,9 @@ TEST_CASE("A mutation never resamples between settling and reopening", "[jobu][t
         }
         return std::string{fault_boundary(sql)};
     };
-    REQUIRE(f.service->update_queue({.queue = queue.id, .weight = 2}));
+    auto updated_queue = f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .weight = 2});
+    REQUIRE(updated_queue);
+    queue = *updated_queue;
     CHECK(f.timing(run.id).runnable_wait_us == 4000000);
     CHECK(f.timing(run.id).open_tick_us == 4000000);
 }
@@ -560,7 +574,9 @@ TEST_CASE("Due blocking retries count wait while backoff and running attempts ar
     auto future            = f.storage.make_run(recovery_id(6), future_job, RunState::RetryWait, 1);
     future.run.runnable_at = UtcTimePoint{200s};
     f.storage.insert_run(future);
-    REQUIRE(f.service->update_queue({.queue = queue.id, .weight = 2}));
+    auto updated_queue = f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .weight = 2});
+    REQUIRE(updated_queue);
+    queue = *updated_queue;
     CHECK(f.timing(recovery_id(4)).quality == WaitQuality::Partial);
     CHECK(f.timing(recovery_id(4)).open_epoch);
     CHECK(f.timing(recovery_id(6)).quality == WaitQuality::Unmeasured);
@@ -727,4 +743,42 @@ TEST_CASE("A management failure receiver can destroy the telemetry target before
     CHECK_FALSE(f.telemetry);
     CHECK(f.telemetry_failures.empty());
     CHECK(f.service->resume_queue(queue.id).error().code == "jobu.service.stopping");
+}
+
+TEST_CASE("Rejected queue revisions leave observed timing untouched", "[jobu][telemetry][management][revision]")
+{
+    Fixture f;
+    auto    queue = f.queue();
+    auto    run   = f.scheduled(f.job(queue).id);
+    f.time.advance(5s);
+    auto before = storage_snapshot(f.storage.database);
+    auto stale =
+        f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision + 1, .concurrency_limit = 2});
+    REQUIRE_FALSE(stale);
+    CHECK(stale.error().code == "jobu.queue.revision_conflict");
+    CHECK(storage_snapshot(f.storage.database) == before);
+    CHECK(f.timing(run.id).open_tick_us == 0);
+    CHECK(f.management_failures.empty());
+
+    auto updated =
+        f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .concurrency_limit = 2});
+    REQUIRE(updated);
+    CHECK(updated->revision == queue.revision + 1);
+    CHECK(f.timing(run.id).runnable_wait_us == 5000000);
+    f.time.advance(3s);
+    before = storage_snapshot(f.storage.database);
+    stale  = f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .weight = 9});
+    REQUIRE_FALSE(stale);
+    CHECK(stale.error().code == "jobu.queue.revision_conflict");
+    CHECK(storage_snapshot(f.storage.database) == before);
+    CHECK(f.management_failures.empty());
+
+    f.sql("UPDATE jobu_queues SET revision = 9223372036854775807");
+    before = storage_snapshot(f.storage.database);
+    auto exhausted =
+        f.service->update_queue({.queue = queue.id, .expected_revision = 9223372036854775807ULL, .weight = 9});
+    REQUIRE_FALSE(exhausted);
+    CHECK(exhausted.error().code == "jobu.queue.revision_exhausted");
+    CHECK(storage_snapshot(f.storage.database) == before);
+    CHECK(f.management_failures.empty());
 }

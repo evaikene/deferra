@@ -688,6 +688,7 @@ TEST_CASE("Update queue request JSON preserves omitted and null retention", "[jo
     auto const                id      = parse_uuid("00112233-4455-6677-8899-aabbccddeeff");
     auto                      request = UpdateQueueRequest{
         .queue                 = QueueSelector{id},
+        .expected_revision     = 1,
         .name                  = "renamed",
         .weight                = 5,
         .concurrency_limit     = 6,
@@ -701,6 +702,7 @@ TEST_CASE("Update queue request JSON preserves omitted and null retention", "[jo
     REQUIRE(encoded);
     auto const& wire = encoded->as_object();
     CHECK(wire.at("queue_id").as_string() == id.to_string());
+    CHECK(wire.at("expected_revision").as_uint() == request.expected_revision);
     CHECK(wire.at("name").as_string() == "renamed");
     CHECK(wire.at("weight").as_uint() == 5U);
     CHECK(wire.at("concurrency_limit").as_uint() == 6U);
@@ -714,6 +716,7 @@ TEST_CASE("Update queue request JSON preserves omitted and null retention", "[jo
     REQUIRE(std::holds_alternative<Uuid>(decoded->queue));
     CHECK(std::get<Uuid>(decoded->queue) == id);
     CHECK(decoded->name == request.name);
+    CHECK(decoded->expected_revision == request.expected_revision);
     CHECK(decoded->weight == request.weight);
     CHECK(decoded->concurrency_limit == request.concurrency_limit);
     CHECK(decoded->recovery_policy == request.recovery_policy);
@@ -725,6 +728,7 @@ TEST_CASE("Update queue request JSON preserves omitted and null retention", "[jo
     CHECK(decoded->runnable_wait_warning == request.runnable_wait_warning);
 
     auto clear_retention = make_json(JsonValue::Object{
+        {"expected_revision",         make_json(std::uint64_t{1})      },
         {"history_retention_seconds", make_json(JsonNull{})            },
         {"queue_name",                make_json(std::string{"default"})},
     });
@@ -737,8 +741,9 @@ TEST_CASE("Update queue request JSON preserves omitted and null retention", "[jo
     CHECK(cleared_json->as_object().at("history_retention_seconds").is_null());
 
     auto omitted = update_queue_request_from_json(make_json(JsonValue::Object{
-                                                      {"queue_name", make_json(std::string{"default"})},
-                                                      {"weight",     make_json(std::uint64_t{2})      },
+                                                      {"expected_revision", make_json(std::uint64_t{1})      },
+                                                      {"queue_name",        make_json(std::string{"default"})},
+                                                      {"weight",            make_json(std::uint64_t{2})      },
     }),
                                                   registry);
     REQUIRE(omitted);
@@ -752,38 +757,84 @@ TEST_CASE("Update queue request decoding enforces its strict structure",
     auto const                id = parse_uuid("00112233-4455-6677-8899-aabbccddeeff");
 
     check_invalid_request(update_queue_request_from_json(make_json(JsonValue::Object{
-                                                             {"queue_id", make_json(id.to_string())},
+                                                             {"expected_revision", make_json(std::uint64_t{1})},
+                                                             {"queue_id",          make_json(id.to_string())  },
     }),
                                                          registry));
     check_invalid_request(update_queue_request_from_json(make_json(JsonValue::Object{
-                                                             {"queue_id",   make_json(id.to_string())        },
-                                                             {"queue_name", make_json(std::string{"default"})},
-                                                             {"weight",     make_json(std::uint64_t{2})      },
+                                                             {"expected_revision", make_json(std::uint64_t{1})      },
+                                                             {"queue_id",          make_json(id.to_string())        },
+                                                             {"queue_name",        make_json(std::string{"default"})},
+                                                             {"weight",            make_json(std::uint64_t{2})      },
     }),
                                                          registry));
     check_invalid_request(update_queue_request_from_json(make_json(JsonValue::Object{
-                                                             {"queue_name", make_json(std::string{"default"})},
-                                                             {"unknown",    make_json(true)                  },
-                                                             {"weight",     make_json(std::uint64_t{2})      },
+                                                             {"expected_revision", make_json(std::uint64_t{1})      },
+                                                             {"queue_name",        make_json(std::string{"default"})},
+                                                             {"unknown",           make_json(true)                  },
+                                                             {"weight",            make_json(std::uint64_t{2})      },
     }),
                                                          registry));
     check_invalid_request(update_queue_request_from_json(make_json(JsonValue::Object{
-                                                             {"name",       make_json(JsonNull{})            },
-                                                             {"queue_name", make_json(std::string{"default"})},
+                                                             {"expected_revision", make_json(std::uint64_t{1})      },
+                                                             {"name",              make_json(JsonNull{})            },
+                                                             {"queue_name",        make_json(std::string{"default"})},
     }),
                                                          registry));
     check_invalid_request(update_queue_request_from_json(make_json(JsonValue::Object{
-                                                             {"defaults",   make_json(JsonValue::Array{})    },
-                                                             {"queue_name", make_json(std::string{"default"})},
+                                                             {"expected_revision", make_json(std::uint64_t{1})      },
+                                                             {"defaults",          make_json(JsonValue::Array{})    },
+                                                             {"queue_name",        make_json(std::string{"default"})},
     }),
                                                          registry));
 
-    auto empty = UpdateQueueRequest{.queue = QueueSelector{std::string{"default"}}};
+    auto empty = UpdateQueueRequest{.queue = QueueSelector{std::string{"default"}}, .expected_revision = 1};
     check_invalid_request(update_queue_request_to_json(empty, registry));
 
     auto invalid_enum = UpdateQueueRequest{
-        .queue           = QueueSelector{std::string{"default"}},
-        .recovery_policy = static_cast<RecoveryPolicy>(255),
+        .queue             = QueueSelector{std::string{"default"}},
+        .expected_revision = 1,
+        .recovery_policy   = static_cast<RecoveryPolicy>(255),
     };
     check_invalid_request(update_queue_request_to_json(invalid_enum, registry));
+}
+
+TEST_CASE("Queue update revisions are mandatory exact positive signed-storage integers",
+          "[jobu][management][json][queue][revision]")
+{
+    StandardAttributeRegistry registry;
+    auto                      params = make_json(JsonValue::Object{
+        {"queue_name", make_json(std::string{"protected"})},
+        {"weight",     make_json(std::uint64_t{2})        },
+    });
+    check_invalid_request(update_queue_request_from_json(params, registry));
+    for (auto const& invalid : {make_json(JsonNull{}),
+                                make_json(false),
+                                make_json(std::string{"1"}),
+                                make_json(1.0),
+                                make_json(std::int64_t{-1}),
+                                make_json(std::uint64_t{0}),
+                                make_json(std::uint64_t{9223372036854775808ULL})}) {
+        std::get<JsonValue::Object>(params.data).insert_or_assign("expected_revision", invalid);
+        check_invalid_request(update_queue_request_from_json(params, registry));
+    }
+    for (auto const& revision : {make_json(std::int64_t{1}),
+                                 make_json(std::uint64_t{9007199254740993ULL}),
+                                 make_json(std::uint64_t{9223372036854775807ULL})}) {
+        std::get<JsonValue::Object>(params.data).insert_or_assign("expected_revision", revision);
+        auto decoded = update_queue_request_from_json(params, registry);
+        REQUIRE(decoded);
+        auto encoded = update_queue_request_to_json(*decoded, registry);
+        REQUIRE(encoded);
+        auto round_trip = update_queue_request_from_json(*encoded, registry);
+        REQUIRE(round_trip);
+        CHECK(round_trip->expected_revision == decoded->expected_revision);
+    }
+    for (auto revision : {QueueRevision{0}, QueueRevision{9223372036854775808ULL}}) {
+        check_invalid_request(update_queue_request_to_json(
+            {.queue = std::string{"protected"}, .expected_revision = revision, .weight = 2},
+            registry));
+    }
+    std::get<JsonValue::Object>(params.data).erase("weight");
+    check_invalid_request(update_queue_request_from_json(params, registry));
 }

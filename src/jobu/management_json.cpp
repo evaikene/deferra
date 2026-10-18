@@ -862,13 +862,15 @@ auto queue_list_request_from_json(jb::core::JsonValue const& value)
 auto update_queue_request_to_json(UpdateQueueRequest const& request, AttributeRegistry const& registry)
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
-    if (!has_queue_update(request)) {
+    if (!has_queue_update(request) || request.expected_revision == 0 ||
+        request.expected_revision > static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max())) {
         return invalid<jb::core::JsonValue>(true);
     }
     auto object = jb::core::JsonValue::Object{};
     if (!add_selector_members(object, request.queue)) {
         return invalid<jb::core::JsonValue>(true);
     }
+    object.emplace("expected_revision", make_json(request.expected_revision));
     if (request.name) {
         object.emplace("name", make_json(*request.name));
     }
@@ -908,6 +910,7 @@ auto update_queue_request_from_json(jb::core::JsonValue const& value, AttributeR
     if (!value.is_object() || !has_only_members(value.as_object(),
                                                 {"queue_id",
                                                  "queue_name",
+                                                 "expected_revision",
                                                  "name",
                                                  "weight",
                                                  "concurrency_limit",
@@ -922,7 +925,13 @@ auto update_queue_request_from_json(jb::core::JsonValue const& value, AttributeR
     if (!selector) {
         return invalid<UpdateQueueRequest>(true);
     }
-    auto result = UpdateQueueRequest{.queue = std::move(selector).value()};
+    auto const* revision          = find_member(object, "expected_revision");
+    auto        expected_revision = QueueRevision{};
+    if (!revision || !decode_unsigned(*revision, expected_revision) || expected_revision == 0 ||
+        expected_revision > static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max())) {
+        return invalid<UpdateQueueRequest>(true);
+    }
+    auto result = UpdateQueueRequest{.queue = std::move(selector).value(), .expected_revision = expected_revision};
     if (auto const* name = find_member(object, "name")) {
         if (!name->is_string()) {
             return invalid<UpdateQueueRequest>(true);

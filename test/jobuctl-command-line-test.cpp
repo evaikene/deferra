@@ -597,7 +597,7 @@ TEST_CASE("jobuctl request files are bounded and strictly decoded", "[jobuctl][i
     {
         auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
         REQUIRE(file);
-        file << R"({"queue_name":"reports","defaults":{},"history_retention_seconds":null})";
+        file << R"({"queue_name":"reports","expected_revision":7,"defaults":{},"history_retention_seconds":null})";
     }
     auto queue_update = parse({"--socket", "fixture.sock", "queue", "update", "--request-file", path.string()});
     REQUIRE(queue_update.command);
@@ -1254,6 +1254,8 @@ TEST_CASE("jobuctl queue configuration keeps inheritance and clear semantics", "
                           "fixture.sock",
                           "queue",
                           "update",
+                          "--revision",
+                          "1",
                           "--name",
                           "reports",
                           "--defaults-file",
@@ -1273,6 +1275,8 @@ TEST_CASE("jobuctl queue configuration keeps inheritance and clear semantics", "
                        "fixture.sock",
                        "queue",
                        "update",
+                       "--revision",
+                       "1",
                        "--name",
                        "reports",
                        "--history-retention-seconds",
@@ -1934,4 +1938,33 @@ TEST_CASE("CLI cron flags and request files preserve timezone omission", "[jobuc
     }
     auto rendered = render_help({.group = "schedule", .action = "validate"});
     CHECK(rendered.find("daemon default") != std::string::npos);
+}
+
+TEST_CASE("Explicit queue updates require a bounded revision without changing selector grammar",
+          "[jobuctl][parse][queue][revision]")
+{
+    auto fields = std::vector<std::string>{"queue", "update", "--name", "protected", "--weight", "2"};
+    CHECK(parse(fields).error == "queue update requires --revision with the inspected queue revision");
+    for (auto const* revision : {"1", "9007199254740993", "9223372036854775807"}) {
+        auto arguments = fields;
+        arguments.insert(arguments.end(), {"--revision", revision});
+        auto parsed = parse(std::move(arguments));
+        REQUIRE(parsed.command);
+        auto const& request = std::get<UpdateQueueRequest>(parsed.command->request);
+        CHECK(request.expected_revision == std::stoull(revision));
+        CHECK(std::get<std::string>(request.queue) == "protected");
+    }
+    for (auto const* revision : {"0", "-1", "1.0", "true", "9223372036854775808", "18446744073709551615"}) {
+        auto arguments = fields;
+        arguments.insert(arguments.end(), {"--revision", revision});
+        CHECK_FALSE(parse(std::move(arguments)).command);
+    }
+    CHECK_FALSE(parse({"queue", "update", "--name", "protected", "--revision", "1"}).command);
+    CHECK_FALSE(parse({"queue", "update", "--name", "protected", "--revision", "1", "--revision", "1", "--weight", "2"})
+                    .command);
+    CHECK_FALSE(parse({"queue", "update", "protected", "--revision", "1", "--weight", "2"}).command);
+    CHECK_FALSE(parse({"queue", "update", "--request-file", "input.json", "--revision", "1"}).command);
+    auto by_id = parse({"queue", "update", "--id", job_id, "--revision", "7", "--weight", "2"});
+    REQUIRE(by_id.command);
+    CHECK(std::get<UpdateQueueRequest>(by_id.command->request).expected_revision == 7);
 }

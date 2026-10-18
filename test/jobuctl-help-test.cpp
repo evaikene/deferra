@@ -596,3 +596,14 @@ TEST_CASE("jobuctl local selection does not open supplied file paths", "[jobuctl
         }
     }
 }
+
+TEST_CASE("Queue update help describes only explicit protected updates", "[jobuctl][help][queue][revision]")
+{
+    auto help = run({"queue", "update", "--help"});
+    REQUIRE(help.code == 0);
+    CHECK(help.out.find("--revision N") != std::string::npos);
+    CHECK(help.out.find("1..9223372036854775807") != std::string::npos);
+    CHECK(help.out.find("--name reports --revision 1 --weight 2") != std::string::npos);
+    CHECK(help.out.find("without automatic retry") != std::string::npos);
+    CHECK(help.err.empty());
+}

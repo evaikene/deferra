@@ -1070,8 +1070,9 @@ TEST_CASE("Configured foreground daemon measures mixed work maintains history an
 
     // Keep newly completed work while checking its statistics and restart replay. The inherited
     // finite policy above has already run through the production timer and repository.
-    auto updated = update_queue_request_to_json({.queue = queue.id, .history_retention = std::chrono::seconds{0}},
-                                                f.storage.registry);
+    auto updated = update_queue_request_to_json(
+        {.queue = queue.id, .expected_revision = queue.revision, .history_retention = std::chrono::seconds{0}},
+        f.storage.registry);
     REQUIRE(updated);
     f.rpc("queue.update", *updated);
 

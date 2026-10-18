@@ -1402,7 +1402,7 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
         .payload    = cli_payload("/before"),
     });
     REQUIRE(created);
-    REQUIRE(service.update_queue({.queue = queue_id, .defaults = updated_queue_defaults()}));
+    REQUIRE(service.update_queue({.queue = queue_id, .expected_revision = 1, .defaults = updated_queue_defaults()}));
     fixture.time.advance(1s);
 
     auto const replacement_payload = complete_http_payload("https://updated.test/path", "PATCH");

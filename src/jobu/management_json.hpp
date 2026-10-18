@@ -140,6 +140,7 @@ namespace jb::jobu {
 
 /// Encodes queue.update parameters.
 ///
+/// The selector and a valid expected revision from 1 through INT64_MAX are required, with at least one mutable field.
 /// Only supplied mutable fields are emitted. A supplied outer retention optional with no inner value becomes JSON
 /// null, preserving the distinction between unchanged retention and inheritance from the daemon policy.
 /// ManagementService remains responsible for domain constraints such as positive configuration values.
@@ -153,7 +154,8 @@ namespace jb::jobu {
 
 /// Decodes queue.update parameters.
 ///
-/// Exactly one queue selector and at least one mutable field are required. Unknown members are rejected. Missing
+/// Exactly one queue selector, an exact integer expected_revision from 1 through INT64_MAX, and at least one mutable
+/// field are required. Missing or invalid revisions and unknown members are rejected. Missing
 /// `history_retention_seconds` leaves retention unchanged, JSON null selects daemon inheritance, and an integer selects
 /// an explicit duration. The registry is used only while decoding supplied queue defaults.
 /// ManagementService remains responsible for domain constraints such as positive configuration values.

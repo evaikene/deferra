@@ -1367,6 +1367,8 @@ auto main(int argc, char* argv[]) -> int
                                     persisted_socket,
                                     {"queue",
                                      "update",
+                                     "--revision",
+                                     "1",
                                      "--name",
                                      "configured",
                                      "--defaults-file",

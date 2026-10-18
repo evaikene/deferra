@@ -154,7 +154,8 @@ public:
     [[nodiscard]] auto list_queues(QueueListRequest const& request, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
-    /// Updates supplied queue fields; replies with Queue after commit.
+    /// Updates supplied queue fields at the required inspected revision; replies with Queue after commit.
+    /// Invalid revisions fail locally; conflicts retain the original token and are never retried automatically.
     [[nodiscard]] auto update_queue(UpdateQueueRequest const& request, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 

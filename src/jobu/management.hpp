@@ -90,6 +90,8 @@ struct CreateQueueRequest {
 struct UpdateQueueRequest {
     /// Existing non-deleted queue to update.
     QueueSelector                                      queue;
+    /// Required inspected revision, from 1 through INT64_MAX; zero is invalid. Never refreshed automatically.
+    QueueRevision                                      expected_revision{0};
     /// Replacement user-facing name.
     std::optional<std::string>                         name;
     /// Replacement positive scheduler weight.
@@ -326,9 +328,10 @@ public:
     [[nodiscard]] auto list_queues(QueueListRequest const& request) -> jb::core::Result<QueuePage, jb::core::Error>;
 
     /// Replaces supplied mutable fields in one immediate transaction.
-    /// @param request Non-empty update consumed after validation and targeting an existing non-deleted queue.
-    /// @return Committed replacement queue, or a validation, not-found, name-conflict, state, attribute, or database
-    /// Error. Queue-default changes affect only jobs created later.
+    /// @param request Non-empty update with the inspected revision, targeting an existing non-deleted queue.
+    /// @return Committed replacement queue with its revision incremented once, including same-value updates, or a
+    /// validation, not-found, conflict, revision-exhaustion, attribute, or database Error. A stale revision returns
+    /// `jobu.queue.revision_conflict` without changing the queue. Queue-default changes affect only jobs created later.
     ///
     [[nodiscard]] auto update_queue(UpdateQueueRequest request) -> jb::core::Result<Queue, jb::core::Error>;
 

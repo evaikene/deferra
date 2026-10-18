@@ -293,6 +293,7 @@ auto parse_queue_update(std::filesystem::path                socket_path,
     auto defaults_seen    = false;
     auto retention_seen   = false;
     auto warning_seen     = false;
+    auto revision_seen    = false;
     auto request          = UpdateQueueRequest{};
 
     for (auto const& argument : arguments) {
@@ -312,6 +313,15 @@ auto parse_queue_update(std::filesystem::path                socket_path,
         auto const value = option_value(argument);
         if (!value) {
             return parse_failure("queue update has an invalid option");
+        }
+        if (argument.name() == "revision" && !revision_seen) {
+            auto parsed = parse_unsigned(*value, 1, std::numeric_limits<std::int64_t>::max());
+            if (!parsed) {
+                return parse_failure("--revision must be an integer from 1 through 9223372036854775807");
+            }
+            request.expected_revision = *parsed;
+            revision_seen             = true;
+            continue;
         }
         if (argument.name() == "new-name" && !new_name_seen) {
             new_name      = std::string{*value};
@@ -377,6 +387,9 @@ auto parse_queue_update(std::filesystem::path                socket_path,
 
     if (!selector) {
         return parse_failure("queue update requires exactly one --id or --name selector");
+    }
+    if (!revision_seen) {
+        return parse_failure("queue update requires --revision with the inspected queue revision");
     }
     if (!new_name && !weight && !concurrency && !request.recovery_policy && !request.defaults &&
         !request.history_retention && !request.runnable_wait_warning) {

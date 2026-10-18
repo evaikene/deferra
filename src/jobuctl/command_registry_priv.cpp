@@ -95,6 +95,7 @@ constexpr std::array queue_list{deleted, limit, after};
 constexpr std::array queue_update{
     id,
     name_selector,
+    value_option("revision", "N", "Required inspected queue revision, 1..9223372036854775807."),
     value_option("new-name", "NAME", "Replace the queue name."),
     value_option("weight", "N", "Replace scheduler weight, 1..4294967295."),
     value_option("concurrency-limit", "N", "Replace concurrency limit, 1..4294967295."),
@@ -316,9 +317,9 @@ constexpr CommandSpec queue_update_command{
     .operands         = {},
     .maximum_operands = 0,
     .options          = queue_update,
-    .rules            = "Supply exactly one of --id or --name and at least one replacement field. Unspecified fields "
-                        "remain unchanged.",
-    .example          = "jobuctl queue update --name reports --weight 2",
+    .rules            = "Supply exactly one of --id or --name, --revision, and at least one replacement field. "
+                        "Unspecified fields remain unchanged. Stale revisions fail without automatic retry.",
+    .example          = "jobuctl queue update --name reports --revision 1 --weight 2",
     .capability       = "queue.update",
     .build            = parse_queue_command,
 };
