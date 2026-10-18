@@ -106,7 +106,7 @@ struct ControlFailure {
 /// ------------------  -----------------  --------------------------------------------------------
 /// not_ready           Unavailable        Wrong lifecycle state; no request written.
 /// unsupported_method  Unsupported        Method not advertised; no request written.
-/// unsupported_feature Unsupported        Request feature needs a newer API minor; no write.
+/// unsupported_feature Unsupported        Request/result feature needs a newer API minor; no write.
 /// invalid_timeout     InvalidArgument    Nonpositive or unrepresentable timeout; no write.
 /// pending_limit       ResourceExhausted  Typed pending limit reached; no request written.
 /// invalid_response    InvalidArgument    Malformed success result; call or handshake fails.
@@ -143,27 +143,33 @@ public:
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
     /// Creates a queue; an unobserved transmitted call may have committed and should be reconciled by key.
+    /// Requires API 1.6 or newer for the revision-bearing Queue reply; older peers fail locally without a write.
     [[nodiscard]] auto create_queue(CreateQueueRequest const& request, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
     /// Reads one queue by ID or exact name; replies with Queue.
+    /// Requires API 1.6 or newer for the revision-bearing reply.
     [[nodiscard]] auto get_queue(QueueSelector const& selector, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
     /// Reads one bounded queue page using its ascending-ID continuation; replies with QueuePage.
+    /// Requires API 1.6 or newer for revision-bearing queue items.
     [[nodiscard]] auto list_queues(QueueListRequest const& request, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
     /// Updates supplied queue fields at the required inspected revision; replies with Queue after commit.
     /// Invalid revisions fail locally; conflicts retain the original token and are never retried automatically.
+    /// Requires API 1.6 or newer; older peers fail locally without downgrading the protected update.
     [[nodiscard]] auto update_queue(UpdateQueueRequest const& request, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
     /// Requests queue suspension; replies with the updated Queue.
+    /// Requires API 1.6 or newer for the revision-bearing reply.
     [[nodiscard]] auto suspend_queue(QueueSelector const& selector, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
     /// Resumes a queue; replies with the updated Queue.
+    /// Requires API 1.6 or newer for the revision-bearing reply.
     [[nodiscard]] auto resume_queue(QueueSelector const& selector, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 

@@ -507,8 +507,17 @@ TEST_CASE("jobuctl creation aliases send the canonical methods and identical req
     CHECK(job_alias.methods == std::vector<std::string>{"system.info", "job.create"});
     CHECK(job_alias.params == job.params);
 
-    auto const queue       = run_client({"queue", "create", "reports", "--weight", "2"});
-    auto const queue_alias = run_client({"queue", "add", "reports", "--weight", "2"});
-    CHECK(queue_alias.methods == std::vector<std::string>{"system.info", "queue.create"});
-    CHECK(queue_alias.params == queue.params);
+    // Queue creation requires revision-bearing replies, so the alias comparison needs an API 1.6 peer.
+    auto const queue_peer = SystemInfo{
+        .daemon_version = "queue-fixture",
+        .api_version    = {.major = 1,     .minor = 6   },
+        .capabilities   = {"queue.create", "system.info"}
+    };
+    auto const queue       = run_client({"queue", "create", "reports", "--weight", "2"}, queue_peer);
+    auto const queue_alias = run_client({"queue", "add", "reports", "--weight", "2"}, queue_peer);
+    REQUIRE(queue.methods == std::vector<std::string>{"system.info", "queue.create"});
+    REQUIRE(queue_alias.methods == queue.methods);
+    REQUIRE(queue.params);
+    REQUIRE(queue_alias.params);
+    CHECK(*queue_alias.params == *queue.params);
 }

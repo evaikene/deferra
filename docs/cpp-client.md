@@ -94,6 +94,40 @@ Successful queue, job, and secret deletions return `EmptyReply`; cron validation
 returns `ScheduleValidationReply` only for a valid schedule. Invalid schedules
 produce a remote error.
 
+Since API 1.6, every `Queue` and `QueuePage` item carries a required
+`QueueRevision` from 1 through `INT64_MAX`. Keep it as an exact integer with
+the queue UUID. Fetch `get_queue()`, retain the returned `id` and `revision`,
+then submit only intended settings in `UpdateQueueRequest`, for example:
+
+```cpp
+auto request = jb::jobu::UpdateQueueRequest{
+    .queue = inspected.id,
+    .expected_revision = inspected.revision,
+    .concurrency_limit = 2,
+};
+auto call = client.update_queue(request);
+```
+
+Here `inspected` is the `Queue` previously delivered by `reply_received`.
+Zero/uninitialized or out-of-range revisions fail shared validation locally.
+The daemon independently enforces the token: a stale request produces remote
+`-32000` with `jobu.queue.revision_conflict`, leaves state unchanged, and is
+never retried. Read the same UUID and reconcile before another update. Names
+can be reused; retaining only a name and numerical token cannot prove identity.
+An explicit same-value update advances once; actual lifecycle transitions also
+invalidate an older token. A replayed create result retains original revision
+1, so use `get_queue()` to inspect the current queue before editing.
+
+The six typed calls `create_queue`, `get_queue`, `list_queues`, `update_queue`,
+`suspend_queue`, and `resume_queue` require negotiated API 1.6 or newer. Against
+older peers, valid calls return local Unsupported
+`jobu.client.unsupported_feature` without writing, allocating a call ID, or
+emitting a later outcome. They neither synthesize missing revisions nor downgrade
+updates. Readiness/closed-client errors precede request validation; shared codec
+validation precedes the peer feature check. `delete_queue`, `queue_statistics`,
+and other unaffected methods retain their advertised-method support. The
+compatible-major handshake and capability names remain unchanged.
+
 For `list_runs`, `RunFilters::state` selects one state. Since API 1.5,
 `RunFilters::states` selects any of 1–7 distinct valid states, preserving caller
 order in the request. The two selectors are mutually exclusive; an absent set

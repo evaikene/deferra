@@ -32,7 +32,7 @@ struct ApiVersion {
     /// Incompatible API generation.
     std::uint32_t major{1};
 
-    /// Backward-compatible feature revision within @ref major.
+    /// Feature/contract revision within @ref major. Pre-release API 1.6 intentionally requires queue.update protection.
     std::uint32_t minor{0};
 };
 

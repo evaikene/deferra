@@ -426,6 +426,25 @@ auto ControlClient::Private::start_encoded_call(Method                   method,
         return Result<ControlCallId, Error>::failure(std::move(params).error());
     }
 
+    // These replies require a durable revision. Reject before accepting a call, especially a mutation whose older
+    // peer could commit successfully but return a revisionless result. Delete and statistics have different replies.
+    if (api_version.minor < 6U) {
+        switch (method) {
+            case Method::CreateQueue:
+            case Method::GetQueue:
+            case Method::ListQueues:
+            case Method::UpdateQueue:
+            case Method::SuspendQueue:
+            case Method::ResumeQueue:
+                return Result<ControlCallId, Error>::failure(
+                    client_error(ErrorCategory::Unsupported,
+                                 "jobu.client.unsupported_feature",
+                                 "Queue revision support requires JobU API 1.6 or newer"));
+            default:
+                break;
+        }
+    }
+
     // The shared codec has validated the request; only initial run queries carry this additive field.
     if (method == Method::ListRuns && api_version.minor < 5U && params->as_object().contains("states")) {
         return Result<ControlCallId, Error>::failure(client_error(ErrorCategory::Unsupported,

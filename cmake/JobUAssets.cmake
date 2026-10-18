@@ -49,6 +49,8 @@ set(JOBU_PROTOCOL_MANUALS
     examples/job-create-http.params.json examples/job-update-http.params.json
     examples/job-list-all.params.json examples/job-list.params.json examples/job-list.result.json
     examples/queue-create.params.json examples/queue-list.result.json
+    examples/queue-update.params.json
+    examples/queue-update-invalid-params.error.json examples/queue-update-conflict.error.json
     examples/run-list.params.json examples/run-list-states.params.json examples/run-list.result.json
     examples/schedule-next-default.params.json examples/schedule-next.params.json examples/schedule-next.result.json
     examples/secret-set.params.json examples/secret-set.result.json

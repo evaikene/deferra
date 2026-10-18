@@ -1,7 +1,7 @@
 package=JobU
 component=@JOBU_PACKAGE_COMPONENT@
 project-version=@PROJECT_VERSION@
-rpc-api-version=1.5
+rpc-api-version=1.6
 source-revision=@JOBU_PACKAGE_SOURCE_REVISION@
 source-state=@JOBU_PACKAGE_SOURCE_STATE@
 target-os=@JOBU_PACKAGE_OS@

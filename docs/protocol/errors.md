@@ -37,10 +37,31 @@ For example, a stale job update can return:
 
 ## Queue, job, and creation errors
 
+Since API 1.6, `queue.update` requires an exact integer `expected_revision`
+from 1 through `INT64_MAX`. Missing or invalid tokens are malformed params,
+not revision conflicts. For example, a legacy unprotected update returns:
+
+```json
+{"jsonrpc":"2.0","id":7,"error":{"code":-32602,"message":"Invalid params"}}
+```
+
+A valid stale queue token instead returns:
+
+```json
+{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"Queue revision does not match the expected revision","data":{"category":"conflict","code":"jobu.queue.revision_conflict"}}}
+```
+
+These [invalid-params](examples/queue-update-invalid-params.error.json) and
+[conflict](examples/queue-update-conflict.error.json) envelopes are checked
+fixtures. Both failures leave the queue unchanged. On conflict, read the same
+UUID and reconcile; do not automatically substitute the latest token or retry.
+
 | Code | Category | Meaning |
 | --- | --- | --- |
 | `jobu.queue.invalid_name` | InvalidArgument | Queue name violates UTF-8, length, control-character, or reserved-suffix rules. |
 | `jobu.queue.invalid_configuration` | InvalidArgument | Weight, capacity, recovery, retention, warning threshold, or defaults are invalid. |
+| `jobu.queue.revision_conflict` | Conflict | Since 1.6: `expected_revision` is valid but stale; no update commits. |
+| `jobu.queue.revision_exhausted` | ResourceExhausted | Since 1.6: a required queue transition/update cannot advance beyond `INT64_MAX`; no wrap or reset. |
 | `jobu.queue.not_found` | NotFound | The selected queue does not exist. |
 | `jobu.queue.name_conflict` | Conflict | An active queue already uses the requested name. |
 | `jobu.queue.ambiguous_deleted_name` | Conflict | Several deleted queues match a historical name; select by ID. |
