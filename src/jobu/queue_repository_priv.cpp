@@ -20,7 +20,8 @@ using RepositoryResult = jb::core::Result<T, jb::core::Error>;
 constexpr std::size_t kMaximumAttributeDocumentBytes = std::size_t{256} * 1024U;
 
 constexpr auto kQueueSelection =
-    "SELECT id AS queue_id, CASE WHEN state = 'deleted' THEN deleted_name ELSE name END AS queue_name, "
+    "SELECT id AS queue_id, revision AS queue_revision, "
+    "CASE WHEN state = 'deleted' THEN deleted_name ELSE name END AS queue_name, "
     "state AS queue_state, weight AS queue_weight, concurrency_limit AS queue_concurrency_limit, "
     "recovery_policy AS queue_recovery_policy, defaults_json AS queue_defaults_json, "
     "retention_seconds AS queue_retention_seconds, runnable_wait_warning_ms AS queue_runnable_wait_warning_ms, "
@@ -65,6 +66,10 @@ auto decode_queue(jb::db::Record const& record, AttributeRegistry const& attribu
     auto id = read_uuid(record, "queue_id");
     if (!id) {
         return RepositoryResult<Queue>::failure(std::move(id).error());
+    }
+    auto revision = read_revision(record, "queue_revision");
+    if (!revision) {
+        return RepositoryResult<Queue>::failure(std::move(revision).error());
     }
     auto name = read_text(record, "queue_name");
     if (!name) {
@@ -126,6 +131,7 @@ auto decode_queue(jb::db::Record const& record, AttributeRegistry const& attribu
 
     return RepositoryResult<Queue>::success(Queue{
         .id                    = *id,
+        .revision              = *revision,
         .name                  = std::move(name).value(),
         .state                 = *state,
         .weight                = *weight,
@@ -163,6 +169,12 @@ auto QueueRepository::insert(Queue const&                       queue,
                              std::string_view                   internal_name,
                              SerializedAttributeDocument const& defaults) -> jb::core::Result<void, jb::core::Error>
 {
+    // Queue and job revisions share the same checked positive signed-integer storage range.
+    auto revision = revision_to_storage(queue.revision);
+    if (!revision) {
+        return RepositoryResult<void>::failure(std::move(revision).error());
+    }
+
     auto weight = positive_uint32_to_storage(queue.weight);
     if (!weight) {
         return RepositoryResult<void>::failure(std::move(weight).error());
@@ -190,16 +202,18 @@ auto QueueRepository::insert(Queue const&                       queue,
 
     jb::db::Query query{_database};
     auto          prepared = query.prepare(
-        "INSERT INTO jobu_queues(id, name, deleted_name, state, weight, concurrency_limit, recovery_policy, "
+        "INSERT INTO jobu_queues(id, revision, name, deleted_name, state, weight, concurrency_limit, recovery_policy, "
         "defaults_json, retention_seconds, runnable_wait_warning_ms, created_at_us, updated_at_us, deleted_at_us) "
-        "VALUES(:id, :name, :deleted_name, :state, :weight, :concurrency_limit, :recovery_policy, :defaults_json, "
-        ":retention_seconds, :runnable_wait_warning_ms, :created_at_us, :updated_at_us, :deleted_at_us)");
+        "VALUES(:id, :revision, :name, :deleted_name, :state, :weight, :concurrency_limit, "
+        ":recovery_policy, :defaults_json, :retention_seconds, :runnable_wait_warning_ms, "
+        ":created_at_us, :updated_at_us, :deleted_at_us)");
     if (!prepared) {
         return RepositoryResult<void>::failure(std::move(prepared).error());
     }
     auto bound = bind_all(query,
                           {
                               {":id",                       uuid_to_storage(queue.id)                             },
+                              {":revision",                 std::move(revision).value()                           },
                               {":name",                     jb::db::make_text(internal_name)                      },
                               {":deleted_name",             jb::db::Null{}                                        },
                               {":state",                    jb::db::make_text(storage_text(queue.state))          },

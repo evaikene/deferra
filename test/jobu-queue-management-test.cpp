@@ -1,10 +1,12 @@
 #include "management.hpp"
 
 #include "attempt_repository_priv.hpp"
+#include "attribute_codec_priv.hpp"
 #include "attribute_registry.hpp"
 #include "database.hpp"
 #include "domain_storage_priv.hpp"
 #include "query.hpp"
+#include "queue_repository_priv.hpp"
 #include "run_repository_priv.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
@@ -15,12 +17,14 @@
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -233,6 +237,7 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
     CHECK(create_request.name == "alpha");
     CHECK(std::get<std::int64_t>(create_request.defaults.at("retry.max_attempts").data) == 4);
     CHECK(first->id == first_id);
+    CHECK(first->revision == 1);
     CHECK(first->state == QueueState::Active);
     CHECK(first->created_at == UtcTimePoint{1s});
     CHECK(first->updated_at == first->created_at);
@@ -244,12 +249,14 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
     auto by_id = service.get_queue(first_id);
     REQUIRE(by_id);
     CHECK(by_id->name == "alpha");
+    CHECK(by_id->revision == 1);
     CHECK(by_id->weight == 2);
     CHECK(by_id->history_retention == 0s);
     CHECK(std::get<std::int64_t>(by_id->defaults.at("retry.max_attempts").data) == 4);
     auto by_name = service.get_queue(std::string{"alpha"});
     REQUIRE(by_name);
     CHECK(by_name->id == first_id);
+    CHECK(by_name->revision == 1);
 
     auto const* const noncanonical_defaults =
         R"({ "values": { "retry.max_attempts": { "type": "integer", "value": 4 } }, "version": 1 })";
@@ -862,12 +869,12 @@ TEST_CASE("Queue lookup exposes original deleted names and detects historical am
 
     execute(fixture.database, R"sql(
 INSERT INTO jobu_queues(
-    id, name, deleted_name, state, weight, concurrency_limit, recovery_policy, defaults_json,
+    id, revision, name, deleted_name, state, weight, concurrency_limit, recovery_policy, defaults_json,
     retention_seconds, runnable_wait_warning_ms, created_at_us, updated_at_us, deleted_at_us
 ) VALUES
-    (X'00000000000070008000000000000031', 'old-deleted#00000000-0000-7000-8000-000000000031', 'old',
+    (X'00000000000070008000000000000031', 1, 'old-deleted#00000000-0000-7000-8000-000000000031', 'old',
      'deleted', 1, 1, 'fail_interrupted', '{"version":1,"values":{}}', NULL, 10000, 1, 2, 2),
-    (X'00000000000070008000000000000032', 'old-deleted#00000000-0000-7000-8000-000000000032', 'old',
+    (X'00000000000070008000000000000032', 1, 'old-deleted#00000000-0000-7000-8000-000000000032', 'old',
      'deleted', 1, 1, 'fail_interrupted', '{"version":1,"values":{}}', NULL, 10000, 1, 3, 3)
 )sql");
 
@@ -897,6 +904,112 @@ INSERT INTO jobu_queues(
     REQUIRE(preferred);
     CHECK(preferred->id == active->id);
     CHECK(preferred->state == QueueState::Active);
+}
+
+TEST_CASE("Queue repository preserves revisions across reopen and every full projection",
+          "[jobu][queue][sqlite][revision]")
+{
+    auto const revision = GENERATE(QueueRevision{1},
+                                   QueueRevision{7},
+                                   static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max()));
+    CAPTURE(revision);
+    ServiceFixture fixture{std::vector<Uuid>{}};
+    auto const     queue = Queue{.id         = sequence_id(41),
+                                 .revision   = revision,
+                                 .name       = "persisted-revision",
+                                 .state      = QueueState::Suspended,
+                                 .created_at = UtcTimePoint{1s},
+                                 .updated_at = UtcTimePoint{1s}};
+    auto           defaults =
+        jb::jobu::detail::encode_and_serialize_attribute_document(fixture.registry,
+                                                                  queue.defaults,
+                                                                  AttributeScope::QueueDefault,
+                                                                  jb::jobu::detail::AttributeDocumentMode::Partial);
+    REQUIRE(defaults);
+    jb::jobu::detail::QueueRepository queues{fixture.database, fixture.registry};
+    REQUIRE(queues.insert(queue, queue.name, *defaults));
+
+    REQUIRE(fixture.database.close());
+    REQUIRE(fixture.database.open());
+    REQUIRE(jb::jobu::sqlite::ensure_schema(fixture.database));
+
+    auto by_id = queues.find_by_id(queue.id, false);
+    REQUIRE(by_id);
+    REQUIRE(by_id->has_value());
+    CHECK((**by_id).revision == revision);
+    auto by_name = queues.find_by_name(queue.name, false);
+    REQUIRE(by_name);
+    REQUIRE(by_name->has_value());
+    CHECK((**by_name).revision == revision);
+    auto listed = queues.list(false, std::nullopt, 10, std::nullopt);
+    REQUIRE(listed);
+    REQUIRE(listed->size() == 1);
+    CHECK(listed->front().revision == revision);
+
+    // U.23 preserves stored tokens through tombstone reads; lifecycle increments arrive in U.26.
+    auto deleted = queues.mark_deleted(queue.id, "deleted-revision", queue.name, UtcTimePoint{2s});
+    REQUIRE(deleted);
+    REQUIRE(*deleted);
+    auto tombstone = queues.find_by_id(queue.id, true);
+    REQUIRE(tombstone);
+    REQUIRE(tombstone->has_value());
+    CHECK((**tombstone).revision == revision);
+    CHECK((**tombstone).state == QueueState::Deleted);
+    auto historical = queues.find_by_name(queue.name, true);
+    REQUIRE(historical);
+    REQUIRE(historical->has_value());
+    CHECK((**historical).revision == revision);
+    auto retained = queues.list(true, QueueState::Deleted, 10, std::nullopt);
+    REQUIRE(retained);
+    REQUIRE(retained->size() == 1);
+    CHECK(retained->front().revision == revision);
+}
+
+TEST_CASE("Queue repository rejects revisions outside the storage range before insertion",
+          "[jobu][queue][sqlite][revision]")
+{
+    auto const revision = GENERATE(QueueRevision{0},
+                                   static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max()) + 1,
+                                   std::numeric_limits<QueueRevision>::max());
+    CAPTURE(revision);
+    ServiceFixture fixture{std::vector<Uuid>{}};
+    auto const     queue = Queue{.id = sequence_id(42), .revision = revision, .name = "invalid-revision"};
+    auto           defaults =
+        jb::jobu::detail::encode_and_serialize_attribute_document(fixture.registry,
+                                                                  queue.defaults,
+                                                                  AttributeScope::QueueDefault,
+                                                                  jb::jobu::detail::AttributeDocumentMode::Partial);
+    REQUIRE(defaults);
+    jb::jobu::detail::QueueRepository queues{fixture.database, fixture.registry};
+
+    require_error(queues.insert(queue, queue.name, *defaults), ErrorCategory::Internal, "jobu.storage.invalid_integer");
+    CHECK(count_rows(fixture.database, "jobu_queues") == 0);
+}
+
+TEST_CASE("Queue repository rejects malformed stored revisions without substituting a default",
+          "[jobu][queue][sqlite][revision]")
+{
+    auto const* invalid = GENERATE("0", "-1", "1.5", "'invalid'", "X'01'", "9223372036854775808");
+    CAPTURE(invalid);
+    auto const        id = sequence_id(43);
+    ServiceFixture    fixture{{id}};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    REQUIRE(service.create_queue({.name = "corrupt-revision"}));
+
+    // Bypass only CHECK constraints in this disposable database to exercise the production row decoder.
+    execute(fixture.database, "PRAGMA ignore_check_constraints = ON");
+    execute(fixture.database, "UPDATE jobu_queues SET revision = " + std::string{invalid});
+    execute(fixture.database, "PRAGMA ignore_check_constraints = OFF");
+
+    jb::jobu::detail::QueueRepository queues{fixture.database, fixture.registry};
+    require_error(queues.find_by_id(id, false), ErrorCategory::Internal, "jobu.storage.invalid_integer");
+    require_error(queues.find_by_name("corrupt-revision", false),
+                  ErrorCategory::Internal,
+                  "jobu.storage.invalid_integer");
+    require_error(queues.list(false, std::nullopt, 10, std::nullopt),
+                  ErrorCategory::Internal,
+                  "jobu.storage.invalid_integer");
+    CHECK(count_rows(fixture.database, "jobu_queues") == 1);
 }
 
 TEST_CASE("Queue management rejects malformed persisted attribute documents", "[jobu][queue][sqlite]")

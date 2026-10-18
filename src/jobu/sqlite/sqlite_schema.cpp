@@ -57,11 +57,12 @@ constexpr std::array schema_objects{
                          .column_probe = "SELECT singleton, version FROM jobu_schema WHERE 0",
                          },
     detail::SchemaObject{
-                         .kind  = detail::SchemaObjectKind::Table,
-                         .name  = "jobu_queues",
-                         .owner = "jobu_queues",
-                         .ddl   = R"sql(CREATE TABLE jobu_queues (
+                         .kind         = detail::SchemaObjectKind::Table,
+                         .name         = "jobu_queues",
+                         .owner        = "jobu_queues",
+                         .ddl          = R"sql(CREATE TABLE jobu_queues (
     id BLOB PRIMARY KEY NOT NULL CHECK (typeof(id) = 'blob' AND length(id) = 16),
+    revision INTEGER NOT NULL CHECK (typeof(revision) = 'integer' AND revision > 0),
     name TEXT NOT NULL CHECK (typeof(name) = 'text'),
     deleted_name TEXT CHECK (deleted_name IS NULL OR typeof(deleted_name) = 'text'),
     state TEXT NOT NULL CHECK (typeof(state) = 'text' AND state IN ('active', 'suspending', 'suspended', 'deleted')),
@@ -85,10 +86,9 @@ constexpr std::array schema_objects{
         OR (state <> 'deleted' AND deleted_name IS NULL AND deleted_at_us IS NULL)
     )
 ))sql",
-                         .column_probe =
-            "SELECT id, name, deleted_name, state, weight, concurrency_limit, recovery_policy, defaults_json, "
-            "retention_seconds, runnable_wait_warning_ms, created_at_us, updated_at_us, deleted_at_us "
-            "FROM jobu_queues WHERE 0", },
+                         .column_probe = "SELECT id, revision, name, deleted_name, state, weight, concurrency_limit, "
+                        "recovery_policy, defaults_json, retention_seconds, runnable_wait_warning_ms, "
+                        "created_at_us, updated_at_us, deleted_at_us FROM jobu_queues WHERE 0", },
     detail::SchemaObject{
                          .kind  = detail::SchemaObjectKind::Table,
                          .name  = "jobu_jobs",
@@ -545,10 +545,10 @@ auto inspect_marker(jb::db::Database& database) -> jb::core::Result<MarkerStatus
     if (malformed || rows != 1 || singleton != 1 || version <= 0) {
         return jb::core::Result<MarkerStatus, jb::core::Error>::success({.kind = MarkerKind::Malformed});
     }
-    if (version < static_cast<std::int64_t>(current_schema_version)) {
+    if (std::cmp_less(version, current_schema_version)) {
         return jb::core::Result<MarkerStatus, jb::core::Error>::success({.kind = MarkerKind::Older});
     }
-    if (version > static_cast<std::int64_t>(current_schema_version)) {
+    if (std::cmp_greater(version, current_schema_version)) {
         return jb::core::Result<MarkerStatus, jb::core::Error>::success({.kind = MarkerKind::Newer});
     }
     return jb::core::Result<MarkerStatus, jb::core::Error>::success({.kind = MarkerKind::Current});
@@ -660,7 +660,7 @@ auto validate_column_probe(jb::db::Database& database, detail::SchemaObject cons
 auto validate_table_definition(jb::db::Database& database, detail::SchemaObject const& object, FailurePhase phase)
     -> VoidResult
 {
-    if (object.name != "jobu_jobs" && object.name != "jobu_run_timing") {
+    if (object.name != "jobu_queues" && object.name != "jobu_jobs" && object.name != "jobu_run_timing") {
         return VoidResult::success();
     }
 

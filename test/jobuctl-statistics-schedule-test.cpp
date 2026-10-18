@@ -223,7 +223,7 @@ TEST_CASE("jobuctl renders the same persisted measured statistics as the service
         expected = std::move(*encoded);
     }
 
-    // Native jobud reads a closed, valid format-4 fixture. Recovery preserves these finalized measurements.
+    // Native jobud reads a closed, valid current-format fixture. Recovery preserves these finalized measurements.
     REQUIRE(storage.database.close());
     auto socket = storage.directory.path() / "jobud.sock";
     auto daemon = start_daemon(socket, storage.database_file);
