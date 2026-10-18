@@ -23,7 +23,7 @@ void interrupt_handler([[maybe_unused]] int number)
 void check_mask(sigset_t const& actual, sigset_t const& expected)
 {
     for (auto number = 1; number < NSIG; ++number) {
-        CHECK(::sigismember(&actual, number) == ::sigismember(&expected, number));
+        CHECK(sigismember(&actual, number) == sigismember(&expected, number));
     }
 }
 
@@ -104,7 +104,7 @@ struct FakeEditor {
         CHECK(action.sa_handler == SIG_IGN);
         sigset_t mask{};
         REQUIRE(::sigprocmask(SIG_BLOCK, nullptr, &mask) == 0);
-        CHECK(::sigismember(&mask, SIGCHLD) == 1);
+        CHECK(sigismember(&mask, SIGCHLD) == 1);
     }
 
     auto io() -> EditorPosixIo
@@ -144,13 +144,13 @@ struct FakeEditor {
                     CHECK(flags == (POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK));
                     sigset_t defaults{};
                     REQUIRE(::posix_spawnattr_getsigdefault(attributes, &defaults) == 0);
-                    CHECK(::sigismember(&defaults, SIGINT) == 1);
-                    CHECK(::sigismember(&defaults, SIGQUIT) == 1);
+                    CHECK(sigismember(&defaults, SIGINT) == 1);
+                    CHECK(sigismember(&defaults, SIGQUIT) == 1);
                     sigset_t mask{};
                     REQUIRE(::posix_spawnattr_getsigmask(attributes, &mask) == 0);
                     auto expected = signals.mask;
-                    REQUIRE(::sigdelset(&expected, SIGINT) == 0);
-                    REQUIRE(::sigdelset(&expected, SIGQUIT) == 0);
+                    REQUIRE(sigdelset(&expected, SIGINT) == 0);
+                    REQUIRE(sigdelset(&expected, SIGQUIT) == 0);
                     check_mask(mask, expected);
 
                     *pid  = child;
@@ -213,16 +213,16 @@ TEST_CASE("editor wait retries interruption and restores custom handlers and blo
     struct sigaction action{};
     action.sa_handler = interrupt_handler;
     action.sa_flags   = SA_RESTART;
-    REQUIRE(::sigemptyset(&action.sa_mask) == 0);
-    REQUIRE(::sigaddset(&action.sa_mask, SIGUSR1) == 0);
+    REQUIRE(sigemptyset(&action.sa_mask) == 0);
+    REQUIRE(sigaddset(&action.sa_mask, SIGUSR1) == 0);
     REQUIRE(::sigaction(SIGINT, &action, nullptr) == 0);
     action.sa_handler = SIG_IGN;
     REQUIRE(::sigaction(SIGQUIT, &action, nullptr) == 0);
     sigset_t blocked{};
-    REQUIRE(::sigemptyset(&blocked) == 0);
-    REQUIRE(::sigaddset(&blocked, SIGINT) == 0);
-    REQUIRE(::sigaddset(&blocked, SIGQUIT) == 0);
-    REQUIRE(::sigaddset(&blocked, SIGUSR1) == 0);
+    REQUIRE(sigemptyset(&blocked) == 0);
+    REQUIRE(sigaddset(&blocked, SIGINT) == 0);
+    REQUIRE(sigaddset(&blocked, SIGQUIT) == 0);
+    REQUIRE(sigaddset(&blocked, SIGUSR1) == 0);
     REQUIRE(::sigprocmask(SIG_BLOCK, &blocked, nullptr) == 0);
 
     auto fake              = FakeEditor{};
@@ -303,7 +303,7 @@ TEST_CASE("editor launcher rejects nonwaitable child signal policies before spaw
 {
     auto             original = SavedSignals{};
     struct sigaction action{};
-    REQUIRE(::sigemptyset(&action.sa_mask) == 0);
+    REQUIRE(sigemptyset(&action.sa_mask) == 0);
     SECTION("ignored child notifications")
     {
         action.sa_handler = SIG_IGN;

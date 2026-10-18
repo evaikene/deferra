@@ -92,9 +92,10 @@ public:
         }
 
         // Block child notifications while this scope owns the PID; waitpid still waits for that exact child.
+        // Signal-set operations stay unqualified because Darwin exposes them as macros.
         sigset_t blocked{};
-        static_cast<void>(::sigemptyset(&blocked));
-        static_cast<void>(::sigaddset(&blocked, SIGCHLD));
+        static_cast<void>(sigemptyset(&blocked));
+        static_cast<void>(sigaddset(&blocked, SIGCHLD));
         if (::sigprocmask(SIG_BLOCK, &blocked, &_mask) != 0) {
             return system_failure("jobuctl.editor.signal_failed", "Unable to block editor child notifications", errno);
         }
@@ -102,7 +103,7 @@ public:
 
         struct sigaction ignored{};
         ignored.sa_handler = SIG_IGN;
-        static_cast<void>(::sigemptyset(&ignored.sa_mask));
+        static_cast<void>(sigemptyset(&ignored.sa_mask));
         if (::sigaction(SIGINT, &ignored, &_interrupt) != 0) {
             return system_failure("jobuctl.editor.signal_failed", "Unable to protect editor parent from SIGINT", errno);
         }
@@ -120,8 +121,8 @@ public:
     {
         auto mask = _mask;
         // The editor must receive terminal interrupts even if the caller had temporarily blocked them.
-        static_cast<void>(::sigdelset(&mask, SIGINT));
-        static_cast<void>(::sigdelset(&mask, SIGQUIT));
+        static_cast<void>(sigdelset(&mask, SIGINT));
+        static_cast<void>(sigdelset(&mask, SIGQUIT));
         return mask;
     }
 
@@ -208,9 +209,9 @@ public:
         _attributes_ready = true;
 
         sigset_t defaults{};
-        static_cast<void>(::sigemptyset(&defaults));
-        static_cast<void>(::sigaddset(&defaults, SIGINT));
-        static_cast<void>(::sigaddset(&defaults, SIGQUIT));
+        static_cast<void>(sigemptyset(&defaults));
+        static_cast<void>(sigaddset(&defaults, SIGINT));
+        static_cast<void>(sigaddset(&defaults, SIGQUIT));
         number = ::posix_spawnattr_setsigdefault(&_attributes, &defaults);
         if (number != 0) {
             return number;
