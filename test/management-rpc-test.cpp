@@ -565,7 +565,7 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         CHECK(rescans.pending());
         rescans.clear_pending();
 
-        // Prepare a later durable revision without implementing U.25/U.26 mutation rules here.
+        // Prepare a later durable revision to distinguish current reads from original creation replay.
         {
             Query query{fixture.database};
             REQUIRE(query.exec("UPDATE jobu_queues SET revision = 7"));
@@ -599,26 +599,27 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
 
         auto update_params = update_queue_request_to_json(
             {
-                .queue    = first_id,
-                .weight   = 5,
-                .defaults = max_attempts(6),
+                .queue             = first_id,
+                .expected_revision = by_name.revision,
+                .weight            = 5,
+                .defaults          = max_attempts(6),
             },
             fixture.registry);
         REQUIRE(update_params);
         auto updated = decode_queue(endpoint.call("queue.update", std::move(update_params).value()), fixture.registry);
         CHECK(updated.weight == 5U);
-        CHECK(updated.revision == 7);
+        CHECK(updated.revision == 8);
         CHECK(std::get<std::int64_t>(updated.defaults.at("retry.max_attempts").data) == 6);
         CHECK(rescans.request_count() == 3U);
 
         auto selector  = encode_selector(first_id);
         auto suspended = decode_queue(endpoint.call("queue.suspend", selector), fixture.registry);
         CHECK(suspended.state == QueueState::Suspended);
-        CHECK(suspended.revision == 7);
+        CHECK(suspended.revision == 8);
         CHECK(rescans.request_count() == 4U);
         auto resumed = decode_queue(endpoint.call("queue.resume", selector), fixture.registry);
         CHECK(resumed.state == QueueState::Active);
-        CHECK(resumed.revision == 7);
+        CHECK(resumed.revision == 8);
         CHECK(rescans.request_count() == 5U);
         suspended = decode_queue(endpoint.call("queue.suspend", selector), fixture.registry);
         CHECK(suspended.state == QueueState::Suspended);
@@ -651,7 +652,7 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         CHECK(page->items[0].id == first_id);
         CHECK(page->items[0].name == "alpha");
         CHECK(page->items[0].state == QueueState::Deleted);
-        CHECK(page->items[0].revision == 7);
+        CHECK(page->items[0].revision == 8);
         CHECK(page->items[1].id == second_id);
         CHECK(page->items[1].name == "alpha");
         CHECK(page->items[1].state == QueueState::Active);
@@ -1172,4 +1173,54 @@ TEST_CASE("Immediate create RPC replays a lost response on a new connection", "[
     auto changed = params;
     std::get<JsonValue::Object>(changed.data).insert_or_assign("priority", make_json(std::int64_t{1}));
     require_application_error(endpoint.call("job.create", changed), "conflict", "jobu.idempotency.conflict");
+}
+
+TEST_CASE("Queue RPC rejects invalid revisions before service work and reports stale tokens as conflicts",
+          "[jobu][management-rpc][queue][revision][sqlite]")
+{
+    Application    app{0, nullptr};
+    ServiceFixture fixture{{sequence_id(1)}};
+    RpcEndpoint    endpoint{fixture};
+    auto           created = endpoint.service().create_queue({.name = "protected"});
+    REQUIRE(created);
+    auto params    = make_json(JsonValue::Object{
+        {"queue_id", make_json(created->id.to_string())},
+        {"weight",   make_json(std::uint64_t{2})       },
+    });
+    auto failures  = std::vector<Error>{};
+    auto committed = std::size_t{0};
+    endpoint.service().failed.connect(&endpoint.service(),
+                                      [&failures](Error const& error) { failures.push_back(error); });
+    endpoint.service().mutation_committed.connect(&endpoint.service(), [&committed] { ++committed; });
+    auto before = storage_snapshot(fixture.database);
+    require_standard_error(endpoint.call("queue.update", params), ErrorCode::InvalidParams);
+    for (auto const& invalid : {make_json(JsonNull{}),
+                                make_json(true),
+                                make_json(std::string{"1"}),
+                                make_json(1.0),
+                                make_json(std::int64_t{-1}),
+                                make_json(std::uint64_t{0}),
+                                make_json(std::uint64_t{9223372036854775808ULL})}) {
+        std::get<JsonValue::Object>(params.data).insert_or_assign("expected_revision", invalid);
+        require_standard_error(endpoint.call("queue.update", params), ErrorCode::InvalidParams);
+    }
+    CHECK(storage_snapshot(fixture.database) == before);
+    CHECK(committed == 0);
+
+    std::get<JsonValue::Object>(params.data).insert_or_assign("expected_revision", make_json(created->revision));
+    auto updated = decode_queue(endpoint.call("queue.update", params), fixture.registry);
+    CHECK(updated.revision == 2);
+    CHECK(updated.weight == 2);
+    CHECK(committed == 1);
+    before = storage_snapshot(fixture.database);
+    require_application_error(endpoint.call("queue.update", params), "conflict", "jobu.queue.revision_conflict");
+    CHECK(storage_snapshot(fixture.database) == before);
+    CHECK(committed == 1);
+    CHECK(failures.empty());
+
+    std::get<JsonValue::Object>(params.data).insert_or_assign("expected_revision", make_json(updated.revision));
+    auto same_value = decode_queue(endpoint.call("queue.update", params), fixture.registry);
+    CHECK(same_value.revision == 3);
+    CHECK(committed == 2);
+    CHECK(failures.empty());
 }

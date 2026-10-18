@@ -437,9 +437,23 @@ auto QueueRepository::next_retention_policy(std::optional<jb::core::Uuid> after_
     return PolicyResult::success(QueueRetentionPolicy{.id = *id, .retention = *retention});
 }
 
-auto QueueRepository::replace_mutable_fields(Queue const& queue, SerializedAttributeDocument const* defaults)
+auto QueueRepository::replace_mutable_fields(Queue const&                       queue,
+                                             QueueRevision                      expected_revision,
+                                             SerializedAttributeDocument const* defaults)
     -> jb::core::Result<bool, jb::core::Error>
 {
+    auto expected = revision_to_storage(expected_revision);
+    if (!expected) {
+        return RepositoryResult<bool>::failure(std::move(expected).error());
+    }
+    auto next = revision_to_storage(queue.revision);
+    if (!next) {
+        return RepositoryResult<bool>::failure(std::move(next).error());
+    }
+    if (queue.revision - 1 != expected_revision) {
+        return RepositoryResult<bool>::failure(invalid_queue_row("invalid_revision_increment"));
+    }
+
     auto weight = positive_uint32_to_storage(queue.weight);
     if (!weight) {
         return RepositoryResult<bool>::failure(std::move(weight).error());
@@ -461,17 +475,20 @@ auto QueueRepository::replace_mutable_fields(Queue const& queue, SerializedAttri
         return RepositoryResult<bool>::failure(std::move(updated).error());
     }
 
+    // The predicate fences stale writers; configuration and its next revision are one atomic replacement.
     auto const* const sql = defaults == nullptr
                               ? "UPDATE jobu_queues SET name = :name, weight = :weight, "
                                 "concurrency_limit = :concurrency_limit, recovery_policy = :recovery_policy, "
                                 "retention_seconds = :retention_seconds, "
-                                "runnable_wait_warning_ms = :runnable_wait_warning_ms, updated_at_us = :updated_at_us "
-                                "WHERE id = :id AND state <> 'deleted'"
+                                "runnable_wait_warning_ms = :runnable_wait_warning_ms, updated_at_us = :updated_at_us, "
+                                "revision = :next_revision WHERE id = :id AND revision = :expected_revision "
+                                "AND state <> 'deleted'"
                               : "UPDATE jobu_queues SET name = :name, weight = :weight, "
                                 "concurrency_limit = :concurrency_limit, recovery_policy = :recovery_policy, "
                                 "defaults_json = :defaults_json, retention_seconds = :retention_seconds, "
-                                "runnable_wait_warning_ms = :runnable_wait_warning_ms, updated_at_us = :updated_at_us "
-                                "WHERE id = :id AND state <> 'deleted'";
+                                "runnable_wait_warning_ms = :runnable_wait_warning_ms, updated_at_us = :updated_at_us, "
+                                "revision = :next_revision WHERE id = :id AND revision = :expected_revision "
+                                "AND state <> 'deleted'";
     jb::db::Query     query{_database};
     auto              prepared = query.prepare(sql);
     if (!prepared) {
@@ -479,6 +496,8 @@ auto QueueRepository::replace_mutable_fields(Queue const& queue, SerializedAttri
     }
     auto bound = bind_all(query,
                           {
+                              {":expected_revision",        std::move(expected).value()                           },
+                              {":next_revision",            std::move(next).value()                               },
                               {":name",                     jb::db::make_text(queue.name)                         },
                               {":weight",                   std::move(weight).value()                             },
                               {":concurrency_limit",        std::move(concurrency).value()                        },

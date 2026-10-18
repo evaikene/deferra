@@ -1139,7 +1139,7 @@ TEST_CASE("Scheduler core resets idle credit and applies dynamic weights", "[job
     REQUIRE(core.process_cycle());
     REQUIRE(fixture.executor.start_requests().size() == 1U);
 
-    REQUIRE(service.update_queue({.queue = second_queue, .weight = 2, .concurrency_limit = 8}));
+    REQUIRE(service.update_queue({.queue = second_queue, .expected_revision = 1, .weight = 2, .concurrency_limit = 8}));
     insert_scheduled_range(fixture, first_queue, 11, 5, JobType::Cli);
     insert_scheduled_range(fixture, second_queue, 60, 5, JobType::Cli);
     REQUIRE(core.process_cycle());
@@ -1282,11 +1282,11 @@ TEST_CASE("Scheduler core observes dynamic queue concurrency", "[jobu][scheduler
     ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
 
     REQUIRE(core.process_cycle());
-    REQUIRE(service.update_queue({.queue = first_queue, .weight = 1, .concurrency_limit = 1}));
+    REQUIRE(service.update_queue({.queue = first_queue, .expected_revision = 1, .weight = 1, .concurrency_limit = 1}));
     insert_scheduled(fixture, first_queue, 11, JobType::Cli);
     insert_scheduled(fixture, second_queue, 20, JobType::Cli);
     REQUIRE(core.process_cycle());
-    REQUIRE(service.update_queue({.queue = first_queue, .weight = 1, .concurrency_limit = 2}));
+    REQUIRE(service.update_queue({.queue = first_queue, .expected_revision = 2, .weight = 1, .concurrency_limit = 2}));
     insert_scheduled(fixture, second_queue, 21, JobType::Cli);
     REQUIRE(core.process_cycle());
 

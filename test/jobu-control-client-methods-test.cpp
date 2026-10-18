@@ -289,7 +289,7 @@ TEST_CASE("Every typed method selects its capability and shared request shape", 
         {"queue.list",        "limit",          false, [](auto& client) { return client.list_queues(QueueListRequest{}); }       },
         {"queue.update",
          "weight",                              true,
-         [&](auto& client) { return client.update_queue({.queue = selector, .weight = 2}); }                                     },
+         [&](auto& client) { return client.update_queue({.queue = selector, .expected_revision = 1, .weight = 2}); }             },
         {"queue.suspend",     "queue_id",       true,  [&](auto& client) { return client.suspend_queue(selector); }              },
         {"queue.resume",      "queue_id",       true,  [&](auto& client) { return client.resume_queue(selector); }               },
         {"queue.delete",      "queue_id",       true,  [&](auto& client) { return client.delete_queue(selector); }               },
@@ -519,16 +519,18 @@ TEST_CASE("All typed queue replies preserve revision and reject missing or inval
     auto cases = std::vector<QueueCase>{
         {.submit   = [&](auto& client) { return client.create_queue({.name = "queue"}); },
          .list     = false,
-         .mutation = true                                                                                                            },
-        {.submit = [&](auto& client) { return client.get_queue(*id); },                              .list = false, .mutation = false},
+         .mutation = true                                                                                                      },
+        {.submit = [&](auto& client) { return client.get_queue(*id); },                    .list = false,     .mutation = false},
         {.submit   = [](auto& client) { return client.list_queues(QueueListRequest{}); },
          .list     = true,
-         .mutation = false                                                                                                           },
-        {.submit   = [&](auto& client) { return client.update_queue({.queue = *id, .weight = 2}); },
-         .list     = false,
-         .mutation = true                                                                                                            },
-        {.submit = [&](auto& client) { return client.suspend_queue(*id); },                          .list = false, .mutation = true },
-        {.submit = [&](auto& client) { return client.resume_queue(*id); },                           .list = false, .mutation = true },
+         .mutation = false                                                                                                     },
+        {.submit =
+             [&](auto& client) {
+                 return client.update_queue({.queue = *id, .expected_revision = queue.revision, .weight = 2});
+             },                                                                   .list     = false,
+         .mutation = true                                                                                                      },
+        {.submit = [&](auto& client) { return client.suspend_queue(*id); },                .list = false,     .mutation = true },
+        {.submit = [&](auto& client) { return client.resume_queue(*id); },                 .list = false,     .mutation = true },
     };
 
     auto received = std::size_t{0};
@@ -765,4 +767,51 @@ TEST_CASE("Typed cron requests preserve omitted and explicit UTC timezones", "[j
             fixture.typed->cancel_call(*submitted);
         }
     }
+}
+
+TEST_CASE("Typed queue updates validate revisions locally and preserve conflict tokens",
+          "[jobu][client][queue][revision]")
+{
+    Fixture fixture;
+    auto    request     = UpdateQueueRequest{.queue = std::string{"protected"}, .weight = 2};
+    auto    unavailable = fixture.typed->update_queue(request);
+    REQUIRE_FALSE(unavailable);
+    CHECK(unavailable.error().code == "jobu.client.not_ready");
+    fixture.initialize();
+    for (auto revision : {QueueRevision{0}, QueueRevision{9223372036854775808ULL}}) {
+        request.expected_revision = revision;
+        auto rejected             = fixture.typed->update_queue(request);
+        REQUIRE_FALSE(rejected);
+        CHECK(rejected.error().code == "jobu.protocol.invalid_request");
+        CHECK(fixture.device.take_written_data().empty());
+    }
+
+    auto failures = std::vector<ControlFailure>{};
+    fixture.typed->call_failed.connect(fixture.typed.get(), [&](ControlCallId, ControlFailure const& failure) {
+        failures.push_back(failure);
+    });
+    request.expected_revision = 9007199254740993ULL;
+    auto call                 = fixture.typed->update_queue(request);
+    REQUIRE(call);
+    auto wire = request_body(fixture.device.take_written_data());
+    CHECK(wire.as_object().at("params").as_object().at("expected_revision").as_uint() == request.expected_revision);
+    auto error_data = parse_json(R"({"category":"conflict","code":"jobu.queue.revision_conflict"})");
+    REQUIRE(error_data);
+    fixture.device.inject_input(frame(
+        detail::encode_error_response(RequestId{wire.as_object().at("id").as_uint()},
+                                      RpcError{.code = -32000, .message = "Stale revision", .data = *error_data})));
+    fixture.drain_tasks();
+    REQUIRE(failures.size() == 1);
+    CHECK(failures.front().kind == ControlFailureKind::Remote);
+    auto const& error = std::get<RpcError>(failures.front().error);
+    REQUIRE(error.data);
+    CHECK(error.data->as_object().at("code").as_string() == "jobu.queue.revision_conflict");
+    CHECK_FALSE(failures.front().outcome_unknown);
+    CHECK(request.expected_revision == 9007199254740993ULL);
+    CHECK(fixture.device.take_written_data().empty());
+    fixture.typed->close();
+    request.expected_revision = 0;
+    auto closed               = fixture.typed->update_queue(request);
+    REQUIRE_FALSE(closed);
+    CHECK(closed.error().code == "jobu.client.not_ready");
 }

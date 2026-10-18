@@ -43,7 +43,11 @@ public:
     /// Returns the next queue's current policy in UUID order, or no value at the end.
     [[nodiscard]] auto next_retention_policy(std::optional<jb::core::Uuid> after_id)
         -> jb::core::Result<std::optional<QueueRetentionPolicy>, jb::core::Error>;
-    [[nodiscard]] auto replace_mutable_fields(Queue const& queue, SerializedAttributeDocument const* defaults)
+    /// Replaces a live queue only at expected_revision; queue must carry its checked next revision.
+    /// False means no row matched. A null defaults pointer preserves the stored default document bytes.
+    [[nodiscard]] auto replace_mutable_fields(Queue const&                       queue,
+                                              QueueRevision                      expected_revision,
+                                              SerializedAttributeDocument const* defaults)
         -> jb::core::Result<bool, jb::core::Error>;
     [[nodiscard]] auto set_state(jb::core::Uuid const&  id,
                                  QueueState             expected_state,

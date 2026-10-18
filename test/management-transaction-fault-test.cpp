@@ -217,7 +217,8 @@ struct MutationFixture : Fixture {
             case Mutation::CreateQueue:
                 return discard_value(service.create_queue({.name = "new-queue", .idempotency_key = "create"}));
             case Mutation::UpdateQueue:
-                return discard_value(service.update_queue({.queue = queue.id, .weight = 2}));
+                return discard_value(
+                    service.update_queue({.queue = queue.id, .expected_revision = queue.revision, .weight = 2}));
             case Mutation::SuspendQueue:
                 return discard_value(service.suspend_queue(queue.id));
             case Mutation::ResumeQueue:

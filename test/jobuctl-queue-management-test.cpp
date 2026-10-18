@@ -295,15 +295,18 @@ auto queue_summary(std::string_view id,
                    std::string_view state,
                    std::uint32_t    weight,
                    std::uint32_t    concurrency,
-                   std::string_view recovery) -> std::string
+                   std::string_view recovery,
+                   std::uint64_t    revision = 1) -> std::string
 {
-    return fmt::format("Queue {}: name={}, revision=1, state={}, weight={}, concurrency_limit={}, recovery_policy={}\n",
-                       id,
-                       name,
-                       state,
-                       weight,
-                       concurrency,
-                       recovery);
+    return fmt::format(
+        "Queue {}: name={}, revision={}, state={}, weight={}, concurrency_limit={}, recovery_policy={}\n",
+        id,
+        name,
+        revision,
+        state,
+        weight,
+        concurrency,
+        recovery);
 }
 
 auto rejects_before_connect(std::filesystem::path const&            executable,
@@ -428,13 +431,33 @@ auto main(int argc, char* argv[]) -> int
         return fail("queue list did not continue after the supplied UUID");
     }
 
-    auto updated = run_success(
-        argv[2],
-        socket_path,
-        {"queue", "update", "--name", "default", "--new-name", "renamed", "--weight", "4", "--concurrency-limit", "5"});
-    auto const updated_summary = queue_summary(*queue_id, "renamed", "active", 4, 5, "retry_interrupted");
+    auto       updated         = run_success(argv[2],
+                                             socket_path,
+                                             {"queue",
+                                              "update",
+                                              "--revision",
+                                              "1",
+                                              "--name",
+                                              "default",
+                                              "--new-name",
+                                              "renamed",
+                                              "--weight",
+                                              "4",
+                                              "--concurrency-limit",
+                                              "5"});
+    auto const updated_summary = queue_summary(*queue_id, "renamed", "active", 4, 5, "retry_interrupted", 2);
     if (!updated || *updated != updated_summary) {
         return fail("queue update did not print the committed replacement fields");
+    }
+
+    auto stale =
+        run_failure(argv[2], socket_path, {"queue", "update", "--id", *queue_id, "--revision", "1", "--weight", "9"});
+    if (!stale || stale->find("jobu.queue.revision_conflict") == std::string::npos) {
+        return fail("stale queue update did not report its revision conflict");
+    }
+    auto unchanged = run_success(argv[2], socket_path, {"queue", "get", "--id", *queue_id});
+    if (!unchanged || *unchanged != updated_summary) {
+        return fail("stale queue update changed the stored queue or stopped the daemon");
     }
 
     auto missing = run_failure(argv[2], socket_path, {"queue", "get", "--name", "default"});
@@ -443,7 +466,7 @@ auto main(int argc, char* argv[]) -> int
     }
 
     auto       suspended         = run_success(argv[2], socket_path, {"queue", "suspend", "--id", *queue_id, "--wait"});
-    auto const suspended_summary = queue_summary(*queue_id, "renamed", "suspended", 4, 5, "retry_interrupted");
+    auto const suspended_summary = queue_summary(*queue_id, "renamed", "suspended", 4, 5, "retry_interrupted", 2);
     if (!suspended || *suspended != suspended_summary) {
         return fail("queue suspend did not print the durable suspended state");
     }
@@ -472,7 +495,7 @@ auto main(int argc, char* argv[]) -> int
         return fail("jobud did not reopen the durable queue database before the deadline");
     }
 
-    auto const deleted_summary = queue_summary(*queue_id, "renamed", "deleted", 4, 5, "retry_interrupted");
+    auto const deleted_summary = queue_summary(*queue_id, "renamed", "deleted", 4, 5, "retry_interrupted", 2);
     auto       after_restart   = run_success(argv[2], reopen_socket, {"queue", "list", "--include-deleted"});
     if (!after_restart || after_restart->find(deleted_summary) == std::string::npos ||
         after_restart->find(other_summary) == std::string::npos) {

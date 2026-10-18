@@ -46,6 +46,8 @@ constexpr std::size_t kListResultBudgetBytes         = std::size_t{512} * 1024U;
 constexpr std::size_t kListWrapperReserveBytes       = 128;
 // JobRevision is unsigned publicly, but schema version 1 stores revisions in a positive signed 64-bit INTEGER.
 constexpr JobRevision kMaximumPersistedJobRevision = static_cast<JobRevision>(std::numeric_limits<std::int64_t>::max());
+constexpr QueueRevision kMaximumPersistedQueueRevision =
+    static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max());
 
 auto service_error(jb::core::ErrorCategory category, std::string_view code, std::string_view message) -> jb::core::Error
 {
@@ -135,6 +137,20 @@ auto queue_state_conflict() -> jb::core::Error
     return service_error(jb::core::ErrorCategory::Conflict,
                          "jobu.queue.state_conflict",
                          "Queue state changed incompatibly during the operation");
+}
+
+auto queue_revision_conflict() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::Conflict,
+                         "jobu.queue.revision_conflict",
+                         "Queue revision does not match the expected revision");
+}
+
+auto queue_revision_exhausted() -> jb::core::Error
+{
+    return service_error(jb::core::ErrorCategory::ResourceExhausted,
+                         "jobu.queue.revision_exhausted",
+                         "Queue revision cannot be incremented");
 }
 
 auto queue_not_suspended() -> jb::core::Error
@@ -954,6 +970,9 @@ auto ManagementService::update_queue_impl(UpdateQueueRequest request) -> jb::cor
     if (data->initialization_error) {
         return ServiceResult<Queue>::failure(*data->initialization_error);
     }
+    if (request.expected_revision == 0 || request.expected_revision > kMaximumPersistedQueueRevision) {
+        return ServiceResult<Queue>::failure(invalid_configuration("invalid_revision"));
+    }
     auto selector = validate_selector(request.queue);
     if (!selector) {
         return ServiceResult<Queue>::failure(std::move(selector).error());
@@ -1009,6 +1028,15 @@ auto ManagementService::update_queue_impl(UpdateQueueRequest request) -> jb::cor
         return ServiceResult<Queue>::failure(queue_not_found());
     }
     auto replacement = std::move(**found);
+    // Reject stale tokens before replacing values or settling the old eligibility scope.
+    if (replacement.revision != request.expected_revision) {
+        return ServiceResult<Queue>::failure(queue_revision_conflict());
+    }
+    if (replacement.revision == kMaximumPersistedQueueRevision) {
+        return ServiceResult<Queue>::failure(queue_revision_exhausted());
+    }
+    ++replacement.revision;
+
     if (request.name && *request.name != replacement.name) {
         auto conflict = data->queues.find_by_name(*request.name, false);
         if (!conflict) {
@@ -1045,12 +1073,24 @@ auto ManagementService::update_queue_impl(UpdateQueueRequest request) -> jb::cor
         return ServiceResult<Queue>::failure(std::move(settled).error());
     }
 
-    auto replaced =
-        data->queues.replace_mutable_fields(replacement, serialized_defaults ? &*serialized_defaults : nullptr);
+    auto replaced = data->queues.replace_mutable_fields(replacement,
+                                                        request.expected_revision,
+                                                        serialized_defaults ? &*serialized_defaults : nullptr);
     if (!replaced) {
         return ServiceResult<Queue>::failure(std::move(replaced).error());
     }
     if (!*replaced) {
+        // Diagnose against stable identity in this transaction; a newer token is never a retry instruction.
+        auto diagnosed = data->queues.find_by_id(replacement.id, true);
+        if (!diagnosed) {
+            return ServiceResult<Queue>::failure(data->repository_read_error(std::move(diagnosed).error()));
+        }
+        if (!diagnosed->has_value() || (**diagnosed).state == QueueState::Deleted) {
+            return ServiceResult<Queue>::failure(queue_not_found());
+        }
+        if ((**diagnosed).revision != request.expected_revision) {
+            return ServiceResult<Queue>::failure(queue_revision_conflict());
+        }
         return ServiceResult<Queue>::failure(data->persisted_error(queue_state_conflict()));
     }
     auto reconciled =

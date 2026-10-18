@@ -403,7 +403,11 @@ TEST_CASE("Retry totals survive fixed and exponential backoff in both occupancy 
         f.time.advance(1s);
         // General due-backlog observation is Stage 9.12. A real scoped mutation
         // observes this due retry now, independently of its occupied blocking slot.
-        REQUIRE(f.service->update_queue({.queue = queue.id, .weight = static_cast<std::uint32_t>(attempt + 1)}));
+        auto updated_queue = f.service->update_queue({.queue             = queue.id,
+                                                      .expected_revision = queue.revision,
+                                                      .weight            = static_cast<std::uint32_t>(attempt + 1)});
+        REQUIRE(updated_queue);
+        queue = *updated_queue;
         CHECK(f.timing(run.id).open_epoch);
         f.time.advance(3s);
         REQUIRE(f.core->process_cycle());
@@ -660,7 +664,9 @@ TEST_CASE("Preparation failures preserve observed wait without external executio
     f.storage.insert_job(job);
     auto seeded = f.storage.make_run(recovery_id(2), job);
     f.storage.insert_run(seeded);
-    REQUIRE(f.service->update_queue({.queue = queue.id, .weight = 2}));
+    auto updated_queue = f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .weight = 2});
+    REQUIRE(updated_queue);
+    queue = *updated_queue;
     f.time.advance(3s);
     REQUIRE(f.core->process_cycle());
     CHECK(f.executor.fake.start_requests().empty());
@@ -685,7 +691,9 @@ TEST_CASE("Due blocking retry keeps runner wait and reuses its occupied queue sl
     REQUIRE(f.core->process_cycle());
 
     f.time.advance(10s);
-    REQUIRE(f.service->update_queue({.queue = queue.id, .weight = 2}));
+    auto updated_queue = f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .weight = 2});
+    REQUIRE(updated_queue);
+    queue = *updated_queue;
     CHECK(f.timing(retry.id).open_epoch);
     f.time.advance(4s);
     REQUIRE(f.core->process_cycle());
@@ -1006,19 +1014,31 @@ TEST_CASE("Disabled warnings still count wait and threshold edits use current qu
     REQUIRE(disabled);
     CHECK_FALSE(disabled->next_warning);
     CHECK(f.warnings.empty());
-    REQUIRE(f.service->update_queue({.queue = queue.id, .runnable_wait_warning = 30ms}));
+    auto updated_queue = f.service->update_queue(
+        {.queue = queue.id, .expected_revision = queue.revision, .runnable_wait_warning = 30ms});
+    REQUIRE(updated_queue);
+    queue       = *updated_queue;
     auto higher = f.core->process_cycle();
     REQUIRE(higher);
     CHECK(higher->next_warning == f.time.monotonic_now() + 10001us);
     CHECK(f.warnings.empty());
-    REQUIRE(f.service->update_queue({.queue = queue.id, .runnable_wait_warning = 5ms}));
+    updated_queue =
+        f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .runnable_wait_warning = 5ms});
+    REQUIRE(updated_queue);
+    queue = *updated_queue;
     REQUIRE(f.core->process_cycle());
     REQUIRE(f.warnings.size() == 1);
     CHECK(f.warnings.front().threshold == 5ms);
     CHECK(f.warnings.front().runnable_wait == 20ms);
     CHECK(f.timing(waiting.id).runnable_wait_us == 20000);
-    REQUIRE(f.service->update_queue({.queue = queue.id, .runnable_wait_warning = 0ms}));
-    REQUIRE(f.service->update_queue({.queue = queue.id, .runnable_wait_warning = 1ms}));
+    updated_queue =
+        f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .runnable_wait_warning = 0ms});
+    REQUIRE(updated_queue);
+    queue = *updated_queue;
+    updated_queue =
+        f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .runnable_wait_warning = 1ms});
+    REQUIRE(updated_queue);
+    queue = *updated_queue;
     REQUIRE(f.core->process_cycle());
     CHECK(f.warnings.size() == 1);
 }
@@ -1136,7 +1156,10 @@ TEST_CASE("Moving eligible work changes threshold ownership without resetting th
     REQUIRE(
         f.service->move_job({.job_id = job.id, .expected_revision = suspended->revision, .target_queue = queue.id}));
     REQUIRE(f.service->resume_job(job.id));
-    REQUIRE(f.service->update_queue({.queue = queue.id, .runnable_wait_warning = 1ms}));
+    auto updated_queue =
+        f.service->update_queue({.queue = queue.id, .expected_revision = queue.revision, .runnable_wait_warning = 1ms});
+    REQUIRE(updated_queue);
+    queue = *updated_queue;
     REQUIRE(f.core->process_cycle());
     CHECK(f.warnings.size() == 1);
 }
@@ -1360,8 +1383,11 @@ TEST_CASE("Delayed receiver mutations invalidate old samples and preserve an imm
     f.job(queue);
     f.job(queue);
     f.job(queue, {}, OnceSchedule{.planned_at = UtcTimePoint{200s}});
-    f.telemetry->delayed.connect(&f.receiver, [&f, id = queue.id](DelayedRun const&) {
-        REQUIRE(f.service->update_queue({.queue = id, .runnable_wait_warning = 0ms}));
+    f.telemetry->delayed.connect(&f.receiver, [&f, queue](DelayedRun const&) mutable {
+        auto updated = f.service->update_queue(
+            {.queue = queue.id, .expected_revision = queue.revision, .runnable_wait_warning = 0ms});
+        REQUIRE(updated);
+        queue = *updated;
     });
     f.service->mutation_committed.connect(f.registrar.get(), [&f] { f.registrar->request_rescan(); });
     REQUIRE(f.registrar->start());

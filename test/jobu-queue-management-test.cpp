@@ -16,6 +16,7 @@
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
 #include "support/sequence_uuid_generator.hpp"
+#include "support/storage_fault_helpers.hpp"
 #include "support/temporary_directory.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -265,7 +266,8 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
         R"({ "values": { "retry.max_attempts": { "type": "integer", "value": 4 } }, "version": 1 })";
     execute(fixture.database,
             "UPDATE jobu_queues SET defaults_json = '" + std::string{noncanonical_defaults} + "' WHERE name = 'alpha'");
-    REQUIRE(service.update_queue({.queue = first_id, .weight = 5}));
+    auto initial_update = service.update_queue({.queue = first_id, .expected_revision = by_id->revision, .weight = 5});
+    REQUIRE(initial_update);
     CHECK(defaults_json(fixture.database, "alpha") == noncanonical_defaults);
 
     fixture.time.advance(1s);
@@ -296,6 +298,7 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
     fixture.time.advance(1s);
     auto update_request = UpdateQueueRequest{
         .queue                 = first_id,
+        .expected_revision     = initial_update->revision,
         .name                  = "renamed-alpha",
         .weight                = 7,
         .concurrency_limit     = 8,
@@ -324,7 +327,7 @@ TEST_CASE("Queue management creates gets lists and updates durable queues", "[jo
     REQUIRE(persisted);
     CHECK(persisted->id == first_id);
 
-    require_error(service.update_queue({.queue = first_id, .name = "beta"}),
+    require_error(service.update_queue({.queue = first_id, .expected_revision = updated->revision, .name = "beta"}),
                   ErrorCategory::Conflict,
                   "jobu.queue.name_conflict");
     persisted = service.get_queue(first_id);
@@ -349,9 +352,9 @@ TEST_CASE("Queue create idempotency replays canonical results and rolls back rec
     REQUIRE(original);
     CHECK(original->id == sequence_id(1));
     CHECK(original->revision == 1);
-    REQUIRE(service.update_queue({.queue = original->id, .name = "renamed"}));
+    REQUIRE(service.update_queue({.queue = original->id, .expected_revision = original->revision, .name = "renamed"}));
 
-    // U.24 verifies snapshot independence without introducing the later mutation-increment contract.
+    // A later current revision never changes the original revision-1 creation snapshot.
     execute(fixture.database, "UPDATE jobu_queues SET revision = 7");
     auto current = service.get_queue(original->id);
     REQUIRE(current);
@@ -879,12 +882,13 @@ TEST_CASE("Queue management rejects invalid input before durable mutation", "[jo
     REQUIRE(created);
     CHECK(created->id == generated_id);
 
-    require_error(service.update_queue({.queue = generated_id}),
+    require_error(service.update_queue({.queue = generated_id, .expected_revision = created->revision}),
                   ErrorCategory::InvalidArgument,
                   "jobu.queue.invalid_configuration");
-    require_error(service.update_queue({.queue = generated_id, .concurrency_limit = 0}),
-                  ErrorCategory::InvalidArgument,
-                  "jobu.queue.invalid_configuration");
+    require_error(
+        service.update_queue({.queue = generated_id, .expected_revision = created->revision, .concurrency_limit = 0}),
+        ErrorCategory::InvalidArgument,
+        "jobu.queue.invalid_configuration");
     require_error(service.list_queues({.page = {.limit = 0}}),
                   ErrorCategory::InvalidArgument,
                   "jobu.queue.invalid_configuration");
@@ -914,7 +918,7 @@ TEST_CASE("Queue management reports invalid daemon defaults from every operation
     require_error(service.create_queue({.name = "queue"}), ErrorCategory::InvalidArgument, "jobu.attribute.unknown");
     require_error(service.get_queue(std::string{"queue"}), ErrorCategory::InvalidArgument, "jobu.attribute.unknown");
     require_error(service.list_queues({}), ErrorCategory::InvalidArgument, "jobu.attribute.unknown");
-    require_error(service.update_queue({.queue = std::string{"queue"}, .weight = 2}),
+    require_error(service.update_queue({.queue = std::string{"queue"}, .expected_revision = 1, .weight = 2}),
                   ErrorCategory::InvalidArgument,
                   "jobu.attribute.unknown");
     require_error(service.suspend_queue(std::string{"queue"}),
@@ -1117,7 +1121,7 @@ TEST_CASE("Queue mutations signal only after successful commit", "[jobu][queue][
     REQUIRE(service.list_queues({}));
     CHECK(emissions == 2);
 
-    auto updated = service.update_queue({.queue = created->id, .weight = 2});
+    auto updated = service.update_queue({.queue = created->id, .expected_revision = created->revision, .weight = 2});
     REQUIRE(updated);
     CHECK(emissions == 3);
     require_error(service.create_queue({.name = "signal-queue"}), ErrorCategory::Conflict, "jobu.queue.name_conflict");
@@ -1202,9 +1206,10 @@ TEST_CASE("Management affected-row mismatch closes admission after SQLite rollba
     execute(fixture.database,
             "CREATE TRIGGER ignore_queue_update BEFORE UPDATE ON jobu_queues "
             "BEGIN SELECT RAISE(IGNORE); END");
-    auto error = require_error(service.update_queue({.queue = queue->id, .weight = 2}),
-                               ErrorCategory::Conflict,
-                               "jobu.queue.state_conflict");
+    auto error =
+        require_error(service.update_queue({.queue = queue->id, .expected_revision = queue->revision, .weight = 2}),
+                      ErrorCategory::Conflict,
+                      "jobu.queue.state_conflict");
     CHECK(error.detail == "operation=mutation reason=durable_invariant");
     REQUIRE(failures.size() == 1);
     CHECK(failures.front().code == error.code);
@@ -1236,4 +1241,156 @@ TEST_CASE("Malformed stored attributes are fatal during queue name lookup", "[jo
     CHECK(failures.front().detail == "operation=mutation reason=durable_invariant");
     require_error(service.create_queue({.name = "new"}), ErrorCategory::Unavailable, "jobu.service.stopping");
     CHECK(count_rows(fixture.database, "jobu_queues") == 1);
+}
+
+TEST_CASE("Queue updates require the inspected revision and advance even for equal values", "[jobu][queue][revision]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              original = service.create_queue({.name = "protected"});
+    REQUIRE(original);
+    REQUIRE(service.create_queue({.name = "occupied"}));
+
+    auto failures  = std::vector<Error>{};
+    auto committed = std::size_t{0};
+    service.failed.connect(&service, [&failures](Error const& error) { failures.push_back(error); });
+    service.mutation_committed.connect(&service, [&committed] { ++committed; });
+    auto before = storage_snapshot(fixture.database);
+
+    for (auto revision :
+         {QueueRevision{0}, QueueRevision{9223372036854775808ULL}, std::numeric_limits<QueueRevision>::max()}) {
+        require_error(service.update_queue({.queue = original->id, .expected_revision = revision, .weight = 2}),
+                      ErrorCategory::InvalidArgument,
+                      "jobu.queue.invalid_configuration");
+        CHECK(storage_snapshot(fixture.database) == before);
+    }
+    require_error(service.update_queue({.queue = original->id, .expected_revision = original->revision}),
+                  ErrorCategory::InvalidArgument,
+                  "jobu.queue.invalid_configuration");
+    require_error(service.update_queue({.queue = original->id, .expected_revision = 2, .weight = 2}),
+                  ErrorCategory::Conflict,
+                  "jobu.queue.revision_conflict");
+    require_error(
+        service.update_queue({.queue = original->id, .expected_revision = original->revision, .name = "occupied"}),
+        ErrorCategory::Conflict,
+        "jobu.queue.name_conflict");
+    CHECK(storage_snapshot(fixture.database) == before);
+    CHECK(committed == 0);
+
+    // A nonempty explicit same-value update consumes exactly one token.
+    auto changed = service.update_queue(
+        {.queue = original->id, .expected_revision = original->revision, .weight = original->weight});
+    REQUIRE(changed);
+    CHECK(changed->revision == original->revision + 1);
+    CHECK(committed == 1);
+    before = storage_snapshot(fixture.database);
+    require_error(service.update_queue({.queue = original->id, .expected_revision = original->revision, .weight = 9}),
+                  ErrorCategory::Conflict,
+                  "jobu.queue.revision_conflict");
+    CHECK(storage_snapshot(fixture.database) == before);
+    CHECK(committed == 1);
+    CHECK(failures.empty());
+
+    auto next = service.update_queue({.queue             = std::string{"protected"},
+                                      .expected_revision = changed->revision,
+                                      .weight            = 3,
+                                      .defaults          = AttributeSet{}});
+    REQUIRE(next);
+    CHECK(next->revision == changed->revision + 1);
+    CHECK(next->weight == 3);
+    CHECK(committed == 2);
+    CHECK(failures.empty());
+}
+
+TEST_CASE("Queue revision exhaustion preserves the complete stored queue", "[jobu][queue][revision][sqlite]")
+{
+    ServiceFixture    fixture{{sequence_id(1)}};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              created = service.create_queue({.name = "last-revision"});
+    REQUIRE(created);
+    execute(fixture.database, "UPDATE jobu_queues SET revision = 9223372036854775806");
+    auto inspected = service.get_queue(created->id);
+    REQUIRE(inspected);
+    auto last = service.update_queue({.queue = inspected->id, .expected_revision = inspected->revision, .weight = 2});
+    REQUIRE(last);
+    CHECK(last->revision == 9223372036854775807ULL);
+    auto before = storage_snapshot(fixture.database);
+    require_error(service.update_queue({.queue = last->id, .expected_revision = last->revision, .weight = 3}),
+                  ErrorCategory::ResourceExhausted,
+                  "jobu.queue.revision_exhausted");
+    CHECK(storage_snapshot(fixture.database) == before);
+    // Exhaustion is a domain failure; unrelated mutations remain admitted.
+    REQUIRE(service.suspend_queue(last->id));
+}
+
+TEST_CASE("Both queue replacement SQL paths fence stale revisions", "[jobu][queue][revision][repository]")
+{
+    auto              replace_defaults = GENERATE(false, true);
+    ServiceFixture    fixture{{sequence_id(1)}};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              created = service.create_queue({.name = "guarded"});
+    REQUIRE(created);
+    jb::jobu::detail::QueueRepository queues{fixture.database, fixture.registry};
+    auto                              defaults =
+        jb::jobu::detail::encode_and_serialize_attribute_document(fixture.registry,
+                                                                  {},
+                                                                  AttributeScope::QueueDefault,
+                                                                  jb::jobu::detail::AttributeDocumentMode::Partial);
+    REQUIRE(defaults);
+    auto replacement = *created;
+    ++replacement.revision;
+    replacement.weight = 2;
+    auto updated =
+        queues.replace_mutable_fields(replacement, created->revision, replace_defaults ? &*defaults : nullptr);
+    REQUIRE(updated);
+    REQUIRE(*updated);
+    auto before        = storage_snapshot(fixture.database);
+    replacement.weight = 9;
+    auto stale = queues.replace_mutable_fields(replacement, created->revision, replace_defaults ? &*defaults : nullptr);
+    REQUIRE(stale);
+    CHECK_FALSE(*stale);
+    CHECK(storage_snapshot(fixture.database) == before);
+
+    // A private caller cannot bypass the exact increment requirement either.
+    auto invalid = queues.replace_mutable_fields(replacement, replacement.revision, nullptr);
+    REQUIRE_FALSE(invalid);
+    CHECK(storage_snapshot(fixture.database) == before);
+}
+
+TEST_CASE("Queue guarded-write diagnosis rolls back missing deleted and changed targets",
+          "[jobu][queue][revision][sqlite]")
+{
+    auto              changed_target = GENERATE(0, 1, 2);
+    ServiceFixture    fixture{{sequence_id(1)}};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              created = service.create_queue({.name = "diagnosed"});
+    REQUIRE(created);
+    auto failures = std::vector<Error>{};
+    service.failed.connect(&service, [&failures](Error const& error) { failures.push_back(error); });
+    auto before = storage_snapshot(fixture.database);
+
+    // A trigger deterministically changes the target between the read and guarded replacement.
+    // RAISE(IGNORE) leaves those changes visible to diagnosis until the caller transaction rolls back.
+    auto mutation = std::string{};
+    if (changed_target == 0) {
+        mutation = "DELETE FROM jobu_queues WHERE id = OLD.id; ";
+    }
+    else if (changed_target == 1) {
+        mutation = "UPDATE jobu_queues SET state = 'deleted', deleted_name = name, deleted_at_us = 1 "
+                   "WHERE id = OLD.id; ";
+    }
+    else {
+        mutation = "UPDATE jobu_queues SET revision = revision + 1 WHERE id = OLD.id; ";
+    }
+    execute(fixture.database,
+            "CREATE TRIGGER change_queue BEFORE UPDATE ON jobu_queues BEGIN " + mutation + "SELECT RAISE(IGNORE); END");
+    require_error(service.update_queue({.queue = created->id, .expected_revision = created->revision, .weight = 9}),
+                  changed_target == 2 ? ErrorCategory::Conflict : ErrorCategory::NotFound,
+                  changed_target == 2 ? "jobu.queue.revision_conflict" : "jobu.queue.not_found");
+    CHECK(storage_snapshot(fixture.database) == before);
+    CHECK(failures.empty());
+    execute(fixture.database, "DROP TRIGGER change_queue");
+    REQUIRE(service.update_queue({.queue = created->id, .expected_revision = created->revision, .weight = 2}));
 }
