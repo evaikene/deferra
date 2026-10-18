@@ -529,11 +529,24 @@ auto QueueRepository::replace_mutable_fields(Queue const&                       
 auto QueueRepository::set_state(jb::core::Uuid const&  id,
                                 QueueState             expected_state,
                                 QueueState             next_state,
+                                QueueRevision          expected_revision,
+                                QueueRevision          next_revision,
                                 jb::core::UtcTimePoint updated_at) -> jb::core::Result<bool, jb::core::Error>
 {
     if (expected_state == QueueState::Deleted || next_state == QueueState::Deleted || expected_state == next_state ||
         storage_text(expected_state).empty() || storage_text(next_state).empty()) {
         return RepositoryResult<bool>::failure(invalid_queue_row("invalid_state_transition"));
+    }
+    auto expected = revision_to_storage(expected_revision);
+    if (!expected) {
+        return RepositoryResult<bool>::failure(std::move(expected).error());
+    }
+    auto next = revision_to_storage(next_revision);
+    if (!next) {
+        return RepositoryResult<bool>::failure(std::move(next).error());
+    }
+    if (next_revision - 1 != expected_revision) {
+        return RepositoryResult<bool>::failure(invalid_queue_row("invalid_revision_increment"));
     }
     auto updated = timestamp_to_storage(updated_at);
     if (!updated) {
@@ -541,17 +554,21 @@ auto QueueRepository::set_state(jb::core::Uuid const&  id,
     }
 
     jb::db::Query query{_database};
-    auto          prepared = query.prepare("UPDATE jobu_queues SET state = :next_state, updated_at_us = :updated_at_us "
-                                           "WHERE id = :id AND state = :expected_state AND deleted_at_us IS NULL");
+    // State and revision move together; both predicates fence a stale lifecycle writer.
+    auto prepared = query.prepare("UPDATE jobu_queues SET state = :next_state, updated_at_us = :updated_at_us, "
+                                  "revision = :next_revision WHERE id = :id AND state = :expected_state "
+                                  "AND revision = :expected_revision AND deleted_at_us IS NULL");
     if (!prepared) {
         return RepositoryResult<bool>::failure(std::move(prepared).error());
     }
     auto bound = bind_all(query,
                           {
-                              {":next_state",     jb::db::make_text(storage_text(next_state))    },
-                              {":updated_at_us",  std::move(updated).value()                     },
-                              {":id",             uuid_to_storage(id)                            },
-                              {":expected_state", jb::db::make_text(storage_text(expected_state))},
+                              {":next_state",        jb::db::make_text(storage_text(next_state))    },
+                              {":updated_at_us",     std::move(updated).value()                     },
+                              {":id",                uuid_to_storage(id)                            },
+                              {":expected_state",    jb::db::make_text(storage_text(expected_state))},
+                              {":expected_revision", std::move(expected).value()                    },
+                              {":next_revision",     std::move(next).value()                        },
     });
     if (!bound) {
         return RepositoryResult<bool>::failure(std::move(bound).error());
@@ -598,28 +615,44 @@ auto QueueRepository::count_non_deleted_jobs(jb::core::Uuid const& queue_id)
 auto QueueRepository::mark_deleted(jb::core::Uuid const&  id,
                                    std::string_view       internal_name,
                                    std::string_view       original_name,
+                                   QueueRevision          expected_revision,
+                                   QueueRevision          next_revision,
                                    jb::core::UtcTimePoint deleted_at) -> jb::core::Result<bool, jb::core::Error>
 {
+    auto expected = revision_to_storage(expected_revision);
+    if (!expected) {
+        return RepositoryResult<bool>::failure(std::move(expected).error());
+    }
+    auto next = revision_to_storage(next_revision);
+    if (!next) {
+        return RepositoryResult<bool>::failure(std::move(next).error());
+    }
+    if (next_revision - 1 != expected_revision) {
+        return RepositoryResult<bool>::failure(invalid_queue_row("invalid_revision_increment"));
+    }
     auto timestamp = timestamp_to_storage(deleted_at);
     if (!timestamp) {
         return RepositoryResult<bool>::failure(std::move(timestamp).error());
     }
 
     jb::db::Query query{_database};
-    auto          prepared =
-        query.prepare("UPDATE jobu_queues SET name = :internal_name, deleted_name = :original_name, state = 'deleted', "
-                      "updated_at_us = :updated_at_us, deleted_at_us = :deleted_at_us "
-                      "WHERE id = :id AND state = 'suspended' AND deleted_at_us IS NULL");
+    // The final token remains with the tombstone until retention removes the row.
+    auto          prepared = query.prepare(
+        "UPDATE jobu_queues SET name = :internal_name, deleted_name = :original_name, state = 'deleted', "
+        "updated_at_us = :updated_at_us, deleted_at_us = :deleted_at_us, revision = :next_revision "
+        "WHERE id = :id AND state = 'suspended' AND revision = :expected_revision AND deleted_at_us IS NULL");
     if (!prepared) {
         return RepositoryResult<bool>::failure(std::move(prepared).error());
     }
     auto bound = bind_all(query,
                           {
-                              {":internal_name", jb::db::make_text(internal_name)},
-                              {":original_name", jb::db::make_text(original_name)},
-                              {":updated_at_us", timestamp.value()               },
-                              {":deleted_at_us", timestamp.value()               },
-                              {":id",            uuid_to_storage(id)             },
+                              {":internal_name",     jb::db::make_text(internal_name)},
+                              {":original_name",     jb::db::make_text(original_name)},
+                              {":updated_at_us",     timestamp.value()               },
+                              {":deleted_at_us",     timestamp.value()               },
+                              {":id",                uuid_to_storage(id)             },
+                              {":expected_revision", std::move(expected).value()     },
+                              {":next_revision",     std::move(next).value()         },
     });
     if (!bound) {
         return RepositoryResult<bool>::failure(std::move(bound).error());

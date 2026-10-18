@@ -615,11 +615,11 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         auto selector  = encode_selector(first_id);
         auto suspended = decode_queue(endpoint.call("queue.suspend", selector), fixture.registry);
         CHECK(suspended.state == QueueState::Suspended);
-        CHECK(suspended.revision == 8);
+        CHECK(suspended.revision == 10);
         CHECK(rescans.request_count() == 4U);
         auto resumed = decode_queue(endpoint.call("queue.resume", selector), fixture.registry);
         CHECK(resumed.state == QueueState::Active);
-        CHECK(resumed.revision == 8);
+        CHECK(resumed.revision == 11);
         CHECK(rescans.request_count() == 5U);
         suspended = decode_queue(endpoint.call("queue.suspend", selector), fixture.registry);
         CHECK(suspended.state == QueueState::Suspended);
@@ -652,7 +652,7 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
         CHECK(page->items[0].id == first_id);
         CHECK(page->items[0].name == "alpha");
         CHECK(page->items[0].state == QueueState::Deleted);
-        CHECK(page->items[0].revision == 8);
+        CHECK(page->items[0].revision == 14);
         CHECK(page->items[1].id == second_id);
         CHECK(page->items[1].name == "alpha");
         CHECK(page->items[1].state == QueueState::Active);

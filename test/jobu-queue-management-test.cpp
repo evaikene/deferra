@@ -356,10 +356,11 @@ TEST_CASE("Queue create idempotency replays canonical results and rolls back rec
 
     // A later current revision never changes the original revision-1 creation snapshot.
     execute(fixture.database, "UPDATE jobu_queues SET revision = 7");
+    REQUIRE(service.suspend_queue(original->id));
     auto current = service.get_queue(original->id);
     REQUIRE(current);
     CHECK(current->name == "renamed");
-    CHECK(current->revision == 7);
+    CHECK(current->revision == 9);
 
     auto explicit_defaults = CreateQueueRequest{
         .name                  = "replay",
@@ -498,23 +499,27 @@ TEST_CASE("Queue lifecycle persists draining suspension resume and idempotent no
     auto immediate = service.suspend_queue(std::string{"immediate"});
     REQUIRE(immediate);
     CHECK(immediate->state == QueueState::Suspended);
+    CHECK(immediate->revision == 3);
     CHECK(immediate->updated_at == UtcTimePoint{2s});
 
     fixture.time.advance(1s);
     auto unchanged_suspended = service.suspend_queue(immediate_queue);
     REQUIRE(unchanged_suspended);
     CHECK(unchanged_suspended->state == QueueState::Suspended);
+    CHECK(unchanged_suspended->revision == 3);
     CHECK(unchanged_suspended->updated_at == UtcTimePoint{2s});
 
     auto resumed = service.resume_queue(immediate_queue);
     REQUIRE(resumed);
     CHECK(resumed->state == QueueState::Active);
+    CHECK(resumed->revision == 4);
     CHECK(resumed->updated_at == UtcTimePoint{3s});
 
     fixture.time.advance(1s);
     auto unchanged_active = service.resume_queue(immediate_queue);
     REQUIRE(unchanged_active);
     CHECK(unchanged_active->state == QueueState::Active);
+    CHECK(unchanged_active->revision == 4);
     CHECK(unchanged_active->updated_at == UtcTimePoint{3s});
 
     execute(fixture.database,
@@ -533,22 +538,26 @@ TEST_CASE("Queue lifecycle persists draining suspension resume and idempotent no
     auto draining = service.suspend_queue(busy_queue);
     REQUIRE(draining);
     CHECK(draining->state == QueueState::Suspending);
+    CHECK(draining->revision == 2);
     CHECK(draining->updated_at == UtcTimePoint{5s});
 
     fixture.time.advance(1s);
     auto unchanged_draining = service.suspend_queue(busy_queue);
     REQUIRE(unchanged_draining);
     CHECK(unchanged_draining->state == QueueState::Suspending);
+    CHECK(unchanged_draining->revision == 2);
     CHECK(unchanged_draining->updated_at == UtcTimePoint{5s});
 
     auto resumed_draining = service.resume_queue(busy_queue);
     REQUIRE(resumed_draining);
     CHECK(resumed_draining->state == QueueState::Active);
+    CHECK(resumed_draining->revision == 3);
     CHECK(resumed_draining->updated_at == UtcTimePoint{6s});
 
     fixture.time.advance(1s);
     draining = service.suspend_queue(busy_queue);
     REQUIRE(draining);
+    CHECK(draining->revision == 4);
     CHECK(draining->state == QueueState::Suspending);
     CHECK(draining->updated_at == UtcTimePoint{7s});
 
@@ -574,6 +583,7 @@ TEST_CASE("Queue lifecycle persists draining suspension resume and idempotent no
     auto suspended = service.suspend_queue(busy_queue);
     REQUIRE(suspended);
     CHECK(suspended->state == QueueState::Suspended);
+    CHECK(suspended->revision == 5);
     CHECK(suspended->updated_at == UtcTimePoint{8s});
 
     job = service.get_job(job_id);
@@ -649,6 +659,7 @@ TEST_CASE("Queue deletion atomically deletes contained work and releases its nam
     REQUIRE(stored_queue);
     CHECK(stored_queue->name == "delete-me");
     CHECK(stored_queue->state == QueueState::Deleted);
+    CHECK(stored_queue->revision == suspended->revision + 1);
     CHECK(stored_queue->updated_at == UtcTimePoint{2s});
     CHECK(stored_queue->deleted_at == UtcTimePoint{2s});
     {
@@ -977,6 +988,7 @@ TEST_CASE("Queue repository preserves revisions across reopen and every full pro
 {
     auto const revision = GENERATE(QueueRevision{1},
                                    QueueRevision{7},
+                                   static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max()) - 1,
                                    static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max()));
     CAPTURE(revision);
     ServiceFixture fixture{std::vector<Uuid>{}};
@@ -1012,23 +1024,31 @@ TEST_CASE("Queue repository preserves revisions across reopen and every full pro
     REQUIRE(listed->size() == 1);
     CHECK(listed->front().revision == revision);
 
-    // U.23 preserves stored tokens through tombstone reads; lifecycle increments arrive in U.26.
-    auto deleted = queues.mark_deleted(queue.id, "deleted-revision", queue.name, UtcTimePoint{2s});
+    // A queue already at the maximum cannot advance to a tombstone; its live projection still round-trips.
+    if (revision == static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max())) {
+        auto before = storage_snapshot(fixture.database);
+        REQUIRE_FALSE(
+            queues.mark_deleted(queue.id, "deleted-revision", queue.name, revision, revision + 1, UtcTimePoint{2s}));
+        CHECK(storage_snapshot(fixture.database) == before);
+        return;
+    }
+    auto deleted =
+        queues.mark_deleted(queue.id, "deleted-revision", queue.name, revision, revision + 1, UtcTimePoint{2s});
     REQUIRE(deleted);
     REQUIRE(*deleted);
     auto tombstone = queues.find_by_id(queue.id, true);
     REQUIRE(tombstone);
     REQUIRE(tombstone->has_value());
-    CHECK((**tombstone).revision == revision);
+    CHECK((**tombstone).revision == revision + 1);
     CHECK((**tombstone).state == QueueState::Deleted);
     auto historical = queues.find_by_name(queue.name, true);
     REQUIRE(historical);
     REQUIRE(historical->has_value());
-    CHECK((**historical).revision == revision);
+    CHECK((**historical).revision == revision + 1);
     auto retained = queues.list(true, QueueState::Deleted, 10, std::nullopt);
     REQUIRE(retained);
     REQUIRE(retained->size() == 1);
-    CHECK(retained->front().revision == revision);
+    CHECK(retained->front().revision == revision + 1);
 }
 
 TEST_CASE("Queue repository rejects revisions outside the storage range before insertion",
@@ -1322,7 +1342,7 @@ TEST_CASE("Queue revision exhaustion preserves the complete stored queue", "[job
                   "jobu.queue.revision_exhausted");
     CHECK(storage_snapshot(fixture.database) == before);
     // Exhaustion is a domain failure; unrelated mutations remain admitted.
-    REQUIRE(service.suspend_queue(last->id));
+    REQUIRE(service.resume_queue(last->id));
 }
 
 TEST_CASE("Both queue replacement SQL paths fence stale revisions", "[jobu][queue][revision][repository]")
@@ -1393,4 +1413,166 @@ TEST_CASE("Queue guarded-write diagnosis rolls back missing deleted and changed 
     CHECK(failures.empty());
     execute(fixture.database, "DROP TRIGGER change_queue");
     REQUIRE(service.update_queue({.queue = created->id, .expected_revision = created->revision, .weight = 2}));
+}
+
+TEST_CASE("Queue lifecycle checks capacity per actual transition", "[jobu][queue][lifecycle][revision]")
+{
+    auto const state    = GENERATE(QueueState::Active, QueueState::Suspending, QueueState::Suspended);
+    auto const maximum  = static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max());
+    auto const revision = GENERATE(9223372036854775805ULL, 9223372036854775806ULL, 9223372036854775807ULL);
+    auto const resume   = GENERATE(false, true);
+    CAPTURE(state, revision, resume);
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              queue = service.create_queue({.name = "capacity"});
+    REQUIRE(queue);
+    {
+        Query seed{fixture.database};
+        REQUIRE(seed.prepare("UPDATE jobu_queues SET state = :state, revision = :revision"));
+        REQUIRE(seed.bind_value(":state", make_text(detail::storage_text(state))));
+        REQUIRE(seed.bind_value(":revision", static_cast<std::int64_t>(revision)));
+        REQUIRE(seed.exec());
+    }
+    auto const before     = storage_snapshot(fixture.database);
+    unsigned   increments = 0;
+    if (resume) {
+        increments = state == QueueState::Active ? 0U : 1U;
+    }
+    else if (state == QueueState::Active) {
+        increments = 2;
+    }
+    else if (state == QueueState::Suspending) {
+        increments = 1;
+    }
+
+    fixture.time.advance(1s);
+    auto result = resume ? service.resume_queue(queue->id) : service.suspend_queue(queue->id);
+    if (maximum - revision < increments) {
+        require_error(result, ErrorCategory::ResourceExhausted, "jobu.queue.revision_exhausted");
+        // This also covers rollback after the first write of an idle two-transition suspend.
+        CHECK(storage_snapshot(fixture.database) == before);
+    }
+    else {
+        REQUIRE(result);
+        CHECK(result->state == (resume ? QueueState::Active : QueueState::Suspended));
+        CHECK(result->revision == revision + increments);
+        auto stored = service.get_queue(queue->id);
+        REQUIRE(stored);
+        CHECK(stored->revision == result->revision);
+        if (increments == 0) {
+            CHECK(storage_snapshot(fixture.database) == before);
+        }
+        else {
+            auto const transitioned = storage_snapshot(fixture.database);
+            require_error(service.update_queue({.queue = queue->id, .expected_revision = revision, .weight = 9}),
+                          ErrorCategory::Conflict,
+                          "jobu.queue.revision_conflict");
+            CHECK(storage_snapshot(fixture.database) == transitioned);
+        }
+    }
+    // Expected exhaustion and stale tokens leave mutation admission open.
+    REQUIRE(service.create_queue({.name = "still-admitted"}));
+}
+
+TEST_CASE("Queue deletion preflights its own revision before cascading cleanup", "[jobu][queue][delete][revision]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              queue = service.create_queue({.name = "delete-capacity"});
+    REQUIRE(queue);
+    auto job = service.create_job({.queue    = queue->id,
+                                   .schedule = OnceSchedule{.planned_at = UtcTimePoint{20s}},
+                                   .payload  = cli_payload("/pending")});
+    REQUIRE(job);
+    REQUIRE(service.suspend_queue(queue->id));
+    execute(fixture.database,
+            "INSERT INTO jobu_secrets(name, value_blob, created_at_us, updated_at_us) "
+            "VALUES ('delete.secret', X'01', 1, 1)");
+    execute(fixture.database,
+            "INSERT INTO jobu_secret_refs(secret_name, job_id, field_path) "
+            "VALUES ('delete.secret', X'00000000000070008000000000000002', 'payload.value')");
+    execute(fixture.database, "UPDATE jobu_queues SET revision = 9223372036854775807");
+    auto const before = storage_snapshot(fixture.database);
+    require_error(service.delete_queue(queue->id), ErrorCategory::ResourceExhausted, "jobu.queue.revision_exhausted");
+    CHECK(storage_snapshot(fixture.database) == before);
+
+    execute(fixture.database, "UPDATE jobu_queues SET revision = 9223372036854775806");
+    REQUIRE(service.delete_queue(queue->id));
+    auto tombstone = service.get_queue(queue->id, true);
+    REQUIRE(tombstone);
+    CHECK(tombstone->revision == 9223372036854775807ULL);
+    CHECK(tombstone->state == QueueState::Deleted);
+    auto deleted_job = service.get_job(job->id, true);
+    REQUIRE(deleted_job);
+    CHECK(deleted_job->revision == job->revision + 1);
+    CHECK(deleted_job->state == JobState::Deleted);
+    CHECK(count_rows(fixture.database, "jobu_secret_refs") == 0);
+}
+
+TEST_CASE("Queue lifecycle SQL fences both state and revision and rejects invalid increments",
+          "[jobu][queue][revision][repository]")
+{
+    auto const        deleting = GENERATE(false, true);
+    ServiceFixture    fixture{{sequence_id(1)}};
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              queue = service.create_queue({.name = "fenced"});
+    REQUIRE(queue);
+    detail::QueueRepository queues{fixture.database, fixture.registry};
+    auto                    mutate = [&](QueueRevision expected, QueueRevision next) {
+        return deleting
+                 ? queues.mark_deleted(queue->id, "deleted-fenced", queue->name, expected, next, UtcTimePoint{2s})
+                 : queues.set_state(queue->id,
+                                    QueueState::Active,
+                                    QueueState::Suspending,
+                                    expected,
+                                    next,
+                                    UtcTimePoint{2s});
+    };
+    auto before = storage_snapshot(fixture.database);
+    for (auto const [expected, next] : std::array<std::pair<QueueRevision, QueueRevision>, 7>{
+             {{0, 1},
+              {1, 0},
+              {1, 1},
+              {1, 3},
+              {2, 1},
+              {9223372036854775807ULL, 9223372036854775808ULL},
+              {std::numeric_limits<QueueRevision>::max(), 1}}
+    }) {
+        CAPTURE(expected, next);
+        REQUIRE_FALSE(mutate(expected, next));
+        CHECK(storage_snapshot(fixture.database) == before);
+    }
+    auto stale = mutate(2, 3);
+    REQUIRE(stale);
+    CHECK_FALSE(*stale);
+    CHECK(storage_snapshot(fixture.database) == before);
+    if (deleting) {
+        auto wrong_state = mutate(1, 2);
+        REQUIRE(wrong_state);
+        CHECK_FALSE(*wrong_state);
+        CHECK(storage_snapshot(fixture.database) == before);
+        execute(fixture.database, "UPDATE jobu_queues SET state = 'suspended'");
+        before = storage_snapshot(fixture.database);
+        stale  = mutate(2, 3);
+        REQUIRE(stale);
+        CHECK_FALSE(*stale);
+        CHECK(storage_snapshot(fixture.database) == before);
+    }
+    auto changed = mutate(1, 2);
+    REQUIRE(changed);
+    REQUIRE(*changed);
+    auto stored = queues.find_by_id(queue->id, true);
+    REQUIRE(stored);
+    REQUIRE(stored->has_value());
+    CHECK((**stored).revision == 2);
+    before = storage_snapshot(fixture.database);
+    // A repeated stale writer cannot consume a token or resurrect a tombstone.
+    stale  = mutate(1, 2);
+    REQUIRE(stale);
+    CHECK_FALSE(*stale);
+    CHECK(storage_snapshot(fixture.database) == before);
 }

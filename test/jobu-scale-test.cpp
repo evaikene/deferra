@@ -808,10 +808,24 @@ TEST_CASE("Paged history cleanup eventually releases a deleted queue and all its
         REQUIRE(*owner);
     }
     QueueRepository queues{fixture.storage.database, fixture.storage.registry};
-    auto suspended = queues.set_state(queue.id, QueueState::Active, QueueState::Suspended, UtcTimePoint{13s});
+    auto            current = queues.find_by_id(queue.id, false);
+    REQUIRE(current);
+    REQUIRE(current->has_value());
+    auto const revision  = (**current).revision;
+    auto       suspended = queues.set_state(queue.id,
+                                            QueueState::Active,
+                                            QueueState::Suspended,
+                                            revision,
+                                            revision + 1,
+                                            UtcTimePoint{13s});
     REQUIRE(suspended);
     REQUIRE(*suspended);
-    auto deleted = queues.mark_deleted(queue.id, "deleted-" + queue.id.to_string(), queue.name, UtcTimePoint{13s});
+    auto deleted = queues.mark_deleted(queue.id,
+                                       "deleted-" + queue.id.to_string(),
+                                       queue.name,
+                                       revision + 1,
+                                       revision + 2,
+                                       UtcTimePoint{13s});
     REQUIRE(deleted);
     REQUIRE(*deleted);
     RetentionRepository  retention{fixture.storage.database, fixture.storage.registry};

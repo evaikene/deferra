@@ -28,6 +28,8 @@ using RepositoryResult = jb::core::Result<T, jb::core::Error>;
 constexpr std::size_t kMaximumSchedulerPageRows    = 1000U;
 // JobRevision is unsigned publicly, but schema version 1 stores revisions in a positive signed 64-bit INTEGER.
 constexpr JobRevision kMaximumPersistedJobRevision = static_cast<JobRevision>(std::numeric_limits<std::int64_t>::max());
+constexpr QueueRevision kMaximumPersistedQueueRevision =
+    static_cast<QueueRevision>(std::numeric_limits<std::int64_t>::max());
 
 auto repository_error(jb::core::ErrorCategory category, std::string_view code, std::string_view message)
     -> jb::core::Error
@@ -58,6 +60,13 @@ auto job_revision_exhausted() -> jb::core::Error
     return repository_error(jb::core::ErrorCategory::ResourceExhausted,
                             "jobu.job.revision_exhausted",
                             "Job revision cannot be incremented");
+}
+
+auto queue_revision_exhausted() -> jb::core::Error
+{
+    return repository_error(jb::core::ErrorCategory::ResourceExhausted,
+                            "jobu.queue.revision_exhausted",
+                            "Queue revision cannot be incremented");
 }
 
 auto invariant(std::string_view reason, jb::core::Error const* cause = nullptr) -> jb::core::Error
@@ -1371,7 +1380,17 @@ auto SchedulerRepository::complete_drained_queue_suspension(jb::core::Uuid const
             return RepositoryResult<bool>::failure(std::move(running).error());
         }
         if (*running == 0) {
-            auto transitioned = queues.set_state(queue_id, QueueState::Suspending, QueueState::Suspended, updated_at);
+            if (queue->value().revision >= kMaximumPersistedQueueRevision) {
+                return RepositoryResult<bool>::failure(queue_revision_exhausted());
+            }
+            // Recovery shares this writer. The caller's transaction also owns any later job/run repair.
+            auto const expected_revision = queue->value().revision;
+            auto       transitioned      = queues.set_state(queue_id,
+                                                            QueueState::Suspending,
+                                                            QueueState::Suspended,
+                                                            expected_revision,
+                                                            expected_revision + 1,
+                                                            updated_at);
             if (!transitioned) {
                 return RepositoryResult<bool>::failure(std::move(transitioned).error());
             }

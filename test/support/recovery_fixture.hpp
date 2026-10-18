@@ -68,7 +68,7 @@ public:
                                 jobu::AttemptNumber        prior_failures = 0,
                                 jobu::RunOrigin origin = jobu::RunOrigin::Scheduled) const -> RecoveryRunFixture;
 
-    /// Persists an owner, including its tombstone representation when deleted.
+    /// Persists the supplied owner snapshot and exact revision, including its tombstone representation when deleted.
     void insert_queue(jobu::Queue const& queue);
     void insert_job(jobu::JobDefinition const& job);
 

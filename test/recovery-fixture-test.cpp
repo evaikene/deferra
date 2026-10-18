@@ -416,3 +416,21 @@ TEST_CASE("Recovery fixtures expose schema guards and application-only manual un
         CHECK(invalid.error().code == "jobu.storage.invariant");
     }
 }
+
+TEST_CASE("Deleted queue fixture snapshots preserve their prepared revisions", "[jobu][recovery][fixture][revision]")
+{
+    auto const      revision = GENERATE(1ULL, 7ULL, 9223372036854775807ULL);
+    RecoveryFixture fixture;
+    auto            queue = recovery_queue(recovery_id(1), QueueState::Deleted);
+    queue.revision        = revision;
+    fixture.insert_queue(queue);
+    fixture.reopen();
+    QueueRepository queues{fixture.database, fixture.registry};
+    auto            stored = queues.find_by_id(queue.id, true);
+    REQUIRE(stored);
+    REQUIRE(stored->has_value());
+    CHECK((**stored).revision == revision);
+    CHECK((**stored).state == queue.state);
+    CHECK((**stored).updated_at == queue.updated_at);
+    CHECK((**stored).deleted_at == queue.deleted_at);
+}

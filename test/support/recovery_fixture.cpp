@@ -215,16 +215,23 @@ void RecoveryFixture::insert_queue(Queue const& queue)
     REQUIRE(defaults);
     QueueRepository queues{database, registry};
 
-    // The normal insertion API creates live queues. Use its tombstone writer for the deleted representation.
+    // Seed the supplied snapshot, not a sequence of lifecycle operations. In particular, a deleted
+    // historical row keeps its prepared revision rather than consuming an extra transition token.
     auto live  = queue;
     live.state = queue.state == QueueState::Deleted ? QueueState::Suspended : queue.state;
     live.deleted_at.reset();
     REQUIRE(queues.insert(live, live.name, *defaults));
     if (queue.state == QueueState::Deleted) {
         REQUIRE(queue.deleted_at);
-        auto deleted = queues.mark_deleted(queue.id, "deleted-" + queue.id.to_string(), queue.name, *queue.deleted_at);
-        REQUIRE(deleted);
-        REQUIRE(*deleted);
+        db::Query tombstone{database};
+        REQUIRE(tombstone.prepare("UPDATE jobu_queues SET name = :internal_name, deleted_name = :original_name, "
+                                  "state = 'deleted', deleted_at_us = :deleted_at WHERE id = :id"));
+        REQUIRE(tombstone.bind_value(":internal_name", db::make_text("deleted-" + queue.id.to_string())));
+        REQUIRE(tombstone.bind_value(":original_name", db::make_text(queue.name)));
+        REQUIRE(tombstone.bind_value(":deleted_at", timestamp(queue.deleted_at)));
+        REQUIRE(tombstone.bind_value(":id", uuid_to_storage(queue.id)));
+        REQUIRE(tombstone.exec());
+        REQUIRE(tombstone.num_rows_affected() == 1);
     }
 }
 

@@ -515,11 +515,12 @@ void require_committed_completion(Fixture& fixture, AttemptKey key, Scenario sce
         CHECK(job->value().updated_at == at(110));
     }
 
+    QueueRepository queues{database, fixture.store.registry};
+    auto            queue = queues.find_by_id(fixture.queue.id, false);
+    REQUIRE(queue);
+    REQUIRE(queue->has_value());
+    CHECK(queue->value().revision == fixture.queue.revision + (suspends(scenario) ? 1 : 0));
     if (suspends(scenario)) {
-        QueueRepository queues{database, fixture.store.registry};
-        auto            queue = queues.find_by_id(fixture.queue.id, false);
-        REQUIRE(queue);
-        REQUIRE(queue->has_value());
         CHECK(queue->value().state == QueueState::Suspended);
         CHECK(queue->value().updated_at == at(110));
     }
@@ -1183,4 +1184,53 @@ TEST_CASE("Synthetic preparation completion faults leave the committed attempt f
             }
         }
     }
+}
+
+TEST_CASE("Automatic queue drain checks capacity and keeps completion transactional",
+          "[jobu][scheduler][fault][revision][sqlite]")
+{
+    for (bool exhausted : {false, true}) {
+        DYNAMIC_SECTION("queue exhausted " << exhausted)
+        {
+            Fixture fixture{Scenario::Suspension};
+            auto    key = fixture.start_completion(Scenario::Suspension);
+            execute(fixture.store.database,
+                    exhausted ? "UPDATE jobu_queues SET revision = 9223372036854775807"
+                              : "UPDATE jobu_queues SET revision = 9223372036854775806");
+            auto const before = snapshot(fixture.store.database);
+            REQUIRE(fixture.executor.fake.complete(key, completion(key, false)));
+            if (exhausted) {
+                REQUIRE(fixture.failures.size() == 1);
+                CHECK(fixture.failures.front().code == "jobu.queue.revision_exhausted");
+                CHECK(fixture.completions.empty());
+                fixture.reopen();
+                CHECK(snapshot(fixture.store.database) == before);
+            }
+            else {
+                CHECK(fixture.failures.empty());
+                fixture.reopen();
+                QueueRepository queues{fixture.store.database, fixture.store.registry};
+                auto            stored = queues.find_by_id(fixture.queue.id, false);
+                REQUIRE(stored);
+                REQUIRE(stored->has_value());
+                CHECK((**stored).state == QueueState::Suspended);
+                CHECK((**stored).revision == 9223372036854775807ULL);
+            }
+        }
+    }
+}
+
+TEST_CASE("A later job drain failure rolls back the queue revision and retry completion",
+          "[jobu][scheduler][fault][revision][sqlite]")
+{
+    Fixture fixture{Scenario::RetrySuspension};
+    auto    key = fixture.start_completion(Scenario::RetrySuspension);
+    execute(fixture.store.database, "UPDATE jobu_jobs SET revision = 9223372036854775807");
+    auto const before = snapshot(fixture.store.database);
+    REQUIRE(fixture.executor.fake.complete(key, completion(key, true)));
+    REQUIRE(fixture.failures.size() == 1);
+    CHECK(fixture.failures.front().code == "jobu.job.revision_exhausted");
+    CHECK(fixture.completions.empty());
+    fixture.reopen();
+    CHECK(snapshot(fixture.store.database) == before);
 }

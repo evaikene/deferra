@@ -1386,13 +1386,21 @@ TEST_CASE("Scheduler core completes service-requested suspension drains",
         auto draining = service.suspend_queue(queue_id);
         REQUIRE(draining);
         CHECK(draining->state == QueueState::Suspending);
+        CHECK(draining->revision == 2);
 
         fixture.time.set_utc(at(140));
         REQUIRE(fixture.executor.complete(key, success(key)));
         auto suspended = service.get_queue(queue_id);
         REQUIRE(suspended);
         CHECK(suspended->state == QueueState::Suspended);
+        CHECK(suspended->revision == 3);
         CHECK(suspended->updated_at == at(140));
+        auto stale = service.update_queue({.queue = queue_id, .expected_revision = draining->revision, .weight = 9});
+        REQUIRE_FALSE(stale);
+        CHECK(stale.error().code == "jobu.queue.revision_conflict");
+        auto current = service.get_queue(queue_id);
+        REQUIRE(current);
+        CHECK(current->revision == suspended->revision);
         REQUIRE(core.process_cycle());
         CHECK(fixture.executor.start_requests().size() == 1U);
 
@@ -1400,6 +1408,7 @@ TEST_CASE("Scheduler core completes service-requested suspension drains",
         auto resumed = service.resume_queue(queue_id);
         REQUIRE(resumed);
         CHECK(resumed->state == QueueState::Active);
+        CHECK(resumed->revision == 4);
         REQUIRE(core.process_cycle());
         REQUIRE(fixture.executor.start_requests().size() == 2U);
         CHECK(fixture.executor.start_requests().back().key.run_id == id(12));

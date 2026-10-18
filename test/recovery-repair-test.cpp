@@ -410,6 +410,7 @@ TEST_CASE("Recovery drains recurring owners atomically after the final Running r
     CHECK(drained_job.revision == job.revision + 1);
     CHECK(drained_job.updated_at == UtcTimePoint{120s});
     CHECK(drained_queue.state == QueueState::Suspended);
+    CHECK(drained_queue.revision == queue.revision + 1);
     CHECK(drained_queue.updated_at == UtcTimePoint{120s});
     {
         auto transaction = Transaction::begin(fixture.storage.database);
@@ -425,6 +426,7 @@ TEST_CASE("Recovery drains recurring owners atomically after the final Running r
     CHECK(read_job(fixture, job.id).updated_at == drained_job.updated_at);
     CHECK(read_job(fixture, job.id).revision == drained_job.revision);
     CHECK(read_queue(fixture, queue.id).updated_at == drained_queue.updated_at);
+    CHECK(read_queue(fixture, queue.id).revision == drained_queue.revision);
     SchedulerRepository scheduler{fixture.storage.database, fixture.storage.registry};
     auto                runnable = scheduler.list_runnable(queue.id, job.type, UtcTimePoint{600s}, 256);
     REQUIRE(runnable);
@@ -475,6 +477,7 @@ TEST_CASE("Suspension repair includes empty queues and jobs without interrupted 
     fixture.storage.reopen();
     fixture.storage.require_run(waiting);
     CHECK(read_queue(fixture, empty_queue.id).state == QueueState::Suspended);
+    CHECK(read_queue(fixture, empty_queue.id).revision == empty_queue.revision + 1);
     CHECK(read_queue(fixture, queue.id).state == QueueState::Suspended);
     CHECK(read_job(fixture, job.id).state == JobState::Suspended);
     CHECK(read_job(fixture, waiting_job.id).state == JobState::Suspended);
@@ -687,6 +690,7 @@ TEST_CASE("Suspension failure rolls back interruption capture successor and earl
     CHECK(after_job.updated_at == job.updated_at);
     auto after_queue = read_queue(fixture, queue.id);
     CHECK(after_queue.state == QueueState::Suspending);
+    CHECK(after_queue.revision == queue.revision);
     CHECK(after_queue.updated_at == queue.updated_at);
     auto runs = fixture.recovery.list_runs(256);
     REQUIRE(runs);
