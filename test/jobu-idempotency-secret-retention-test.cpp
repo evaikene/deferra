@@ -136,9 +136,9 @@ void insert_queue(Database&                           database,
 {
     Query query{database};
     REQUIRE(query.prepare(
-        "INSERT INTO jobu_queues(id, name, deleted_name, state, weight, concurrency_limit, recovery_policy, "
+        "INSERT INTO jobu_queues(id, revision, name, deleted_name, state, weight, concurrency_limit, recovery_policy, "
         "defaults_json, retention_seconds, runnable_wait_warning_ms, created_at_us, updated_at_us, deleted_at_us) "
-        "VALUES(:id, :name, :deleted_name, :state, 1, 1, 'fail_interrupted', "
+        "VALUES(:id, 1, :name, :deleted_name, :state, 1, 1, 'fail_interrupted', "
         "'{\"version\":1,\"values\":{}}', :retention, 10000, 0, :updated_at, :deleted_at)"));
     REQUIRE(query.bind_value(":id", uuid_to_storage(queue_id)));
     REQUIRE(query.bind_value(":retention", retention ? Value{retention->count()} : Value{Null{}}));

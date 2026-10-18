@@ -90,9 +90,9 @@ void insert_queue(Database& database, Uuid const& queue_id, std::string_view nam
 {
     Query query{database};
     REQUIRE(query.prepare(
-        "INSERT INTO jobu_queues(id, name, deleted_name, state, weight, concurrency_limit, recovery_policy, "
+        "INSERT INTO jobu_queues(id, revision, name, deleted_name, state, weight, concurrency_limit, recovery_policy, "
         "defaults_json, retention_seconds, runnable_wait_warning_ms, created_at_us, updated_at_us, deleted_at_us) "
-        "VALUES(:id, :name, NULL, 'active', 1, 1, 'fail_interrupted', '{\"version\":1,\"values\":{}}', "
+        "VALUES(:id, 1, :name, NULL, 'active', 1, 1, 'fail_interrupted', '{\"version\":1,\"values\":{}}', "
         "NULL, 10000, 0, 0, NULL)"));
     REQUIRE(query.bind_value(":id", uuid_to_storage(queue_id)));
     REQUIRE(query.bind_value(":name", make_text(name)));

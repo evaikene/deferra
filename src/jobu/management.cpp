@@ -828,6 +828,7 @@ auto ManagementService::create_queue_impl(CreateQueueRequest request) -> jb::cor
     auto const now   = data->time_source.utc_now();
     auto       queue = Queue{
         .id                    = *id,
+        .revision              = 1,
         .name                  = std::move(request.name),
         .state                 = QueueState::Active,
         .weight                = request.weight,

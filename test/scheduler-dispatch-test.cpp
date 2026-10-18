@@ -101,6 +101,7 @@ auto queue_record() -> Record
     return Record{
         {
          Field{"queue_id", uuid_to_storage(id(3))},
+         Field{"queue_revision", std::int64_t{1}},
          Field{"queue_name", make_text("dispatch")},
          Field{"queue_state", make_text("active")},
          Field{"queue_weight", std::int64_t{1}},

@@ -73,6 +73,7 @@ auto recovery_id(std::uint32_t suffix) -> core::Uuid
 auto recovery_queue(core::Uuid id, QueueState state, RecoveryPolicy policy) -> Queue
 {
     return {.id              = id,
+            .revision        = 1,
             .name            = "recovery-" + id.to_string(),
             .state           = state,
             .recovery_policy = policy,
