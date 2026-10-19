@@ -8,12 +8,14 @@
 #include "event_thread.hpp"
 #include "framing.hpp"
 #include "history_json.hpp"
+#include "input_priv.hpp"
 #include "json.hpp"
 #include "local_server.hpp"
 #include "local_socket.hpp"
 #include "management_json.hpp"
 #include "output_priv.hpp"
 #include "session_priv.hpp"
+#include "statistics_json.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "support/fake_event_loop_backend.hpp"
 #include "support/temporary_directory.hpp"
@@ -139,9 +141,11 @@ auto handshake() -> PeerStep
         .capabilities   = {"system.info",
                            "job.get", "queue.list",
                            "queue.delete", "queue.suspend",
-                           "queue.get", "run.cancel",
-                           "run.get", "attempt.list",
-                           "attempt.get", "attempt.output"}
+                           "queue.resume", "queue.update",
+                           "queue.stats", "queue.get",
+                           "run.cancel", "run.get",
+                           "attempt.list", "attempt.get",
+                           "attempt.output"}
     };
     return {.method = "system.info", .value = system_info_to_json(info)};
 }
@@ -538,6 +542,68 @@ void check_once(std::string const& text, std::string_view marker)
     CHECK(position == text.rfind(marker));
 }
 
+auto fixture_queue(std::string name = "reports", std::string_view identity = fixture_id) -> Queue
+{
+    auto id = Uuid::parse(identity);
+    auto at = parse_utc_timestamp("2030-01-01T00:00:00Z");
+    REQUIRE(id);
+    REQUIRE(at);
+    return {.id = *id, .revision = 7, .name = std::move(name), .created_at = *at, .updated_at = *at};
+}
+
+auto queue_json(Queue const& queue) -> JsonValue
+{
+    auto value = queue_to_json(queue, StandardAttributeRegistry{});
+    REQUIRE(value);
+    return *value;
+}
+
+auto queue_failure(std::string code = "jobu.queue.not_found", std::string category = "not_found") -> JsonValue
+{
+    auto data = JsonValue::Object{
+        {"code",     JsonValue{.data = std::move(code)}    },
+        {"category", JsonValue{.data = std::move(category)}}
+    };
+    return {
+        .data = JsonValue::Object{{"code", JsonValue{.data = std::int64_t{-32000}}},
+                                  {"message", JsonValue{.data = std::string{"fixture queue failure"}}},
+                                  {"data", JsonValue{.data = std::move(data)}}}
+    };
+}
+
+/// Scripts a lookup with exact wire selector/visibility; nullopt means only the domain not-found response.
+auto queue_lookup(QueueSelector selector, std::optional<Queue> const& queue, bool historical = false) -> PeerStep
+{
+    auto params = queue_get_request_to_json({.queue = std::move(selector), .include_deleted = historical});
+    REQUIRE(params);
+    return {.method = "queue.get",
+            .value  = queue ? queue_json(*queue) : queue_failure(),
+            .action = queue ? PeerAction::Reply : PeerAction::RemoteError,
+            .params = *params};
+}
+
+auto queue_mutation(std::string method, Queue const& queue) -> PeerStep
+{
+    auto params = queue_selector_to_json(QueueSelector{queue.id});
+    REQUIRE(params);
+    auto const deleting = method == "queue.delete";
+    return {.method = std::move(method), .value = deleting ? JsonValue{} : queue_json(queue), .params = *params};
+}
+
+auto statistics_json() -> JsonValue
+{
+    auto from = parse_utc_timestamp("2030-01-01T00:00:00Z");
+    auto to   = parse_utc_timestamp("2030-01-02T00:00:00Z");
+    REQUIRE(from);
+    REQUIRE(to);
+    auto page = statistics_page_to_json({
+        .window = {.from = *from, .to = *to},
+        .groups = {StatisticsGroup{}}
+    });
+    REQUIRE(page);
+    return *page;
+}
+
 } // namespace
 
 TEST_CASE("scoped capture owns a job beyond every network and registry lifetime", "[jobuctl][session][capture]")
@@ -597,7 +663,9 @@ TEST_CASE("capture preserves remote and local failure projections", "[jobuctl][s
         R"({"code":-32000,"message":"fixture rejection","data":{"category":"conflict","code":"jobu.fixture.conflict"}})");
     REQUIRE(error);
     ScriptedPeer peer{
-        {handshake(), {.method = "queue.delete", .value = *error, .action = PeerAction::RemoteError}}
+        {handshake(),
+         queue_lookup(std::string{"reports"}, fixture_queue()),
+         {.method = "queue.delete", .value = *error, .action = PeerAction::RemoteError}}
     };
     auto captured = run_captured(command_for(peer.path(), {"queue", "delete", "--name", "reports", "--json"}));
     peer.verify();
@@ -651,7 +719,9 @@ TEST_CASE("capture preserves timeout and mutation uncertainty without printing",
     SECTION("connection lost after mutation delivery")
     {
         ScriptedPeer peer{
-            {handshake(), {.method = "queue.delete", .value = {}, .action = PeerAction::Disconnect}}
+            {handshake(),
+             queue_lookup(std::string{"reports"}, fixture_queue()),
+             {.method = "queue.delete", .value = {}, .action = PeerAction::Disconnect}}
         };
         auto captured = run_captured(command_for(peer.path(), {"queue", "delete", "--name", "reports"}));
         peer.verify();
@@ -883,6 +953,7 @@ TEST_CASE("capture retains the final wait reply rather than the initial mutation
         REQUIRE(completed);
         ScriptedPeer peer{
             {handshake(),
+             {.method = "queue.get", .value = *pending},
              {.method = "queue.suspend", .value = *pending},
              {.method = "queue.get", .value = *completed}}
         };
@@ -1921,4 +1992,591 @@ TEST_CASE("duplicate run output replies cannot reselect deliver twice or finish 
     CHECK(finishes == 1);
     check_once(output_text, "Output " + std::string{fixture_id} + ":7 channel=stdout");
     CHECK(output_text.find("Last attempt:") == std::string::npos);
+}
+
+TEST_CASE("queue inferred UUID selection covers both interpretations without fallback", "[jobuctl][queue-selection]")
+{
+    auto const queue = fixture_queue(fixture_id);
+    auto const other = fixture_queue(fixture_id, "10112233-4455-6677-8899-aabbccddeeff");
+
+    struct Scenario {
+        bool                 id_exists;
+        std::optional<Queue> name_match;
+        int                  exit;
+    };
+
+    auto const scenarios = std::vector<Scenario>{
+        {.id_exists = true,  .name_match = std::nullopt, .exit = 0},
+        {.id_exists = true,  .name_match = queue,        .exit = 0},
+        {.id_exists = true,  .name_match = other,        .exit = 1},
+        {.id_exists = false, .name_match = other,        .exit = 1},
+        {.id_exists = false, .name_match = std::nullopt, .exit = 1}
+    };
+    for (auto const& scenario : scenarios) {
+        CAPTURE(scenario.id_exists, scenario.name_match.has_value(), scenario.exit);
+        ScriptedPeer peer{
+            {handshake(),
+             queue_lookup(queue.id, scenario.id_exists ? std::optional{queue} : std::nullopt),
+             queue_lookup(std::string{fixture_id}, scenario.name_match)}
+        };
+        auto captured = run_captured(command_for(peer.path(), {"queue", "get", fixture_id}));
+        peer.verify();
+        check_silent(captured);
+        CHECK(captured.result.exit_code == scenario.exit);
+        if (scenario.exit == 0) {
+            REQUIRE(captured.result.reply);
+            CHECK(std::get<Queue>(*captured.result.reply).id == queue.id);
+        }
+        else {
+            CHECK_FALSE(captured.result.reply);
+            REQUIRE(captured.result.error);
+            auto const& error = *captured.result.error;
+            CHECK_FALSE(error.outcome_unknown);
+            if (scenario.id_exists) {
+                CHECK(error.code == "jobuctl.queue.ambiguous_selector");
+                CHECK(error.message.find("id:" + std::string{fixture_id}) != std::string::npos);
+                CHECK(error.message.find("name:" + std::string{fixture_id}) != std::string::npos);
+            }
+            else {
+                CHECK(error.code == "jobu.queue.not_found");
+                CHECK(error.kind == "remote");
+                CHECK(error.rpc_code == -32000);
+                CHECK(error.category == "not_found");
+                CHECK((error.message.find("name:") != std::string::npos) == scenario.name_match.has_value());
+            }
+        }
+    }
+}
+
+TEST_CASE("queue probes retain uppercase name bytes and require explicit collision remedies",
+          "[jobuctl][queue-selection]")
+{
+    auto const   upper = std::string{"00112233-4455-6677-8899-AABBCCDDEEFF"};
+    auto const   queue = fixture_queue();
+    auto const   other = fixture_queue(upper, "10112233-4455-6677-8899-aabbccddeeff");
+    ScriptedPeer peer{
+        {handshake(), queue_lookup(queue.id, queue), queue_lookup(upper, other)}
+    };
+    auto rendered = run_captured(command_for(peer.path(), {"queue", "delete", upper, "--json"}), SessionMode::Render);
+    peer.verify();
+    CHECK(rendered.result.exit_code == 1);
+    CHECK(rendered.output.empty());
+    auto value = parse_json(rendered.error);
+    REQUIRE(value);
+    auto const& error = value->as_object().at("error").as_object();
+    CHECK(error.at("code").as_string() == "jobuctl.queue.ambiguous_selector");
+    CHECK(error.at("message").as_string().find("id:" + upper) != std::string::npos);
+    CHECK(error.at("message").as_string().find("name:" + upper) != std::string::npos);
+    CHECK_FALSE(error.at("outcome_unknown").as_bool());
+}
+
+TEST_CASE("explicit queue aliases and prefixes bypass only inference probes", "[jobuctl][queue-selection]")
+{
+    auto const queue = fixture_queue(fixture_id);
+    for (auto const& arguments : std::vector<std::vector<std::string>>{
+             {"id:" + std::string{fixture_id}},
+             {"--id", fixture_id},
+             {"name:" + std::string{fixture_id}},
+             {"--name", fixture_id}
+    }) {
+        CAPTURE(arguments);
+        auto const explicit_id = arguments.front().starts_with("id:") || arguments.front() == "--id";
+        auto       steps       = std::vector<PeerStep>{handshake()};
+        if (!explicit_id) {
+            steps.push_back(queue_lookup(queue.name, queue));
+        }
+        steps.push_back(queue_mutation("queue.delete", queue));
+        ScriptedPeer peer{std::move(steps)};
+        auto         command = std::vector<std::string>{"queue", "delete"};
+        command.insert(command.end(), arguments.begin(), arguments.end());
+        command.emplace_back("--json");
+        auto rendered = run_captured(command_for(peer.path(), std::move(command)), SessionMode::Render);
+        peer.verify();
+        CHECK(rendered.result.exit_code == 0);
+        CHECK(rendered.output == "null\n");
+        CHECK(rendered.error.empty());
+    }
+}
+
+TEST_CASE("resolved queue names pin updates lifecycle calls and human acknowledgements", "[jobuctl][queue-selection]")
+{
+    auto const original = fixture_queue();
+    auto       renamed  = original;
+    renamed.name        = "renamed-after-selection";
+    for (auto const* action : {"update", "suspend", "resume", "delete"}) {
+        CAPTURE(action);
+        auto command = std::vector<std::string>{"queue", action, "reports"};
+        auto final   = queue_mutation("queue." + std::string{action}, renamed);
+        if (std::string_view{action} == "update") {
+            command.insert(command.end(), {"--revision", "7", "--weight", "4"});
+            auto params =
+                parse_json(R"({"queue_id":"00112233-4455-6677-8899-aabbccddeeff","expected_revision":7,"weight":4})");
+            REQUIRE(params);
+            final.params = *params;
+        }
+        // The peer changes the name between discovery and mutation, accepting only the original UUID on the wire.
+        // A replacement queue named reports cannot become the mutation's target.
+        ScriptedPeer peer{
+            {handshake(), queue_lookup(original.name, original), std::move(final)}
+        };
+        auto rendered = run_captured(command_for(peer.path(), std::move(command)), SessionMode::Render);
+        peer.verify();
+        CHECK(rendered.result.exit_code == 0);
+        CHECK(rendered.error.empty());
+        if (std::string_view{action} == "delete") {
+            CHECK(rendered.output == "Deleted queue name=reports\n");
+        }
+        else {
+            check_once(rendered.output, "renamed-after-selection");
+        }
+    }
+}
+
+TEST_CASE("queue get reuses the first result and prints or captures it only once", "[jobuctl][queue-selection]")
+{
+    auto queue     = fixture_queue(fixture_id);
+    auto later     = queue;
+    later.revision = 8;
+    for (auto const mode : {SessionMode::Capture, SessionMode::Render}) {
+        for (auto const inferred : {false, true}) {
+            CAPTURE(mode, inferred);
+            auto steps = std::vector<PeerStep>{
+                handshake(),
+                queue_lookup(inferred ? QueueSelector{queue.id} : QueueSelector{queue.name}, queue)};
+            if (inferred) {
+                steps.push_back(queue_lookup(queue.name, later));
+            }
+            ScriptedPeer peer{std::move(steps)};
+            auto         command =
+                std::vector<std::string>{"queue", "get", inferred ? fixture_id : "name:" + queue.name, "--json"};
+            auto captured = run_captured(command_for(peer.path(), std::move(command)), mode);
+            peer.verify();
+            CHECK(captured.result.exit_code == 0);
+            if (mode == SessionMode::Capture) {
+                check_silent(captured);
+                REQUIRE(captured.result.reply);
+                CHECK(std::get<Queue>(*captured.result.reply).revision == 7);
+            }
+            else {
+                CHECK(captured.error.empty());
+                auto value = parse_json(captured.output);
+                REQUIRE(value);
+                CHECK(value->as_object().at("revision").as_uint() == 7);
+                check_once(captured.output, "\"revision\"");
+            }
+        }
+    }
+}
+
+TEST_CASE("queue selection preserves operational errors at either lookup", "[jobuctl][queue-selection]")
+{
+    auto const queue = fixture_queue();
+    for (auto const first_lookup : {true, false}) {
+        for (auto const action : {PeerAction::RemoteError, PeerAction::Disconnect, PeerAction::Reply}) {
+            CAPTURE(first_lookup, action);
+            auto steps = std::vector<PeerStep>{handshake()};
+            if (!first_lookup) {
+                steps.push_back(queue_lookup(queue.id, queue));
+            }
+            auto failure = queue_lookup(first_lookup ? QueueSelector{queue.id} : QueueSelector{std::string{fixture_id}},
+                                        std::nullopt);
+            failure.action = action;
+            // A valid domain failure, disconnect, or malformed result must stop discovery without a final mutation.
+            failure.value =
+                action == PeerAction::RemoteError ? queue_failure("jobu.fixture.storage", "storage") : JsonValue{};
+            steps.push_back(std::move(failure));
+            ScriptedPeer peer{std::move(steps)};
+            auto         captured = run_captured(command_for(peer.path(), {"queue", "delete", fixture_id}));
+            peer.verify();
+            check_silent(captured);
+            CHECK(captured.result.exit_code == (action == PeerAction::RemoteError ? 1 : 3));
+            REQUIRE(captured.result.error);
+            CHECK_FALSE(captured.result.error->outcome_unknown);
+            CHECK_FALSE(captured.result.reply);
+            if (action == PeerAction::RemoteError) {
+                CHECK(captured.result.error->code == "jobu.fixture.storage");
+            }
+        }
+    }
+}
+
+TEST_CASE("only the application queue not-found error counts as absent", "[jobuctl][queue-selection]")
+{
+    auto const queue = fixture_queue();
+    for (auto const wrong_category : {false, true}) {
+        auto failure = queue_lookup(std::string{fixture_id}, std::nullopt);
+        if (wrong_category) {
+            failure.value = queue_failure("jobu.queue.not_found", "storage");
+        }
+        else {
+            std::get<JsonValue::Object>(failure.value.data).at("code").data = std::int64_t{-32602};
+        }
+        ScriptedPeer peer{
+            {handshake(), queue_lookup(queue.id, queue), std::move(failure)}
+        };
+        auto captured = run_captured(command_for(peer.path(), {"queue", "get", fixture_id}));
+        peer.verify();
+        check_silent(captured);
+        CHECK(captured.result.exit_code == 1);
+        REQUIRE(captured.result.error);
+        CHECK_FALSE(captured.result.reply);
+        CHECK_FALSE(captured.result.error->outcome_unknown);
+    }
+}
+
+TEST_CASE("queue statistics resolve retained rows and retain every filter", "[jobuctl][queue-selection]")
+{
+    auto queue      = fixture_queue();
+    queue.state     = QueueState::Deleted;
+    auto const page = statistics_json();
+    for (auto const inferred : {false, true}) {
+        CAPTURE(inferred);
+        auto steps = std::vector<PeerStep>{
+            handshake(),
+            queue_lookup(inferred ? QueueSelector{queue.id} : QueueSelector{queue.name}, queue, true)};
+        if (inferred) {
+            steps.push_back(queue_lookup(std::string{fixture_id}, std::nullopt, true));
+        }
+        auto params = parse_json(
+            R"({"queue_id":"00112233-4455-6677-8899-aabbccddeeff","job_id":"10112233-4455-6677-8899-aabbccddeeff","type":"cli","origin":"manual","planned":{"from":"2030-01-01T00:00:00.000000Z","to":"2030-01-02T00:00:00.000000Z"},"group_by":"state","limit":17})");
+        REQUIRE(params);
+        steps.push_back({.method = "queue.stats", .value = page, .params = *params});
+        ScriptedPeer peer{std::move(steps)};
+        auto         captured = run_captured(command_for(peer.path(),
+                                                         {"queue",
+                                                          "stats",
+                                                          inferred ? fixture_id : "reports",
+                                                          "--job-id",
+                                                          "10112233-4455-6677-8899-aabbccddeeff",
+                                                          "--type",
+                                                          "cli",
+                                                          "--origin",
+                                                          "manual",
+                                                          "--planned-from",
+                                                          "2030-01-01T00:00:00Z",
+                                                          "--planned-to",
+                                                          "2030-01-02T00:00:00Z",
+                                                          "--group-by",
+                                                          "state",
+                                                          "--limit",
+                                                          "17",
+                                                          "--json"}),
+                                             SessionMode::Render);
+        peer.verify();
+        CHECK(captured.result.exit_code == 0);
+        CHECK(captured.error.empty());
+        auto value = parse_json(captured.output);
+        REQUIRE(value);
+        CHECK(serialize_json(*value).value() == serialize_json(page).value());
+    }
+}
+
+TEST_CASE("historical ambiguity stops statistics with explicit identity guidance", "[jobuctl][queue-selection]")
+{
+    auto const queue = fixture_queue();
+    for (auto const id_exists : {false, true}) {
+        auto steps =
+            std::vector<PeerStep>{handshake(),
+                                  queue_lookup(queue.id, id_exists ? std::optional{queue} : std::nullopt, true)};
+        auto failure  = queue_lookup(std::string{fixture_id}, std::nullopt, true);
+        failure.value = queue_failure("jobu.queue.ambiguous_deleted_name", "conflict");
+        steps.push_back(std::move(failure));
+        ScriptedPeer peer{std::move(steps)};
+        auto         captured = run_captured(command_for(peer.path(), {"queue", "stats", fixture_id}));
+        peer.verify();
+        check_silent(captured);
+        CHECK(captured.result.exit_code == 1);
+        REQUIRE(captured.result.error);
+        CHECK(captured.result.error->code == "jobu.queue.ambiguous_deleted_name");
+        CHECK(captured.result.error->message.find("id:UUID") != std::string::npos);
+    }
+}
+
+TEST_CASE("cursor raw requests and explicit IDs keep their original dispatch contract", "[jobuctl][queue-selection]")
+{
+    auto const queue = fixture_queue();
+    SECTION("cursor-only stats")
+    {
+        auto params = parse_json(R"({"cursor":"opaque"})");
+        REQUIRE(params);
+        ScriptedPeer peer{
+            {handshake(), {.method = "queue.stats", .value = statistics_json(), .params = *params}}
+        };
+        auto captured = run_captured(command_for(peer.path(), {"queue", "stats", "--cursor", "opaque"}));
+        peer.verify();
+        check_silent(captured);
+        CHECK(captured.result.exit_code == 0);
+    }
+    SECTION("raw name and prefix-looking strings are sent literally")
+    {
+        for (auto const* action : {"get", "update", "suspend", "resume", "delete", "stats"}) {
+            CAPTURE(action);
+            // Load through the actual request-file path; Session must not strip prefixes or preflight.
+            auto text  = std::string_view{R"({"queue_name":"name:reports"})"};
+            auto value = queue_json(queue);
+            if (std::string_view{action} == "get") {
+                text = R"({"queue_name":"name:reports","include_deleted":true})";
+            }
+            else if (std::string_view{action} == "update") {
+                text = R"({"queue_name":"name:reports","expected_revision":7,"weight":4})";
+            }
+            else if (std::string_view{action} == "stats") {
+                text  = R"({"queue_name":"name:reports","group_by":"none","limit":100,"planned":{}})";
+                value = statistics_json();
+            }
+            else if (std::string_view{action} == "delete") {
+                value = JsonValue{};
+            }
+            auto params = parse_json(text);
+            REQUIRE(params);
+            ScriptedPeer peer{
+                {handshake(),
+                 {.method = "queue." + std::string{action}, .value = std::move(value), .params = *params}}
+            };
+            jb::test::TemporaryDirectory directory;
+            auto                         path    = directory.path() / "request.json";
+            auto                         encoded = serialize_json(*params);
+            REQUIRE(encoded);
+            {
+                std::ofstream file{path};
+                file << *encoded;
+                REQUIRE(file.good());
+            }
+            auto command = command_for(peer.path(), {"queue", action, "--request-file", path.string()});
+            REQUIRE_FALSE(command.queue_selector_intent);
+            REQUIRE(load_request_file(command, StandardAttributeRegistry{}));
+            auto captured = run_captured(std::move(command));
+            peer.verify();
+            check_silent(captured);
+            CHECK(captured.result.exit_code == 0);
+        }
+    }
+    SECTION("explicit delete remains available without revision-bearing lookup support")
+    {
+        auto  info               = handshake();
+        auto& fields             = std::get<JsonValue::Object>(info.value.data);
+        auto& version            = std::get<JsonValue::Object>(fields.at("api_version").data);
+        version.at("minor").data = std::uint64_t{5};
+        ScriptedPeer peer{
+            {std::move(info), queue_mutation("queue.delete", queue)}
+        };
+        auto captured = run_captured(command_for(peer.path(), {"queue", "delete", "--id", fixture_id}));
+        peer.verify();
+        check_silent(captured);
+        CHECK(captured.result.exit_code == 0);
+    }
+}
+
+TEST_CASE("queue selection rejects mismatched lookup identities and live-only tombstones", "[jobuctl][queue-selection]")
+{
+    auto const queue = fixture_queue();
+    for (auto const* scenario : {"id", "name", "probe", "deleted"}) {
+        CAPTURE(scenario);
+        auto returned  = queue;
+        auto arguments = std::vector<std::string>{"queue", "delete", fixture_id};
+        auto selector  = QueueSelector{queue.id};
+        auto steps     = std::vector<PeerStep>{handshake()};
+        if (std::string_view{scenario} == "id") {
+            returned = fixture_queue("reports", "10112233-4455-6677-8899-aabbccddeeff");
+        }
+        else if (std::string_view{scenario} == "deleted") {
+            returned.state = QueueState::Deleted;
+        }
+        else if (std::string_view{scenario} == "name") {
+            arguments.back() = "reports";
+            selector         = std::string{"reports"};
+            returned.name    = "unrelated";
+        }
+        else {
+            steps.push_back(queue_lookup(queue.id, queue));
+            selector = std::string{fixture_id};
+        }
+        steps.push_back(queue_lookup(selector, returned));
+        ScriptedPeer peer{std::move(steps)};
+        auto         captured = run_captured(command_for(peer.path(), std::move(arguments)));
+        peer.verify();
+        check_silent(captured);
+        CHECK(captured.result.exit_code == 3);
+        REQUIRE(captured.result.error);
+        CHECK(captured.result.error->code == "jobu.client.invalid_response");
+        CHECK_FALSE(captured.result.error->outcome_unknown);
+    }
+}
+
+TEST_CASE("queue selection preserves synchronous admission failures without uncertainty", "[jobuctl][queue-selection]")
+{
+    auto const queue = fixture_queue();
+    for (auto const* scenario : {"old-peer", "missing-lookup", "missing-mutation"}) {
+        CAPTURE(scenario);
+        auto  info   = handshake();
+        auto& fields = std::get<JsonValue::Object>(info.value.data);
+        auto  steps  = std::vector<PeerStep>{};
+        if (std::string_view{scenario} == "old-peer") {
+            auto& version            = std::get<JsonValue::Object>(fields.at("api_version").data);
+            version.at("minor").data = std::uint64_t{5};
+        }
+        else {
+            auto info_value = system_info_from_json(info.value);
+            REQUIRE(info_value);
+            auto const* absent = std::string_view{scenario} == "missing-lookup" ? "queue.get" : "queue.delete";
+            std::erase(info_value->capabilities, std::string{absent});
+            info.value = system_info_to_json(*info_value);
+        }
+        steps.push_back(std::move(info));
+        if (std::string_view{scenario} == "missing-mutation") {
+            steps.push_back(queue_lookup(queue.name, queue));
+        }
+        ScriptedPeer peer{std::move(steps)};
+        auto         captured = run_captured(command_for(peer.path(), {"queue", "delete", "reports"}));
+        peer.verify();
+        check_silent(captured);
+        CHECK(captured.result.exit_code == 1);
+        REQUIRE(captured.result.error);
+        CHECK(captured.result.error->code == (std::string_view{scenario} == "old-peer"
+                                                  ? "jobu.client.unsupported_feature"
+                                                  : "jobu.client.unsupported_method"));
+        CHECK_FALSE(captured.result.error->outcome_unknown);
+    }
+}
+
+TEST_CASE("queue selection mutation and polling share one deadline with phase-correct uncertainty",
+          "[jobuctl][queue-selection]")
+{
+    auto queue = fixture_queue(fixture_id);
+    for (auto const stop_at : {0U, 1U, 2U, 3U, 4U}) {
+        CAPTURE(stop_at);
+        StandardAttributeRegistry    registry;
+        StreamCapture                output{stdout};
+        StreamCapture                error{stderr};
+        std::optional<SessionResult> result;
+        auto                         finishes = 0;
+        auto                         observed = 0U;
+        {
+            Application app{0, nullptr};
+            auto*       loop = ThreadCtx::current()->event_loop();
+            REQUIRE(loop);
+            auto suspended  = queue;
+            suspended.state = QueueState::Suspending;
+            auto steps      = std::vector<PeerStep>{handshake(),
+                                                    queue_lookup(queue.id, queue),
+                                                    queue_lookup(queue.name, queue),
+                                                    queue_mutation("queue.suspend", suspended),
+                                                    queue_lookup(queue.id, suspended)};
+            steps.resize(stop_at + 1);
+            steps.back().action = PeerAction::Silence;
+            std::optional<TimePoint> initial_deadline;
+            ScriptedPeer             peer{
+                std::move(steps),
+                RequestObservation{.loop = loop, .observe = [&](std::string const&) {
+                                       auto deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*loop);
+                                       REQUIRE(deadline);
+                                       REQUIRE(initial_deadline);
+                                       CHECK(*deadline <= *initial_deadline);
+                                       if (observed++ == stop_at) {
+                                           // Expire the original budget at the chosen phase without sleeps or a fresh
+                                           // Session.
+                                           jb::core::priv::EventLoopTestAccess::fire_next_timer(*loop);
+                                       }
+                                   }}
+            };
+            Session session{command_for(peer.path(), {"queue", "suspend", fixture_id, "--wait", "--json"}), registry};
+            session.finished.connect(&app, [&](int code) {
+                ++finishes;
+                static_cast<void>(app.quit(code));
+                session.start();
+            });
+            session.start();
+            initial_deadline = jb::core::priv::EventLoopTestAccess::next_timer_deadline(*loop);
+            REQUIRE(initial_deadline);
+            CHECK(app.exec() == 3);
+            result = session.take_result();
+            CHECK_FALSE(session.take_result());
+            CHECK(jb::core::priv::EventLoopTestAccess::active_timer_count(*loop) == 0);
+            peer.verify();
+        }
+        auto error_text  = error.text();
+        auto output_text = output.text();
+        CHECK(output_text.empty());
+        CHECK(observed == stop_at + 1);
+        CHECK(finishes == 1);
+        REQUIRE(result);
+        REQUIRE(result->error);
+        CHECK(result->error->code == "jobu.client.timeout");
+        CHECK(result->error->outcome_unknown == (stop_at == 3));
+        auto rendered = parse_json(error_text);
+        REQUIRE(rendered);
+        CHECK(rendered->as_object().at("error").as_object().at("outcome_unknown").as_bool() == (stop_at == 3));
+    }
+}
+
+TEST_CASE("queue waits keep the selected UUID and late replies cannot deliver or finish twice",
+          "[jobuctl][queue-selection]")
+{
+    auto queue = fixture_queue(fixture_id);
+    for (auto const wait : {false, true}) {
+        CAPTURE(wait);
+        auto final  = queue;
+        final.name  = "renamed-after-resolution";
+        final.state = wait ? QueueState::Suspending : QueueState::Suspended;
+        auto steps  = std::vector<PeerStep>{handshake(),
+                                            queue_lookup(queue.id, queue),
+                                            queue_lookup(queue.name, queue),
+                                            queue_mutation("queue.suspend", final)};
+        if (wait) {
+            final.state = QueueState::Suspended;
+            steps.push_back(queue_lookup(queue.id, final));
+        }
+        for (auto& step : steps) {
+            step.action = PeerAction::Duplicate;
+        }
+        ScriptedPeer                 peer{std::move(steps)};
+        StreamCapture                output{stdout};
+        StreamCapture                error{stderr};
+        StandardAttributeRegistry    registry;
+        auto                         finishes = 0;
+        std::optional<SessionResult> result;
+        {
+            Application app{0, nullptr};
+            auto        command = command_for(peer.path(), {"queue", "suspend", fixture_id, "--json"});
+            command.wait        = wait;
+            Session session{std::move(command), registry};
+            session.finished.connect(&app, [&](int code) {
+                ++finishes;
+                static_cast<void>(app.quit(code));
+                session.start();
+            });
+            session.start();
+            CHECK(app.exec() == 0);
+            result = session.take_result();
+        }
+        auto error_text  = error.text();
+        auto output_text = output.text();
+        peer.verify();
+        CHECK(finishes == 1);
+        REQUIRE(result);
+        CHECK(result->exit_code == 0);
+        CHECK(error_text.empty());
+        auto value = parse_json(output_text);
+        REQUIRE(value);
+        CHECK(value->as_object().at("id").as_string() == fixture_id);
+        CHECK(value->as_object().at("state").as_string() == "suspended");
+        CHECK(value->as_object().at("name").as_string() == "renamed-after-resolution");
+    }
+}
+
+TEST_CASE("a lost final mutation reply remains uncertain after successful selection", "[jobuctl][queue-selection]")
+{
+    auto const queue    = fixture_queue();
+    auto       mutation = queue_mutation("queue.delete", queue);
+    mutation.action     = PeerAction::Disconnect;
+    ScriptedPeer peer{
+        {handshake(), queue_lookup(queue.name, queue), std::move(mutation)}
+    };
+    auto captured = run_captured(command_for(peer.path(), {"queue", "delete", "reports"}));
+    peer.verify();
+    check_silent(captured);
+    CHECK(captured.result.exit_code == 3);
+    REQUIRE(captured.result.error);
+    CHECK(captured.result.error->outcome_unknown);
+    CHECK_FALSE(captured.result.reply);
 }

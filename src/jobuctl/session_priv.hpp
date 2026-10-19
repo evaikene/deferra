@@ -31,6 +31,8 @@ struct SessionResult {
 /// JSON and Capture run.get retain the single requested reply without enrichment.
 /// Run output selects the latest observed Completed attempt and reads one chunk under that same deadline.
 /// Only its final chunk is rendered or captured; selection failures never deliver output bytes or create files.
+/// CLI queue names are resolved and pinned before dispatch; inferred IDs also check their exact name interpretation.
+/// Selection and wait polling share the original deadline and never deliver intermediate replies.
 /// Destroy after signal callback stacks unwind.
 class Session final : public jb::core::Object {
 public:
@@ -54,6 +56,12 @@ private:
 
     void connected();
     void ready(jb::jobu::SystemInfo const& info);
+    void dispatch_command();
+    void begin_queue_selection();
+    void request_queue_selection(bool name_probe);
+    void receive_queue_selection(jb::jobu::ControlReply const& reply);
+    void queue_selection_missing(CliError error);
+    void complete_queue_selection();
     void receive_reply(jb::jobu::ControlCallId id, jb::jobu::ControlReply const& reply);
     void receive_failure(jb::jobu::ControlCallId id, jb::jobu::ControlFailure const& failure);
     void receive_run_inspection(jb::jobu::ControlReply const& reply);

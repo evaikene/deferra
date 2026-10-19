@@ -237,7 +237,7 @@ constexpr std::array schedule_validate{timezone};
 constexpr std::string_view select_queue =
     "Supply one positional SELECTOR, --id UUID, or --name NAME. Bare UUIDs select IDs; other text selects exact names. "
     "Use id:UUID or name:NAME to be explicit; prefixes are case-sensitive and interpreted once. "
-    "UUID/name collision checks are not yet available.";
+    "Bare UUID/name collision checks require an explicit prefix on ambiguity. Names are pinned to UUIDs.";
 constexpr std::string_view job_uuid = "UUID is the job ID.";
 
 // Each canonical leaf owns its alias and dispatch strategy. Adding an alias cannot introduce a new wire method.
@@ -325,7 +325,8 @@ constexpr CommandSpec queue_update_command{
                         "use id:UUID or name:NAME to be explicit. Prefixes are case-sensitive and interpreted once. "
                         "Require --revision and at least one replacement field; --new-name changes the name. "
                         "Unspecified fields remain unchanged. Stale revisions fail without automatic retry. "
-                        "UUID/name collision checks and interactive queue editing are not yet available.",
+                        "Bare UUID/name collisions require an explicit prefix. Names are pinned to UUIDs. "
+                        "Interactive queue editing is not yet available.",
     .example          = "jobuctl queue update reports --revision 1 --weight 2",
     .capability       = "queue.update",
     .build            = parse_queue_command,
@@ -386,7 +387,8 @@ constexpr CommandSpec queue_stats_command{
     .rules            = "Initially supply one positional SELECTOR, --id UUID, or --name NAME. Bare UUIDs select IDs; "
                         "use id:UUID or name:NAME to be explicit. Prefixes are case-sensitive and interpreted once. "
                         "--cursor alone continues a page, without selectors or filters. "
-                        "UUID/name collision checks are not yet available.",
+                        "Bare UUID/name collisions require an explicit prefix. Name resolution includes retained "
+                        "deleted queues and pins the selected UUID.",
     .example          = "jobuctl queue stats reports --group-by job",
     .capability       = "queue.stats",
     .build            = parse_queue_statistics_command,

@@ -442,3 +442,129 @@ TEST_CASE("jobuctl statistics pages and cron previews use real daemon methods", 
     CHECK(invalid.out.empty());
     CHECK(invalid.err.find("\"kind\":\"remote\"") != std::string::npos);
 }
+
+TEST_CASE("queue selectors distinguish live collisions from retained statistics names",
+          "[jobuctl][integration][selector]")
+{
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    auto const                   socket       = directory.path() / "jobud.sock";
+    auto                         daemon       = start_daemon(socket, directory.path() / "jobu.sqlite");
+    auto                         anchor       = json_reply(socket, {"queue", "create", "anchor"});
+    auto const                   id           = anchor.as_object().at("id").as_string();
+    auto                         collision    = json_reply(socket, {"queue", "create", id});
+    auto const                   collision_id = collision.as_object().at("id").as_string();
+
+    // Every ordinary command rejects the same live collision before making changes.
+    for (auto const* action : {"get", "update", "suspend", "resume", "delete", "stats"}) {
+        CAPTURE(action);
+        auto arguments = std::vector<std::string>{"queue", action, id, "--json"};
+        if (std::string_view{action} == "update") {
+            arguments.insert(arguments.end(), {"--revision", "1", "--weight", "4"});
+        }
+        auto result = run_cli(socket, std::move(arguments));
+        CHECK(result.code == 1);
+        CHECK(result.out.empty());
+        auto error = jb::core::parse_json(result.err);
+        REQUIRE(error);
+        auto const& fields = error->as_object().at("error").as_object();
+        CHECK(fields.at("code").as_string() == "jobuctl.queue.ambiguous_selector");
+        CHECK_FALSE(fields.at("outcome_unknown").as_bool());
+    }
+    auto selected_id   = json_reply(socket, {"queue", "get", "id:" + id});
+    auto selected_name = json_reply(socket, {"queue", "get", "name:" + id});
+    CHECK(selected_id == anchor);
+    CHECK(selected_name == collision);
+
+    // Give this queue two retained cancelled runs before deletion. Childless tombstones can be purged immediately.
+    // Future schedules avoid launching an executor, and normal retention keeps these newly cancelled runs alive.
+    for (auto index = 0; index < 2; ++index) {
+        static_cast<void>(json_reply(socket,
+                                     {"job",
+                                      "create",
+                                      "--queue-id",
+                                      collision_id,
+                                      "--type",
+                                      "cli",
+                                      "--at",
+                                      "2099-01-01T00:00:00Z",
+                                      "--command",
+                                      "/bin/true"}));
+    }
+    static_cast<void>(json_reply(socket, {"queue", "suspend", "id:" + collision_id}));
+    static_cast<void>(json_reply(socket, {"queue", "delete", "id:" + collision_id}));
+    CHECK(json_reply(socket, {"queue", "get", id}) == anchor);
+
+    auto historical_collision = run_cli(socket, {"queue", "stats", id, "--json"});
+    CHECK(historical_collision.code == 1);
+    CHECK(historical_collision.err.find("jobuctl.queue.ambiguous_selector") != std::string::npos);
+    auto page = json_reply(socket,
+                           {"queue",
+                            "stats",
+                            "name:" + id,
+                            "--planned-from",
+                            "2099-01-01T00:00:00Z",
+                            "--planned-to",
+                            "2099-01-02T00:00:00Z",
+                            "--group-by",
+                            "job",
+                            "--limit",
+                            "1"});
+    CHECK(page.as_object().at("groups").as_array().size() == 1);
+    auto const& cursor = page.as_object().at("next_cursor");
+    REQUIRE(cursor.is_string());
+    auto continuation = json_reply(socket, {"queue", "stats", "--cursor", cursor.as_string()});
+    CHECK(continuation.as_object().at("groups").as_array().size() == 1);
+    CHECK(continuation.as_object().at("next_cursor").is_null());
+
+    auto       reused     = json_reply(socket, {"queue", "create", id});
+    auto const reused_id  = reused.as_object().at("id").as_string();
+    auto       live_stats = json_reply(socket,
+                                       {"queue",
+                                        "stats",
+                                        "name:" + id,
+                                        "--planned-from",
+                                        "2099-01-01T00:00:00Z",
+                                        "--planned-to",
+                                        "2099-01-02T00:00:00Z"});
+    CHECK(live_stats.as_object()
+              .at("groups")
+              .as_array()
+              .front()
+              .as_object()
+              .at("runs")
+              .as_object()
+              .at("total")
+              .as_uint() == 0);
+    static_cast<void>(json_reply(socket,
+                                 {"job",
+                                  "create",
+                                  "--queue-id",
+                                  reused_id,
+                                  "--type",
+                                  "cli",
+                                  "--at",
+                                  "2099-01-01T00:00:00Z",
+                                  "--command",
+                                  "/bin/true"}));
+    static_cast<void>(json_reply(socket, {"queue", "suspend", "id:" + reused_id}));
+    static_cast<void>(json_reply(socket, {"queue", "delete", "id:" + reused_id}));
+
+    for (auto const& selector : {id, "name:" + id}) {
+        auto ambiguous = run_cli(socket, {"queue", "stats", selector, "--json"});
+        CHECK(ambiguous.code == 1);
+        CHECK(ambiguous.out.empty());
+        CHECK(ambiguous.err.find("jobu.queue.ambiguous_deleted_name") != std::string::npos);
+        CHECK(ambiguous.err.find("id:UUID") != std::string::npos);
+    }
+    auto by_id = json_reply(socket,
+                            {"queue",
+                             "stats",
+                             "id:" + collision_id,
+                             "--planned-from",
+                             "2099-01-01T00:00:00Z",
+                             "--planned-to",
+                             "2099-01-02T00:00:00Z"});
+    CHECK(by_id.as_object().at("groups").as_array().front().as_object().at("runs").as_object().at("total").as_uint() ==
+          2);
+    CHECK(json_reply(socket, {"queue", "get", "id:" + id}) == anchor);
+}

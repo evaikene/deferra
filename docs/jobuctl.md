@@ -98,7 +98,7 @@ These forms are mutually exclusive, even if they identify the same queue.
 | Selector | Meaning |
 |---|---|
 | `reports` | Exact queue name |
-| An exact 8-4-4-4-12 hexadecimal UUID, in either hex case | Queue ID |
+| An exact 8-4-4-4-12 hexadecimal UUID, in either hex case | Queue ID, checked for an exact-name collision |
 | `id:UUID` | Explicit ID; a malformed UUID is a local error |
 | `name:NAME` | Explicit exact name, including UUID-shaped names |
 | `name:id:reports` / `name:name:reports` | Literal `id:reports` / `name:reports` |
@@ -111,9 +111,22 @@ name. Alias values are literal: `--name id:reports` selects the name `id:reports
 and `--id` requires the UUID itself. `queue create NAME` keeps a literal name,
 including prefix-looking names; `queue list` takes no selector.
 
-UUID/name collision checks and name-to-UUID pinning are pending U.30. Currently,
-a bare UUID selects only by ID, without a name probe or fallback. Use `id:UUID`
-or `name:NAME` to state intent explicitly. Request-file selectors remain raw
+For a bare UUID, the CLI checks both the ID and the exact original name spelling.
+If they select different queues, the command fails with
+`jobuctl.queue.ambiguous_selector`; use `id:UUID` or `name:NAME` to state intent.
+Matching the same queue both ways is allowed. If the ID is missing, a name match
+does not become a fallback: use `name:NAME` explicitly. Prefixes and aliases
+bypass this ambiguity check; explicit names still require resolution.
+
+Names are resolved once and subsequent operations use the returned UUID, so a
+later rename or name reuse cannot redirect the command. Sequential probes are
+not an atomic snapshot of the namespace. Connection, handshake, selection, the
+final RPC and any wait polling share one `--timeout` budget. Only the final
+result is printed, including in JSON mode. A failure during read-only selection
+does not imply an unknown mutation outcome. Selection reads require API 1.6 and
+the `queue.get` capability; explicit IDs require no additional preflight read.
+
+Request-file selectors remain raw
 protocol values: `queue_name` is literal, `queue_id` must be a UUID, and neither
 field undergoes CLI prefix interpretation or inferred selection.
 
@@ -539,6 +552,13 @@ initial selector, positional `SELECTOR`, `--id UUID`, or `--name NAME`. Both acc
 The planned window is half-open and at most 31 days. Omit its upper bound to use
 the daemon's current UTC time; omit its lower bound to use 24 hours before the
 resolved upper bound.
+
+Initial CLI name resolution and bare-UUID ambiguity probes include retained
+deleted queues. Names prefer a live queue, then a unique historical match;
+ambiguous historical names fail with `jobu.queue.ambiguous_deleted_name` and
+require an explicit ID. The final query retains the requested filters and
+window and uses the resolved UUID. Explicit IDs can address retained deleted
+queues directly. Cursor-only continuation performs no selector lookup.
 
 ```sh
 jobuctl system stats --group-by state --json
