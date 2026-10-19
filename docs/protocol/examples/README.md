@@ -11,6 +11,7 @@ names, IDs, and timestamps.
 | [Protected queue update](queue-update.params.json) | API 1.6 stable UUID and required inspected revision |
 | [Queue update Invalid params](queue-update-invalid-params.error.json) and [revision conflict](queue-update-conflict.error.json) | Legacy/invalid input versus a valid stale token; no automatic retry |
 | [Queue creation](queue-create.params.json) | Defaulted queue configuration and an idempotency key |
+| [Historical queue get](queue-get.params.json) | API 1.6 opt-in to a retained original queue name |
 | [Job creation](job-create.params.json) | A symbolic once-now schedule and a CLI payload |
 | [Job creation with secret references](job-create-secret.params.json) | Ordered CLI argument references and a named environment reference |
 | [HTTP job creation](job-create-http.params.json) | Mixed-case POST input admitted and stored as uppercase POST |

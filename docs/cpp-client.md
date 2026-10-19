@@ -128,6 +128,24 @@ validation precedes the peer feature check. `delete_queue`, `queue_statistics`,
 and other unaffected methods retain their advertised-method support. The
 compatible-major handshake and capability names remain unchanged.
 
+Since API 1.6, `get_queue(GetQueueRequest const&, ControlCallOptions)` can opt
+into retained deleted queues:
+
+```cpp
+auto call = client.get_queue(jb::jobu::GetQueueRequest{
+    .queue = std::string{"archived-reports"},
+    .include_deleted = true,
+});
+```
+
+The option defaults to false. Existing calls with a UUID, string name, or
+`QueueSelector` remain live-only and preserve their call options. With true,
+IDs address the retained row; names prefer a live queue, then a unique original
+deleted name. Multiple deleted matches fail remotely with
+`jobu.queue.ambiguous_deleted_name`. Both overloads deliver the usual
+revision-bearing `Queue` reply and use the same API 1.6 admission checks.
+Use explicit `GetQueueRequest` construction when selecting historical visibility.
+
 For `list_runs`, `RunFilters::state` selects one state. Since API 1.5,
 `RunFilters::states` selects any of 1–7 distinct valid states, preserving caller
 order in the request. The two selectors are mutually exclusive; an absent set

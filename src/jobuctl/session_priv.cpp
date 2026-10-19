@@ -130,7 +130,7 @@ auto call_command(ControlClient& client, Command const& command, ControlCallOpti
         case CommandKind::QueueCreate:
             return client.create_queue(std::get<CreateQueueRequest>(command.request), options);
         case CommandKind::QueueGet:
-            return client.get_queue(std::get<QueueSelector>(command.request), options);
+            return client.get_queue(std::get<GetQueueRequest>(command.request), options);
         case CommandKind::QueueList:
             return client.list_queues(std::get<QueueListRequest>(command.request), options);
         case CommandKind::QueueUpdate:

@@ -17,6 +17,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -145,6 +146,11 @@ auto revision_queue_methods() -> std::vector<MethodCase>
     return {
         {"queue.create",  "name",       true,  [](auto& client) { return client.create_queue({.name = "queue"}); }    },
         {"queue.get",     "queue_name", false, [](auto& client) { return client.get_queue(std::string{"queue"}); }    },
+        {"queue.get",
+         "include_deleted",             false,
+         [](auto& client) {
+             return client.get_queue(GetQueueRequest{.queue = std::string{"queue"}, .include_deleted = true});
+         }                                                                                                            },
         {"queue.list",    "limit",      false, [](auto& client) { return client.list_queues(QueueListRequest{}); }    },
         {"queue.update",
          "expected_revision",           true,
@@ -236,7 +242,7 @@ TEST_CASE("API 1.6 and newer accept every revision-bearing queue method", "[jobu
             fixture.device.inject_input(success(wire.as_object().at("id").as_uint(), result));
             fixture.drain_tasks();
         }
-        CHECK(received == 6);
+        CHECK(received == 7);
         CHECK(fixture.device.take_written_data().empty());
     }
 }
@@ -991,4 +997,95 @@ TEST_CASE("Typed queue updates validate revisions locally and preserve conflict 
     auto closed               = fixture.typed->update_queue(request);
     REQUIRE_FALSE(closed);
     CHECK(closed.error().code == "jobu.client.not_ready");
+}
+
+TEST_CASE("Typed queue get preserves visibility convenience calls and call options", "[jobu][client][queue][get]")
+{
+    Fixture fixture;
+    fixture.initialize();
+    auto const id       = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff").value();
+    auto const selector = QueueSelector{id};
+    auto const submits  = std::vector<Submit>{
+        [&](auto& client) { return client.get_queue(id); },
+        [&](auto& client) { return client.get_queue(selector, ControlCallOptions{}); },
+        [](auto& client) { return client.get_queue(std::string{"archived"}); },
+        [&](auto& client) { return client.get_queue(GetQueueRequest{.queue = id}); },
+        [&](auto& client) { return client.get_queue(GetQueueRequest{.queue = id, .include_deleted = true}); },
+    };
+    auto received = std::optional<Queue>{};
+    auto failure  = std::optional<ControlFailure>{};
+    fixture.typed->reply_received.connect(fixture.typed.get(), [&](ControlCallId, ControlReply const& reply) {
+        received = std::get<Queue>(reply);
+    });
+    fixture.typed->call_failed.connect(fixture.typed.get(),
+                                       [&](ControlCallId, ControlFailure const& value) { failure = value; });
+
+    for (std::size_t index = 0; index < submits.size(); ++index) {
+        CAPTURE(index);
+        auto call = submits[index](*fixture.typed);
+        REQUIRE(call);
+        auto wire = request_body(fixture.device.take_written_data());
+        CHECK(wire.as_object().at("method").as_string() == "queue.get");
+        auto const& params = wire.as_object().at("params").as_object();
+        CHECK(params.size() == 2);
+        CHECK(params.at("include_deleted").as_bool() == (index == 4));
+        if (index == 2) {
+            CHECK(params.at("queue_name").as_string() == "archived");
+        }
+        else {
+            CHECK(params.at("queue_id").as_string() == id.to_string());
+        }
+
+        if (index == 4) {
+            auto tombstone = Queue{.id         = id,
+                                   .revision   = 4,
+                                   .name       = "archived",
+                                   .state      = QueueState::Deleted,
+                                   .deleted_at = UtcTimePoint{std::chrono::seconds{1}}};
+            fixture.device.inject_input(
+                success(wire.as_object().at("id").as_uint(), encoded(queue_to_json(tombstone, fixture.attributes))));
+            fixture.drain_tasks();
+            REQUIRE(received);
+            CHECK(received->id == id);
+            CHECK(received->revision == 4);
+            CHECK(received->state == QueueState::Deleted);
+        }
+        else {
+            fixture.typed->cancel_call(*call);
+            REQUIRE(failure);
+            CHECK_FALSE(failure->outcome_unknown);
+            failure.reset();
+        }
+    }
+
+    // Both overloads must forward options rather than silently substituting their default timeout.
+    auto const invalid_options = ControlCallOptions{.timeout = std::chrono::milliseconds{0}};
+    auto invalid = fixture.typed->get_queue(GetQueueRequest{.queue = id, .include_deleted = true}, invalid_options);
+    REQUIRE_FALSE(invalid);
+    CHECK(invalid.error().code == "jobu.client.invalid_timeout");
+    invalid = fixture.typed->get_queue(selector, invalid_options);
+    REQUIRE_FALSE(invalid);
+    CHECK(invalid.error().code == "jobu.client.invalid_timeout");
+    CHECK(fixture.device.take_written_data().empty());
+}
+
+TEST_CASE("Typed queue get validates before peer admission and after readiness", "[jobu][client][queue][get]")
+{
+    Fixture    fixture;
+    auto const invalid_request = GetQueueRequest{
+        .queue           = std::string{"\xc3\x28", 2U},
+        .include_deleted = true
+    };
+    auto rejected = fixture.typed->get_queue(invalid_request);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == "jobu.client.not_ready");
+    fixture.initialize(5);
+    rejected = fixture.typed->get_queue(invalid_request);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == "jobu.protocol.invalid_request");
+    CHECK(fixture.device.take_written_data().empty());
+    fixture.typed->close();
+    rejected = fixture.typed->get_queue(invalid_request);
+    REQUIRE_FALSE(rejected);
+    CHECK(rejected.error().code == "jobu.client.not_ready");
 }

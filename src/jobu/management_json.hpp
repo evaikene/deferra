@@ -71,8 +71,8 @@ namespace jb::jobu {
 
 /// Encodes queue operation parameters containing exactly one selector.
 ///
-/// UUID selectors become `queue_id`; name selectors become `queue_name`. The result is suitable for queue.get,
-/// queue.suspend, queue.resume, and queue.delete.
+/// UUID selectors become `queue_id`; name selectors become `queue_name`. The result is suitable for queue.suspend,
+/// queue.resume, and queue.delete. Use queue_get_request_to_json() for queue.get visibility options.
 ///
 /// @param selector Queue UUID or name to encode without retaining it.
 /// @return Owning JSON object, or `jobu.protocol.invalid_request` when the selector cannot be represented.
@@ -89,6 +89,24 @@ namespace jb::jobu {
 ///
 [[nodiscard]] auto queue_selector_from_json(jb::core::JsonValue const& value)
     -> jb::core::Result<QueueSelector, jb::core::Error>;
+
+/// Since API 1.6: encodes queue.get parameters with exactly one selector and an explicit include_deleted boolean.
+///
+/// @param request Typed get request to encode without retaining it.
+/// @return Owning JSON object, or `jobu.protocol.invalid_request` when the selector cannot be represented.
+///
+[[nodiscard]] auto queue_get_request_to_json(GetQueueRequest const& request)
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
+
+/// Since API 1.6: decodes queue.get parameters containing exactly one selector and optional include_deleted.
+///
+/// Omitted include_deleted defaults to false. Null, non-boolean values, and unknown members are rejected.
+///
+/// @param value JSON request object to decode without retaining references to it.
+/// @return Owning GetQueueRequest, or `jobu.protocol.invalid_request` when the object is ambiguous or invalid.
+///
+[[nodiscard]] auto queue_get_request_from_json(jb::core::JsonValue const& value)
+    -> jb::core::Result<GetQueueRequest, jb::core::Error>;
 
 /// Encodes queue.create parameters.
 ///

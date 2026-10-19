@@ -65,6 +65,32 @@ there is no fixed expiry measured from queue creation time.
 ## Get and list (`queue.get`, `queue.list`)
 
 `queue.get` accepts exactly one selector and returns a full queue object.
+Since API 1.6 it also accepts optional `include_deleted`:
+
+| Params member | Type | Required / default | Since | Meaning |
+| --- | --- | --- | --- | --- |
+| `queue_id` or `queue_name` | ID or string | Exactly one | 1.1 | Exact queue selector |
+| `include_deleted` | boolean | `false` | 1.6 | Permit retained soft-deleted rows |
+
+Omission or false reads only non-deleted queues. True permits a deleted queue
+by ID; name lookup first prefers a live queue, then accepts exactly one retained
+queue with that original name. Multiple deleted matches return application
+conflict `jobu.queue.ambiguous_deleted_name`; select a UUID to distinguish them.
+Historical results retain the original name and final revision. Null or a
+non-boolean option is Invalid params. The option is accepted only by get and
+list, and is rejected by queue mutations.
+
+For example, [this checked get request](../examples/queue-get.params.json)
+selects a retained queue by its original name:
+
+```json
+{"queue_name":"archived-reports","include_deleted":true}
+```
+
+Ordinary `jobuctl queue get SELECTOR` remains live-only. Use `queue get
+--request-file FILE` for the explicit protocol option. The C++ client exposes
+it through `GetQueueRequest`; selector-only `get_queue()` calls remain live-only.
+
 `queue.list` accepts these optional params:
 
 | Params member | Type | Default | Since | Meaning |

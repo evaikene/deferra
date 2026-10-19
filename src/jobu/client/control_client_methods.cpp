@@ -37,12 +37,17 @@ auto ControlClient::create_queue(CreateQueueRequest const& request, ControlCallO
                                     options);
 }
 
-auto ControlClient::get_queue(QueueSelector const& selector, ControlCallOptions options) -> CallResult
+auto ControlClient::get_queue(GetQueueRequest const& request, ControlCallOptions options) -> CallResult
 {
     return d_ptr<Private>()->start_encoded_call(Private::Method::GetQueue,
                                                 "queue.get",
-                                                queue_selector_to_json(selector),
+                                                queue_get_request_to_json(request),
                                                 options);
+}
+
+auto ControlClient::get_queue(QueueSelector const& selector, ControlCallOptions options) -> CallResult
+{
+    return get_queue(GetQueueRequest{.queue = selector}, options);
 }
 
 auto ControlClient::list_queues(QueueListRequest const& request, ControlCallOptions options) -> CallResult

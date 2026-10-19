@@ -36,6 +36,15 @@ class ExecutionTelemetry;
 /// Selects a queue by stable UUID or exact user-facing name.
 using QueueSelector = std::variant<jb::core::Uuid, std::string>;
 
+/// Since API 1.6: reads one queue with optional visibility of retained deleted rows.
+struct GetQueueRequest {
+    /// Stable UUID or exact name; historical names use the queue's original name.
+    QueueSelector queue;
+    /// False restricts reads to live queues. True permits tombstones by ID and prefers a live name match;
+    /// without a live match, multiple deleted names fail with `jobu.queue.ambiguous_deleted_name`.
+    bool          include_deleted{false};
+};
+
 /// Shared bounded keyset-pagination options for management lists.
 struct PageOptions {
     /// Number of resources to return; accepted values are 1 through 200.

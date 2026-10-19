@@ -505,6 +505,62 @@ TEST_CASE("Queue selector JSON uses one shared strict shape", "[jobu][management
     }));
 }
 
+TEST_CASE("Queue get JSON preserves selectors and explicit or omitted visibility",
+          "[jobu][management][json][queue][get]")
+{
+    auto const id = parse_uuid("00112233-4455-6677-8899-aabbccddeeff");
+    for (auto const& selector : {QueueSelector{id}, QueueSelector{std::string{"name:archived"}}}) {
+        auto legacy = queue_selector_to_json(selector);
+        REQUIRE(legacy);
+        auto omitted = queue_get_request_from_json(*legacy);
+        REQUIRE(omitted);
+        CHECK(omitted->queue == selector);
+        CHECK_FALSE(omitted->include_deleted);
+
+        for (auto const include_deleted : {false, true}) {
+            auto encoded =
+                queue_get_request_to_json(GetQueueRequest{.queue = selector, .include_deleted = include_deleted});
+            REQUIRE(encoded);
+            CHECK(encoded->as_object().size() == 2);
+            CHECK(encoded->as_object().at("include_deleted").as_bool() == include_deleted);
+            auto decoded = queue_get_request_from_json(*encoded);
+            REQUIRE(decoded);
+            CHECK(decoded->queue == selector);
+            CHECK(decoded->include_deleted == include_deleted);
+
+            // Sharing the selector type must not widen lifecycle mutation input.
+            check_invalid_request(queue_selector_from_json(*encoded));
+        }
+    }
+}
+
+TEST_CASE("Queue get JSON rejects malformed visibility selectors and extra members",
+          "[jobu][management][json][queue][get]")
+{
+    for (auto const* document : {"null",
+                                 "[]",
+                                 "{}",
+                                 R"({"include_deleted":true})",
+                                 R"({"queue_name":"archived","queue_id":"00112233-4455-6677-8899-aabbccddeeff"})",
+                                 R"({"queue_id":"bad"})",
+                                 R"({"queue_name":null})",
+                                 R"({"queue_name":"archived","include_deleted":null})",
+                                 R"({"queue_name":"archived","include_deleted":0})",
+                                 R"({"queue_name":"archived","include_deleted":1.0})",
+                                 R"({"queue_name":"archived","include_deleted":"true"})",
+                                 R"({"queue_name":"archived","include_deleted":[]})",
+                                 R"({"queue_name":"archived","include_deleted":{}})",
+                                 R"({"queue_name":"archived","include_deleted":true,"unknown":false})"}) {
+        CAPTURE(document);
+        auto value = parse_json(document);
+        REQUIRE(value);
+        check_invalid_request(queue_get_request_from_json(*value));
+    }
+    check_invalid_request(queue_get_request_to_json(GetQueueRequest{
+        .queue = std::string{"\xc3\x28", 2U}
+    }));
+}
+
 TEST_CASE("Create queue request JSON round trips full and defaulted forms", "[jobu][management][json][queue][create]")
 {
     StandardAttributeRegistry registry;

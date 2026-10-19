@@ -73,6 +73,7 @@ struct RunOutputRequest {
 /// CommandKind identifies repeated result types; InteractiveJobUpdate must be dispatched before entering a Session.
 using CommandRequest = std::variant<std::monostate,
                                     jb::jobu::QueueSelector,
+                                    jb::jobu::GetQueueRequest,
                                     jb::jobu::CreateQueueRequest,
                                     jb::jobu::QueueListRequest,
                                     jb::jobu::UpdateQueueRequest,

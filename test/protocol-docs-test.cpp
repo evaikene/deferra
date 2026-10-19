@@ -46,6 +46,13 @@ TEST_CASE("Published protocol requests use production decoders", "[jobu][protoco
     auto const attributes = StandardAttributeRegistry{};
 
     REQUIRE(create_queue_request_from_json(example("queue-create.params.json"), attributes));
+    auto historical = queue_get_request_from_json(example("queue-get.params.json"));
+    REQUIRE(historical);
+    CHECK(historical->include_deleted);
+    CHECK(std::get<std::string>(historical->queue) == "archived-reports");
+    auto encoded_get = queue_get_request_to_json(*historical);
+    REQUIRE(encoded_get);
+    CHECK(*encoded_get == example("queue-get.params.json"));
     REQUIRE(update_queue_request_from_json(example("queue-update.params.json"), attributes));
     REQUIRE(create_job_request_from_json(example("job-create.params.json"), attributes));
     REQUIRE(create_job_request_from_json(example("job-create-secret.params.json"), attributes));

@@ -814,13 +814,18 @@ TEST_CASE("jobuctl parser preserves queue selectors and deletion rendering ident
         CAPTURE(action);
         auto named = parse({"--socket", "fixture.sock", "queue", action, "--name", "queue with spaces"});
         REQUIRE(named.command);
-        auto const& selector = std::get<QueueSelector>(named.command->request);
+        auto const& selector = std::string_view{action} == "get"
+                                 ? std::get<GetQueueRequest>(named.command->request).queue
+                                 : std::get<QueueSelector>(named.command->request);
         CHECK(std::get<std::string>(selector) == "queue with spaces");
         CHECK(named.command->method == std::string{"queue."} + action);
 
         auto identified = parse({"--socket", "fixture.sock", "queue", action, "--id", job_id});
         REQUIRE(identified.command);
-        CHECK(std::get<Uuid>(std::get<QueueSelector>(identified.command->request)).to_string() == job_id);
+        auto const& id_selector = std::string_view{action} == "get"
+                                    ? std::get<GetQueueRequest>(identified.command->request).queue
+                                    : std::get<QueueSelector>(identified.command->request);
+        CHECK(std::get<Uuid>(id_selector).to_string() == job_id);
     }
 
     auto duplicate = parse({"--socket", "fixture.sock", "queue", "get", "--id", job_id, "--name", "queue"});
@@ -1216,7 +1221,7 @@ TEST_CASE("jobuctl help-looking option values and terminator operands remain dat
     }
     auto name = parse({"--socket", "fixture.sock", "queue", "get", "--name=--help"});
     REQUIRE(name.command);
-    CHECK(std::get<std::string>(std::get<QueueSelector>(name.command->request)) == "--help");
+    CHECK(std::get<std::string>(std::get<GetQueueRequest>(name.command->request).queue) == "--help");
 }
 
 TEST_CASE("jobuctl queue configuration keeps inheritance and clear semantics", "[jobuctl][parse]")
@@ -2024,7 +2029,11 @@ TEST_CASE("Queue commands share owning positional and explicit selector intent",
             CHECK(parsed.command->queue_selector_intent->original_text == original);
 
             auto const* selector = std::get_if<QueueSelector>(&parsed.command->request);
-            if (auto const* update = std::get_if<UpdateQueueRequest>(&parsed.command->request)) {
+            if (auto const* get = std::get_if<GetQueueRequest>(&parsed.command->request)) {
+                selector = &get->queue;
+                CHECK_FALSE(get->include_deleted);
+            }
+            else if (auto const* update = std::get_if<UpdateQueueRequest>(&parsed.command->request)) {
                 selector = &update->queue;
                 CHECK(update->name == "name:replacement");
                 CHECK(update->expected_revision == 6);
@@ -2137,6 +2146,42 @@ TEST_CASE("Queue statistics keep cursor continuation free of selector intent", "
     CHECK(query.statistics.job_id == Uuid::parse(job_id).value());
 }
 
+TEST_CASE("Queue get request files alone can opt into deleted visibility", "[jobuctl][input][queue][get]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   path = directory.path() / "historical-get.json";
+    StandardAttributeRegistry    registry;
+    CHECK_FALSE(parse({"queue", "get", "archived", "--include-deleted"}).command);
+
+    for (auto const include_deleted : {false, true}) {
+        {
+            std::ofstream file{path};
+            file << R"({"queue_name":"name:archived","include_deleted":)" << (include_deleted ? "true" : "false")
+                 << '}';
+        }
+        auto raw = parse({"queue", "get", "--request-file", path.string()});
+        REQUIRE(raw.command);
+        REQUIRE(load_request_file(*raw.command, registry));
+        CHECK_FALSE(raw.command->queue_selector_intent);
+        auto const& request = std::get<GetQueueRequest>(raw.command->request);
+        CHECK(std::get<std::string>(request.queue) == "name:archived");
+        CHECK(request.include_deleted == include_deleted);
+
+        for (auto const* action : {"suspend", "resume", "delete"}) {
+            auto mutation = parse({"queue", action, "--request-file", path.string()});
+            REQUIRE(mutation.command);
+            CHECK_FALSE(load_request_file(*mutation.command, registry));
+        }
+    }
+    for (auto const* invalid : {R"({"queue_name":"archived","include_deleted":null})",
+                                R"({"queue_name":"archived","include_deleted":1})",
+                                R"({"queue_name":"archived","include_deleted":true,"unknown":true})"}) {
+        auto value = parse_json(invalid);
+        REQUIRE(value);
+        CHECK_FALSE(decode_command_request(CommandKind::QueueGet, *value, registry));
+    }
+}
+
 TEST_CASE("Queue request files bypass CLI selector interpretation and intent", "[jobuctl][input][queue][selector]")
 {
     jb::test::TemporaryDirectory directory;
@@ -2159,7 +2204,11 @@ TEST_CASE("Queue request files bypass CLI selector interpretation and intent", "
             REQUIRE(load_request_file(*raw.command, registry));
             CHECK_FALSE(raw.command->queue_selector_intent);
             auto const* selector = std::get_if<QueueSelector>(&raw.command->request);
-            if (auto const* update = std::get_if<UpdateQueueRequest>(&raw.command->request)) {
+            if (auto const* get = std::get_if<GetQueueRequest>(&raw.command->request)) {
+                selector = &get->queue;
+                CHECK_FALSE(get->include_deleted);
+            }
+            else if (auto const* update = std::get_if<UpdateQueueRequest>(&raw.command->request)) {
                 selector = &update->queue;
             }
             else if (auto const* stats = std::get_if<QueueStatisticsListRequest>(&raw.command->request)) {
