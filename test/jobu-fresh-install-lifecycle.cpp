@@ -197,7 +197,7 @@ auto expected_system_info(JsonValue const& info, std::string_view version) -> bo
     auto const  expected_api = JsonValue{
         .data = JsonValue::Object{
                                   {"major", JsonValue{.data = std::uint64_t{1}}},
-                                  {"minor", JsonValue{.data = std::uint64_t{5}}},
+                                  {"minor", JsonValue{.data = std::uint64_t{6}}},
                                   }
     };
     return api != object.end() && api->second == expected_api;
