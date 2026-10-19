@@ -629,8 +629,13 @@ TEST_CASE("Queue selector help stays local before selector files or network work
                 CHECK(result.out.find("--name NAME") != std::string::npos);
                 CHECK(result.out.find("id:UUID or name:NAME") != std::string::npos);
                 CHECK(result.out.find("case-sensitive and interpreted once") != std::string::npos);
-                CHECK(result.out.find("collision checks") != std::string::npos);
-                CHECK(result.out.find("not yet available") != std::string::npos);
+                CHECK(result.out.find("collision") != std::string::npos);
+                CHECK(result.out.find("explicit prefix") != std::string::npos);
+                CHECK((result.out.find("pins the selected UUID") != std::string::npos ||
+                       result.out.find("Names are pinned to UUIDs") != std::string::npos));
+                if (std::string_view{action} == "update") {
+                    CHECK(result.out.find("Interactive queue editing is not yet available") != std::string::npos);
+                }
                 CHECK(result.err.empty());
             }
         }

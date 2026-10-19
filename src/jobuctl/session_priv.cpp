@@ -53,6 +53,8 @@ enum class SessionPhase : std::uint8_t {
     Idle,
     Connecting,
     Initializing,
+    QueueLookup,
+    QueueNameProbe,
     Command,
     Polling,
     InspectionList,
@@ -64,12 +66,49 @@ enum class SessionPhase : std::uint8_t {
 
 auto is_call_phase(SessionPhase phase) noexcept -> bool
 {
-    return phase == SessionPhase::Command || phase == SessionPhase::Polling || phase == SessionPhase::InspectionList ||
+    return phase == SessionPhase::QueueLookup || phase == SessionPhase::QueueNameProbe ||
+           phase == SessionPhase::Command || phase == SessionPhase::Polling || phase == SessionPhase::InspectionList ||
            phase == SessionPhase::InspectionDetails || phase == SessionPhase::OutputList ||
            phase == SessionPhase::OutputChunk;
 }
 
-auto invalid_history_response() -> CliError
+auto is_queue_selection_phase(SessionPhase phase) noexcept -> bool
+{
+    return phase == SessionPhase::QueueLookup || phase == SessionPhase::QueueNameProbe;
+}
+
+auto command_queue_selector(CommandKind kind, CommandRequest& request) -> QueueSelector*
+{
+    // Only ordinary queue commands carry intent. Raw requests and cursor continuations have none.
+    switch (kind) {
+        case CommandKind::QueueGet:
+            return &std::get<GetQueueRequest>(request).queue;
+        case CommandKind::QueueUpdate:
+            return &std::get<UpdateQueueRequest>(request).queue;
+        case CommandKind::QueueSuspend:
+        case CommandKind::QueueResume:
+        case CommandKind::QueueDelete:
+            return &std::get<QueueSelector>(request);
+        case CommandKind::QueueStats: {
+            auto& statistics = std::get<QueueStatisticsListRequest>(request);
+            if (auto* query = std::get_if<QueueStatisticsQuery>(&statistics)) {
+                return &query->selector;
+            }
+            return nullptr;
+        }
+        default:
+            return nullptr;
+    }
+}
+
+auto is_queue_not_found(CliError const& error) -> bool
+{
+    return error.kind == "remote" &&
+           error.rpc_code == static_cast<std::int64_t>(jb::rpc::ErrorCode::ApplicationError) &&
+           error.category == "not_found" && error.code == "jobu.queue.not_found";
+}
+
+auto invalid_session_response() -> CliError
 {
     return local_error({.category = ErrorCategory::InvalidArgument,
                         .code     = "jobu.client.invalid_response",
@@ -122,71 +161,71 @@ auto is_mutation(CommandKind kind) noexcept -> bool
     return false;
 }
 
-auto call_command(ControlClient& client, Command const& command, ControlCallOptions options)
+auto call_command(ControlClient& client, CommandKind kind, CommandRequest const& request, ControlCallOptions options)
     -> Result<ControlCallId, Error>
 {
     // The builders and request-file decoder establish the request alternative paired with each kind.
-    switch (command.kind) {
+    switch (kind) {
         case CommandKind::QueueCreate:
-            return client.create_queue(std::get<CreateQueueRequest>(command.request), options);
+            return client.create_queue(std::get<CreateQueueRequest>(request), options);
         case CommandKind::QueueGet:
-            return client.get_queue(std::get<GetQueueRequest>(command.request), options);
+            return client.get_queue(std::get<GetQueueRequest>(request), options);
         case CommandKind::QueueList:
-            return client.list_queues(std::get<QueueListRequest>(command.request), options);
+            return client.list_queues(std::get<QueueListRequest>(request), options);
         case CommandKind::QueueUpdate:
-            return client.update_queue(std::get<UpdateQueueRequest>(command.request), options);
+            return client.update_queue(std::get<UpdateQueueRequest>(request), options);
         case CommandKind::QueueSuspend:
-            return client.suspend_queue(std::get<QueueSelector>(command.request), options);
+            return client.suspend_queue(std::get<QueueSelector>(request), options);
         case CommandKind::QueueResume:
-            return client.resume_queue(std::get<QueueSelector>(command.request), options);
+            return client.resume_queue(std::get<QueueSelector>(request), options);
         case CommandKind::QueueDelete:
-            return client.delete_queue(std::get<QueueSelector>(command.request), options);
+            return client.delete_queue(std::get<QueueSelector>(request), options);
         case CommandKind::JobCreate:
-            return client.create_job(std::get<CreateJobRequest>(command.request), options);
+            return client.create_job(std::get<CreateJobRequest>(request), options);
         case CommandKind::JobGet:
-            return client.get_job(std::get<Uuid>(command.request), options);
+            return client.get_job(std::get<Uuid>(request), options);
         case CommandKind::JobList:
-            return client.list_jobs(std::get<JobListRequest>(command.request), options);
+            return client.list_jobs(std::get<JobListRequest>(request), options);
         case CommandKind::JobUpdate:
-            return client.update_job(std::get<UpdateJobRequest>(command.request), options);
+            return client.update_job(std::get<UpdateJobRequest>(request), options);
         case CommandKind::JobSuspend:
-            return client.suspend_job(std::get<Uuid>(command.request), options);
+            return client.suspend_job(std::get<Uuid>(request), options);
         case CommandKind::JobResume:
-            return client.resume_job(std::get<Uuid>(command.request), options);
+            return client.resume_job(std::get<Uuid>(request), options);
         case CommandKind::JobMove:
-            return client.move_job(std::get<MoveJobRequest>(command.request), options);
+            return client.move_job(std::get<MoveJobRequest>(request), options);
         case CommandKind::JobDelete:
-            return client.delete_job(std::get<DeleteJobRequest>(command.request), options);
+            return client.delete_job(std::get<DeleteJobRequest>(request), options);
         case CommandKind::JobRunNow:
-            return client.run_now(std::get<RunNowRequest>(command.request), options);
+            return client.run_now(std::get<RunNowRequest>(request), options);
         case CommandKind::RunGet:
-            return client.get_run(std::get<Uuid>(command.request), options);
+            return client.get_run(std::get<Uuid>(request), options);
         case CommandKind::RunList:
-            return client.list_runs(std::get<RunListRequest>(command.request), options);
+            return client.list_runs(std::get<RunListRequest>(request), options);
         case CommandKind::RunCancel:
-            return client.cancel_run(std::get<Uuid>(command.request), options);
+            return client.cancel_run(std::get<Uuid>(request), options);
         case CommandKind::RunOutput:
-            return client.get_run(std::get<RunOutputRequest>(command.request).run_id, options);
+            return client.get_run(std::get<RunOutputRequest>(request).run_id, options);
         case CommandKind::AttemptGet:
-            return client.get_attempt(std::get<AttemptKey>(command.request), options);
+            return client.get_attempt(std::get<AttemptKey>(request), options);
         case CommandKind::AttemptList:
-            return client.list_attempts(std::get<AttemptListRequest>(command.request), options);
+            return client.list_attempts(std::get<AttemptListRequest>(request), options);
         case CommandKind::AttemptOutput:
-            return client.read_attempt_output(std::get<AttemptOutputRequest>(command.request), options);
+            return client.read_attempt_output(std::get<AttemptOutputRequest>(request), options);
         case CommandKind::SecretSet:
-            return client.set_secret(std::get<SetSecretRequest>(command.request), options);
+            return client.set_secret(std::get<SetSecretRequest>(request), options);
         case CommandKind::SecretList:
-            return client.list_secrets(std::get<SecretListRequest>(command.request), options);
+            return client.list_secrets(std::get<SecretListRequest>(request), options);
         case CommandKind::SecretDelete:
-            return client.delete_secret(std::get<std::string>(command.request), options);
+            return client.delete_secret(std::get<std::string>(request), options);
         case CommandKind::SystemStats:
-            return client.system_statistics(std::get<StatisticsListRequest>(command.request), options);
+            return client.system_statistics(std::get<StatisticsListRequest>(request), options);
         case CommandKind::QueueStats:
-            return client.queue_statistics(std::get<QueueStatisticsListRequest>(command.request), options);
+            return client.queue_statistics(std::get<QueueStatisticsListRequest>(request), options);
         case CommandKind::ScheduleValidate:
-            return client.validate_schedule(std::get<CronScheduleInput>(command.request), options);
+            return client.validate_schedule(std::get<CronScheduleInput>(request), options);
         case CommandKind::ScheduleNext:
-            return client.next_schedule_occurrences(std::get<ScheduleNextRequest>(command.request), options);
+            return client.next_schedule_occurrences(std::get<ScheduleNextRequest>(request), options);
         case CommandKind::SystemInfo:
             break;
     }
@@ -299,8 +338,17 @@ struct Session::Private : jb::core::priv::ObjectPrivate {
     SessionPhase                     phase{SessionPhase::Idle};
     TimePoint                        deadline;
     std::optional<ControlCallId>     active_call;
+    // Only an accepted final mutation can be uncertain; selection, enrichment and polling are reads.
+    bool                             active_mutation{false};
     std::optional<Uuid>              poll_id;
     std::chrono::milliseconds        poll_interval{100};
+
+    // Preserve the first lookup across the exact-name probe. Probes are sequential, not a namespace snapshot;
+    // the resulting UUID prevents subsequent name changes from redirecting the final operation.
+    std::optional<QueueSelectorIntent> queue_selection;
+    std::optional<Queue>               selected_queue;
+    std::optional<CommandRequest>      selected_request;
+    std::optional<CliError>            selection_not_found;
 
     // Own callback values across enrichment calls. The summary pins the exact attempt.get identity;
     // keep it unrendered until details succeed or terminal failure needs the partial-result fallback.
@@ -331,7 +379,7 @@ Session::Session(Command command, StandardAttributeRegistry const& registry, Ses
                        .code     = "jobuctl.connection_failed",
                        .message  = connection_error_message(state->command.socket_path),
                    },
-                   state->phase == SessionPhase::Command && state->active_call && is_mutation(state->command.kind)));
+                   state->active_call && state->active_mutation));
     });
     data->socket.connected.connect(this, [this] { connected(); });
     data->timer.timeout.connect(this, [this] { deadline_expired(); });
@@ -402,7 +450,7 @@ void Session::finish(int code, std::optional<CliError> error, std::optional<Cont
 void Session::deadline_expired()
 {
     auto*      data    = d_ptr<Private>();
-    auto const unknown = data->phase == SessionPhase::Command && data->active_call && is_mutation(data->command.kind);
+    auto const unknown = data->active_call && data->active_mutation;
     auto       message = std::string_view{"Overall command deadline expired"};
     if (data->phase == SessionPhase::Polling) {
         if (data->command.kind == CommandKind::RunCancel) {
@@ -443,10 +491,7 @@ void Session::connected()
     });
     data->control->failed.connect(this, [this](Error const& error) {
         auto* state = d_ptr<Private>();
-        finish(3,
-               local_error(error,
-                           state->phase == SessionPhase::Command && state->active_call &&
-                               is_mutation(state->command.kind)));
+        finish(3, local_error(error, state->active_call && state->active_mutation));
     });
 
     data->phase  = SessionPhase::Initializing;
@@ -472,18 +517,162 @@ void Session::ready(SystemInfo const& info)
         return;
     }
 
-    auto options = remaining_options(data->deadline);
+    begin_queue_selection();
+}
+
+void Session::dispatch_command()
+{
+    auto* data    = d_ptr<Private>();
+    auto  options = remaining_options(data->deadline);
     if (!options) {
         deadline_expired();
         return;
     }
-    data->phase = SessionPhase::Command;
-    auto call   = call_command(*data->control, data->command, *options);
+    data->phase         = SessionPhase::Command;
+    auto const& request = data->selected_request ? *data->selected_request : data->command.request;
+    auto        call    = call_command(*data->control, data->command.kind, request, *options);
+    if (!call) {
+        finish(operation_exit(call.error()), local_error(call.error()));
+        return;
+    }
+    data->active_call     = *call;
+    data->active_mutation = is_mutation(data->command.kind);
+}
+
+void Session::begin_queue_selection()
+{
+    auto* data            = d_ptr<Private>();
+    data->queue_selection = std::exchange(data->command.queue_selector_intent, std::nullopt);
+    if (!data->queue_selection) {
+        dispatch_command();
+        return;
+    }
+
+    auto*      selector   = command_queue_selector(data->command.kind, data->command.request);
+    auto const exact_name = data->queue_selection->form == QueueSelectionForm::ExactName;
+    if (!selector || exact_name != std::holds_alternative<std::string>(*selector)) {
+        finish(3,
+               local_error({.category = ErrorCategory::Internal,
+                            .code     = "jobuctl.session.invalid_selector",
+                            .message  = "Queue selector intent does not match the command"}));
+        return;
+    }
+
+    if (data->queue_selection->form == QueueSelectionForm::ExplicitId) {
+        // Explicit IDs need no discovery read, including stats and lifecycle calls on older peers.
+        if (data->command.kind == CommandKind::QueueSuspend && data->command.wait) {
+            data->poll_id = std::get<Uuid>(*selector);
+        }
+        data->queue_selection.reset();
+        dispatch_command();
+        return;
+    }
+    request_queue_selection(false);
+}
+
+void Session::request_queue_selection(bool name_probe)
+{
+    auto* data    = d_ptr<Private>();
+    auto  options = remaining_options(data->deadline);
+    if (!options) {
+        deadline_expired();
+        return;
+    }
+
+    auto selector = name_probe ? QueueSelector{data->queue_selection->original_text}
+                               : *command_queue_selector(data->command.kind, data->command.request);
+    data->phase   = name_probe ? SessionPhase::QueueNameProbe : SessionPhase::QueueLookup;
+    auto call     = data->control->get_queue(
+        GetQueueRequest{.queue = std::move(selector), .include_deleted = data->command.kind == CommandKind::QueueStats},
+        *options);
     if (!call) {
         finish(operation_exit(call.error()), local_error(call.error()));
         return;
     }
     data->active_call = *call;
+}
+
+void Session::receive_queue_selection(ControlReply const& reply)
+{
+    auto*       data     = d_ptr<Private>();
+    auto const* queue    = std::get_if<Queue>(&reply);
+    auto const  selector = data->phase == SessionPhase::QueueNameProbe
+                             ? QueueSelector{data->queue_selection->original_text}
+                             : *command_queue_selector(data->command.kind, data->command.request);
+    auto const  matches =
+        queue != nullptr && (std::holds_alternative<Uuid>(selector) ? queue->id == std::get<Uuid>(selector)
+                                                                    : queue->name == std::get<std::string>(selector));
+    if (!matches || (data->command.kind != CommandKind::QueueStats && queue->state == QueueState::Deleted)) {
+        finish(3, invalid_session_response());
+        return;
+    }
+
+    if (data->phase == SessionPhase::QueueLookup) {
+        data->selected_queue = *queue;
+        if (data->queue_selection->form == QueueSelectionForm::InferredId) {
+            request_queue_selection(true);
+            return;
+        }
+    }
+    else if (!data->selected_queue) {
+        // A UUID-shaped name never changes the original ID interpretation, even if it is the sole match.
+        auto error = std::move(*data->selection_not_found);
+        error.message +=
+            fmt::format(". Use name:{} to select the exact queue name", data->queue_selection->original_text);
+        finish(1, std::move(error));
+        return;
+    }
+    else if (data->selected_queue->id != queue->id) {
+        auto const& text = data->queue_selection->original_text;
+        finish(1,
+               local_error({.category = ErrorCategory::Conflict,
+                            .code     = "jobuctl.queue.ambiguous_selector",
+                            .message  = fmt::format("Queue selector is ambiguous. Use id:{} or name:{}", text, text)}));
+        return;
+    }
+
+    complete_queue_selection();
+}
+
+void Session::queue_selection_missing(CliError error)
+{
+    auto* data = d_ptr<Private>();
+    if (data->phase == SessionPhase::QueueLookup && data->queue_selection->form == QueueSelectionForm::InferredId) {
+        data->selection_not_found = std::move(error);
+        request_queue_selection(true);
+        return;
+    }
+    if (data->phase == SessionPhase::QueueNameProbe && data->selected_queue) {
+        complete_queue_selection();
+        return;
+    }
+
+    // Preserve the original ID failure when neither interpretation exists.
+    finish(1, data->selection_not_found ? std::move(*data->selection_not_found) : std::move(error));
+}
+
+void Session::complete_queue_selection()
+{
+    auto*      data = d_ptr<Private>();
+    auto const id   = data->selected_queue->id;
+    data->queue_selection.reset();
+    data->selection_not_found.reset();
+    if (data->command.kind == CommandKind::QueueGet) {
+        // Own the first result across the probe and deliver it once without a duplicate get.
+        auto queue = std::move(*data->selected_queue);
+        data->selected_queue.reset();
+        deliver_reply(ControlReply{std::move(queue)});
+        return;
+    }
+    data->selected_queue.reset();
+
+    // Keep the original request for rendering (notably delete acknowledgements), and pin only dispatch data.
+    data->selected_request                                               = data->command.request;
+    *command_queue_selector(data->command.kind, *data->selected_request) = id;
+    if (data->command.kind == CommandKind::QueueSuspend && data->command.wait) {
+        data->poll_id = id;
+    }
+    dispatch_command();
 }
 
 void Session::receive_reply(ControlCallId id, ControlReply const& reply)
@@ -493,6 +682,12 @@ void Session::receive_reply(ControlCallId id, ControlReply const& reply)
         return;
     }
     data->active_call.reset();
+    data->active_mutation = false;
+
+    if (is_queue_selection_phase(data->phase)) {
+        receive_queue_selection(reply);
+        return;
+    }
 
     if (data->command.kind == CommandKind::RunOutput) {
         receive_run_output(reply);
@@ -582,7 +777,7 @@ void Session::receive_run_inspection(ControlReply const& reply)
     if (data->phase == SessionPhase::Command) {
         auto const* run = std::get_if<RunDetails>(&reply);
         if (!run || run->id != std::get<Uuid>(data->command.request)) {
-            finish(3, invalid_history_response());
+            finish(3, invalid_session_response());
             return;
         }
         if (!print_command_result(data->command, reply, data->registry)) {
@@ -605,7 +800,7 @@ void Session::receive_run_inspection(ControlReply const& reply)
         auto const* page = std::get_if<AttemptPage>(&reply);
         if (!page || page->items.size() > 1U ||
             (!page->items.empty() && page->items.front().run_id != data->inspected_run->id)) {
-            finish(3, invalid_history_response());
+            finish(3, invalid_session_response());
             return;
         }
         if (page->items.empty()) {
@@ -623,12 +818,12 @@ void Session::receive_run_inspection(ControlReply const& reply)
     auto const* attempt  = std::get_if<AttemptDetails>(&reply);
     auto const& selected = *data->inspected_attempt;
     if (!attempt || attempt->run_id != selected.run_id || attempt->attempt_number != selected.attempt_number) {
-        finish(3, invalid_history_response());
+        finish(3, invalid_session_response());
         return;
     }
     auto text = format_last_attempt(data->inspected_run->type, *attempt);
     if (!text) {
-        finish(3, invalid_history_response());
+        finish(3, invalid_session_response());
         return;
     }
 
@@ -667,7 +862,7 @@ void Session::receive_run_output(ControlReply const& reply)
     if (data->phase == SessionPhase::Command) {
         auto const* run = std::get_if<RunDetails>(&reply);
         if (!run || run->id != request.run_id) {
-            finish(3, invalid_history_response());
+            finish(3, invalid_session_response());
             return;
         }
         if (!output_channel_matches(run->type, request.channel)) {
@@ -688,7 +883,7 @@ void Session::receive_run_output(ControlReply const& reply)
         auto const* page = std::get_if<AttemptPage>(&reply);
         if (!page || page->items.size() > 200U ||
             (page->next_cursor && (page->items.empty() || page->next_cursor == data->output_cursor))) {
-            finish(3, invalid_history_response());
+            finish(3, invalid_session_response());
             return;
         }
 
@@ -697,7 +892,7 @@ void Session::receive_run_output(ControlReply const& reply)
         auto before = data->output_before;
         for (auto const& attempt : page->items) {
             if (attempt.run_id != request.run_id || (before && attempt.attempt_number >= *before)) {
-                finish(3, invalid_history_response());
+                finish(3, invalid_session_response());
                 return;
             }
             before = attempt.attempt_number;
@@ -731,7 +926,7 @@ void Session::receive_run_output(ControlReply const& reply)
     if (!chunk || chunk->attempt.run_id != data->output_attempt->run_id ||
         chunk->attempt.attempt_number != data->output_attempt->attempt_number || chunk->channel != request.channel ||
         chunk->offset != request.offset || chunk->bytes_returned > request.limit) {
-        finish(3, invalid_history_response());
+        finish(3, invalid_session_response());
         return;
     }
 
@@ -816,8 +1011,19 @@ void Session::receive_failure(ControlCallId id, ControlFailure const& failure)
         return;
     }
     data->active_call.reset();
+    data->active_mutation = false;
     if (failure.kind == ControlFailureKind::Remote) {
-        finish(1, remote_error(std::get<jb::rpc::RpcError>(failure.error)));
+        auto error = remote_error(std::get<jb::rpc::RpcError>(failure.error));
+        if (is_queue_selection_phase(data->phase)) {
+            if (is_queue_not_found(error)) {
+                queue_selection_missing(std::move(error));
+                return;
+            }
+            if (error.code == "jobu.queue.ambiguous_deleted_name") {
+                error.message += ". Use id:UUID or --id UUID to select a retained queue explicitly";
+            }
+        }
+        finish(1, std::move(error));
     }
     else {
         auto const& error = std::get<Error>(failure.error);

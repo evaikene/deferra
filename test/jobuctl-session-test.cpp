@@ -278,13 +278,16 @@ auto run_session(PeerBehavior             behavior,
                 auto at = parse_utc_timestamp("2030-01-01T00:00:00Z");
                 REQUIRE(id);
                 REQUIRE(at);
-                auto queue = Queue{.id         = *id,
-                                   .revision   = 7,
-                                   .name       = "reports",
-                                   .state      = QueueState::Suspending,
-                                   .created_at = *at,
-                                   .updated_at = *at};
-                if (method == "queue.get" && behavior != PeerBehavior::SuspendNeverSettles && ++poll_count == 2) {
+                auto       queue      = Queue{.id         = *id,
+                                              .revision   = 7,
+                                              .name       = "reports",
+                                              .state      = QueueState::Suspending,
+                                              .created_at = *at,
+                                              .updated_at = *at};
+                // A name-based suspend now fetches first; only gets after the mutation observe drain progress.
+                auto const suspending = std::ranges::find(exchange.methods, "queue.suspend") != exchange.methods.end();
+                if (method == "queue.get" && suspending && behavior != PeerBehavior::SuspendNeverSettles &&
+                    ++poll_count == 2) {
                     queue.state = QueueState::Suspended;
                 }
                 auto encoded = queue_to_json(queue, StandardAttributeRegistry{});
@@ -689,7 +692,8 @@ TEST_CASE("jobuctl suspend wait submits once and reads until suspension complete
     auto queue =
         run_session(PeerBehavior::QueueSuspendPolling, {"queue", "suspend", "--name", "reports", "--wait"}, {"--json"});
     CHECK(queue.exit->exit_code == 0);
-    CHECK(queue.methods == std::vector<std::string>{"system.info", "queue.suspend", "queue.get", "queue.get"});
+    CHECK(queue.methods ==
+          std::vector<std::string>{"system.info", "queue.get", "queue.suspend", "queue.get", "queue.get"});
     auto queue_result = parse_json(queue.output);
     REQUIRE(queue_result);
     CHECK(queue_result->as_object().at("state").as_string() == "suspended");
@@ -753,7 +757,8 @@ TEST_CASE("jobuctl wait deadline reports an unconfirmed state after observed mut
                                 {"--json", "--timeout", "250"});
     CHECK(exchange.exit->exit_code == 3);
     CHECK(exchange.methods.front() == "system.info");
-    CHECK(exchange.methods[1] == "queue.suspend");
+    CHECK(exchange.methods[1] == "queue.get");
+    CHECK(exchange.methods[2] == "queue.suspend");
     CHECK(std::count(exchange.methods.begin(), exchange.methods.end(), "queue.suspend") == 1);
     auto value = parse_json(exchange.error);
     REQUIRE(value);
