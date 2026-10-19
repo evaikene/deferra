@@ -58,13 +58,19 @@ auto make_selector_command(std::filesystem::path                socket_path,
         return parse_failure("expected one selector: SELECTOR, --id UUID, or --name NAME");
     }
 
+    // Get owns its visibility option; lifecycle commands retain the strict selector-only request.
+    auto request = CommandRequest{std::move(selector.selector->selector)};
+    if (kind == CommandKind::QueueGet) {
+        request = GetQueueRequest{.queue = std::get<QueueSelector>(std::move(request))};
+    }
+
     return {
         .command =
             Command{
                     .socket_path           = std::move(socket_path),
                     .kind                  = kind,
                     .method                = method,
-                    .request               = std::move(selector.selector->selector),
+                    .request               = std::move(request),
                     .queue_selector_intent = std::move(selector.selector->intent),
                     },
         .error = {},

@@ -117,6 +117,15 @@ or `name:NAME` to state intent explicitly. Request-file selectors remain raw
 protocol values: `queue_name` is literal, `queue_id` must be a UUID, and neither
 field undergoes CLI prefix interpretation or inferred selection.
 
+Ordinary `queue get SELECTOR` reads only non-deleted queues. Since API 1.6,
+`queue get --request-file FILE` can explicitly include retained deleted rows,
+using strict JSON such as `{"queue_name":"archived-reports","include_deleted":true}`.
+Omission or false stays live-only; there is no `--include-deleted` flag for get.
+Historical name lookup prefers a live queue, then a unique original deleted
+name. Multiple deleted matches fail with `jobu.queue.ambiguous_deleted_name`;
+use `queue_id` to select the retained row explicitly. The option is rejected
+on queue mutation requests.
+
 Job creation and moving use exactly one of `--queue-id UUID` or `--queue-name NAME`. Flag-based job updates, moves, and deletes require `--revision N`; use the current revision shown by `job get`. A bare `job update UUID` instead [opens an interactive draft](#interactive-job-updates) and captures the inspected revision.
 
 For example:

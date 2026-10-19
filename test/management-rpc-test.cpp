@@ -661,6 +661,80 @@ TEST_CASE("Queue management RPC completes and persists the durable lifecycle", "
     }
 }
 
+TEST_CASE("Queue get RPC exposes historical visibility without widening mutations",
+          "[jobu][management-rpc][queue][sqlite]")
+{
+    Application    app{0, nullptr};
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3)}
+    };
+    RpcEndpoint endpoint{fixture};
+    auto const  name = QueueSelector{std::string{"archived"}};
+    auto        read = [&](QueueSelector const& selector, bool include_deleted) {
+        auto params = queue_get_request_to_json(GetQueueRequest{.queue = selector, .include_deleted = include_deleted});
+        REQUIRE(params);
+        return endpoint.call("queue.get", *params);
+    };
+    auto create = [&] {
+        return decode_queue(
+            endpoint.call("queue.create", encode_create(CreateQueueRequest{.name = "archived"}, fixture.registry)),
+            fixture.registry);
+    };
+    auto remove = [&](Uuid const& id) {
+        REQUIRE(require_result(endpoint.call("queue.suspend", encode_selector(id))).is_object());
+        REQUIRE(require_result(endpoint.call("queue.delete", encode_selector(id))).is_null());
+    };
+
+    auto first = create();
+    CHECK(decode_queue(endpoint.call("queue.get", encode_selector(name)), fixture.registry).id == first.id);
+    CHECK(decode_queue(read(name, false), fixture.registry).id == first.id);
+    remove(first.id);
+    require_application_error(endpoint.call("queue.get", encode_selector(first.id)),
+                              "not_found",
+                              "jobu.queue.not_found");
+    require_application_error(read(first.id, false), "not_found", "jobu.queue.not_found");
+    require_application_error(endpoint.call("queue.get", encode_selector(name)), "not_found", "jobu.queue.not_found");
+    auto historical = decode_queue(read(first.id, true), fixture.registry);
+    CHECK(historical.id == first.id);
+    CHECK(historical.state == QueueState::Deleted);
+    CHECK(historical.name == "archived");
+    CHECK(historical.revision == 4);
+    CHECK(decode_queue(read(name, true), fixture.registry).id == first.id);
+
+    // A live name wins over retained names. Once two tombstones remain, identity is required.
+    auto second = create();
+    CHECK(decode_queue(read(name, true), fixture.registry).id == second.id);
+    remove(second.id);
+    require_application_error(read(name, true), "conflict", "jobu.queue.ambiguous_deleted_name");
+    CHECK(decode_queue(read(first.id, true), fixture.registry).id == first.id);
+    CHECK(decode_queue(read(second.id, true), fixture.registry).id == second.id);
+    auto third = create();
+    CHECK(decode_queue(read(name, true), fixture.registry).id == third.id);
+
+    for (auto const* invalid : {R"({"queue_name":"archived","include_deleted":null})",
+                                R"({"queue_name":"archived","include_deleted":"true"})",
+                                R"({"queue_name":"archived","include_deleted":true,"extra":1})"}) {
+        auto params = parse_json(invalid);
+        REQUIRE(params);
+        require_standard_error(endpoint.call("queue.get", *params), ErrorCode::InvalidParams);
+    }
+    for (auto const include_deleted : {false, true}) {
+        auto params = queue_get_request_to_json(GetQueueRequest{.queue = third.id, .include_deleted = include_deleted});
+        REQUIRE(params);
+        for (auto const* method : {"queue.suspend", "queue.resume", "queue.delete"}) {
+            require_standard_error(endpoint.call(method, *params), ErrorCode::InvalidParams);
+        }
+        auto& object = std::get<JsonValue::Object>(params->data);
+        object.emplace("expected_revision", make_json(std::uint64_t{1}));
+        object.emplace("weight", make_json(std::uint64_t{2}));
+        require_standard_error(endpoint.call("queue.update", *params), ErrorCode::InvalidParams);
+    }
+    auto unchanged = decode_queue(read(third.id, false), fixture.registry);
+    CHECK(unchanged.state == QueueState::Active);
+    CHECK(unchanged.revision == 1);
+    CHECK(unchanged.weight == 1);
+}
+
 TEST_CASE("Management RPC creates and replays a recurring job with its first occurrence",
           "[jobu][management-rpc][cron][sqlite]")
 {

@@ -717,6 +717,38 @@ auto queue_selector_from_json(jb::core::JsonValue const& value) -> jb::core::Res
     return decode_selector(value.as_object());
 }
 
+auto queue_get_request_to_json(GetQueueRequest const& request) -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
+{
+    auto object = jb::core::JsonValue::Object{
+        {"include_deleted", make_json(request.include_deleted)}
+    };
+    if (!add_selector_members(object, request.queue)) {
+        return invalid<jb::core::JsonValue>(true);
+    }
+    return checked_json(make_json(std::move(object)), true);
+}
+
+auto queue_get_request_from_json(jb::core::JsonValue const& value) -> jb::core::Result<GetQueueRequest, jb::core::Error>
+{
+    if (!value.is_object() || !has_only_members(value.as_object(), {"queue_id", "queue_name", "include_deleted"})) {
+        return invalid<GetQueueRequest>(true);
+    }
+    auto const& object   = value.as_object();
+    auto        selector = decode_selector(object);
+    if (!selector) {
+        return invalid<GetQueueRequest>(true);
+    }
+
+    auto result = GetQueueRequest{.queue = std::move(selector).value()};
+    if (auto const* include_deleted = find_member(object, "include_deleted")) {
+        if (!include_deleted->is_bool()) {
+            return invalid<GetQueueRequest>(true);
+        }
+        result.include_deleted = include_deleted->as_bool();
+    }
+    return ConversionResult<GetQueueRequest>::success(std::move(result));
+}
+
 auto create_queue_request_to_json(CreateQueueRequest const& request, AttributeRegistry const& registry)
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {

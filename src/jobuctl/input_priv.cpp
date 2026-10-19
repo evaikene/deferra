@@ -114,6 +114,7 @@ auto decode_command_request(CommandKind kind, JsonValue const& value, AttributeR
         case CommandKind::QueueCreate:
             return request_from(create_queue_request_from_json(value, registry));
         case CommandKind::QueueGet:
+            return request_from(queue_get_request_from_json(value));
         case CommandKind::QueueSuspend:
         case CommandKind::QueueResume:
         case CommandKind::QueueDelete:

@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <initializer_list>
 #include <optional>
 #include <string>
@@ -309,6 +310,18 @@ auto queue_summary(std::string_view id,
         recovery);
 }
 
+auto write_get_request(std::filesystem::path const& path,
+                       std::string_view             member,
+                       std::string_view             selector,
+                       bool                         include_deleted) -> bool
+{
+    // These fixed fixture selectors contain no JSON escaping characters.
+    std::ofstream file{path};
+    file << fmt::format(R"({{"{}":"{}","include_deleted":{}}})", member, selector, include_deleted) << '\n';
+    file.close();
+    return !file.fail();
+}
+
 auto rejects_before_connect(std::filesystem::path const&            executable,
                             std::filesystem::path const&            socket_path,
                             std::initializer_list<std::string_view> arguments) -> bool
@@ -465,6 +478,23 @@ auto main(int argc, char* argv[]) -> int
         return fail("renamed queue lookup did not surface the stable not-found code");
     }
 
+    // Retained cancelled runs keep both tombstones alive through the daemon's retention sweeps.
+    // Schedule far in the future so this fixture never launches an executor.
+    if (!run_success(argv[2],
+                     socket_path,
+                     {"job",
+                      "create",
+                      "--queue-id",
+                      *queue_id,
+                      "--type",
+                      "cli",
+                      "--at",
+                      "2099-01-01T00:00:00Z",
+                      "--command",
+                      "/bin/true"})) {
+        return fail("unable to prepare retained history for the original queue");
+    }
+
     auto       suspended         = run_success(argv[2], socket_path, {"queue", "suspend", "--id", *queue_id, "--wait"});
     auto const suspended_summary = queue_summary(*queue_id, "renamed", "suspended", 4, 5, "retry_interrupted", 4);
     if (!suspended || *suspended != suspended_summary) {
@@ -503,6 +533,29 @@ auto main(int argc, char* argv[]) -> int
         return fail("queue states did not survive daemon restart");
     }
 
+    // The normal get path stays live-only after restart, while the raw path can inspect retained rows.
+    auto const get_request_path = directory.path() / "queue-get.json";
+    auto const get_request_file = get_request_path.string();
+    auto       ordinary_deleted = run_failure(argv[2], reopen_socket, {"queue", "get", *queue_id});
+    if (!ordinary_deleted || ordinary_deleted->find("jobu.queue.not_found") == std::string::npos ||
+        !write_get_request(get_request_path, "queue_id", *queue_id, false)) {
+        return fail("ordinary queue get exposed a deleted row or fixture creation failed");
+    }
+    auto raw_deleted = run_failure(argv[2], reopen_socket, {"queue", "get", "--request-file", get_request_file});
+    if (!raw_deleted || raw_deleted->find("jobu.queue.not_found") == std::string::npos ||
+        !write_get_request(get_request_path, "queue_id", *queue_id, true)) {
+        return fail("explicit false queue get exposed a deleted row or fixture creation failed");
+    }
+    auto historical_id = run_success(argv[2], reopen_socket, {"queue", "get", "--request-file", get_request_file});
+    if (!historical_id || *historical_id != deleted_summary ||
+        !write_get_request(get_request_path, "queue_name", "renamed", true)) {
+        return fail("historical queue get did not return the deleted UUID and revision");
+    }
+    auto historical_name = run_success(argv[2], reopen_socket, {"queue", "get", "--request-file", get_request_file});
+    if (!historical_name || *historical_name != deleted_summary) {
+        return fail("historical queue get did not resolve a unique original name");
+    }
+
     auto recreated = run_success(argv[2], reopen_socket, {"queue", "create", "renamed"});
     if (!recreated) {
         return fail("jobuctl could not reuse a soft-deleted queue name");
@@ -511,6 +564,38 @@ auto main(int argc, char* argv[]) -> int
     if (!recreated_id || *recreated_id == *queue_id ||
         *recreated != queue_summary(*recreated_id, "renamed", "active", 1, 1, "fail_interrupted")) {
         return fail("queue name reuse did not create a distinct active queue");
+    }
+
+    auto preferred_live = run_success(argv[2], reopen_socket, {"queue", "get", "--request-file", get_request_file});
+    if (!preferred_live || *preferred_live != *recreated) {
+        return fail("historical queue get did not prefer the current live name");
+    }
+
+    // Reusing and deleting the same name twice makes name lookup ambiguous without affecting ID reads.
+    if (!run_success(argv[2],
+                     reopen_socket,
+                     {"job",
+                      "create",
+                      "--queue-id",
+                      *recreated_id,
+                      "--type",
+                      "cli",
+                      "--at",
+                      "2099-01-01T00:00:00Z",
+                      "--command",
+                      "/bin/true"}) ||
+        !run_success(argv[2], reopen_socket, {"queue", "suspend", *recreated_id}) ||
+        !run_success(argv[2], reopen_socket, {"queue", "delete", *recreated_id})) {
+        return fail("unable to prepare an ambiguous historical name");
+    }
+    auto ambiguous = run_failure(argv[2], reopen_socket, {"queue", "get", "--request-file", get_request_file});
+    if (!ambiguous || ambiguous->find("jobu.queue.ambiguous_deleted_name") == std::string::npos ||
+        !write_get_request(get_request_path, "queue_id", *queue_id, true)) {
+        return fail("historical queue get did not report ambiguous deleted names");
+    }
+    historical_id = run_success(argv[2], reopen_socket, {"queue", "get", "--request-file", get_request_file});
+    if (!historical_id || *historical_id != deleted_summary) {
+        return fail("historical name ambiguity changed stable-ID lookup");
     }
 
     reopened->terminate();

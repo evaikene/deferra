@@ -147,7 +147,13 @@ public:
     [[nodiscard]] auto create_queue(CreateQueueRequest const& request, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
-    /// Reads one queue by ID or exact name; replies with Queue.
+    /// Since API 1.6: reads one queue with the requested historical visibility; replies with Queue.
+    /// Names prefer live queues, then a unique retained deleted queue; ambiguous historical names fail remotely.
+    /// Requires API 1.6 or newer. The request is encoded synchronously without retaining references to it.
+    [[nodiscard]] auto get_queue(GetQueueRequest const& request, ControlCallOptions options = {})
+        -> jb::core::Result<ControlCallId, jb::core::Error>;
+
+    /// Reads one live queue by ID or exact name; replies with Queue. Equivalent to include_deleted=false.
     /// Requires API 1.6 or newer for the revision-bearing reply.
     [[nodiscard]] auto get_queue(QueueSelector const& selector, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;

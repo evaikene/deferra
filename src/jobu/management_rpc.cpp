@@ -158,8 +158,10 @@ auto register_management_methods(jb::rpc::Server&         server,
                    return handle_value(
                        context,
                        params,
-                       [](jb::core::JsonValue const& value) { return queue_selector_from_json(value); },
-                       [&service](QueueSelector const& selector) { return service.get_queue(selector); },
+                       [](jb::core::JsonValue const& value) { return queue_get_request_from_json(value); },
+                       [&service](GetQueueRequest const& request) {
+                           return service.get_queue(request.queue, request.include_deleted);
+                       },
                        [attribute_registry](Queue const& queue) { return queue_to_json(queue, *attribute_registry); });
                }) &&
            server.register_method(

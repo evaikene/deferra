@@ -4,6 +4,12 @@
 
 using JsonResult = jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
+static_assert(
+    std::is_same_v<decltype(&jb::jobu::queue_get_request_to_json), JsonResult (*)(jb::jobu::GetQueueRequest const&)>);
+static_assert(
+    std::is_same_v<decltype(&jb::jobu::queue_get_request_from_json),
+                   jb::core::Result<jb::jobu::GetQueueRequest, jb::core::Error> (*)(jb::core::JsonValue const&)>);
+
 static_assert(std::is_same_v<decltype(&jb::jobu::queue_to_json),
                              JsonResult (*)(jb::jobu::Queue const&, jb::jobu::AttributeRegistry const&)>);
 static_assert(
