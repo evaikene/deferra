@@ -1,11 +1,11 @@
 #include "job_edit_priv.hpp"
 
 #include "command_line_priv.hpp"
-#include "framing.hpp"
+#include "edit_document_priv.hpp"
+#include "edit_resource_priv.hpp"
 #include "input_priv.hpp"
 #include "management_json.hpp"
 
-#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <utility>
@@ -23,55 +23,9 @@ auto edit_error(std::string code, std::string message) -> Error
     return {.category = ErrorCategory::InvalidArgument, .code = std::move(code), .message = std::move(message)};
 }
 
-auto draft_too_large() -> Error
-{
-    return edit_error("jobuctl.edit.too_large", "Job edit draft exceeds 16 MiB");
-}
-
 auto make_json(auto value) -> JsonValue
 {
     return {.data = std::move(value)};
-}
-
-auto within_depth_limit(JsonValue const& value, std::size_t depth = 0) -> bool
-{
-    if (!value.is_array() && !value.is_object()) {
-        return true;
-    }
-    if (depth >= JsonLimits{}.max_depth) {
-        return false;
-    }
-
-    if (value.is_array()) {
-        for (auto const& item : value.as_array()) {
-            if (!within_depth_limit(item, depth + 1)) {
-                return false;
-            }
-        }
-    }
-    else {
-        for (auto const& [key, item] : value.as_object()) {
-            if (!within_depth_limit(item, depth + 1)) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-auto serialize_edit_json(JsonValue const& value) -> Result<std::string, Error>
-{
-    // Reject excessive nesting before entering the serializer's recursive tree conversion.
-    if (!within_depth_limit(value)) {
-        return Result<std::string, Error>::failure(
-            edit_error("jobuctl.edit.invalid_json", "Job edit JSON exceeds the nesting limit"));
-    }
-    auto compact = serialize_json(value);
-    if (!compact) {
-        return Result<std::string, Error>::failure(
-            edit_error("jobuctl.edit.invalid_json", "Job edit JSON cannot be serialized"));
-    }
-    return compact;
 }
 
 auto same_json_value(JsonValue const& left, JsonValue const& right) -> bool
@@ -116,96 +70,6 @@ auto same_json_value(JsonValue const& left, JsonValue const& right) -> bool
         return true;
     }
     return left == right;
-}
-
-auto append_fragment(std::string& output, std::string_view fragment) -> bool
-{
-    if (fragment.size() > max_job_edit_draft_bytes - output.size()) {
-        return false;
-    }
-    output.append(fragment);
-    return true;
-}
-
-auto append_line(std::string& output, std::size_t depth) -> bool
-{
-    auto const spaces = depth * 2;
-    if (1 + spaces > max_job_edit_draft_bytes - output.size()) {
-        return false;
-    }
-    output.push_back('\n');
-    output.append(spaces, ' ');
-    return true;
-}
-
-auto format_compact_json(std::string_view compact) -> Result<std::string, Error>
-{
-    auto output  = std::string{};
-    auto depth   = std::size_t{0};
-    auto quoted  = false;
-    auto escaped = false;
-
-    // Serialization has already validated escaping. Track quotes and backslashes so payload text is never
-    // interpreted as punctuation; every insertion is bounded before it grows the human-readable draft.
-    for (std::size_t index = 0; index < compact.size(); ++index) {
-        auto const byte = compact[index];
-        if (quoted) {
-            if (!append_fragment(output, compact.substr(index, 1))) {
-                return Result<std::string, Error>::failure(draft_too_large());
-            }
-            if (escaped) {
-                escaped = false;
-            }
-            else if (byte == '\\') {
-                escaped = true;
-            }
-            else if (byte == '"') {
-                quoted = false;
-            }
-            continue;
-        }
-
-        auto appended = true;
-        switch (byte) {
-            case '"':
-                quoted   = true;
-                appended = append_fragment(output, compact.substr(index, 1));
-                break;
-            case '{':
-            case '[':
-                appended = append_fragment(output, compact.substr(index, 1));
-                ++depth;
-                if (compact[index + 1] != '}' && compact[index + 1] != ']') {
-                    appended = appended && append_line(output, depth);
-                }
-                break;
-            case '}':
-            case ']':
-                --depth;
-                if (compact[index - 1] != '{' && compact[index - 1] != '[') {
-                    appended = append_line(output, depth);
-                }
-                appended = appended && append_fragment(output, compact.substr(index, 1));
-                break;
-            case ',':
-                appended = append_fragment(output, ",") && append_line(output, depth);
-                break;
-            case ':':
-                appended = append_fragment(output, ": ");
-                break;
-            default:
-                appended = append_fragment(output, compact.substr(index, 1));
-                break;
-        }
-        if (!appended) {
-            return Result<std::string, Error>::failure(draft_too_large());
-        }
-    }
-
-    if (!append_fragment(output, "\n")) {
-        return Result<std::string, Error>::failure(draft_too_large());
-    }
-    return Result<std::string, Error>::success(std::move(output));
 }
 
 auto changed_attributes(JsonValue::Object const& original, JsonValue::Object const& edited) -> JsonValue::Object
@@ -274,62 +138,13 @@ auto JobEditBaseline::from_job(JobDefinition const& job, AttributeRegistry const
     return Result<JobEditBaseline, Error>::success(JobEditBaseline{make_json(std::move(draft))});
 }
 
-auto format_job_edit_json(JsonValue const& value) -> Result<std::string, Error>
-{
-    auto compact = serialize_edit_json(value);
-    if (!compact) {
-        return Result<std::string, Error>::failure(std::move(compact).error());
-    }
-    if (compact->size() > max_job_edit_draft_bytes) {
-        return Result<std::string, Error>::failure(draft_too_large());
-    }
-    return format_compact_json(*compact);
-}
-
 auto format_job_edit_draft(JsonValue const& value) -> Result<std::string, Error>
 {
-    auto json = format_job_edit_json(value);
-    if (!json) {
-        return Result<std::string, Error>::failure(std::move(json).error());
-    }
-
-    auto draft = std::string{"// JSONC draft: comments are ignored; trailing commas are not allowed.\n"
-                             "// Keep job_id and expected_revision unchanged.\n"
-                             "// Omitted fields leave server values unchanged.\n"
-                             "// Exit without effective changes to cancel the update.\n\n"};
-    if (!append_fragment(draft, *json)) {
-        return Result<std::string, Error>::failure(draft_too_large());
-    }
-    return Result<std::string, Error>::success(std::move(draft));
-}
-
-auto parse_job_edit_draft(std::string_view draft) -> Result<JsonValue, Error>
-{
-    if (draft.size() > max_job_edit_draft_bytes) {
-        return Result<JsonValue, Error>::failure(draft_too_large());
-    }
-
-    auto parsed = parse_json_with_comments(draft);
-    if (!parsed || !parsed->is_object()) {
-        return Result<JsonValue, Error>::failure(
-            edit_error("jobuctl.edit.invalid_json", "Job edit draft must contain one valid JSONC object"));
-    }
-    return parsed;
-}
-
-auto serialize_job_edit_request(JsonValue const& params) -> Result<std::string, Error>
-{
-    auto compact = serialize_edit_json(params);
-    if (!compact) {
-        return Result<std::string, Error>::failure(std::move(compact).error());
-    }
-    // Recovery is consumed by ordinary request-file mode. Draft indentation and its larger allowance cannot
-    // enter this artifact; full RPC framing and domain payload limits still apply when it is submitted.
-    if (compact->size() > jb::rpc::FramingLimits{}.max_body_bytes) {
-        return Result<std::string, Error>::failure(
-            edit_error("jobuctl.edit.request_too_large", "Minimal update request exceeds the request-file size limit"));
-    }
-    return compact;
+    constexpr auto instructions = "// JSONC draft: comments are ignored; trailing commas are not allowed.\n"
+                                  "// Keep job_id and expected_revision unchanged.\n"
+                                  "// Omitted fields leave server values unchanged.\n"
+                                  "// Exit without effective changes to cancel the update.\n\n";
+    return format_edit_draft(EditResource::Job, value, instructions);
 }
 
 auto prepare_job_update(JobEditBaseline const& baseline, std::string_view draft, AttributeRegistry const& registry)
@@ -337,7 +152,7 @@ auto prepare_job_update(JobEditBaseline const& baseline, std::string_view draft,
 {
     using EditResult = Result<std::optional<PreparedJobUpdate>, Error>;
 
-    auto parsed = parse_job_edit_draft(draft);
+    auto parsed = parse_edit_draft(EditResource::Job, draft);
     if (!parsed) {
         return EditResult::failure(std::move(parsed).error());
     }

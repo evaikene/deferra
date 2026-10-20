@@ -1,5 +1,7 @@
-#include "job_edit_files_priv.hpp"
-#include "job_edit_recovery_priv.hpp"
+#include "edit_document_priv.hpp"
+#include "edit_files_priv.hpp"
+#include "edit_recovery_priv.hpp"
+#include "edit_resource_priv.hpp"
 
 #include "attribute_registry.hpp"
 #include "command_argv_priv.hpp"
@@ -84,9 +86,11 @@ struct Fixture {
     StandardAttributeRegistry    registry;
     JobEditBaseline              baseline{make_baseline(registry)};
 
-    auto create(JobEditFileIo io = {}) const -> JobEditFiles
+    auto create(EditFileIo io = {}) const -> EditFiles
     {
-        auto files = JobEditFiles::create(baseline.value(), root.path(), std::move(io));
+        auto formatted = format_job_edit_draft(baseline.value());
+        REQUIRE(formatted);
+        auto files = EditFiles::create(EditResource::Job, *formatted, root.path(), std::move(io));
         REQUIRE(files);
         return std::move(files).value();
     }
@@ -127,11 +131,39 @@ auto metadata(std::filesystem::path const& path) -> struct stat {
 
 } // namespace
 
+TEST_CASE("Shared files preserve supplied bytes and write validated queue params without job types",
+          "[jobuctl][edit][files]")
+{
+    jb::test::TemporaryDirectory root;
+    StandardAttributeRegistry    registry;
+    auto params = parsed(R"({"queue_id":"00112233-4455-6677-8899-aabbccddeeff","expected_revision":7,"weight":2})");
+    REQUIRE(decode_command_request(CommandKind::QueueUpdate, params, registry));
+    auto draft   = std::string{"// Supplied instructions\r\n"} + serialized(params) + "\r\n";
+    auto created = EditFiles::create(EditResource::Queue, draft, root.path());
+    REQUIRE(created);
+    auto files = std::move(created).value();
+    CHECK(read_text(files.artifacts().draft) == draft);
+    auto moved = std::move(files);
+    auto saved = moved.read_draft();
+    REQUIRE(saved);
+    CHECK(*saved == draft);
+    REQUIRE(moved.write_request(params));
+    REQUIRE(moved.artifacts().request);
+    CHECK(read_text(*moved.artifacts().request) == serialized(params));
+    auto retry = Command{.kind = CommandKind::QueueUpdate, .request_file = moved.artifacts().request};
+    REQUIRE(load_request_file(retry, registry));
+    auto const& request = std::get<UpdateQueueRequest>(retry.request);
+    CHECK(request.expected_revision == 7);
+    CHECK(request.weight == 2);
+    REQUIRE(moved.cleanup());
+    CHECK(std::filesystem::is_empty(root.path()));
+}
+
 TEST_CASE("Edit files are private, closed before editing, and retained by default", "[jobuctl][edit][files]")
 {
-    Fixture          fixture;
-    auto             finishes = 0;
-    JobEditArtifacts paths;
+    Fixture       fixture;
+    auto          finishes = 0;
+    EditArtifacts paths;
     {
         auto files = fixture.create({.finish = [&](int fd) {
             ++finishes;
@@ -149,7 +181,7 @@ TEST_CASE("Edit files are private, closed before editing, and retained by defaul
         auto text = files.read_draft();
         REQUIRE(text);
         CHECK(text->starts_with("// JSONC draft:"));
-        auto decoded = parse_job_edit_draft(*text);
+        auto decoded = parse_edit_draft(EditResource::Job, *text);
         REQUIRE(decoded);
         CHECK(serialized(*decoded) == serialized(fixture.baseline.value()));
         CHECK_FALSE(load_json_object(paths.draft));
@@ -161,11 +193,11 @@ TEST_CASE("Edit files are private, closed before editing, and retained by defaul
     CHECK(std::filesystem::exists(paths.draft));
 }
 
-TEST_CASE("Draft generation failure creates no artifacts", "[jobuctl][edit][files]")
+TEST_CASE("Oversized preformatted drafts create no artifacts", "[jobuctl][edit][files]")
 {
     Fixture fixture;
-    auto    oversized = JsonValue{.data = std::string(max_job_edit_draft_bytes, 'x')};
-    auto    files     = JobEditFiles::create(oversized, fixture.root.path());
+    auto    oversized = std::string(max_edit_draft_bytes + 1, 'x');
+    auto    files     = EditFiles::create(EditResource::Job, oversized, fixture.root.path());
     REQUIRE_FALSE(files);
     CHECK(files.error().error.code == "jobuctl.edit.too_large");
     CHECK(files.error().retained_directory.empty());
@@ -177,7 +209,7 @@ TEST_CASE("A completed draft and minimal request both survive a failure return",
     Fixture fixture;
     auto    paths = [&] {
         auto files = fixture.create();
-        REQUIRE(files.write_request(fixture.update()));
+        REQUIRE(files.write_request(fixture.update().params));
         return files.artifacts();
     }();
     REQUIRE(paths.request);
@@ -229,7 +261,7 @@ TEST_CASE("Safe atomic saves are accepted without changing the edited bytes", "[
     auto update = prepare_job_update(fixture.baseline, *text, fixture.registry);
     REQUIRE(update);
     REQUIRE(*update);
-    REQUIRE(files.write_request(**update));
+    REQUIRE(files.write_request((**update).params));
     paths = files.artifacts();
     REQUIRE(paths.request);
     CHECK(read_text(paths.draft) == edited);
@@ -267,7 +299,7 @@ TEST_CASE("Compact recovery requests remain loadable when readable JSON exceeds 
     REQUIRE(admitted);
     auto draft                                            = fixture.baseline.value();
     std::get<JsonValue::Object>(draft.data).at("payload") = std::move(admitted).value();
-    auto readable                                         = format_job_edit_json(draft);
+    auto readable                                         = format_edit_json(EditResource::Job, draft);
     REQUIRE(readable);
     auto const request_file_limit = jb::rpc::FramingLimits{}.max_body_bytes;
     REQUIRE(readable->size() > request_file_limit);
@@ -280,13 +312,13 @@ TEST_CASE("Compact recovery requests remain loadable when readable JSON exceeds 
     REQUIRE(prepared);
     REQUIRE(*prepared);
     auto const& update         = **prepared;
-    auto        pretty_request = format_job_edit_json(update.params);
+    auto        pretty_request = format_edit_json(EditResource::Job, update.params);
     REQUIRE(pretty_request);
     REQUIRE(pretty_request->size() > request_file_limit);
     auto compact = serialized(update.params);
     REQUIRE(compact.size() < request_file_limit);
 
-    REQUIRE(files.write_request(update));
+    REQUIRE(files.write_request(update.params));
     auto paths = files.artifacts();
     REQUIRE(paths.request);
     CHECK(read_text(paths.draft) == *readable);
@@ -315,8 +347,7 @@ TEST_CASE("Recovery files use the inclusive request-file limit without changing 
         auto    params                                         = parsed(R"({"padding":""})");
         auto    overhead                                       = serialized(params).size();
         std::get<JsonValue::Object>(params.data).at("padding") = JsonValue{.data = std::string(bytes - overhead, 'x')};
-        auto update                                            = PreparedJobUpdate{.params = std::move(params)};
-        auto written                                           = files.write_request(update);
+        auto written                                           = files.write_request(params);
         if (bytes <= limit) {
             REQUIRE(written);
             REQUIRE(files.artifacts().request);
@@ -353,7 +384,7 @@ TEST_CASE("Recovery serialization rejects invalid encoding and excessive nesting
             update.params = JsonValue{.data = std::move(layer)};
         }
     }
-    auto written = files.write_request(update);
+    auto written = files.write_request(update.params);
     REQUIRE_FALSE(written);
     CHECK(written.error().code == "jobuctl.edit.invalid_json");
     CHECK_FALSE(files.artifacts().request);
@@ -462,17 +493,17 @@ TEST_CASE("Draft reads enforce the byte bound during accumulation", "[jobuctl][e
 {
     Fixture fixture;
     auto    files = fixture.create();
-    auto    text  = std::string(max_job_edit_draft_bytes, ' ');
+    auto    text  = std::string(max_edit_draft_bytes, ' ');
     write_text(files.artifacts().draft, text);
     auto accepted = files.read_draft();
     REQUIRE(accepted);
-    CHECK(accepted->size() == max_job_edit_draft_bytes);
+    CHECK(accepted->size() == max_edit_draft_bytes);
     text += ' ';
     write_text(files.artifacts().draft, text);
     auto rejected = files.read_draft();
     REQUIRE_FALSE(rejected);
     CHECK(rejected.error().code == "jobuctl.edit.too_large");
-    CHECK(std::filesystem::file_size(files.artifacts().draft) == max_job_edit_draft_bytes + 1);
+    CHECK(std::filesystem::file_size(files.artifacts().draft) == max_edit_draft_bytes + 1);
     REQUIRE(files.cleanup());
 }
 
@@ -519,10 +550,10 @@ TEST_CASE("Interrupted short writes finish complete protected recovery files", "
     }});
     writes         = 0;
     auto update    = fixture.update();
-    REQUIRE(files.write_request(update));
+    REQUIRE(files.write_request(update.params));
     REQUIRE(files.artifacts().request);
     CHECK(serialized(parsed(read_text(*files.artifacts().request))) == serialized(update.params));
-    CHECK_FALSE(files.write_request(update));
+    CHECK_FALSE(files.write_request(update.params));
     REQUIRE(files.cleanup());
 }
 
@@ -563,7 +594,7 @@ TEST_CASE("Partial request write and finish failures retain the draft without pu
     auto paths    = files.artifacts();
     auto original = read_text(paths.draft);
     failing       = true;
-    auto written  = files.write_request(fixture.update());
+    auto written  = files.write_request(fixture.update().params);
     REQUIRE_FALSE(written);
     CHECK(written.error().code == "jobuctl.edit.write_failed");
     CHECK_FALSE(files.artifacts().request);
@@ -581,21 +612,24 @@ TEST_CASE("Initial file failures clean known files and report unexpected retaine
     {
         keep_backup = true;
     }
-    auto writes = 0;
-    auto files  = JobEditFiles::create(fixture.baseline.value(),
-                                       fixture.root.path(),
-                                       {.write = [&](int fd, void const* data, std::size_t size) -> ssize_t {
-                                          if (++writes == 1) {
-                                              return ::write(fd, data, std::min(size, std::size_t{5}));
-                                          }
-                                          if (keep_backup) {
-                                              auto child =
-                                                  std::filesystem::directory_iterator{fixture.root.path()}->path();
-                                              write_text(child / "unexpected.bak", "backup");
-                                          }
-                                          errno = ENOSPC;
-                                          return -1;
-                                       }});
+    auto writes    = 0;
+    auto formatted = format_job_edit_draft(fixture.baseline.value());
+    REQUIRE(formatted);
+    auto files = EditFiles::create(EditResource::Job,
+                                   *formatted,
+                                   fixture.root.path(),
+                                   {.write = [&](int fd, void const* data, std::size_t size) -> ssize_t {
+                                       if (++writes == 1) {
+                                           return ::write(fd, data, std::min(size, std::size_t{5}));
+                                       }
+                                       if (keep_backup) {
+                                           auto child =
+                                               std::filesystem::directory_iterator{fixture.root.path()}->path();
+                                           write_text(child / "unexpected.bak", "backup");
+                                       }
+                                       errno = ENOSPC;
+                                       return -1;
+                                   }});
     REQUIRE_FALSE(files);
     if (keep_backup) {
         REQUIRE_FALSE(files.error().retained_directory.empty());
@@ -612,7 +646,7 @@ TEST_CASE("Cleanup removes known files but never recurses into unexpected backup
 {
     Fixture fixture;
     auto    files = fixture.create();
-    REQUIRE(files.write_request(fixture.update()));
+    REQUIRE(files.write_request(fixture.update().params));
     auto paths  = files.artifacts();
     auto backup = paths.directory / "editor-backup";
     REQUIRE(std::filesystem::create_directory(backup));
@@ -637,7 +671,7 @@ TEST_CASE("Cleanup preserves unowned request entries and replaced directories", 
     {
         auto path = paths.directory / "update-request.json";
         write_text(path, "preexisting");
-        CHECK_FALSE(files.write_request(fixture.update()));
+        CHECK_FALSE(files.write_request(fixture.update().params));
         CHECK_FALSE(files.artifacts().request);
         CHECK_FALSE(files.cleanup());
         CHECK(read_text(path) == "preexisting");
@@ -648,7 +682,7 @@ TEST_CASE("Cleanup preserves unowned request entries and replaced directories", 
         auto target = fixture.root.path() / "outside";
         write_text(target, "untouched");
         REQUIRE(::symlink(target.c_str(), path.c_str()) == 0);
-        CHECK_FALSE(files.write_request(fixture.update()));
+        CHECK_FALSE(files.write_request(fixture.update().params));
         CHECK_FALSE(files.artifacts().request);
         CHECK_FALSE(files.cleanup());
         CHECK(std::filesystem::is_symlink(path));
@@ -656,7 +690,7 @@ TEST_CASE("Cleanup preserves unowned request entries and replaced directories", 
     }
     SECTION("replacement request inode")
     {
-        REQUIRE(files.write_request(fixture.update()));
+        REQUIRE(files.write_request(fixture.update().params));
         auto path        = *files.artifacts().request;
         auto replacement = paths.directory / "replacement";
         write_text(replacement, "replacement");
@@ -706,25 +740,73 @@ TEST_CASE("Recovery commands quote argv as data without shell evaluation", "[job
     CHECK(failed.error().message.find("sensitive") == std::string::npos);
 }
 
+TEST_CASE("Shared recovery selects fixed resource commands and submission conflict codes", "[jobuctl][edit][recovery]")
+{
+    auto command = Command{.socket_path = "/tmp/daemon's socket", .timeout = std::chrono::milliseconds{12345}};
+    auto paths   = EditArtifacts{.directory = "/tmp/retained edit",
+                                 .draft     = "/tmp/retained edit/draft.jsonc",
+                                 .request   = "/tmp/retained edit/update-request.json"};
+    auto advice  = format_edit_recovery(EditResource::Queue, command, EditRecoveryReason::RevisionConflict, paths);
+    REQUIRE(advice);
+    REQUIRE(advice->retry_command);
+    CHECK(advice->instructions.find("old revision") != std::string::npos);
+    auto arguments = parse_command_argv(*advice->retry_command);
+    REQUIRE(arguments);
+    auto argv = std::vector<char*>{};
+    for (auto& argument : *arguments) {
+        argv.push_back(argument.data());
+    }
+    StandardAttributeRegistry registry;
+    auto                      parsed_command = parse_command_line(static_cast<int>(argv.size()), argv.data(), registry);
+    REQUIRE(parsed_command.action);
+    auto const& retry = std::get<Command>(*parsed_command.action);
+    CHECK(retry.kind == CommandKind::QueueUpdate);
+    CHECK(retry.socket_path == command.socket_path);
+    CHECK(retry.timeout == command.timeout);
+    CHECK(retry.request_file == paths.request);
+
+    auto invalid = format_edit_recovery(EditResource::Queue, command, EditRecoveryReason::InvalidDraft, paths);
+    REQUIRE(invalid);
+    CHECK_FALSE(invalid->retry_command);
+    CHECK_FALSE(invalid->paths.request);
+    CHECK(invalid->instructions.find("original queue_id and expected_revision") != std::string::npos);
+    CHECK(invalid->instructions.find("job_id") == std::string::npos);
+    auto missing = format_edit_recovery(EditResource::Queue, command, EditRecoveryReason::MissingDraft, paths);
+    REQUIRE(missing);
+    CHECK_FALSE(missing->retry_command);
+    CHECK_FALSE(missing->paths.request);
+    CHECK(missing->instructions.find("Start a new interactive edit") != std::string::npos);
+
+    auto error = CliError{.code = "jobu.queue.revision_conflict"};
+    CHECK(edit_recovery_reason(EditResource::Queue, error) == EditRecoveryReason::RevisionConflict);
+    CHECK(edit_recovery_reason(EditResource::Job, error) == EditRecoveryReason::SubmissionFailed);
+    error.code = "jobu.job.revision_conflict";
+    CHECK(edit_recovery_reason(EditResource::Job, error) == EditRecoveryReason::RevisionConflict);
+    CHECK(edit_recovery_reason(EditResource::Queue, error) == EditRecoveryReason::SubmissionFailed);
+    error.outcome_unknown = true;
+    CHECK(edit_recovery_reason(EditResource::Job, error) == EditRecoveryReason::OutcomeUnknown);
+    CHECK(edit_recovery_reason(EditResource::Queue, error) == EditRecoveryReason::OutcomeUnknown);
+}
+
 TEST_CASE("Recovery preserves connection settings and the existing request-file grammar", "[jobuctl][edit][recovery]")
 {
     auto command = Command{.socket_path = "/tmp/daemon's socket", .timeout = std::chrono::milliseconds{12345}};
-    auto paths   = JobEditArtifacts{.directory = "/tmp/edit's directory",
-                                    .draft     = "/tmp/edit's directory/draft.jsonc",
-                                    .request   = "/tmp/edit's directory/update-request.json"};
-    for (auto reason : {JobEditRecoveryReason::SubmissionFailed,
-                        JobEditRecoveryReason::RevisionConflict,
-                        JobEditRecoveryReason::OutcomeUnknown}) {
-        auto advice = format_job_edit_recovery(command, reason, paths);
+    auto paths   = EditArtifacts{.directory = "/tmp/edit's directory",
+                                 .draft     = "/tmp/edit's directory/draft.jsonc",
+                                 .request   = "/tmp/edit's directory/update-request.json"};
+    for (auto reason : {EditRecoveryReason::SubmissionFailed,
+                        EditRecoveryReason::RevisionConflict,
+                        EditRecoveryReason::OutcomeUnknown}) {
+        auto advice = format_edit_recovery(EditResource::Job, command, reason, paths);
         REQUIRE(advice);
         REQUIRE(advice->retry_command);
         CHECK(*advice->retry_command == "'jobuctl' '--socket' '/tmp/daemon'\\''s socket' '--timeout' '12345' 'job' "
                                         "'update' '--request-file' '/tmp/edit'\\''s directory/update-request.json'");
-        if (reason == JobEditRecoveryReason::RevisionConflict) {
+        if (reason == EditRecoveryReason::RevisionConflict) {
             CHECK(advice->instructions.find("old revision") != std::string::npos);
             CHECK(advice->instructions.find("manually reconcile") != std::string::npos);
         }
-        if (reason == JobEditRecoveryReason::OutcomeUnknown) {
+        if (reason == EditRecoveryReason::OutcomeUnknown) {
             CHECK(advice->instructions.find("Inspect current server state before any retry") != std::string::npos);
         }
 
@@ -744,7 +826,7 @@ TEST_CASE("Recovery preserves connection settings and the existing request-file 
         CHECK(recovered.timeout == command.timeout);
         CHECK(recovered.request_file == paths.request);
     }
-    auto invalid = format_job_edit_recovery(command, JobEditRecoveryReason::InvalidDraft, paths);
+    auto invalid = format_edit_recovery(EditResource::Job, command, EditRecoveryReason::InvalidDraft, paths);
     REQUIRE(invalid);
     CHECK_FALSE(invalid->retry_command);
     CHECK_FALSE(invalid->paths.request);
@@ -754,7 +836,7 @@ TEST_CASE("Recovery preserves connection settings and the existing request-file 
     CHECK(invalid->instructions.find("original job_id and expected_revision") != std::string::npos);
     CHECK(invalid->instructions.find("select only intended changed fields") != std::string::npos);
 
-    auto missing = format_job_edit_recovery(command, JobEditRecoveryReason::MissingDraft, paths);
+    auto missing = format_edit_recovery(EditResource::Job, command, EditRecoveryReason::MissingDraft, paths);
     REQUIRE(missing);
     CHECK_FALSE(missing->retry_command);
     CHECK_FALSE(missing->paths.request);
@@ -764,7 +846,7 @@ TEST_CASE("Recovery preserves connection settings and the existing request-file 
     CHECK(missing->instructions.find("Correct the retained draft") == std::string::npos);
 
     paths.request.reset();
-    auto no_request = format_job_edit_recovery(command, JobEditRecoveryReason::SubmissionFailed, paths);
+    auto no_request = format_edit_recovery(EditResource::Job, command, EditRecoveryReason::SubmissionFailed, paths);
     REQUIRE(no_request);
     CHECK_FALSE(no_request->retry_command);
 }

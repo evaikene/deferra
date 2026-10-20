@@ -18,9 +18,10 @@ add_library(jobuctl-private STATIC
     editor_command_priv.cpp
     editor_posix_priv.cpp
     input_priv.cpp
+    edit_document_priv.cpp
     job_edit_priv.cpp
-    job_edit_files_priv.cpp
-    job_edit_recovery_priv.cpp
+    edit_files_priv.cpp
+    edit_recovery_priv.cpp
     job_edit_workflow_priv.cpp
     output_priv.cpp
     queue_selector_priv.cpp
