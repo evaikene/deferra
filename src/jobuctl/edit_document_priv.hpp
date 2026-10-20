@@ -17,6 +17,10 @@ inline constexpr std::size_t max_edit_draft_bytes = std::size_t{16} * 1024 * 102
 /// Fixed, input-safe size error, also used by bounded file creation and reads.
 [[nodiscard]] auto edit_draft_too_large(EditResource resource) -> jb::core::Error;
 
+/// Compares draft values structurally, treating equal nonnegative signed/unsigned integers as equal.
+/// Floating-point values remain distinct from integers; object order is ignored and array order is preserved.
+[[nodiscard]] auto same_json_value(jb::core::JsonValue const& left, jb::core::JsonValue const& right) -> bool;
+
 /// Pretty-prints JSON with whitespace changes only, preserving strings and scalar representations.
 /// Enforces the normal JSON depth limit and a 16 MiB output limit. Errors never contain supplied values.
 [[nodiscard]] auto format_edit_json(EditResource resource, jb::core::JsonValue const& value)

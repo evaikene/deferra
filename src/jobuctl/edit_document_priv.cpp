@@ -4,6 +4,7 @@
 
 #include <fmt/format.h>
 
+#include <cstdint>
 #include <utility>
 
 namespace jb::jobuctl::detail {
@@ -150,6 +151,50 @@ auto format_compact_json(EditResource resource, std::string_view compact) -> Res
 }
 
 } // namespace
+
+auto same_json_value(JsonValue const& left, JsonValue const& right) -> bool
+{
+    // Positive typed integers serialize as unsigned on parsing. Compare their values without narrowing or
+    // treating floating-point replacements as integers; the normal field codecs must still reject those.
+    if (left.is_int() && right.is_uint()) {
+        return left.as_int() >= 0 && static_cast<std::uint64_t>(left.as_int()) == right.as_uint();
+    }
+    if (left.is_uint() && right.is_int()) {
+        return right.as_int() >= 0 && left.as_uint() == static_cast<std::uint64_t>(right.as_int());
+    }
+
+    if (left.is_array() && right.is_array()) {
+        auto const& a = left.as_array();
+        auto const& b = right.as_array();
+        if (a.size() != b.size()) {
+            return false;
+        }
+        for (std::size_t index = 0; index < a.size(); ++index) {
+            if (!same_json_value(a[index], b[index])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (left.is_object() && right.is_object()) {
+        auto const& a = left.as_object();
+        auto const& b = right.as_object();
+        if (a.size() != b.size()) {
+            return false;
+        }
+        // Object maps already have canonical key ordering; only arrays retain source ordering.
+        auto other = b.begin();
+        for (auto const& [key, value] : a) {
+            if (key != other->first || !same_json_value(value, other->second)) {
+                return false;
+            }
+            ++other;
+        }
+        return true;
+    }
+    return left == right;
+}
 
 auto edit_draft_too_large(EditResource resource) -> Error
 {
