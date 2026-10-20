@@ -1,3 +1,5 @@
+#include "edit_document_priv.hpp"
+#include "edit_resource_priv.hpp"
 #include "job_edit_workflow_priv.hpp"
 
 #include "application.hpp"
@@ -9,7 +11,6 @@
 #include "event_thread.hpp"
 #include "framing.hpp"
 #include "input_priv.hpp"
-#include "job_edit_priv.hpp"
 #include "job_validation_priv.hpp"
 #include "json.hpp"
 #include "local_server.hpp"
@@ -85,7 +86,7 @@ auto read_text(std::filesystem::path const& path) -> std::string
 
 auto read_draft(std::filesystem::path const& path) -> JsonValue
 {
-    auto value = parse_job_edit_draft(read_text(path));
+    auto value = parse_edit_draft(EditResource::Job, read_text(path));
     REQUIRE(value);
     return std::move(value).value();
 }
@@ -484,7 +485,7 @@ struct WorkflowResult {
     std::string error;
 };
 
-auto run_workflow(Command command, JobEditWorkflowIo io) -> WorkflowResult
+auto run_workflow(Command command, EditWorkflowIo io) -> WorkflowResult
 {
     StandardAttributeRegistry registry;
     StreamCapture             output{stdout};
@@ -520,7 +521,7 @@ auto load_recovery_request(std::string_view diagnostic, StandardAttributeRegistr
     return command;
 }
 
-auto test_io(std::filesystem::path const& parent, EditorLauncher launch) -> JobEditWorkflowIo
+auto test_io(std::filesystem::path const& parent, EditorLauncher launch) -> EditWorkflowIo
 {
     return {.check_terminal   = [] { return Result<void, Error>::success(); },
             .launch           = std::move(launch),

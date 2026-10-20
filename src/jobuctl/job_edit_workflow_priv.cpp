@@ -1,11 +1,11 @@
 #include "job_edit_workflow_priv.hpp"
 
 #include "commands/commands_priv.hpp"
+#include "edit_files_priv.hpp"
+#include "edit_recovery_priv.hpp"
 #include "editor_command_priv.hpp"
 #include "job.hpp"
-#include "job_edit_files_priv.hpp"
 #include "job_edit_priv.hpp"
-#include "job_edit_recovery_priv.hpp"
 #include "output_priv.hpp"
 #include "run_session_priv.hpp"
 
@@ -42,12 +42,12 @@ auto fail_locally(bool json, Error const& error) -> int
     return 2;
 }
 
-void print_recovery(Command const& command, JobEditFiles const& files, JobEditRecoveryReason reason)
+void print_recovery(Command const& command, EditFiles const& files, EditRecoveryReason reason)
 {
     auto const paths  = files.artifacts();
-    auto       advice = format_job_edit_recovery(command, reason, paths);
+    auto       advice = format_edit_recovery(EditResource::Job, command, reason, paths);
     print_retained_directory(paths.directory);
-    auto const* draft_label = reason == JobEditRecoveryReason::MissingDraft ? "Missing draft" : "Retained draft";
+    auto const* draft_label = reason == EditRecoveryReason::MissingDraft ? "Missing draft" : "Retained draft";
     fmt::print(stderr, "{}: {}\n", draft_label, escape_human(paths.draft.string()));
     if (!advice) {
         print_error(command.json, local_error(advice.error()));
@@ -62,7 +62,7 @@ void print_recovery(Command const& command, JobEditFiles const& files, JobEditRe
     }
 }
 
-auto cleanup_edit(Command const& command, JobEditFiles& files, int exit_code) -> int
+auto cleanup_edit(Command const& command, EditFiles& files, int exit_code) -> int
 {
     auto cleaned = files.cleanup();
     if (!cleaned) {
@@ -73,22 +73,9 @@ auto cleanup_edit(Command const& command, JobEditFiles& files, int exit_code) ->
     return exit_code;
 }
 
-auto recovery_reason(SessionResult const& result) -> JobEditRecoveryReason
-{
-    if (result.error) {
-        if (result.error->outcome_unknown) {
-            return JobEditRecoveryReason::OutcomeUnknown;
-        }
-        if (result.error->code == "jobu.job.revision_conflict") {
-            return JobEditRecoveryReason::RevisionConflict;
-        }
-    }
-    return JobEditRecoveryReason::SubmissionFailed;
-}
-
 } // namespace
 
-auto run_job_edit(Command command, jb::jobu::StandardAttributeRegistry const& registry, JobEditWorkflowIo io) -> int
+auto run_job_edit(Command command, jb::jobu::StandardAttributeRegistry const& registry, EditWorkflowIo io) -> int
 {
     auto const* edit = std::get_if<InteractiveJobUpdate>(&command.request);
     if (!edit || command.kind != CommandKind::JobUpdate) {
@@ -143,7 +130,11 @@ auto run_job_edit(Command command, jb::jobu::StandardAttributeRegistry const& re
     if (!baseline) {
         return fail_locally(command.json, baseline.error());
     }
-    auto created = JobEditFiles::create(baseline->value(), io.temporary_parent);
+    auto formatted = format_job_edit_draft(baseline->value());
+    if (!formatted) {
+        return fail_locally(command.json, formatted.error());
+    }
+    auto created = EditFiles::create(EditResource::Job, *formatted, io.temporary_parent);
     if (!created) {
         print_retained_directory(created.error().retained_directory);
         return fail_locally(command.json, created.error().error);
@@ -162,16 +153,16 @@ auto run_job_edit(Command command, jb::jobu::StandardAttributeRegistry const& re
     auto draft = files.read_draft();
     if (!draft) {
         // Use the read result; a second filesystem probe could observe a different file.
-        auto reason = JobEditRecoveryReason::InvalidDraft;
+        auto reason = EditRecoveryReason::InvalidDraft;
         if (draft.error().code == "jobuctl.edit.missing_draft") {
-            reason = JobEditRecoveryReason::MissingDraft;
+            reason = EditRecoveryReason::MissingDraft;
         }
         print_recovery(command, files, reason);
         return fail_locally(command.json, draft.error());
     }
     auto prepared = prepare_job_update(*baseline, *draft, registry);
     if (!prepared) {
-        print_recovery(command, files, JobEditRecoveryReason::InvalidDraft);
+        print_recovery(command, files, EditRecoveryReason::InvalidDraft);
         return fail_locally(command.json, prepared.error());
     }
     if (!*prepared) {
@@ -181,9 +172,9 @@ auto run_job_edit(Command command, jb::jobu::StandardAttributeRegistry const& re
 
     // Persist exactly the validated minimal params before the mutation can reach the server.
     auto& update  = **prepared;
-    auto  written = files.write_request(update);
+    auto  written = files.write_request(update.params);
     if (!written) {
-        print_recovery(command, files, JobEditRecoveryReason::InvalidDraft);
+        print_recovery(command, files, EditRecoveryReason::InvalidDraft);
         return fail_locally(command.json, written.error());
     }
 
@@ -193,7 +184,9 @@ auto run_job_edit(Command command, jb::jobu::StandardAttributeRegistry const& re
     auto submitted = io.run(std::move(submit), SessionMode::Render);
     if (submitted.exit_code != 0) {
         // Render already delivered the existing error, including outcome_unknown. Add recovery without repeating it.
-        print_recovery(command, files, recovery_reason(submitted));
+        auto reason = submitted.error ? edit_recovery_reason(EditResource::Job, *submitted.error)
+                                      : EditRecoveryReason::SubmissionFailed;
+        print_recovery(command, files, reason);
         return submitted.exit_code;
     }
     return cleanup_edit(command, files, 0);

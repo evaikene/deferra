@@ -1,5 +1,6 @@
-#include "job_edit_files_priv.hpp"
+#include "edit_files_priv.hpp"
 
+#include "edit_document_priv.hpp"
 #include "time_source.hpp"
 #include "uuid.hpp"
 
@@ -58,8 +59,13 @@ auto safe_draft(struct stat const& metadata) -> bool
 
 } // namespace
 
-JobEditFiles::JobEditFiles(std::filesystem::path directory, int parent, int directory_fd, JobEditFileIo io)
-    : _directory{std::move(directory)}
+EditFiles::EditFiles(EditResource          resource,
+                     std::filesystem::path directory,
+                     int                   parent,
+                     int                   directory_fd,
+                     EditFileIo            io)
+    : _resource{resource}
+    , _directory{std::move(directory)}
     , _leaf{_directory.filename().string()}
     , _parent{parent}
     , _directory_fd{directory_fd}
@@ -79,7 +85,7 @@ JobEditFiles::JobEditFiles(std::filesystem::path directory, int parent, int dire
     }
 }
 
-JobEditFiles::~JobEditFiles()
+EditFiles::~EditFiles()
 {
     // Destruction releases handles only. The coordinator must explicitly choose destructive cleanup.
     if (_directory_fd >= 0) {
@@ -90,8 +96,9 @@ JobEditFiles::~JobEditFiles()
     }
 }
 
-JobEditFiles::JobEditFiles(JobEditFiles&& other) noexcept
-    : _directory{std::move(other._directory)}
+EditFiles::EditFiles(EditFiles&& other) noexcept
+    : _resource{other._resource}
+    , _directory{std::move(other._directory)}
     , _leaf{std::move(other._leaf)}
     , _parent{std::exchange(other._parent, -1)}
     , _directory_fd{std::exchange(other._directory_fd, -1)}
@@ -103,13 +110,14 @@ JobEditFiles::JobEditFiles(JobEditFiles&& other) noexcept
     , _request_inode{other._request_inode}
 {}
 
-auto JobEditFiles::create(JsonValue const& draft, std::filesystem::path const& parent, JobEditFileIo io)
-    -> Result<JobEditFiles, JobEditFileFailure>
+auto EditFiles::create(EditResource                 resource,
+                       std::string_view             draft,
+                       std::filesystem::path const& parent,
+                       EditFileIo                   io) -> Result<EditFiles, EditFileFailure>
 {
-    using Creation = Result<JobEditFiles, JobEditFileFailure>;
-    auto text      = format_job_edit_draft(draft);
-    if (!text) {
-        return Creation::failure({.error = std::move(text).error()});
+    using Creation = Result<EditFiles, EditFileFailure>;
+    if (draft.size() > max_edit_draft_bytes) {
+        return Creation::failure({.error = edit_draft_too_large(resource)});
     }
 
     std::error_code error;
@@ -147,12 +155,12 @@ auto JobEditFiles::create(JsonValue const& draft, std::filesystem::path const& p
                 {.error = file_error("jobuctl.edit.create_failed", "Unable to open the private edit directory"),
                  .retained_directory = removed ? std::filesystem::path{} : root / leaf});
         }
-        JobEditFiles files{root / leaf, parent_fd.release(), raw, std::move(io)};
+        EditFiles files{resource, root / leaf, parent_fd.release(), raw, std::move(io)};
         // Set the exact owner permissions even under a restrictive umask; no shared bits were ever granted.
-        auto written = ::fchmod(raw, 0700) == 0
-                         ? files.write_file("draft.jsonc", *text, false)
-                         : Result<void, Error>::failure(
-                               file_error("jobuctl.edit.create_failed", "Unable to protect the edit directory"));
+        auto      written = ::fchmod(raw, 0700) == 0
+                              ? files.write_file("draft.jsonc", draft, false)
+                              : Result<void, Error>::failure(
+                                    file_error("jobuctl.edit.create_failed", "Unable to protect the edit directory"));
         if (!written) {
             auto cleaned = files.cleanup();
             return Creation::failure({.error              = std::move(written).error(),
@@ -164,14 +172,14 @@ auto JobEditFiles::create(JsonValue const& draft, std::filesystem::path const& p
         {.error = file_error("jobuctl.edit.create_failed", "Unable to create a private edit directory")});
 }
 
-auto JobEditFiles::artifacts() const -> JobEditArtifacts
+auto EditFiles::artifacts() const -> EditArtifacts
 {
     return {.directory = _directory,
             .draft     = _directory / "draft.jsonc",
             .request   = _request_ready ? std::optional{_directory / "update-request.json"} : std::nullopt};
 }
 
-auto JobEditFiles::read_draft() const -> Result<std::string, Error>
+auto EditFiles::read_draft() const -> Result<std::string, Error>
 {
     Descriptor file{::openat(_directory_fd, "draft.jsonc", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)};
     if (file.get() < 0) {
@@ -204,7 +212,7 @@ auto JobEditFiles::read_draft() const -> Result<std::string, Error>
     auto text  = std::string{};
     auto block = std::array<char, 8192>{};
     while (true) {
-        auto const wanted = std::min(block.size(), max_job_edit_draft_bytes - text.size() + 1);
+        auto const wanted = std::min(block.size(), max_edit_draft_bytes - text.size() + 1);
         auto const count  = _io.read(file.get(), block.data(), wanted);
         if (count < 0 && errno == EINTR) {
             continue;
@@ -216,16 +224,14 @@ auto JobEditFiles::read_draft() const -> Result<std::string, Error>
         if (count == 0) {
             return Result<std::string, Error>::success(std::move(text));
         }
-        if (static_cast<std::size_t>(count) > max_job_edit_draft_bytes - text.size()) {
-            return Result<std::string, Error>::failure({.category = ErrorCategory::InvalidArgument,
-                                                        .code     = "jobuctl.edit.too_large",
-                                                        .message  = "Job edit draft exceeds 16 MiB"});
+        if (static_cast<std::size_t>(count) > max_edit_draft_bytes - text.size()) {
+            return Result<std::string, Error>::failure(edit_draft_too_large(_resource));
         }
         text.append(block.data(), static_cast<std::size_t>(count));
     }
 }
 
-auto JobEditFiles::write_file(char const* name, std::string const& text, bool request) -> Result<void, Error>
+auto EditFiles::write_file(char const* name, std::string_view text, bool request) -> Result<void, Error>
 {
     Descriptor file{::openat(_directory_fd, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600)};
     if (file.get() < 0) {
@@ -268,13 +274,13 @@ auto JobEditFiles::write_file(char const* name, std::string const& text, bool re
     return Result<void, Error>::success();
 }
 
-auto JobEditFiles::write_request(PreparedJobUpdate const& update) -> Result<void, Error>
+auto EditFiles::write_request(JsonValue const& params) -> Result<void, Error>
 {
     if (_request_ready || _request_present) {
         return Result<void, Error>::failure(
             file_error("jobuctl.edit.write_failed", "A minimal update request already exists"));
     }
-    auto text = serialize_job_edit_request(update.params);
+    auto text = serialize_edit_request(_resource, params);
     if (!text) {
         return Result<void, Error>::failure(std::move(text).error());
     }
@@ -290,7 +296,7 @@ auto JobEditFiles::write_request(PreparedJobUpdate const& update) -> Result<void
     return Result<void, Error>::success();
 }
 
-auto JobEditFiles::remove_file(char const* name, bool request) const -> bool
+auto EditFiles::remove_file(char const* name, bool request) const -> bool
 {
     struct stat metadata{};
     if (::fstatat(_directory_fd, name, &metadata, AT_SYMLINK_NOFOLLOW) != 0) {
@@ -305,7 +311,7 @@ auto JobEditFiles::remove_file(char const* name, bool request) const -> bool
     return ::unlinkat(_directory_fd, name, 0) == 0;
 }
 
-auto JobEditFiles::cleanup() -> Result<void, Error>
+auto EditFiles::cleanup() -> Result<void, Error>
 {
     if (_directory_fd < 0) {
         return Result<void, Error>::success();

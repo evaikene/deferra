@@ -7,15 +7,11 @@
 #include "management.hpp"
 #include "result.hpp"
 
-#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
 
 namespace jb::jobuctl::detail {
-
-/// Maximum human draft size; this does not enlarge RPC or persisted payload limits.
-inline constexpr std::size_t max_job_edit_draft_bytes = std::size_t{16} * 1024 * 1024;
 
 /// Owns the original editable projection, independently of the fetched definition and registry.
 /// Only const access is exposed so draft edits cannot change the captured identity, revision, or comparison values.
@@ -43,30 +39,12 @@ struct PreparedJobUpdate {
     jb::jobu::UpdateJobRequest request;
 };
 
-/// Pretty-prints JSON with whitespace changes only, preserving strings and scalar representations.
-/// Enforces the normal JSON depth limit and a 16 MiB output limit. Errors never contain supplied values.
-[[nodiscard]] auto format_job_edit_json(jb::core::JsonValue const& value)
-    -> jb::core::Result<std::string, jb::core::Error>;
-
 /// Prepends editor-visible // instructions to pretty JSON, bounding the complete JSONC draft to 16 MiB.
 /// The result is an interactive draft; request-file input still requires strict JSON.
 [[nodiscard]] auto format_job_edit_draft(jb::core::JsonValue const& value)
     -> jb::core::Result<std::string, jb::core::Error>;
 
-/// Parses one interactive JSONC object, accepting // line comments and /* ... */ block comments outside strings.
-/// Comments may appear wherever whitespace is permitted. Trailing commas are rejected.
-/// Bounds the original input to 16 MiB before processing and retains the normal JSON depth limit.
-/// Does not modify the caller's text or enable comments in ordinary JSON/request-file input.
-[[nodiscard]] auto parse_job_edit_draft(std::string_view draft)
-    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
-
-/// Serializes minimal recovery params as compact JSON within the ordinary request-file byte limit.
-/// Preserves the normal JSON depth limit. Does not replace request decoding, RPC framing, or payload validation.
-/// Returns fixed, input-safe errors; performs no file I/O and does not use the larger human draft allowance.
-[[nodiscard]] auto serialize_job_edit_request(jb::core::JsonValue const& params)
-    -> jb::core::Result<std::string, jb::core::Error>;
-
-/// Parses at most 16 MiB of edited draft text through parse_job_edit_draft() and validates retained fields.
+/// Parses at most 16 MiB of edited draft text through the shared JSONC parser and validates retained fields.
 /// Identity/revision are mandatory and fixed. Omitted fields/attributes mean no update; payload/schedule changes
 /// replace the whole value. Validation uses the existing update codecs, leaving domain admission to the server.
 /// Returns an empty optional for a no-op, or owning minimal params and the shared decoder's typed update.

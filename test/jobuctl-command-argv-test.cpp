@@ -1,5 +1,5 @@
 #include "command_argv_priv.hpp"
-#include "job_edit_recovery_priv.hpp"
+#include "edit_recovery_priv.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 

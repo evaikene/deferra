@@ -1,3 +1,5 @@
+#include "edit_document_priv.hpp"
+#include "edit_resource_priv.hpp"
 #include "job_edit_priv.hpp"
 
 #include "attribute_registry.hpp"
@@ -126,6 +128,50 @@ auto nested_arrays(std::size_t count) -> JsonValue
 
 } // namespace
 
+TEST_CASE("Shared documents accept domain instructions without requiring a job projection", "[jobuctl][edit]")
+{
+    auto value        = parsed(R"({"resource_data":[1,18446744073709551615,"// literal /* text */"]})");
+    auto instructions = std::string{"// Caller-owned instructions\r\n/* another instruction */\r\n"};
+    auto draft        = format_edit_draft(EditResource::Queue, value, instructions);
+    REQUIRE(draft);
+    CHECK(draft->starts_with(instructions));
+    CHECK(draft->find("job_id") == std::string::npos);
+    auto original = *draft;
+    auto decoded  = parse_edit_draft(EditResource::Queue, *draft);
+    REQUIRE(decoded);
+    CHECK(*decoded == value);
+    CHECK(*draft == original);
+    CHECK_FALSE(parse_json(*draft));
+
+    auto request = serialize_edit_request(EditResource::Queue, value);
+    REQUIRE(request);
+    CHECK(*request == serialized(value));
+    CHECK(parse_json(*request));
+
+    auto oversized = format_edit_draft(EditResource::Queue, value, std::string(max_edit_draft_bytes + 1, ' '));
+    REQUIRE_FALSE(oversized);
+    CHECK(oversized.error().code == "jobuctl.edit.too_large");
+    CHECK(oversized.error().message == "Queue edit draft exceeds 16 MiB");
+}
+
+TEST_CASE("Shared draft parsing retains strict JSON validation and job error text", "[jobuctl][edit]")
+{
+    for (auto const* text : {"// comments\n{\"value\":1,\"value\":2}",
+                             "/* note */ {\"value\":18446744073709551616}",
+                             "// note\n{\"value\":\"\xff\"}",
+                             "/* unclosed",
+                             "{\"value\":1,}"}) {
+        auto rejected = parse_edit_draft(EditResource::Job, text);
+        REQUIRE_FALSE(rejected);
+        CHECK(rejected.error().code == "jobuctl.edit.invalid_json");
+        CHECK(rejected.error().message == "Job edit draft must contain one valid JSONC object");
+    }
+    auto invalid = format_edit_json(EditResource::Job, make_json(std::string{"\xff"}));
+    REQUIRE_FALSE(invalid);
+    CHECK(invalid.error().message == "Job edit JSON cannot be serialized");
+    CHECK(edit_draft_too_large(EditResource::Job).message == "Job edit draft exceeds 16 MiB");
+}
+
 TEST_CASE("Job edit projection selects writable content for each runner and schedule", "[jobuctl][edit]")
 {
     StandardAttributeRegistry registry;
@@ -172,7 +218,7 @@ TEST_CASE("Job edit projection selects writable content for each runner and sche
                     CHECK(schedule.at("at").as_string() == "2026-10-16T12:00:00.123456Z");
                 }
 
-                auto formatted = format_job_edit_json(baseline.value());
+                auto formatted = format_edit_json(EditResource::Job, baseline.value());
                 REQUIRE(formatted);
                 auto result = prepare_job_update(baseline, *formatted, registry);
                 REQUIRE(result);
@@ -207,7 +253,7 @@ TEST_CASE("Job edit formatting preserves escapes and JSON scalar representations
 {
     auto value = parsed(
         R"({"text":"private-draft-marker: { [ , : } ] \" \\\" \\ \n\t \u0000 \u20ac","empty_object":{},"empty_array":[],"items":[true,false,null,1.0,-2,18446744073709551615,{"inner":"value"}]})");
-    auto pretty = format_job_edit_json(value);
+    auto pretty = format_edit_json(EditResource::Job, value);
     REQUIRE(pretty);
     CHECK(pretty->starts_with("{\n  \"empty_array\": [],\n"));
     CHECK(pretty->ends_with("\n}\n"));
@@ -216,15 +262,15 @@ TEST_CASE("Job edit formatting preserves escapes and JSON scalar representations
 
     for (auto const* text : {"null", "true", "-1", "1.0", R"("[{},:]\\\"")", "{}", "[]"}) {
         auto scalar    = parsed(text);
-        auto formatted = format_job_edit_json(scalar);
+        auto formatted = format_edit_json(EditResource::Job, scalar);
         REQUIRE(formatted);
         CHECK(parsed(*formatted) == scalar);
     }
 
-    auto invalid = format_job_edit_json(make_json(std::string{"\xff"}));
+    auto invalid = format_edit_json(EditResource::Job, make_json(std::string{"\xff"}));
     REQUIRE_FALSE(invalid);
     CHECK(invalid.error().code == "jobuctl.edit.invalid_json");
-    auto non_finite = format_job_edit_json(make_json(std::numeric_limits<double>::infinity()));
+    auto non_finite = format_edit_json(EditResource::Job, make_json(std::numeric_limits<double>::infinity()));
     CHECK_FALSE(non_finite);
 }
 
@@ -238,7 +284,7 @@ TEST_CASE("Interactive drafts show instructions and preserve JSON values and no-
     CHECK(draft->find("// Omitted fields leave server values unchanged.\n") != std::string::npos);
     CHECK(draft->find("// Exit without effective changes to cancel the update.\n") != std::string::npos);
     CHECK_FALSE(parse_json(*draft));
-    auto decoded = parse_job_edit_draft(*draft);
+    auto decoded = parse_edit_draft(EditResource::Job, *draft);
     REQUIRE(decoded);
     CHECK(*decoded == value);
 
@@ -273,7 +319,7 @@ TEST_CASE("Interactive drafts accept JSONC comments without changing saved bytes
         }
         text          += "// trailing note without a final newline";
         auto original  = text;
-        auto decoded   = parse_job_edit_draft(text);
+        auto decoded   = parse_edit_draft(EditResource::Job, text);
         REQUIRE(decoded);
         CHECK(*decoded == expected);
         CHECK(text == original);
@@ -286,7 +332,7 @@ TEST_CASE("Interactive drafts accept JSONC comments without changing saved bytes
                              "{} // note\n{}",
                              "{\"priority\":1, // trailing comma\n}"}) {
         CAPTURE(text);
-        auto rejected = parse_job_edit_draft(text);
+        auto rejected = parse_edit_draft(EditResource::Job, text);
         REQUIRE_FALSE(rejected);
         CHECK(rejected.error().code == "jobuctl.edit.invalid_json");
     }
@@ -298,28 +344,28 @@ TEST_CASE("Interactive instructions count toward the existing size and nesting l
     auto small = format_job_edit_draft(value);
     REQUIRE(small);
     // Fill exactly the remaining complete-draft budget; even the instruction bytes count toward 16 MiB.
-    object(value).at("text") = make_json(std::string(max_job_edit_draft_bytes - small->size(), 'x'));
+    object(value).at("text") = make_json(std::string(max_edit_draft_bytes - small->size(), 'x'));
     auto exact               = format_job_edit_draft(value);
     REQUIRE(exact);
-    CHECK(exact->size() == max_job_edit_draft_bytes);
-    REQUIRE(parse_job_edit_draft(*exact));
+    CHECK(exact->size() == max_edit_draft_bytes);
+    REQUIRE(parse_edit_draft(EditResource::Job, *exact));
     std::get<std::string>(object(value).at("text").data).push_back('x');
-    REQUIRE(format_job_edit_json(value));
+    REQUIRE(format_edit_json(EditResource::Job, value));
     auto oversized = format_job_edit_draft(value);
     REQUIRE_FALSE(oversized);
     CHECK(oversized.error().code == "jobuctl.edit.too_large");
 
     auto notes = std::string{"//"};
-    notes.append(max_job_edit_draft_bytes - notes.size() - 3, 'x');
+    notes.append(max_edit_draft_bytes - notes.size() - 3, 'x');
     notes += "\n{}";
-    REQUIRE(parse_job_edit_draft(notes));
+    REQUIRE(parse_edit_draft(EditResource::Job, notes));
     notes.push_back(' ');
-    auto rejected = parse_job_edit_draft(notes);
+    auto rejected = parse_edit_draft(EditResource::Job, notes);
     REQUIRE_FALSE(rejected);
     CHECK(rejected.error().code == "jobuctl.edit.too_large");
 
     auto too_deep = "// notes\n{\"nested\":" + serialized(nested_arrays(JsonLimits{}.max_depth)) + "}";
-    auto depth    = parse_job_edit_draft(too_deep);
+    auto depth    = parse_edit_draft(EditResource::Job, too_deep);
     REQUIRE_FALSE(depth);
     CHECK(depth.error().code == "jobuctl.edit.invalid_json");
 }
@@ -327,30 +373,30 @@ TEST_CASE("Interactive instructions count toward the existing size and nesting l
 TEST_CASE("Job edit formatting and parsing enforce byte and nesting limits", "[jobuctl][edit]")
 {
     // Quotes and the final newline consume three bytes. The next byte must fail even though compact JSON fits.
-    auto value = make_json(std::string(max_job_edit_draft_bytes - 3, 'x'));
-    auto exact = format_job_edit_json(value);
+    auto value = make_json(std::string(max_edit_draft_bytes - 3, 'x'));
+    auto exact = format_edit_json(EditResource::Job, value);
     REQUIRE(exact);
-    CHECK(exact->size() == max_job_edit_draft_bytes);
+    CHECK(exact->size() == max_edit_draft_bytes);
     std::get<std::string>(value.data).push_back('x');
-    auto expanded = format_job_edit_json(value);
+    auto expanded = format_edit_json(EditResource::Job, value);
     REQUIRE_FALSE(expanded);
     CHECK(expanded.error().code == "jobuctl.edit.too_large");
     std::get<std::string>(value.data).push_back('x');
-    auto oversized = format_job_edit_json(value);
+    auto oversized = format_edit_json(EditResource::Job, value);
     REQUIRE_FALSE(oversized);
     CHECK(oversized.error().code == "jobuctl.edit.too_large");
 
-    auto maximum_depth = format_job_edit_json(nested_arrays(JsonLimits{}.max_depth));
+    auto maximum_depth = format_edit_json(EditResource::Job, nested_arrays(JsonLimits{}.max_depth));
     REQUIRE(maximum_depth);
     CHECK(parse_json(*maximum_depth));
-    auto excessive_depth = format_job_edit_json(nested_arrays(JsonLimits{}.max_depth + 1));
+    auto excessive_depth = format_edit_json(EditResource::Job, nested_arrays(JsonLimits{}.max_depth + 1));
     REQUIRE_FALSE(excessive_depth);
     CHECK(excessive_depth.error().code == "jobuctl.edit.invalid_json");
 
     StandardAttributeRegistry registry;
     auto                      baseline = baseline_for(sample_job(registry), registry);
     auto                      text     = serialized(baseline.value());
-    text.resize(max_job_edit_draft_bytes, ' ');
+    text.resize(max_edit_draft_bytes, ' ');
     auto accepted = prepare_job_update(baseline, text, registry);
     REQUIRE(accepted);
     CHECK_FALSE(*accepted);
