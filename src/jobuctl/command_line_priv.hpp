@@ -60,6 +60,13 @@ struct InteractiveJobUpdate {
     std::optional<std::string> editor;
 };
 
+/// CLI-only bare queue update. Command retains the matching owning selector intent for the initial Capture fetch.
+/// Submission replaces this input with UpdateQueueRequest and discards the original selection intent.
+struct InteractiveQueueUpdate {
+    jb::jobu::QueueSelector    queue;
+    std::optional<std::string> editor;
+};
+
 /// CLI-only selection input; an attempt identity is chosen later by the composed session.
 /// Delivery flags remain on Command, and no protocol request can decode this type.
 struct RunOutputRequest {
@@ -70,7 +77,7 @@ struct RunOutputRequest {
 };
 
 /// Owning requests for the currently registered CLI methods and local/composed workflows.
-/// CommandKind identifies repeated result types; InteractiveJobUpdate must be dispatched before entering a Session.
+/// CommandKind identifies repeated result types; interactive updates must be dispatched before entering a Session.
 using CommandRequest = std::variant<std::monostate,
                                     jb::jobu::QueueSelector,
                                     jb::jobu::GetQueueRequest,
@@ -95,6 +102,7 @@ using CommandRequest = std::variant<std::monostate,
                                     jb::jobu::CronScheduleInput,
                                     jb::jobu::ScheduleNextRequest,
                                     InteractiveJobUpdate,
+                                    InteractiveQueueUpdate,
                                     RunOutputRequest,
                                     std::string>;
 

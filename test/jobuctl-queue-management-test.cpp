@@ -347,7 +347,7 @@ auto main(int argc, char* argv[]) -> int
         !rejects_before_connect(argv[2],
                                 socket_path,
                                 {"queue", "create", "default", "--weight", "1", "--weight", "2"}) ||
-        !rejects_before_connect(argv[2], socket_path, {"queue", "update", "--name", "default"}) ||
+        !rejects_before_connect(argv[2], socket_path, {"queue", "update", "--name", "default", "--weight", "2"}) ||
         !rejects_before_connect(argv[2], socket_path, {"queue", "list", "--unknown"}) ||
         !rejects_before_connect(argv[2], socket_path, {"queue", "create", "default", "--weight"})) {
         return fail("jobuctl accepted invalid queue command arguments");

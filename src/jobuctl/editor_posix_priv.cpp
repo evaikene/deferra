@@ -307,7 +307,7 @@ auto check_editor_terminal() -> Completion
             .category = ErrorCategory::InvalidArgument,
             .code     = "jobuctl.edit.terminal_required",
             .message  = "Interactive update requires terminal stdin/stderr and a foreground controlling terminal. "
-                        "Use explicit fields with --revision, or job update --request-file FILE.",
+                        "Use explicit fields with --revision, or --request-file FILE.",
         });
     };
     if (::isatty(STDIN_FILENO) != 1 || ::isatty(STDERR_FILENO) != 1) {

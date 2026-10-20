@@ -87,6 +87,103 @@ auto parse_cli_job_create(std::vector<std::string> options, std::string action =
 
 } // namespace
 
+TEST_CASE("jobuctl selects only bare queue updates for interactive editing", "[jobuctl][parse][queue][edit]")
+{
+    struct Selection {
+        std::vector<std::string> arguments;
+        QueueSelectionForm       form;
+        std::string              text;
+        std::string              value;
+    };
+
+    for (auto const& selection : std::vector<Selection>{
+             {.arguments = {"reports"},                   .form = QueueSelectionForm::ExactName,  .text = "reports", .value = "reports"},
+             {.arguments = {"name:id:reports"},
+              .form      = QueueSelectionForm::ExactName,
+              .text      = "name:id:reports",
+              .value     = "id:reports"                                                                                                },
+             {.arguments = {"--name", "id:reports"},
+              .form      = QueueSelectionForm::ExactName,
+              .text      = "id:reports",
+              .value     = "id:reports"                                                                                                },
+             {.arguments = {job_id},                      .form = QueueSelectionForm::InferredId, .text = job_id,    .value = job_id   },
+             {.arguments = {"id:" + std::string{job_id}},
+              .form      = QueueSelectionForm::ExplicitId,
+              .text      = "id:" + std::string{job_id},
+              .value     = job_id                                                                                                      },
+             {.arguments = {"--id", job_id},
+              .form      = QueueSelectionForm::ExplicitId,
+              .text      = job_id,
+              .value     = job_id                                                                                                      }
+    }) {
+        auto arguments = std::vector<std::string>{"queue", "update"};
+        arguments.insert(arguments.end(), selection.arguments.begin(), selection.arguments.end());
+        arguments.insert(arguments.end(), {"--socket", "edit.sock", "--timeout", "1234", "--json"});
+        auto bare = parse(arguments);
+        REQUIRE(bare.command);
+        CHECK(bare.command->kind == CommandKind::QueueUpdate);
+        CHECK(bare.command->socket_path == "edit.sock");
+        CHECK(bare.command->timeout == std::chrono::milliseconds{1234});
+        CHECK(bare.command->json);
+        auto const& edit = std::get<InteractiveQueueUpdate>(bare.command->request);
+        CHECK_FALSE(edit.editor);
+        REQUIRE(bare.command->queue_selector_intent);
+        CHECK(bare.command->queue_selector_intent->form == selection.form);
+        CHECK(bare.command->queue_selector_intent->original_text == selection.text);
+        if (selection.form == QueueSelectionForm::ExactName) {
+            CHECK(std::get<std::string>(edit.queue) == selection.value);
+        }
+        else {
+            CHECK(std::get<Uuid>(edit.queue).to_string() == selection.value);
+        }
+        arguments.insert(arguments.end(), {"--editor", "'editor path' --wait"});
+        auto overridden = parse(std::move(arguments));
+        REQUIRE(overridden.command);
+        CHECK(std::get<InteractiveQueueUpdate>(overridden.command->request).editor == "'editor path' --wait");
+    }
+
+    // Each mutable option still selects an explicit update, even when its value means clearing or inheritance.
+    jb::test::TemporaryDirectory directory;
+    auto const                   defaults = directory.path() / "defaults.json";
+    {
+        std::ofstream{defaults} << "{}";
+    }
+    for (auto const& fields : std::vector<std::vector<std::string>>{
+             {"--new-name", "changed"},
+             {"--weight", "2"},
+             {"--concurrency-limit", "2"},
+             {"--recovery-policy", "retry_interrupted"},
+             {"--defaults-file", defaults.string()},
+             {"--history-retention-seconds", "0"},
+             {"--inherit-history-retention"},
+             {"--runnable-wait-warning-ms", "0"}
+    }) {
+        CAPTURE(fields);
+        auto arguments = std::vector<std::string>{"queue", "update", "reports"};
+        arguments.insert(arguments.end(), fields.begin(), fields.end());
+        CHECK(parse(arguments).error == "queue update requires --revision with the inspected queue revision");
+        arguments.insert(arguments.end(), {"--editor", "editor"});
+        CHECK(parse(arguments).error == "--editor is allowed only with a bare interactive queue update");
+        arguments.insert(arguments.end(), {"--revision", "7"});
+        CHECK_FALSE(parse(std::move(arguments)).command);
+    }
+    for (auto const& suffix : std::vector<std::vector<std::string>>{
+             {"--editor", ""},
+             {"--editor", "one", "--editor", "two"},
+             {"--editor", "one", "--revision", "7"},
+             {"--editor", "one", "--request-file", "input.json"}
+    }) {
+        auto arguments = std::vector<std::string>{"queue", "update", "reports"};
+        arguments.insert(arguments.end(), suffix.begin(), suffix.end());
+        CHECK_FALSE(parse(std::move(arguments)).command);
+    }
+    CHECK(parse({"queue", "update", "reports", "--revision", "7"}).error ==
+          "queue update requires at least one mutable field");
+    auto help = parse_action({"queue", "update", "--editor", "'unterminated", "--help"});
+    REQUIRE(help.action);
+    CHECK(std::holds_alternative<HelpCommand>(*help.action));
+}
+
 TEST_CASE("jobuctl selects only bare job updates for interactive editing", "[jobuctl][parse][edit]")
 {
     auto bare = parse({"job", "update", job_id, "--json", "--timeout", "1234", "--socket", "edit.sock"});
@@ -2104,7 +2201,9 @@ TEST_CASE("Queue selectors reject empty malformed and conflicting forms", "[jobu
     }) {
         auto arguments = std::vector<std::string>{"queue", "update"};
         arguments.insert(arguments.end(), selection.begin(), selection.end());
-        CHECK(parse(arguments).error == "queue update requires --revision with the inspected queue revision");
+        auto interactive = parse(arguments);
+        REQUIRE(interactive.command);
+        CHECK(std::holds_alternative<InteractiveQueueUpdate>(interactive.command->request));
         arguments.insert(arguments.end(), {"--revision", "6"});
         CHECK(parse(std::move(arguments)).error == "queue update requires at least one mutable field");
     }

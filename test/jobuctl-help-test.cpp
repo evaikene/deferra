@@ -597,7 +597,7 @@ TEST_CASE("jobuctl local selection does not open supplied file paths", "[jobuctl
     }
 }
 
-TEST_CASE("Queue update help describes only explicit protected updates", "[jobuctl][help][queue][revision]")
+TEST_CASE("Queue update help describes interactive and explicit protected updates", "[jobuctl][help][queue][revision]")
 {
     auto help = run({"queue", "update", "--help"});
     REQUIRE(help.code == 0);
@@ -605,6 +605,20 @@ TEST_CASE("Queue update help describes only explicit protected updates", "[jobuc
     CHECK(help.out.find("1..9223372036854775807") != std::string::npos);
     CHECK(help.out.find("update reports --revision 1 --weight 2") != std::string::npos);
     CHECK(help.out.find("without automatic retry") != std::string::npos);
+    for (auto const* text : {"Bare update opens an interactive draft.jsonc",
+                             "Keep queue_id and expected_revision unchanged",
+                             "terminal stdin/stderr",
+                             "stdout may be redirected",
+                             "full --timeout",
+                             "--editor, nonempty VISUAL, nonempty EDITOR, then vi",
+                             "without shell evaluation",
+                             "code --wait",
+                             "defaults replaces the whole queue-default layer",
+                             "queue update --request-file FILE",
+                             "Conflicts require manual reconciliation"}) {
+        CAPTURE(text);
+        CHECK(help.out.find(text) != std::string::npos);
+    }
     CHECK(help.err.empty());
 }
 
@@ -634,7 +648,7 @@ TEST_CASE("Queue selector help stays local before selector files or network work
                 CHECK((result.out.find("pins the selected UUID") != std::string::npos ||
                        result.out.find("Names are pinned to UUIDs") != std::string::npos));
                 if (std::string_view{action} == "update") {
-                    CHECK(result.out.find("Interactive queue editing is not yet available") != std::string::npos);
+                    CHECK(result.out.find("Bare update opens an interactive draft.jsonc") != std::string::npos);
                 }
                 CHECK(result.err.empty());
             }
@@ -643,5 +657,67 @@ TEST_CASE("Queue selector help stays local before selector files or network work
         CHECK(update.code == 0);
         CHECK(update.out.find("--new-name NAME") != std::string::npos);
         CHECK(update.err.empty());
+    }
+}
+
+TEST_CASE("Queue interactive help precedes editor input and terminal checks", "[jobuctl][help][queue][edit]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   fifo = directory.path() / "unopened-editor-input";
+    REQUIRE(::mkfifo(fifo.c_str(), 0600) == 0);
+    for (auto const blocked : {false, true}) {
+        for (auto const& arguments : std::vector<std::vector<std::string>>{
+                 {"queue", "update", "--socket", fifo.string(), "--editor", "'unterminated", "--help"},
+                 {"queue", "update", "--request-file", fifo.string(), "--json", "--help"}
+        }) {
+            auto result = run(arguments, blocked);
+            CHECK(result.code == 0);
+            CHECK(result.err.empty());
+            CHECK(result.out.find("Bare update opens an interactive draft.jsonc") != std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("Queue main dispatch refuses interactive use without a terminal and preserves explicit modes",
+          "[jobuctl][help][queue][edit]")
+{
+    jb::test::TemporaryDirectory directory;
+    auto const                   endpoint = directory.path() / "missing.sock";
+    auto const                   request  = directory.path() / "update.json";
+    {
+        auto file = std::ofstream{request};
+        REQUIRE(file);
+        file << R"({"queue_name":"reports","expected_revision":7,"weight":5})";
+        file.close();
+        REQUIRE(file);
+    }
+    for (auto const blocked : {false, true}) {
+        auto bare =
+            run({"--socket", endpoint.string(), "queue", "update", "reports", "--editor", "'unterminated", "--json"},
+                blocked);
+        CHECK(bare.code == 2);
+        CHECK(bare.out.empty());
+        auto error = jb::core::parse_json(bare.err);
+        REQUIRE(error);
+        CHECK(error->as_object().at("error").as_object().at("code").as_string() == "jobuctl.edit.terminal_required");
+        CHECK(error->as_object().at("error").as_object().at("message").as_string().find("job update") ==
+              std::string::npos);
+
+        auto incomplete = run({"queue", "update", "reports", "--weight", "5"}, blocked);
+        CHECK(incomplete.code == 2);
+        CHECK(incomplete.out.empty());
+        CHECK(incomplete.err.find("requires --revision") != std::string::npos);
+        for (auto arguments : std::vector<std::vector<std::string>>{
+                 {"queue", "update", "reports", "--revision", "7", "--weight", "5"},
+                 {"queue", "update", "--request-file", request.string()}
+        }) {
+            arguments.insert(arguments.end(), {"--socket", endpoint.string(), "--json"});
+            auto result = run(arguments, blocked);
+            CHECK(result.code == 3);
+            CHECK(result.out.empty());
+            auto failure = jb::core::parse_json(result.err);
+            REQUIRE(failure);
+            CHECK(failure->as_object().at("error").as_object().at("code").as_string() == "jobuctl.connection_failed");
+        }
     }
 }
