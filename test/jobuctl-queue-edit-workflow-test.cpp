@@ -10,19 +10,27 @@
 #include "event_thread.hpp"
 #include "framing.hpp"
 #include "input_priv.hpp"
+#include "job_edit_priv.hpp"
 #include "json.hpp"
 #include "local_server.hpp"
 #include "local_socket.hpp"
 #include "management.hpp"
 #include "management_json.hpp"
+#include "management_rpc.hpp"
 #include "protocol.hpp"
 #include "protocol_priv.hpp"
+#include "recovery.hpp"
 #include "run_session_priv.hpp"
+#include "scheduler.hpp"
+#include "server.hpp"
 #include "sqlite/sqlite_driver.hpp"
 #include "sqlite/sqlite_schema.hpp"
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
+#include "support/fake_attempt_executor.hpp"
 #include "support/fake_cron_engine.hpp"
 #include "support/fake_time_source.hpp"
+#include "support/memory_io_device.hpp"
+#include "support/rejecting_secret_provider.hpp"
 #include "support/sequence_uuid_generator.hpp"
 #include "support/temporary_directory.hpp"
 #include "system_info.hpp"
@@ -179,6 +187,11 @@ enum class Submission : std::uint8_t {
     DisconnectAfterUpdate
 };
 
+enum class RpcPath : std::uint8_t {
+    ServiceBridge,
+    ProductionAdapter
+};
+
 /// All service/database/socket state belongs to the worker loop. Calls synchronize through posts and latches.
 struct PeerState {
     explicit PeerState(std::filesystem::path const& directory)
@@ -186,7 +199,7 @@ struct PeerState {
               jb::db::sqlite::Options{.database_file = directory / "queues.sqlite"})}
     {}
 
-    auto initialize() -> bool
+    auto initialize(RpcPath rpc_path) -> bool
     {
         auto opened = database.open();
         if (!opened) {
@@ -206,6 +219,26 @@ struct PeerState {
             return false;
         }
         queue = std::move(created).value();
+        service->failed.connect(service.get(), [this](Error const& failure) { failures.push_back(failure); });
+        service->mutation_committed.connect(service.get(), [this] { ++commits; });
+
+        if (rpc_path == RpcPath::ProductionAdapter) {
+            rpc = std::make_unique<Server>();
+            if (!register_management_methods(*rpc, *service, registry) ||
+                !rpc->register_method("system.info", [this](auto const&, auto const&) {
+                    return dispatch("system.info", JsonValue{});
+                })) {
+                error = "unable to register production management methods";
+                return false;
+            }
+            auto device = std::make_unique<jb::test::MemoryIODevice>();
+            rpc_device  = device.get();
+            device->open();
+            if (!rpc->add_connection(std::move(device))) {
+                error = "unable to connect production management adapter";
+                return false;
+            }
+        }
         return true;
     }
 
@@ -226,7 +259,28 @@ struct PeerState {
             auto const& method = fields.at("method").as_string();
             methods.push_back(method);
             auto const params = fields.find("params");
-            auto       result = dispatch(method, params == fields.end() ? JsonValue{} : params->second);
+            if (rpc) {
+                if (method == "queue.get") {
+                    lookups.push_back(params->second);
+                }
+                else if (method == "queue.update") {
+                    updates.push_back(params->second);
+                }
+                // Retain the socket trace while forwarding unchanged requests/replies through the real adapter.
+                auto framed = frame_message(body);
+                if (!framed) {
+                    error = framed.error().message;
+                    return;
+                }
+                rpc_device->inject_input(*framed);
+                auto response = rpc_device->take_written_data();
+                if (response.empty() || socket->write(response) != response.size()) {
+                    error = "production response write failed";
+                    return;
+                }
+                continue;
+            }
+            auto result = dispatch(method, params == fields.end() ? JsonValue{} : params->second);
             if (method == "queue.update" && submission != Submission::Reply) {
                 socket->abort();
                 return;
@@ -290,10 +344,17 @@ struct PeerState {
     StandardAttributeRegistry       registry;
     jb::test::FakeCronEngine        cron;
     jb::test::SequenceUuidGenerator generator{
-        {sequence_id(1), sequence_id(2), sequence_id(3)}
+        {sequence_id(1), sequence_id(2), sequence_id(3), sequence_id(4), sequence_id(5), sequence_id(6)}
     };
     jb::test::FakeTimeSource           time;
     std::unique_ptr<ManagementService> service;
+    std::unique_ptr<Server>            rpc;
+    jb::test::MemoryIODevice*          rpc_device{nullptr};
+    jb::test::FakeAttemptExecutor      executor;
+    jb::test::RejectingSecretProvider  secrets;
+    std::unique_ptr<Scheduler>         scheduler;
+    std::vector<Error>                 failures;
+    std::size_t                        commits{0};
     Queue                              queue;
     std::optional<Queue>               replacement;
     LocalServer                        listener;
@@ -314,6 +375,8 @@ struct PeerSnapshot {
     std::vector<JsonValue>   updates;
     std::vector<JsonValue>   lookups;
     std::size_t              connections;
+    std::vector<Error>       failures;
+    std::size_t              commits;
 };
 
 enum class CompetingChange : std::uint8_t {
@@ -373,14 +436,14 @@ auto change_queue_while_editing(PeerState& state, CompetingChange change) -> Res
 
 class ServicePeer final {
 public:
-    ServicePeer()
+    explicit ServicePeer(RpcPath rpc_path = RpcPath::ServiceBridge)
     {
         REQUIRE(_thread.start());
         // Watched I/O is created after run() adopts the worker's context, never in about_to_start.
         std::latch ready{1};
-        REQUIRE(_thread.as_event_loop()->post([this, &ready] {
+        REQUIRE(_thread.as_event_loop()->post([this, &ready, rpc_path] {
             _state = std::make_unique<PeerState>(_directory.path());
-            if (_state->initialize()) {
+            if (_state->initialize(rpc_path)) {
                 _state->listener.new_connection.connect(&_state->listener, [this] {
                     _state->socket = _state->listener.take_next_connection();
                     _state->framer = StreamFramer{};
@@ -450,9 +513,30 @@ public:
                      .methods     = state.methods,
                      .updates     = state.updates,
                      .lookups     = state.lookups,
-                     .connections = state.connections};
+                     .connections = state.connections,
+                     .failures    = state.failures,
+                     .commits     = state.commits};
         });
         return value;
+    }
+
+    // Propagate owner-thread operational failures after the latch has released, never throw a Catch assertion there.
+    template <typename Operation>
+    void perform(Operation operation)
+    {
+        synchronize([&operation](PeerState& state) {
+            auto result = operation(state);
+            if (!result) {
+                state.error = result.error().message;
+            }
+        });
+    }
+
+    // Call between requests with no scheduler, so durability checks use no competing database connection.
+    void reopen_storage()
+    {
+        perform([](PeerState& state) { return state.database.close(); });
+        perform([](PeerState& state) { return state.database.open(); });
     }
 
 private:
@@ -461,13 +545,10 @@ private:
     EventThread                  _thread;
 };
 
-auto edit_command(ServicePeer& peer, std::vector<std::string> selector = {"edit-workflow"}) -> Command
+auto queue_command(ServicePeer& peer, std::vector<std::string> arguments) -> Command
 {
-    auto arguments = std::vector<std::string>{"jobuctl", "queue", "update"};
-    arguments.insert(arguments.end(), selector.begin(), selector.end());
-    arguments.insert(
-        arguments.end(),
-        {"--editor", "'fake editor' --wait", "--socket", peer.path().string(), "--timeout", "2000", "--json"});
+    arguments.insert(arguments.begin(), "jobuctl");
+    arguments.insert(arguments.end(), {"--socket", peer.path().string(), "--timeout", "2000", "--json"});
     auto argv = std::vector<char*>{};
     for (auto& argument : arguments) {
         argv.push_back(argument.data());
@@ -476,6 +557,14 @@ auto edit_command(ServicePeer& peer, std::vector<std::string> selector = {"edit-
     auto                      parsed_command = parse_command_line(static_cast<int>(argv.size()), argv.data(), registry);
     REQUIRE(parsed_command.action);
     return std::get<Command>(std::move(*parsed_command.action));
+}
+
+auto edit_command(ServicePeer& peer, std::vector<std::string> selector = {"edit-workflow"}) -> Command
+{
+    auto arguments = std::vector<std::string>{"queue", "update"};
+    arguments.insert(arguments.end(), selector.begin(), selector.end());
+    arguments.insert(arguments.end(), {"--editor", "'fake editor' --wait"});
+    return queue_command(peer, std::move(arguments));
 }
 
 struct WorkflowResult {
@@ -827,7 +916,7 @@ TEST_CASE("queue workflow refuses file failures before submission and preserves 
 TEST_CASE("queue changes while editing retain the original UUID revision and recovery request",
           "[jobuctl][queue-edit][workflow]")
 {
-    ServicePeer                  peer;
+    ServicePeer                  peer{RpcPath::ProductionAdapter};
     jb::test::TemporaryDirectory files;
     auto const                   parent = files.path() / "operator's $HOME; edit files";
     REQUIRE(std::filesystem::create_directory(parent));
@@ -924,6 +1013,7 @@ TEST_CASE("queue changes while editing retain the original UUID revision and rec
     REQUIRE(outgoing);
     CHECK(serialized(*outgoing) == serialized(request));
     CHECK(peer.snapshot().methods == snapshot.methods);
+    CHECK(snapshot.failures.empty());
 }
 
 TEST_CASE("lost queue update replies preserve the request and require inspecting state",
@@ -1147,4 +1237,418 @@ TEST_CASE("queue cleanup retains unexpected editor backups and reports their dir
     else {
         CHECK(result.output.empty());
     }
+}
+
+TEST_CASE("two captured queue editors share one revision and a conflict leaves production RPC healthy",
+          "[jobuctl][queue-edit][integration][revision]")
+{
+    ServicePeer                  peer{RpcPath::ProductionAdapter};
+    jb::test::TemporaryDirectory files;
+    auto const                   original = peer.snapshot().queue;
+    auto                         winner   = WorkflowResult{};
+    auto                         retained = std::filesystem::path{};
+
+    // The outer draft remains open while the inner workflow captures the same revision and commits first.
+    auto loser =
+        run_workflow(edit_command(peer), test_io(files.path(), [&](auto, auto const& draft) {
+                         retained                                                   = draft;
+                         auto edited                                                = read_draft(draft);
+                         std::get<JsonValue::Object>(edited.data).at("weight").data = std::uint64_t{7};
+                         write_text(draft, serialized(edited));
+                         winner = run_workflow(edit_command(peer), test_io(files.path(), [&](auto, auto const& other) {
+                                                   CHECK(read_draft(other).as_object().at("expected_revision") ==
+                                                         edited.as_object().at("expected_revision"));
+                                                   edit_weight(other);
+                                                   return Result<void, Error>::success();
+                                               }));
+                         return Result<void, Error>::success();
+                     }));
+    REQUIRE(winner.code == 0);
+    CHECK(parsed(winner.output).as_object().at("revision").as_uint() == 2);
+    CHECK(loser.code == 1);
+    CHECK(loser.output.empty());
+    CHECK(loser.error.find("jobu.queue.revision_conflict") != std::string::npos);
+    auto const after_conflict = peer.snapshot();
+    CHECK(after_conflict.queue.weight == 5);
+    CHECK(after_conflict.queue.revision == 2);
+    CHECK(after_conflict.failures.empty());
+    CHECK(after_conflict.commits == 1);
+    REQUIRE(after_conflict.updates.size() == 2);
+    for (auto const& update : after_conflict.updates) {
+        CHECK(update.as_object().at("queue_id").as_string() == original.id.to_string());
+        CHECK(update.as_object().at("expected_revision").as_uint() == 1);
+    }
+    CHECK(after_conflict.methods == std::vector<std::string>{"system.info",
+                                                             "queue.get",
+                                                             "system.info",
+                                                             "queue.get",
+                                                             "system.info",
+                                                             "queue.update",
+                                                             "system.info",
+                                                             "queue.update"});
+    CHECK(parsed(read_text(retained.parent_path() / "update-request.json")) == after_conflict.updates.back());
+    StandardAttributeRegistry registry;
+    auto                      recovered = load_recovery_request(loser.error, registry);
+    CHECK(std::get<UpdateQueueRequest>(recovered.request).expected_revision == 1);
+
+    auto next = run_workflow(edit_command(peer), test_io(files.path(), [](auto, auto const& draft) {
+                                 auto edited                                                = read_draft(draft);
+                                 std::get<JsonValue::Object>(edited.data).at("weight").data = std::uint64_t{9};
+                                 write_text(draft, serialized(edited));
+                                 return Result<void, Error>::success();
+                             }));
+    REQUIRE(next.code == 0);
+    CHECK(parsed(next.output).as_object().at("revision").as_uint() == 3);
+    auto const final = peer.snapshot();
+    CHECK(final.queue.weight == 9);
+    CHECK(final.queue.revision == 3);
+    CHECK(final.failures.empty());
+    CHECK(final.commits == 2);
+    REQUIRE(final.updates.size() == 3);
+    CHECK(final.updates.back().as_object().at("expected_revision").as_uint() == 2);
+}
+
+TEST_CASE("automatic scheduler and startup recovery drains invalidate a captured queue draft once",
+          "[jobuctl][queue-edit][integration][lifecycle]")
+{
+    ServicePeer                  peer{RpcPath::ProductionAdapter};
+    jb::test::TemporaryDirectory files;
+    auto                         recovery = false;
+    SECTION("scheduler completes the last running attempt")
+    {}
+    SECTION("startup recovery interrupts the last running attempt")
+    {
+        recovery = true;
+    }
+
+    peer.perform([](PeerState& state) {
+        return state.service->create_job({.queue    = state.queue.id,
+                                          .schedule = OnceSchedule{UtcTimePoint{1s}},
+                                          .payload  = *parse_json(R"({"command":"/bin/true"})")});
+    });
+    peer.perform([](PeerState& state) {
+        state.executor.set_available(JobType::Cli, true);
+        state.scheduler = std::make_unique<Scheduler>(state.database,
+                                                      state.registry,
+                                                      state.cron,
+                                                      state.generator,
+                                                      state.time,
+                                                      state.executor,
+                                                      state.secrets);
+        state.scheduler->failed.connect(state.scheduler.get(),
+                                        [&state](Error const& error) { state.failures.push_back(error); });
+        return state.scheduler->start();
+    });
+    auto keys = std::vector<AttemptKey>{};
+    peer.synchronize([&](PeerState& state) { keys = state.executor.pending_keys(); });
+    REQUIRE(keys.size() == 1);
+    peer.perform([](PeerState& state) { return state.service->suspend_queue(state.queue.id); });
+    auto const captured = peer.snapshot();
+    REQUIRE(captured.queue.state == QueueState::Suspending);
+    REQUIRE(captured.queue.revision == 2);
+
+    auto repaired = std::optional<RecoveryReport>{};
+    auto result   = run_workflow(
+        edit_command(peer),
+        test_io(files.path(), [&](auto, auto const& draft) {
+            CHECK(read_draft(draft).as_object().at("expected_revision").as_uint() == 2);
+            edit_weight(draft);
+            if (recovery) {
+                peer.perform([&](PeerState& state) {
+                    // Destroy the old scheduler before exercising startup's exclusive database repair boundary.
+                    state.scheduler.reset();
+                    state.time.set_utc(UtcTimePoint{2s});
+                    auto report =
+                        recover_startup(state.database, state.registry, state.cron, state.generator, state.time);
+                    if (report) {
+                        repaired = *report;
+                    }
+                    return report;
+                });
+            }
+            else {
+                peer.perform([&](PeerState& state) {
+                    state.time.set_utc(UtcTimePoint{2s});
+                    return state.executor.complete(
+                        keys.front(),
+                        {.key = keys.front(), .outcome = AttemptOutcome::Succeeded, .result = *parse_json("{}")});
+                });
+            }
+            return Result<void, Error>::success();
+        }));
+    CHECK(result.code == 1);
+    CHECK(result.output.empty());
+    CHECK(result.error.find("jobu.queue.revision_conflict") != std::string::npos);
+    auto const after = peer.snapshot();
+    CHECK(after.queue.state == QueueState::Suspended);
+    CHECK(after.queue.revision == 3);
+    CHECK(after.queue.weight == 1);
+    CHECK(after.failures.empty());
+    check_methods(after, true);
+    REQUIRE(after.updates.size() == 1);
+    CHECK(after.updates.front().as_object().at("expected_revision").as_uint() == 2);
+    StandardAttributeRegistry registry;
+    CHECK(std::get<UpdateQueueRequest>(load_recovery_request(result.error, registry).request).expected_revision == 2);
+    if (recovery) {
+        REQUIRE(repaired);
+        CHECK(repaired->suspended_queues == 1);
+        CHECK(repaired->interrupted_attempts == 1);
+    }
+    peer.perform([&](PeerState& state) {
+        state.scheduler.reset();
+        auto report = recover_startup(state.database, state.registry, state.cron, state.generator, state.time);
+        if (report) {
+            repaired = *report;
+        }
+        return report;
+    });
+    REQUIRE(repaired);
+    CHECK(repaired->suspended_queues == 0);
+    CHECK(repaired->interrupted_attempts == 0);
+    CHECK(peer.snapshot().queue.revision == 3);
+
+    // The expected stale editor conflict must not poison the next protected update.
+    peer.perform([&](PeerState& state) {
+        return state.service->update_queue({.queue = captured.queue.id, .expected_revision = 3, .weight = 8});
+    });
+    CHECK(peer.snapshot().queue.revision == 4);
+    CHECK(peer.snapshot().failures.empty());
+}
+
+TEST_CASE("queue default replacement persists independently of materialized job attribute patches",
+          "[jobuctl][queue-edit][integration][defaults]")
+{
+    ServicePeer                  peer{RpcPath::ProductionAdapter};
+    jb::test::TemporaryDirectory files;
+    auto                         clear = false;
+    auto                         omit  = false;
+    SECTION("remove one queue override")
+    {}
+    SECTION("clear the queue layer")
+    {
+        clear = true;
+    }
+    SECTION("omit the queue layer")
+    {
+        omit = true;
+    }
+    peer.perform([](PeerState& state) {
+        return state.service->update_queue({
+            .queue             = state.queue.id,
+            .expected_revision = 1,
+            .defaults          = AttributeSet{{"retry.max_attempts", {.data = std::int64_t{4}}},
+                                              {"job.timeout", {.data = Duration{30s}}}}
+        });
+    });
+    auto original_job = std::optional<JobDefinition>{};
+    peer.perform([&](PeerState& state) {
+        auto job = state.service->create_job({.queue    = state.queue.id,
+                                              .schedule = OnceSchedule{UtcTimePoint{100s}},
+                                              .payload  = *parse_json(R"({"command":"/bin/true"})")});
+        if (job) {
+            original_job = *job;
+        }
+        return job;
+    });
+    REQUIRE(original_job);
+    CHECK(std::get<std::int64_t>(original_job->attributes.at("retry.max_attempts").data) == 4);
+    CHECK(std::get<Duration>(original_job->attributes.at("job.timeout").data) == Duration{30s});
+
+    auto result = run_workflow(edit_command(peer), test_io(files.path(), [&](auto, auto const& path) {
+                                   auto  draft  = read_draft(path);
+                                   auto& fields = std::get<JsonValue::Object>(draft.data);
+                                   if (omit) {
+                                       fields.erase("defaults");
+                                       fields.at("weight").data = std::uint64_t{5};
+                                   }
+                                   else {
+                                       auto& defaults = std::get<JsonValue::Object>(fields.at("defaults").data);
+                                       if (clear) {
+                                           defaults.clear();
+                                       }
+                                       else {
+                                           defaults.erase("job.timeout");
+                                       }
+                                   }
+                                   write_text(path, serialized(draft));
+                                   return Result<void, Error>::success();
+                               }));
+    REQUIRE(result.code == 0);
+    peer.reopen_storage();
+    auto snapshot = peer.snapshot();
+    CHECK(snapshot.queue.revision == 3);
+    auto expected_defaults = std::size_t{1};
+    if (omit) {
+        expected_defaults = 2;
+    }
+    else if (clear) {
+        expected_defaults = 0;
+    }
+    CHECK(snapshot.queue.defaults.size() == expected_defaults);
+    CHECK(snapshot.queue.defaults.contains("job.timeout") == omit);
+    if (!clear) {
+        CHECK(std::get<std::int64_t>(snapshot.queue.defaults.at("retry.max_attempts").data) == 4);
+    }
+    REQUIRE(snapshot.updates.size() == 1);
+    CHECK(snapshot.updates.front().as_object().contains("defaults") == !omit);
+    CHECK(parsed(result.output).as_object().at("revision").as_uint() == snapshot.queue.revision);
+
+    auto persisted_job = std::optional<JobDefinition>{};
+    peer.perform([&](PeerState& state) {
+        auto job = state.service->get_job(original_job->id);
+        if (job) {
+            persisted_job = *job;
+        }
+        return job;
+    });
+    REQUIRE(persisted_job);
+    CHECK(persisted_job->revision == original_job->revision);
+
+    // Omitting one job attribute remains no patch, while another changed attribute is persisted normally.
+    StandardAttributeRegistry registry;
+    auto                      baseline = JobEditBaseline::from_job(*persisted_job, registry);
+    REQUIRE(baseline);
+    auto original_baseline = JobEditBaseline::from_job(*original_job, registry);
+    REQUIRE(original_baseline);
+    CHECK(baseline->value().as_object().at("attributes") == original_baseline->value().as_object().at("attributes"));
+    auto  draft      = baseline->value();
+    auto& attributes = std::get<JsonValue::Object>(std::get<JsonValue::Object>(draft.data).at("attributes").data);
+    attributes.erase("job.timeout");
+    attributes.at("retry.max_attempts").data = std::uint64_t{6};
+    auto prepared                            = prepare_job_update(*baseline, serialized(draft), registry);
+    REQUIRE(prepared);
+    REQUIRE(*prepared);
+    CHECK((**prepared).params.as_object().at("attributes").as_object().size() == 1);
+    auto updated_job = std::optional<JobDefinition>{};
+    peer.perform([&](PeerState& state) {
+        auto job = state.service->update_job((**prepared).request);
+        if (job) {
+            updated_job = *job;
+        }
+        return job;
+    });
+    REQUIRE(updated_job);
+    CHECK(std::get<Duration>(updated_job->attributes.at("job.timeout").data) == Duration{30s});
+    CHECK(std::get<std::int64_t>(updated_job->attributes.at("retry.max_attempts").data) == 6);
+    CHECK(updated_job->revision == original_job->revision + 1);
+    peer.reopen_storage();
+    peer.perform([&](PeerState& state) {
+        auto job = state.service->get_job(original_job->id);
+        if (job) {
+            persisted_job = *job;
+        }
+        return job;
+    });
+    CHECK(std::get<Duration>(persisted_job->attributes.at("job.timeout").data) == Duration{30s});
+    CHECK(std::get<std::int64_t>(persisted_job->attributes.at("retry.max_attempts").data) == 6);
+    CHECK(persisted_job->revision == updated_job->revision);
+    CHECK(peer.snapshot().queue.revision == 3);
+}
+
+TEST_CASE("create replay remains the original snapshot while the queue editor captures current state",
+          "[jobuctl][queue-edit][integration][replay]")
+{
+    ServicePeer                  peer{RpcPath::ProductionAdapter};
+    jb::test::TemporaryDirectory files;
+    auto                         original = std::optional<Queue>{};
+    auto                         replay   = std::optional<Queue>{};
+    peer.perform([&](PeerState& state) {
+        auto created = state.service->create_queue({.name = "replayed", .idempotency_key = "original-create"});
+        if (created) {
+            original = *created;
+        }
+        return created;
+    });
+    REQUIRE(original);
+    peer.perform([&](PeerState& state) {
+        return state.service->update_queue({.queue = original->id, .expected_revision = 1, .name = "current-name"});
+    });
+    peer.perform([&](PeerState& state) {
+        auto created = state.service->create_queue({.name = "replayed", .idempotency_key = "original-create"});
+        if (created) {
+            replay = *created;
+        }
+        return created;
+    });
+    REQUIRE(replay);
+    CHECK(replay->id == original->id);
+    CHECK(replay->revision == 1);
+    CHECK(replay->name == "replayed");
+    auto result = run_workflow(edit_command(peer, {"id:" + original->id.to_string()}),
+                               test_io(files.path(), [](auto, auto const& path) {
+                                   auto draft = read_draft(path);
+                                   CHECK(draft.as_object().at("expected_revision").as_uint() == 2);
+                                   CHECK(draft.as_object().at("name").as_string() == "current-name");
+                                   edit_weight(path);
+                                   return Result<void, Error>::success();
+                               }));
+    REQUIRE(result.code == 0);
+    CHECK(parsed(result.output).as_object().at("id").as_string() == original->id.to_string());
+    CHECK(parsed(result.output).as_object().at("revision").as_uint() == 3);
+    peer.reopen_storage();
+    peer.perform([&](PeerState& state) {
+        auto created = state.service->create_queue({.name = "replayed", .idempotency_key = "original-create"});
+        if (created) {
+            replay = *created;
+        }
+        return created;
+    });
+    CHECK(replay->revision == 1);
+    CHECK(replay->name == "replayed");
+    auto snapshot = peer.snapshot();
+    check_methods(snapshot, true);
+    CHECK(snapshot.failures.empty());
+    CHECK(snapshot.updates.front().as_object().at("expected_revision").as_uint() == 2);
+}
+
+TEST_CASE("raw protected queue files preserve literal selectors through production RPC",
+          "[jobuctl][queue-edit][integration][request-file]")
+{
+    ServicePeer                  peer{RpcPath::ProductionAdapter};
+    jb::test::TemporaryDirectory files;
+    auto                         literal_name = std::string{"name:reports"};
+    SECTION("prefix-looking protocol name")
+    {}
+    SECTION("UUID-looking protocol name")
+    {
+        literal_name = peer.snapshot().queue.id.to_string();
+    }
+    auto selected = std::optional<Queue>{};
+    peer.perform([&](PeerState& state) {
+        auto created = state.service->create_queue({.name = literal_name});
+        if (created) {
+            selected = *created;
+        }
+        return created;
+    });
+    REQUIRE(selected);
+    auto params = parsed(R"({"queue_name":"placeholder","expected_revision":1,"weight":4})");
+    std::get<JsonValue::Object>(params.data).at("queue_name").data = literal_name;
+    auto const path                                                = files.path() / "raw.jsonc";
+    write_text(path, serialized(params));
+    auto                      command = queue_command(peer, {"queue", "update", "--request-file", path.string()});
+    StandardAttributeRegistry registry;
+    REQUIRE(load_request_file(command, registry));
+    CHECK_FALSE(command.queue_selector_intent);
+    StreamCapture output{stdout};
+    StreamCapture error{stderr};
+    auto          result  = run_session(command, registry);
+    auto          errors  = error.text();
+    auto          printed = output.text();
+    REQUIRE(result.exit_code == 0);
+    CHECK(errors.empty());
+    CHECK(parsed(printed).as_object().at("id").as_string() == selected->id.to_string());
+    CHECK(parsed(printed).as_object().at("revision").as_uint() == 2);
+    auto snapshot = peer.snapshot();
+    CHECK(snapshot.methods == std::vector<std::string>{"system.info", "queue.update"});
+    CHECK(snapshot.lookups.empty());
+    CHECK(snapshot.queue.revision == 1);
+    CHECK(snapshot.queue.weight == 1);
+    REQUIRE(snapshot.updates.size() == 1);
+    CHECK(snapshot.updates.front() == params);
+
+    write_text(path, "// comments stay invalid for ordinary request files\n" + serialized(params));
+    auto invalid = queue_command(peer, {"queue", "update", "--request-file", path.string()});
+    CHECK_FALSE(load_request_file(invalid, registry));
+    CHECK(peer.snapshot().methods == snapshot.methods);
 }
