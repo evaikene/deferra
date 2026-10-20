@@ -626,3 +626,87 @@ TEST_CASE("An exhausted busy queue keeps its existing suspension without a write
     CHECK(storage_snapshot(fixture.storage.database) == before);
     CHECK(fixture.failures.empty());
 }
+
+TEST_CASE("Queue revision conflicts preserve admission unless rollback poisons storage",
+          "[jobu][management][fault][revision][sqlite]")
+{
+    Fixture fixture;
+    auto    queue  = recovery_queue(recovery_id(1));
+    queue.revision = 2;
+    fixture.storage.insert_queue(queue);
+    auto const before = storage_snapshot(fixture.storage.database);
+    auto       poison = false;
+    SECTION("successful rollback leaves the next protected update usable")
+    {}
+    SECTION("failed rollback closes admission once")
+    {
+        poison = true;
+    }
+    if (poison) {
+        fixture.arm({.boundary = "connection", .operation = Operation::Rollback}, "db.rollback_failed");
+    }
+
+    auto stale = fixture.service.update_queue(
+        {.queue = queue.id, .expected_revision = 1, .weight = 8, .defaults = AttributeSet{}});
+    REQUIRE_FALSE(stale);
+    CHECK(fixture.committed == 0);
+    if (poison) {
+        // A failed transaction cleanup supersedes the ordinary conflict and closes admission immediately.
+        CHECK(stale.error().code == "db.rollback_failed");
+        fixture.require_faults_fired();
+        fixture.check_terminal_failure("db.rollback_failed");
+        fixture.check_closed_gate();
+        fixture.check_poisoned_connection();
+        fixture.storage.reopen();
+        CHECK(storage_snapshot(fixture.storage.database) == before);
+    }
+    else {
+        CHECK(stale.error().code == "jobu.queue.revision_conflict");
+        CHECK(fixture.failures.empty());
+        CHECK(storage_snapshot(fixture.storage.database) == before);
+        auto updated = fixture.service.update_queue(
+            {.queue = queue.id, .expected_revision = queue.revision, .weight = 5, .defaults = AttributeSet{}});
+        REQUIRE(updated);
+        CHECK(updated->revision == 3);
+        CHECK(updated->weight == 5);
+        CHECK(fixture.committed == 1);
+        CHECK(fixture.failures.empty());
+    }
+}
+
+TEST_CASE("Protected queue defaults and revision roll back together after a write or precommit fault",
+          "[jobu][management][fault][revision][defaults][sqlite]")
+{
+    MutationFixture fixture{Mutation::UpdateQueue};
+    auto const      before = storage_snapshot(fixture.storage.database);
+    auto            fault =
+        DatabaseCall{.boundary = "queue.update", .operation = Operation::Execute, .phase = Phase::AfterSuccess};
+    SECTION("the replacement write succeeded before the reported failure")
+    {}
+    SECTION("the full replacement reached commit")
+    {
+        fault = {.boundary = "connection", .operation = Operation::Commit};
+    }
+    fixture.arm(fault);
+    auto failed =
+        fixture.service.update_queue({.queue             = fixture.queue.id,
+                                      .expected_revision = fixture.queue.revision,
+                                      .name              = "replacement-name",
+                                      .weight            = 8,
+                                      .defaults = AttributeSet{{"retry.max_attempts", {.data = std::int64_t{4}}}}});
+    REQUIRE_FALSE(failed);
+    fixture.require_faults_fired();
+    check_safe_error(failed.error(), "db.io");
+    fixture.check_terminal_failure("db.io", false);
+    fixture.check_closed_gate();
+
+    // Include every timing/job/run column, then reopen so cached replies cannot masquerade as rollback evidence.
+    fixture.storage.reopen();
+    CHECK(storage_snapshot(fixture.storage.database) == before);
+    auto stored = fixture.service.get_queue(fixture.queue.id);
+    REQUIRE(stored);
+    CHECK(stored->revision == fixture.queue.revision);
+    CHECK(stored->name == fixture.queue.name);
+    CHECK(stored->weight == fixture.queue.weight);
+    CHECK(stored->defaults.empty());
+}
