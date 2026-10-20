@@ -96,7 +96,8 @@ constexpr std::array queue_list{deleted, limit, after};
 constexpr std::array queue_update{
     id,
     name_selector,
-    value_option("revision", "N", "Required inspected queue revision, 1..9223372036854775807."),
+    value_option("editor", "COMMAND", "Editor override for bare interactive update; graphical editors must wait."),
+    value_option("revision", "N", "Inspected revision for flag updates, 1..9223372036854775807; editing captures it."),
     value_option("new-name", "NAME", "Replace the queue name."),
     value_option("weight", "N", "Replace scheduler weight, 1..4294967295."),
     value_option("concurrency-limit", "N", "Replace concurrency limit, 1..4294967295."),
@@ -323,11 +324,23 @@ constexpr CommandSpec queue_update_command{
     .options          = queue_update,
     .rules            = "Supply one positional SELECTOR, --id UUID, or --name NAME. Bare UUIDs select IDs; "
                         "use id:UUID or name:NAME to be explicit. Prefixes are case-sensitive and interpreted once. "
-                        "Require --revision and at least one replacement field; --new-name changes the name. "
+                        "Bare update opens an interactive draft.jsonc with // instruction comments. Keep queue_id "
+                        "and expected_revision unchanged; only effective changes are submitted. No changes means no update.\n"
+                        "Interactive editing requires terminal stdin/stderr and a foreground controlling terminal; "
+                        "stdout may be redirected. Fetch and submission each get a full --timeout.\n"
+                        "Editor precedence: --editor, nonempty VISUAL, nonempty EDITOR, then vi. Commands are parsed "
+                        "without shell evaluation; graphical editors must wait (for example code --wait). "
+                        "--editor is allowed only for interactive updates.\n"
+                        "Flag updates require --revision and at least one replacement field; --new-name changes the name. "
                         "Unspecified fields remain unchanged. Stale revisions fail without automatic retry. "
                         "Bare UUID/name collisions require an explicit prefix. Names are pinned to UUIDs. "
-                        "Interactive queue editing is not yet available.",
-    .example          = "jobuctl queue update reports --revision 1 --weight 2",
+                        "defaults replaces the whole queue-default layer; {} clears it. Null retention inherits "
+                        "daemon policy. Use queue update --request-file FILE for strict JSON params.\n"
+                        "Invalid drafts and failed submissions retain recovery files. Conflicts require manual "
+                        "reconciliation; inspect server state before retrying an unknown outcome.",
+    .example          = "jobuctl queue update reports\n"
+                        "  jobuctl queue update reports --revision 1 --weight 2\n"
+                        "  jobuctl queue update --request-file update-request.json",
     .capability       = "queue.update",
     .build            = parse_queue_command,
 };

@@ -1101,6 +1101,14 @@ add_test(NAME jobuctl-editor-command-test COMMAND $<TARGET_FILE:jobuctl-editor-c
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
     if(JB_BUILD_SQLITE_DRIVER)
+        add_executable(jobuctl-queue-edit-workflow-test jobuctl-queue-edit-workflow-test.cpp support/temporary_directory.cpp)
+        target_link_libraries(jobuctl-queue-edit-workflow-test PRIVATE jobuctl-private jobu-sqlite Catch2::Catch2WithMain)
+        add_test(NAME jobuctl-queue-edit-workflow-test COMMAND $<TARGET_FILE:jobuctl-queue-edit-workflow-test>)
+        set_tests_properties(jobuctl-queue-edit-workflow-test PROPERTIES TIMEOUT 60)
+        if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+            set_tests_properties(jobuctl-queue-edit-workflow-test PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+        endif()
+
         add_executable(jobuctl-job-edit-workflow-test jobuctl-job-edit-workflow-test.cpp support/temporary_directory.cpp)
         target_link_libraries(jobuctl-job-edit-workflow-test PRIVATE jobuctl-private jobu-sqlite Catch2::Catch2WithMain)
         add_test(NAME jobuctl-job-edit-workflow-test COMMAND $<TARGET_FILE:jobuctl-job-edit-workflow-test>)

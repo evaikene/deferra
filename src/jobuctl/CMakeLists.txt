@@ -24,6 +24,7 @@ add_library(jobuctl-private STATIC
     edit_files_priv.cpp
     edit_recovery_priv.cpp
     job_edit_workflow_priv.cpp
+    queue_edit_workflow_priv.cpp
     output_priv.cpp
     queue_selector_priv.cpp
     run_inspection_priv.cpp

@@ -254,6 +254,7 @@ auto parse_queue_update(std::filesystem::path                socket_path,
     auto new_name         = std::optional<std::string>{};
     auto weight           = std::optional<std::uint32_t>{};
     auto concurrency      = std::optional<std::uint32_t>{};
+    auto editor           = std::optional<std::string>{};
     auto new_name_seen    = false;
     auto weight_seen      = false;
     auto concurrency_seen = false;
@@ -278,6 +279,13 @@ auto parse_queue_update(std::filesystem::path                socket_path,
         auto const value = option_value(argument);
         if (!value) {
             return parse_failure("queue update has an invalid option");
+        }
+        if (argument.name() == "editor" && !editor) {
+            if (value->empty()) {
+                return parse_failure("--editor requires a nonempty command");
+            }
+            editor = std::string{*value};
+            continue;
         }
         if (argument.name() == "revision" && !revision_seen) {
             auto parsed = parse_unsigned(*value, 1, std::numeric_limits<std::int64_t>::max());
@@ -350,11 +358,29 @@ auto parse_queue_update(std::filesystem::path                socket_path,
         return parse_failure("queue update has an unknown or duplicate option");
     }
 
+    // Only the bare form opens an editor. Incomplete flag updates never fetch their own revision.
+    auto const mutable_fields = new_name || weight || concurrency || request.recovery_policy || request.defaults ||
+                                request.history_retention || request.runnable_wait_warning;
+    if (!revision_seen && !mutable_fields) {
+        auto edit =
+            InteractiveQueueUpdate{.queue = std::move(selector.selector->selector), .editor = std::move(editor)};
+        return {
+            .command = Command{
+                               .socket_path           = std::move(socket_path),
+                               .kind                  = CommandKind::QueueUpdate,
+                               .method                = "queue.update",
+                               .request               = std::move(edit),
+                               .queue_selector_intent = std::move(selector.selector->intent),
+                               }
+        };
+    }
+    if (editor) {
+        return parse_failure("--editor is allowed only with a bare interactive queue update");
+    }
     if (!revision_seen) {
         return parse_failure("queue update requires --revision with the inspected queue revision");
     }
-    if (!new_name && !weight && !concurrency && !request.recovery_policy && !request.defaults &&
-        !request.history_retention && !request.runnable_wait_warning) {
+    if (!mutable_fields) {
         return parse_failure("queue update requires at least one mutable field");
     }
 
