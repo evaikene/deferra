@@ -118,6 +118,53 @@ TEST_CASE("Published protocol results use production decoders", "[jobu][protocol
     REQUIRE(statistics_page_from_json(example("system-stats.result.json")));
 }
 
+TEST_CASE("Published queue recovery retains inspected identity and replacement semantics",
+          "[jobu][protocol][docs][queue]")
+{
+    auto const attributes = StandardAttributeRegistry{};
+    auto const result     = example("queue-get.result.json");
+    auto const inspected  = queue_from_json(result, attributes);
+    REQUIRE(inspected);
+    CHECK(inspected->revision == 6);
+    CHECK_FALSE(result.as_object().at("defaults").as_object().empty());
+    REQUIRE(inspected->history_retention);
+    CHECK(inspected->history_retention->count() == 86400);
+
+    auto const encoded_result = queue_to_json(*inspected, attributes);
+    REQUIRE(encoded_result);
+
+    // Duration encoding may use signed integers where parsing used unsigned; compare their exact wire values.
+    auto const encoded_text = serialize_json(*encoded_result);
+    auto const result_text  = serialize_json(result);
+    REQUIRE(encoded_text);
+    REQUIRE(result_text);
+    CHECK(*encoded_text == *result_text);
+
+    // Recovery retains the inspected UUID/token; it clears defaults and restores inherited retention.
+    auto const params  = example("queue-update-recovery.params.json");
+    auto const request = update_queue_request_from_json(params, attributes);
+    REQUIRE(request);
+    CHECK(std::get<Uuid>(request->queue) == inspected->id);
+    CHECK(request->expected_revision == inspected->revision);
+    REQUIRE(request->defaults);
+    CHECK(params.as_object().at("defaults").as_object().empty());
+    REQUIRE(request->history_retention);
+    CHECK_FALSE(*request->history_retention);
+
+    // Unchanged settings are absent rather than resubmitted from the full inspected result.
+    CHECK_FALSE(request->name);
+    CHECK_FALSE(request->weight);
+    CHECK_FALSE(request->concurrency_limit);
+    CHECK_FALSE(request->recovery_policy);
+    CHECK_FALSE(request->runnable_wait_warning);
+    auto const encoded_request = update_queue_request_to_json(*request, attributes);
+    REQUIRE(encoded_request);
+    CHECK(*encoded_request == params);
+
+    // A full get result is neither an update-shaped draft nor valid raw request params.
+    CHECK_FALSE(update_queue_request_from_json(result, attributes));
+}
+
 TEST_CASE("Published run state sets retain their owner intersection and caller order", "[jobu][protocol][docs]")
 {
     auto const request = run_list_request_from_json(example("run-list-states.params.json"));

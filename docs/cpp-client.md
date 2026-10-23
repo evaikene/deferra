@@ -109,6 +109,12 @@ auto call = client.update_queue(request);
 ```
 
 Here `inspected` is the `Queue` previously delivered by `reply_received`.
+The [checked queue result](protocol/examples/queue-get.result.json) and
+[minimal recovery params](protocol/examples/queue-update-recovery.params.json)
+illustrate the same UUID/revision while clearing the complete defaults layer and
+restoring inherited retention. An omitted outer `history_retention` optional leaves retention
+unchanged; an engaged outer optional containing `std::nullopt` encodes JSON null
+to restore inheritance. An engaged empty `defaults` replaces the layer with `{}`.
 Zero/uninitialized or out-of-range revisions fail shared validation locally.
 The daemon independently enforces the token: a stale request produces remote
 `-32000` with `jobu.queue.revision_conflict`, leaves state unchanged, and is
@@ -127,6 +133,11 @@ updates. Readiness/closed-client errors precede request validation; shared codec
 validation precedes the peer feature check. `delete_queue`, `queue_statistics`,
 and other unaffected methods retain their advertised-method support. The
 compatible-major handshake and capability names remain unchanged.
+
+The minor-version requirement and advertised capability are separate checks.
+An API 1.6 peer that omits the requested method fails locally with
+`jobu.client.unsupported_method`; this is distinct from the older-peer
+`jobu.client.unsupported_feature` rejection. Neither path writes a request.
 
 Since API 1.6, `get_queue(GetQueueRequest const&, ControlCallOptions)` can opt
 into retained deleted queues:

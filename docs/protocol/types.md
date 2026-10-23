@@ -71,7 +71,8 @@ the `planned` range and resolve omitted bounds against the daemon clock.
 
 ## Queue and job definition results
 
-Every queue result contains:
+Every queue result contains the following fields; see the
+[checked full queue result](examples/queue-get.result.json):
 
 | Member | Type | Since | Meaning |
 | --- | --- | --- | --- |

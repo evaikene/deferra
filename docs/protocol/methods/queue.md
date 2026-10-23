@@ -16,11 +16,14 @@ attributes. A queue has a stable ID and an exact user-facing name. See the
 | `queue.delete` | Soft-delete a suspended queue | 1.1 | `queue delete` | `delete_queue()` |
 | `queue.stats` | Summarize retained work for one queue | 1.3 | `queue stats` | `queue_statistics()` |
 
-Every method takes object params. Except for `queue.list`, select one queue
-with exactly one of `queue_id` and `queue_name`; they cannot be combined.
-`queue_id` is a canonical UUID. Ordinary get/mutation methods target
-non-deleted queues. `queue.stats` also accepts a deleted queue by ID or an
-unambiguous historical name.
+Every method takes object params. Get, update, suspend, resume, delete, and an
+initial statistics request select one queue with exactly one of `queue_id` and
+`queue_name`; they cannot be combined. Creation supplies a new `name`, listing
+has no selector, and statistics continuation takes only `cursor`.
+`queue_id` is a canonical UUID. Ordinary get/mutation methods target non-deleted
+queues. `queue.stats` also accepts a deleted queue by ID or an unambiguous
+historical name. CLI `id:`/`name:` prefixes are interpreted only by `jobuctl`;
+a protocol `queue_name` is always literal.
 
 ## Create (`queue.create`)
 
@@ -71,6 +74,10 @@ Since API 1.6 it also accepts optional `include_deleted`:
 | --- | --- | --- | --- | --- |
 | `queue_id` or `queue_name` | ID or string | Exactly one | 1.1 | Exact queue selector |
 | `include_deleted` | boolean | `false` | 1.6 | Permit retained soft-deleted rows |
+
+The [checked live-queue result](../examples/queue-get.result.json) includes the
+UUID, inspected revision, and partial defaults needed for protected editing.
+It is separate from the historical-name request example below.
 
 Omission or false reads only non-deleted queues. True permits a deleted queue
 by ID; name lookup first prefers a live queue, then accepts exactly one retained
@@ -144,6 +151,11 @@ update commits no field, revision, or timing changes.
 ```
 
 Use the [checked update params](../examples/queue-update.params.json).
+The [minimal recovery example](../examples/queue-update-recovery.params.json)
+uses the checked live result's UUID/revision, clears its default layer with
+`{}`, and restores inherited retention with null. Unchanged settings are omitted.
+It is strict JSON; interactive JSONC drafts are a
+[CLI editing format](../../jobuctl.md#interactive-queue-updates), not wire params.
 Missing, null, zero, negative, out-of-range, fractional, boolean, or string
 revisions return Invalid params (`-32602`) before service work. A valid stale
 token returns application error `-32000` with `data.category: "conflict"` and
