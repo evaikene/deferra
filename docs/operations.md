@@ -295,6 +295,12 @@ Configuration updates and actual lifecycle transitions invalidate earlier
 tokens; reads, counters, and ordinary job activity do not. See the
 [protected update contract](protocol/methods/queue.md#update-queueupdate).
 
+[Interactive queue editing](jobuctl.md#interactive-queue-updates) captures that
+UUID/revision before opening the editor and submits once afterward. On conflict,
+the retained minimal request keeps its old revision; reconcile against the same
+UUID before preparing another update. After an unknown outcome, inspect current
+state before any retry because the update may already have committed.
+
 Recovery runs before readiness. Interrupted attempts follow the queue's
 `fail_interrupted` or `retry_interrupted` policy. Abandoned open timing intervals
 retain checkpointed wait and become partial; downtime is not charged. See

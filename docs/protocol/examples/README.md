@@ -12,6 +12,9 @@ names, IDs, and timestamps.
 | [Queue update Invalid params](queue-update-invalid-params.error.json) and [revision conflict](queue-update-conflict.error.json) | Legacy/invalid input versus a valid stale token; no automatic retry |
 | [Queue creation](queue-create.params.json) | Defaulted queue configuration and an idempotency key |
 | [Historical queue get](queue-get.params.json) | API 1.6 opt-in to a retained original queue name |
+| [Live queue result](queue-get.result.json) | Full revision-bearing queue with partial defaults and explicit retention |
+| [Minimal queue recovery request](queue-update-recovery.params.json) | The live result's UUID/revision, complete defaults clearing, and null retention; unchanged fields omitted |
+| [Queue list result](queue-list.result.json) | Revision-bearing items and management keyset pagination |
 | [Job creation](job-create.params.json) | A symbolic once-now schedule and a CLI payload |
 | [Job creation with secret references](job-create-secret.params.json) | Ordered CLI argument references and a named environment reference |
 | [HTTP job creation](job-create-http.params.json) | Mixed-case POST input admitted and stored as uppercase POST |
@@ -30,3 +33,11 @@ names, IDs, and timestamps.
 The [method pages](../README.md) explain the required fields, defaults,
 pagination rules, errors, and safe mutation retries. A JSON file here is a
 wire example, not a command to execute against a live daemon.
+
+The live queue result and minimal recovery request describe one inspected
+queue. The recovery request keeps its original revision even after a conflict;
+inspect the same UUID and reconcile before preparing another update. It is a
+strict JSON params object suitable for `queue update --request-file FILE`.
+It is not the full JSONC draft, and copying a get result directly into request
+mode is invalid. See [interactive queue updates](../../jobuctl.md#interactive-queue-updates)
+for draft diffing, private files, and inspect-before-retry guidance.

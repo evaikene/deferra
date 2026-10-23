@@ -51,7 +51,7 @@ Wait for `jobud.ready` on stderr. The directory is mode 0700, owned by you;
 database and socket files are owner-only. Raw paths in shared `/tmp` are unsafe.
 This temporary location is for a demo, not persistent deployment or backups.
 
-The daemon creates the current SQLite format (version 4) in an empty database
+The daemon creates the current SQLite format (version 5) in an empty database
 and validates it on later starts. It rejects older and newer formats without
 changing them. If you have an earlier test database, keep it separately and
 point the daemon at a fresh database file; changing its version marker does not
@@ -113,7 +113,7 @@ running daemon.
 | [Configuration](configuration.md) | Startup keys, defaults, units, precedence, and local validation |
 | [Operations](operations.md) | Lifecycle, retention, backup/restore, recovery, and troubleshooting |
 | [Observability](observability.md) | Logs, warning guarantees, timing quality, and retained statistics |
-| [jobuctl command guide](jobuctl.md) | Creating and changing queues and jobs; inspecting runs, attempts, output, statistics, and cron previews |
+| [jobuctl command guide](jobuctl.md) | Creating and changing queues and jobs, including interactive queue/job updates; inspecting runs, attempts, output, statistics, and cron previews |
 | [Cron schedules](cron.md) | Writing recurring schedules, understanding aliases and timezones, and previewing occurrences |
 | [Named secrets](secrets.md) | Supplying sensitive values and understanding storage, process, and output exposure |
 | [JSON-RPC protocol](protocol/README.md) | Writing a client for the local socket, including method fields, errors, and examples |

@@ -184,11 +184,12 @@ following the raw `job.list` API. Request-file input cannot be combined with
 
 ## Queue and job configuration
 
-Queue updates require the inspected `--revision N` (1 through `9223372036854775807`)
-and at least one replacement field. Use `--new-name NAME` to rename;
-`--name NAME` always selects. Omitted fields stay unchanged. A bare
-`queue update SELECTOR` does not open an editor yet; interactive queue editing
-arrives in U.33. The CLI does not fetch a missing revision or retry a stale one.
+Flag-based queue updates require the inspected `--revision N` (1 through
+`9223372036854775807`) and at least one replacement field. Use `--new-name NAME`
+to rename; `--name NAME` always selects. Omitted fields stay unchanged. A bare
+`queue update SELECTOR` instead [opens an interactive draft](#interactive-queue-updates)
+and captures the inspected revision. The CLI does not fill in a missing revision
+for a flag-based update or retry a stale one.
 For identity continuity after a read, retain both its UUID and revision and use
 `id:UUID`: revision equality alone cannot protect against name reuse.
 
@@ -263,6 +264,143 @@ command fail. Both commands submit suspension once and use read requests while
 waiting. The same overall `--timeout` applies. A timeout after an observed
 suspension reply means the final state was not confirmed; inspect the resource
 before deciding what to do next.
+
+## Interactive queue updates
+
+Run a bare update to inspect and edit a live queue:
+
+```sh
+jobuctl queue update reports
+jobuctl queue update --name reports --editor 'code --wait'
+jobuctl --timeout 10000 queue update reports --json > updated-queue.json
+```
+
+The positional selector and `--id UUID` / `--name NAME` aliases follow the
+[queue selector rules](#connecting-to-the-daemon). This mode takes no mutable
+fields, `--revision`, or `--request-file`. `--editor COMMAND` is valid only in
+interactive mode. Fields without a revision, or a revision without fields,
+remain usage errors. Scripts can use an explicit protected update or strict
+request file:
+
+```sh
+jobuctl queue update id:019a0c70-1234-7000-8000-0123456789ab --revision 6 --weight 2
+jobuctl queue update --request-file update-request.json
+```
+
+Interactive editing requires terminal stdin and stderr and an openable foreground
+controlling terminal. Redirected stdout is allowed; editor display stays on the
+terminal. Editor selection is `--editor`, nonempty `VISUAL`, nonempty `EDITOR`,
+then `vi`. Commands are parsed into arguments without shell evaluation, and the
+absolute draft path is appended as one argument. A GUI editor must wait for the
+save/close, for example `code --wait`. See [editor selection and waiting](#editor-selection-and-waiting)
+for quoting and cancellation details shared with job editing.
+
+The initial fetch resolves the selector, checks any inferred-UUID ambiguity, and
+captures the live queue's UUID, revision, and editable values under one network
+budget. The connection closes before the editor starts.
+Submission receives a separate full `--timeout`, including connection and
+handshake, and uses the captured UUID/revision without another selector lookup.
+File work and editor time consume neither network budget.
+
+### Queue draft semantics
+
+The protected `draft.jsonc` starts with queue-specific `//` instructions and the
+current editable configuration, for example:
+
+```jsonc
+// JSONC draft: comments are ignored; trailing commas are not allowed.
+// Keep queue_id and expected_revision unchanged.
+// Omitted top-level fields leave server values unchanged.
+// defaults replaces the whole queue-default layer; {} clears it.
+// Set history_retention_seconds to null to inherit the daemon policy.
+// Exit without effective changes to cancel the update.
+{
+  "queue_id": "019a0c70-1234-7000-8000-0123456789ab",
+  "expected_revision": 6,
+  "name": "reports",
+  "weight": 1,
+  "concurrency_limit": 1,
+  "recovery_policy": "fail_interrupted",
+  "defaults": {"retry.max_attempts": 2},
+  "history_retention_seconds": 86400,
+  "runnable_wait_warning_ms": 10000
+}
+```
+
+The CLI fills these values from the fetched queue; do not copy this illustrative
+configuration over another queue. `queue_id` and `expected_revision` must remain
+present and unchanged. Adding `queue_name`, state, timestamps, unknown members,
+or invalid retained values fails validation. The draft contains only the partial
+queue-default layer, without daemon defaults or existing jobs' materialized
+attributes. It never fetches secret values.
+
+| Edit | Meaning |
+| --- | --- |
+| Leave a value unchanged, reorder object keys, or change only comments | Omit it from the update |
+| Remove a writable top-level field | Leave that server value unchanged |
+| Change name, weight, concurrency, recovery policy, or warning delay | Replace the complete changed value |
+| Change `defaults` | Replace the entire partial queue-default layer |
+| Remove a member inside a retained, changed `defaults` object | Remove that queue override |
+| Set `defaults` to `{}` | Clear all queue-default overrides |
+| Remove the top-level `defaults` field | Leave queue defaults unchanged |
+| Set `history_retention_seconds` to `null` | Restore daemon-policy inheritance |
+| Set retention to `0` or a positive integer | Unlimited retention or an explicit duration in seconds |
+| Remove the top-level retention field | Leave retention unchanged |
+
+`defaults: null` and null for other non-nullable fields are invalid. Integer-only
+fields reject floating-point values such as `1.0`. All retained values are
+validated before no-op detection. Queue defaults replace a whole layer; job
+editing instead sends individual attribute patches, where removing an attribute
+entry leaves its stored value unchanged. Queue-default changes affect newly
+created jobs; existing materialized job attributes stay unchanged.
+
+Drafts accept `//` and `/* ... */` comments wherever JSON permits whitespace.
+Comment markers inside strings remain data; trailing commas are rejected.
+Parsing preserves saved bytes. An unchanged draft prints
+`No changes; no update submitted` on stderr, exits 0, and produces no stdout or
+mutation, including with `--json`. A successful update prints the ordinary full
+queue result with its new revision. Probe replies never appear on stdout.
+
+### Queue files, conflicts, and recovery
+
+Queue editing uses the same private mode-0700 directory, mode-0600 files, safe
+atomic-save checks, and cleanup rules as [job editing](#retained-files-and-recovery).
+The complete JSONC draft, including comments, is bounded by **16 MiB** and normal
+JSON depth limits. Before submission, the CLI writes and closes a compact,
+strict-JSON `update-request.json` containing only the captured UUID/revision and
+changed top-level fields. That request has the separate **1 MiB** request limit.
+Ordinary `--request-file` input rejects comments even with a `.jsonc` extension
+and sends every supplied field without interactive diffing.
+
+For example, clearing the displayed defaults and restoring retention inheritance
+produces [these checked minimal params](protocol/examples/queue-update-recovery.params.json).
+Other unchanged fields are absent. A retained complete request gets a
+POSIX-shell-quoted recovery command preserving the resolved socket and timeout:
+
+```sh
+'jobuctl' '--socket' '/private/jobud.sock' '--timeout' '5000' 'queue' 'update' '--request-file' '/private/edit/update-request.json'
+```
+
+The CLI displays that command for manual recovery; it never runs it. A concurrent
+configuration change, rename, suspend/resume, or completed suspension invalidates
+the captured revision. On conflict, the draft and minimal request remain with the
+**original revision**. Inspect the same UUID and reconcile before preparing
+another update; blindly retrying the saved request does not fix the conflict.
+Deletion or removal returns the ordinary lifecycle/not-found error. Reusing the
+old name cannot redirect the saved UUID to a replacement queue.
+
+After a lost mutation reply or other unknown outcome, inspect current server
+state before any retry because the update may already have committed. There is
+no automatic refresh, retry, merge, or editor relaunch. Invalid/unsafe drafts
+retain available work but have no submit-ready request or recovery command;
+prepare strict minimal JSON deliberately, removing comments and preserving the
+original identity/revision. A missing draft requires a new interactive edit.
+
+Success, no-op, and editor cancellation/launch failure clean known files.
+Unexpected backup files remain, and cleanup failure returns nonzero even after
+a successful mutation has printed its result. Inspect that result before another
+mutation. Diagnostics report safely escaped paths without printing draft/default
+contents; keep retained files private.
 
 ## Interactive job updates
 
