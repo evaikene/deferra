@@ -1,5 +1,6 @@
 #include "support/temporary_directory.hpp"
 
+#include "json.hpp"
 #include "uuid.hpp"
 
 #include <fmt/format.h>
@@ -330,6 +331,90 @@ auto rejects_before_connect(std::filesystem::path const&            executable,
     return output && output->find("Usage:\n") != std::string::npos;
 }
 
+auto verify_queue_name_output(std::filesystem::path const& executable, std::filesystem::path const& socket) -> bool
+{
+    struct NameExample {
+        std::string_view stored;
+        std::string_view rendered;
+    };
+
+    constexpr NameExample examples[]{
+        {.stored = "Default",    .rendered = "Default"       },
+        {.stored = " Default",   .rendered = "' Default'"    },
+        {.stored = "My Queue",   .rendered = "My Queue"      },
+        {.stored = "O'Reilly",   .rendered = R"('O\'Reilly')"},
+        {.stored = R"(C:\work)", .rendered = R"('C:\\work')" },
+        {.stored = "A\u00a0B",   .rendered = R"('A\u00A0B')" },
+        {.stored = "A\u200bB",   .rendered = R"('A\u200BB')" },
+    };
+
+    for (auto const& example : examples) {
+        auto created = run_success(executable, socket, {"queue", "create", example.stored});
+        auto id      = created ? queue_id_from_summary(*created) : std::nullopt;
+        if (!created || !id || *created != queue_summary(*id, example.rendered, "active", 1, 1, "fail_interrupted")) {
+            fmt::print(stderr,
+                       "Queue creation mismatch for {}: {}",
+                       example.rendered,
+                       created.value_or("<no result>\n"));
+            return false;
+        }
+
+        // All human views must use the same rendering while JSON retains the supplied name.
+        auto fetched = run_success(executable, socket, {"queue", "get", "--name", example.stored});
+        auto listed  = run_success(executable, socket, {"queue", "list"});
+        auto encoded = run_success(executable, socket, {"queue", "get", "--id", *id, "--json"});
+        auto value   = jb::core::parse_json(encoded.value_or(""));
+        if (!fetched || *fetched != *created || !listed || listed->find(*created) == std::string::npos || !value ||
+            value->as_object().at("name").as_string() != example.stored) {
+            fmt::print(stderr, "Queue view or JSON name mismatch for {}\n", example.rendered);
+            return false;
+        }
+
+        // Deletion acknowledges the exact name selector, including its visible delimiters and escapes.
+        if (!run_success(executable, socket, {"queue", "suspend", "--name", example.stored})) {
+            return false;
+        }
+        auto deleted = run_success(executable, socket, {"queue", "delete", "--name", example.stored});
+        if (!deleted || *deleted != fmt::format("Deleted queue name={}\n", example.rendered)) {
+            fmt::print(stderr,
+                       "Queue deletion mismatch for {}: {}",
+                       example.rendered,
+                       deleted.value_or("<no result>\n"));
+            return false;
+        }
+    }
+    return true;
+}
+
+auto verify_renamed_queue(std::filesystem::path const& executable,
+                          std::filesystem::path const& socket,
+                          std::string_view             id) -> bool
+{
+    auto const expected = queue_summary(id, "'Default '", "active", 1, 1, "fail_interrupted", 2);
+    auto       by_name  = run_success(executable, socket, {"queue", "get", "--name", "Default "});
+    auto       trimmed  = run_failure(executable, socket, {"queue", "get", "--name", "Default"});
+    auto       listed   = run_success(executable, socket, {"queue", "list"});
+    if (!by_name || *by_name != expected || !trimmed || trimmed->find("jobu.queue.not_found") == std::string::npos ||
+        !listed || listed->find(expected) == std::string::npos) {
+        return false;
+    }
+
+    // Compare decoded values rather than display text to prove that neither JSON path trims the name.
+    auto encoded      = run_success(executable, socket, {"queue", "get", "--id", id, "--json"});
+    auto encoded_page = run_success(executable, socket, {"queue", "list", "--json"});
+    auto value        = jb::core::parse_json(encoded.value_or(""));
+    auto page         = jb::core::parse_json(encoded_page.value_or(""));
+    if (!value || value->as_object().at("name").as_string() != "Default " || !page) {
+        return false;
+    }
+    for (auto const& item : page->as_object().at("items").as_array()) {
+        if (item.as_object().at("id").as_string() == id) {
+            return item.as_object().at("name").as_string() == "Default ";
+        }
+    }
+    return false;
+}
+
 } // anonymous namespace
 
 auto main(int argc, char* argv[]) -> int
@@ -598,7 +683,34 @@ auto main(int argc, char* argv[]) -> int
         return fail("historical name ambiguity changed stable-ID lookup");
     }
 
+    // Reproduce the reported rename, then verify the same exact-name behavior across a real restart.
+    auto whitespace_queue = run_success(argv[2], reopen_socket, {"queue", "create", "default"});
+    auto whitespace_id    = whitespace_queue ? queue_id_from_summary(*whitespace_queue) : std::nullopt;
+    if (!whitespace_id) {
+        return fail("unable to create the whitespace rename fixture");
+    }
+    auto whitespace_renamed =
+        run_success(argv[2],
+                    reopen_socket,
+                    {"queue", "update", "--id", *whitespace_id, "--revision", "1", "--new-name", "Default "});
+    if (!whitespace_renamed ||
+        *whitespace_renamed != queue_summary(*whitespace_id, "'Default '", "active", 1, 1, "fail_interrupted", 2) ||
+        !verify_renamed_queue(argv[2], reopen_socket, *whitespace_id)) {
+        return fail("queue rename changed the stored name or failed to reveal its trailing space");
+    }
     reopened->terminate();
+
+    auto const names_socket = directory.path() / "jobud-names.sock";
+    auto       names_daemon = spawn_jobud(argv[1], names_socket, database_path);
+    if (!names_daemon || !wait_for_listener(*names_daemon, names_socket) ||
+        !verify_renamed_queue(argv[2], names_socket, *whitespace_id)) {
+        return fail("exact whitespace queue names and JSON did not survive daemon restart");
+    }
+    if (!verify_queue_name_output(argv[2], names_socket)) {
+        return fail("queue views or deletion confirmations did not render exact names consistently");
+    }
+    names_daemon->terminate();
+
     auto const cleanup_error = directory.cleanup();
     if (cleanup_error) {
         return fail("temporary directory cleanup failed");

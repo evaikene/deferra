@@ -102,7 +102,7 @@ auto metadata_line(SecretMetadata const& metadata) -> std::optional<std::string>
     }
     auto const& fields = encoded->as_object();
     return fmt::format("Secret {}: created_at={}, updated_at={}\n",
-                       escape_human(fields.at("name").as_string()),
+                       format_human_name(fields.at("name").as_string()),
                        fields.at("created_at").as_string(),
                        fields.at("updated_at").as_string());
 }
@@ -161,7 +161,7 @@ auto print_secret_result(Command const& command, ControlReply const& value) -> b
         text = "No secrets\n";
     }
     if (page->next_after_name) {
-        text += fmt::format("Next after name: {}\n", escape_human(*page->next_after_name));
+        text += fmt::format("Next after name: {}\n", format_human_name(*page->next_after_name));
     }
     fmt::print(stdout, "{}", text);
     return true;

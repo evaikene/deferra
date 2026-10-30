@@ -436,7 +436,7 @@ void print_queue(Queue const& queue)
     fmt::print(stdout,
                "Queue {}: name={}, revision={}, state={}, weight={}, concurrency_limit={}, recovery_policy={}\n",
                queue.id.to_string(),
-               escape_human(queue.name),
+               format_human_name(queue.name),
                queue.revision,
                queue_state_text(queue.state),
                queue.weight,
@@ -463,7 +463,7 @@ void print_deleted_selector(QueueSelector const& selector)
         fmt::print(stdout, "Deleted queue id={}\n", id->to_string());
         return;
     }
-    fmt::print(stdout, "Deleted queue name={}\n", escape_human(std::get<std::string>(selector)));
+    fmt::print(stdout, "Deleted queue name={}\n", format_human_name(std::get<std::string>(selector)));
 }
 
 } // namespace

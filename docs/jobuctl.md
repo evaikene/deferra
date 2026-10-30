@@ -829,7 +829,40 @@ jobuctl queue create -- --help
 
 ## Results and errors
 
-Human output escapes control characters in data supplied by the daemon, including names and error text. JSON mode prints exactly one result value and a newline on standard output; successful delete commands print `null`. It prints no headings or progress text. Integer values remain integers, including large revisions.
+Human output escapes control characters in data supplied by the daemon, including
+names and error text. Queue, job, and secret names, name-based deletion selectors,
+and secret name cursors use the same display format. Ordinary names and internal
+ASCII spaces remain unquoted. Empty names, leading/trailing spaces, quotes,
+backslashes, controls, and invisible Unicode characters trigger single quoting.
+Quotes and backslashes are escaped inside the delimiters. Non-ASCII Unicode
+whitespace and characters normally ignored when displaying text, including
+zero-width spaces and bidi controls, appear as visible numeric escapes
+(`\uXXXX` or `\UXXXXXXXX`).
+
+The stored-name column below uses JSON notation to make spaces and invisible
+characters explicit:
+
+| Stored name (JSON notation) | Human name text |
+| --- | --- |
+| `"Default"` | `Default` |
+| `"Default "` | `'Default '` |
+| `" Default"` | `' Default'` |
+| `" Default "` | `' Default '` |
+| `"My Queue"` | `My Queue` |
+| `"O'Reilly"` | `'O\'Reilly'` |
+| `"path\\name"` | `'path\\name'` |
+| `"Default\u00a0"` | `'Default\u00A0'` |
+| `"Default\u200b"` | `'Default\u200B'` |
+
+These delimiters and escapes are for display; they are not shell quoting.
+Names retain their existing validation rules. Formatting never trims or
+normalizes a name: lookup of `Default` still fails if the stored name is
+`Default `, and the exact trailing space must be supplied to select that queue.
+
+JSON mode preserves the original name, apart from standard JSON escaping. It
+prints exactly one result value and a newline on standard output; successful
+delete commands print `null`. It prints no headings or progress text. Integer
+values remain integers, including large revisions.
 
 For an ordinary command failure, standard output is empty. With `--json`, each
 error is represented on stderr by an object with `error.kind` (`local` or

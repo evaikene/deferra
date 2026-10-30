@@ -249,6 +249,8 @@ TEST_CASE("jobuctl secret commands preserve bytes and expose only metadata", "[j
     CHECK_FALSE(first->as_object().contains("value"));
     auto binary_set = run_cli(JOBUCTL_EXECUTABLE, socket, {"secret", "set", "reports.binary", "--file", file.string()});
     REQUIRE(binary_set.code == 0);
+    CHECK(binary_set.out.starts_with("Secret reports.binary: created_at="));
+    CHECK(binary_set.err.empty());
 
     auto const marker        = std::string{"rotated-secret-sentinel"};
     auto const rotated_bytes = marker + '\n';
@@ -278,6 +280,21 @@ TEST_CASE("jobuctl secret commands preserve bytes and expose only metadata", "[j
     CHECK(first_items.front().as_object().at("name").as_string() == "reports.binary");
     auto const after = first_page->as_object().at("next_after_name").as_string();
     CHECK(after == "reports.binary");
+
+    // Secret names retain their existing identifier grammar and remain unquoted in human output.
+    auto human_page = run_cli(JOBUCTL_EXECUTABLE, socket, {"secret", "list", "--limit", "1"});
+    REQUIRE(human_page.code == 0);
+    CHECK(human_page.out.starts_with("Secret reports.binary: created_at="));
+    CHECK(human_page.out.ends_with("\nNext after name: reports.binary\n"));
+    CHECK(human_page.err.empty());
+
+    auto human_continuation =
+        run_cli(JOBUCTL_EXECUTABLE, socket, {"secret", "list", "--after-name", after, "--limit", "1"});
+    REQUIRE(human_continuation.code == 0);
+    CHECK(human_continuation.out.starts_with("Secret reports.empty: created_at="));
+    CHECK(human_continuation.out.ends_with("\nNext after name: reports.empty\n"));
+    CHECK(human_continuation.err.empty());
+
     auto continuation =
         run_cli(JOBUCTL_EXECUTABLE, socket, {"secret", "list", "--after-name", after, "--limit", "1", "--json"});
     REQUIRE(continuation.code == 0);

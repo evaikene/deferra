@@ -10,10 +10,12 @@
 #include "system_info.hpp"
 
 #include "json.hpp"
+#include "text_validation.hpp"
 
 #include <fmt/format.h>
 
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio> // IWYU pragma: keep for stdout/stderr macros
 #include <fcntl.h>
@@ -31,6 +33,108 @@ using namespace jb::jobu;
 using namespace jb::rpc;
 
 namespace {
+
+auto append_control_escape(std::string& escaped, std::string_view value, std::size_t& index) -> bool
+{
+    auto const byte = static_cast<unsigned char>(value[index]);
+    if (byte == '\n') {
+        escaped += "\\n";
+    }
+    else if (byte == '\r') {
+        escaped += "\\r";
+    }
+    else if (byte == '\t') {
+        escaped += "\\t";
+    }
+    else if (byte < 0x20U || byte == 0x7fU) {
+        escaped += fmt::format("\\x{:02X}", byte);
+    }
+    else if (byte == 0xc2U && index + 1U < value.size() && static_cast<unsigned char>(value[index + 1U]) >= 0x80U &&
+             static_cast<unsigned char>(value[index + 1U]) <= 0x9fU) {
+        // C1 controls are two bytes in UTF-8; consume the complete character.
+        escaped += fmt::format("\\u00{:02X}", static_cast<unsigned char>(value[++index]));
+    }
+    else {
+        return false;
+    }
+    return true;
+}
+
+struct HumanCharacter {
+    std::uint32_t code_point;
+    std::size_t   byte_count;
+};
+
+auto decode_non_ascii_character(std::string_view value) -> std::optional<HumanCharacter>
+{
+    auto const first      = static_cast<unsigned char>(value.front());
+    auto       byte_count = std::size_t{0};
+    if (first >= 0xc2U && first <= 0xdfU) {
+        byte_count = 2;
+    }
+    else if (first >= 0xe0U && first <= 0xefU) {
+        byte_count = 3;
+    }
+    else if (first >= 0xf0U && first <= 0xf4U) {
+        byte_count = 4;
+    }
+    else {
+        return std::nullopt;
+    }
+
+    // Reuse core validation to reject truncated, overlong, surrogate, and out-of-range encodings.
+    if (value.size() < byte_count || !is_valid_utf8(value.substr(0, byte_count))) {
+        return std::nullopt;
+    }
+
+    auto code_point = static_cast<std::uint32_t>(first & (0x7fU >> byte_count));
+    for (auto index = std::size_t{1}; index < byte_count; ++index) {
+        code_point = (code_point << 6U) | (static_cast<unsigned char>(value[index]) & 0x3fU);
+    }
+    return HumanCharacter{.code_point = code_point, .byte_count = byte_count};
+}
+
+auto is_invisible_name_character(std::uint32_t code_point) -> bool
+{
+    struct Range {
+        std::uint32_t first;
+        std::uint32_t last;
+    };
+
+    // Unicode 17.0 White_Space and Default_Ignorable_Code_Point, with adjacent ranges merged.
+    // ASCII spaces need quoting only at the boundaries; C0/C1 controls use the shared escaping above.
+    // https://www.unicode.org/Public/17.0.0/ucd/PropList.txt
+    // https://www.unicode.org/Public/17.0.0/ucd/DerivedCoreProperties.txt
+    static constexpr Range ranges[]{
+        {.first = 0x00a0,  .last = 0x00a0 },
+        {.first = 0x00ad,  .last = 0x00ad },
+        {.first = 0x034f,  .last = 0x034f },
+        {.first = 0x061c,  .last = 0x061c },
+        {.first = 0x115f,  .last = 0x1160 },
+        {.first = 0x1680,  .last = 0x1680 },
+        {.first = 0x17b4,  .last = 0x17b5 },
+        {.first = 0x180b,  .last = 0x180f },
+        {.first = 0x2000,  .last = 0x200f },
+        {.first = 0x2028,  .last = 0x202f },
+        {.first = 0x205f,  .last = 0x206f },
+        {.first = 0x3000,  .last = 0x3000 },
+        {.first = 0x3164,  .last = 0x3164 },
+        {.first = 0xfe00,  .last = 0xfe0f },
+        {.first = 0xfeff,  .last = 0xfeff },
+        {.first = 0xffa0,  .last = 0xffa0 },
+        {.first = 0xfff0,  .last = 0xfff8 },
+        {.first = 0x1bca0, .last = 0x1bca3},
+        {.first = 0x1d173, .last = 0x1d17a},
+        {.first = 0xe0000, .last = 0xe0fff},
+    };
+
+    for (auto const& range : ranges) {
+        if (code_point >= range.first && code_point <= range.last) {
+            return true;
+        }
+    }
+    return false;
+}
 
 auto category_text(ErrorCategory category) -> std::string_view
 {
@@ -216,26 +320,63 @@ auto escape_human(std::string_view value) -> std::string
     auto escaped = std::string{};
     escaped.reserve(value.size());
     for (auto index = std::size_t{0}; index < value.size(); ++index) {
-        auto const byte = static_cast<unsigned char>(value[index]);
-        if (byte == '\n') {
-            escaped += "\\n";
-        }
-        else if (byte == '\r') {
-            escaped += "\\r";
-        }
-        else if (byte == '\t') {
-            escaped += "\\t";
-        }
-        else if (byte < 0x20U || byte == 0x7fU) {
-            escaped += fmt::format("\\x{:02X}", byte);
-        }
-        else if (byte == 0xc2U && index + 1U < value.size() && static_cast<unsigned char>(value[index + 1U]) >= 0x80U &&
-                 static_cast<unsigned char>(value[index + 1U]) <= 0x9fU) {
-            escaped += fmt::format("\\u00{:02X}", static_cast<unsigned char>(value[++index]));
-        }
-        else {
+        if (!append_control_escape(escaped, value, index)) {
             escaped += value[index];
         }
+    }
+    return escaped;
+}
+
+auto format_human_name(std::string_view value) -> std::string
+{
+    auto escaped      = std::string{};
+    auto needs_quotes = value.empty() || value.front() == ' ' || value.back() == ' ';
+    escaped.reserve(value.size());
+
+    for (auto index = std::size_t{0}; index < value.size(); ++index) {
+        if (append_control_escape(escaped, value, index)) {
+            needs_quotes = true;
+            continue;
+        }
+
+        auto const byte = static_cast<unsigned char>(value[index]);
+        if (byte == '\'' || byte == '"' || byte == '\\') {
+            // Literal escape syntax must not impersonate a quoted name or an escaped control.
+            escaped      += '\\';
+            escaped      += value[index];
+            needs_quotes  = true;
+            continue;
+        }
+        if (byte < 0x80U) {
+            escaped += value[index];
+            continue;
+        }
+
+        auto const character = decode_non_ascii_character(value.substr(index));
+        if (!character) {
+            escaped      += fmt::format("\\x{:02X}", byte);
+            needs_quotes  = true;
+            continue;
+        }
+
+        if (is_invisible_name_character(character->code_point)) {
+            // Quoting alone cannot reveal zero-width characters or neutralize bidi formatting.
+            if (character->code_point <= 0xffffU) {
+                escaped += fmt::format("\\u{:04X}", character->code_point);
+            }
+            else {
+                escaped += fmt::format("\\U{:08X}", character->code_point);
+            }
+            needs_quotes = true;
+        }
+        else {
+            escaped.append(value.substr(index, character->byte_count));
+        }
+        index += character->byte_count - 1U;
+    }
+
+    if (needs_quotes) {
+        return fmt::format("'{}'", escaped);
     }
     return escaped;
 }
