@@ -831,6 +831,93 @@ auto verify_run_attempt_cli(std::filesystem::path const& executable,
            active_cancel_json->as_object().at("run").as_object().at("state").as_string() == "cancelled";
 }
 
+auto verify_job_name_output(std::filesystem::path const& executable, std::filesystem::path const& socket) -> bool
+{
+    auto queue    = run_success(executable, socket, {"queue", "create", "name-output"});
+    auto queue_id = queue ? queue_id_from_summary(*queue) : std::nullopt;
+    if (!queue_id) {
+        return false;
+    }
+
+    // Keep the job in the future so presentation checks never launch an executor.
+    constexpr auto at      = std::string_view{"2099-01-01T00:00:00.000000Z"};
+    auto           created = run_success(executable,
+                                         socket,
+                                         {"job",
+                                          "create",
+                                          "--queue-id",
+                                          *queue_id,
+                                          "--type",
+                                          "cli",
+                                          "--at",
+                                          at,
+                                          "--command",
+                                          "/bin/true",
+                                          "--priority",
+                                          "0",
+                                          "--name",
+                                          " Initial "});
+    auto           id      = created ? job_id_from_summary(*created) : std::nullopt;
+    if (!created || !id || *created != job_summary(*id, *queue_id, 1, "' Initial '", "active", "cli", at, 0)) {
+        fmt::print(stderr, "Unexpected initial named job: {}", created.value_or("<no result>\n"));
+        return false;
+    }
+
+    struct NameExample {
+        std::string_view stored;
+        std::string_view rendered;
+    };
+
+    constexpr NameExample examples[]{
+        {.stored = "Default",    .rendered = "Default"       },
+        {.stored = "Job ",       .rendered = "'Job '"        },
+        {.stored = " Job",       .rendered = "' Job'"        },
+        {.stored = "My Job",     .rendered = "My Job"        },
+        {.stored = "O'Reilly",   .rendered = R"('O\'Reilly')"},
+        {.stored = R"(C:\work)", .rendered = R"('C:\\work')" },
+        {.stored = "A\u00a0B",   .rendered = R"('A\u00A0B')" },
+        {.stored = "A\u200bB",   .rendered = R"('A\u200BB')" },
+    };
+
+    auto revision = std::uint64_t{1};
+    for (auto const& example : examples) {
+        auto updated =
+            run_success(executable,
+                        socket,
+                        {"job", "update", *id, "--revision", fmt::format("{}", revision), "--name", example.stored});
+        ++revision;
+        auto const expected = job_summary(*id, *queue_id, revision, example.rendered, "active", "cli", at, 0);
+        auto       fetched  = run_success(executable, socket, {"job", "get", *id});
+        auto       listed   = run_success(executable, socket, {"job", "list", "--queue-id", *queue_id});
+        if (!updated || *updated != expected || !fetched || *fetched != expected || !listed || *listed != expected) {
+            fmt::print(stderr,
+                       "Expected: {}Updated: {}Fetched: {}Listed: {}",
+                       expected,
+                       updated.value_or("<no result>\n"),
+                       fetched.value_or("<no result>\n"),
+                       listed.value_or("<no result>\n"));
+            return false;
+        }
+
+        // Both JSON result shapes must retain the exact name supplied to the update.
+        auto encoded      = run_success(executable, socket, {"job", "get", *id, "--json"});
+        auto encoded_page = run_success(executable, socket, {"job", "list", "--queue-id", *queue_id, "--json"});
+        auto value        = jb::core::parse_json(encoded.value_or(""));
+        auto page         = jb::core::parse_json(encoded_page.value_or(""));
+        if (!value || value->as_object().at("name").as_string() != example.stored || !page ||
+            page->as_object().at("items").as_array().size() != 1U ||
+            page->as_object().at("items").as_array().front().as_object().at("name").as_string() != example.stored) {
+            fmt::print(stderr,
+                       "JSON name mismatch for {}: get={}, list={}\n",
+                       example.rendered,
+                       encoded.value_or("<no result>"),
+                       encoded_page.value_or("<no result>"));
+            return false;
+        }
+    }
+    return true;
+}
+
 } // anonymous namespace
 
 auto main(int argc, char* argv[]) -> int
@@ -1382,6 +1469,9 @@ auto main(int argc, char* argv[]) -> int
     }
     if (!verify_run_attempt_cli(argv[2], persisted_socket, directory.path(), ::geteuid() != 0 || allow_root_cli)) {
         return fail("run and attempt CLI did not preserve durable history and output");
+    }
+    if (!verify_job_name_output(argv[2], persisted_socket)) {
+        return fail("job views or mutation confirmations did not preserve and render exact names consistently");
     }
     persisted->terminate();
 

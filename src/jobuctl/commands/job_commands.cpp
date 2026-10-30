@@ -896,7 +896,7 @@ auto print_job(JobDefinition const& job) -> bool
                job.id.to_string(),
                job.queue_id.to_string(),
                job.revision,
-               escape_human(job.name.value_or("<unnamed>")),
+               format_human_name(job.name.value_or("<unnamed>")),
                job_state_text(job.state),
                job_type_text(job.type),
                schedule,

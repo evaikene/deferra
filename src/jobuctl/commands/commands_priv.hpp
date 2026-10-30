@@ -54,6 +54,13 @@ auto is_cli_creation_option(std::string_view name) -> bool;
 void print_system_info(jb::jobu::SystemInfo const& info);
 /// Escapes terminal control bytes in data embedded in human-readable output.
 auto escape_human(std::string_view value) -> std::string;
+
+/// Formats a name for display, preserving ordinary visible text and internal ASCII spaces.
+/// Empty names, boundary spaces, quotes, backslashes, controls, Unicode whitespace, and default-ignorable
+/// characters trigger single quoting. Controls and invisible Unicode characters become visible escapes;
+/// quotes and backslashes are escaped, and malformed UTF-8 bytes become \\xHH. This is not shell quoting.
+auto format_human_name(std::string_view value) -> std::string;
+
 auto print_queue_result(Command const& command, jb::jobu::ControlReply const& value) -> bool;
 auto print_job_result(Command const& command, jb::jobu::ControlReply const& value) -> bool;
 auto print_run_result(Command const&                             command,
