@@ -17,6 +17,9 @@ persistence.
 - **`jobuctl`** — the command-line client for managing queues and jobs through
   `jobud`.
 
+A terminal user interface (TUI) is available separately in
+[JobuTU](https://github.com/rukkirahu/jobutu).
+
 ## Supported platforms
 
 - Arch Linux (rolling release; primary development platform)
