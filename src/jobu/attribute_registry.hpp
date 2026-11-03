@@ -133,6 +133,14 @@ private:
 attribute_set_to_json(AttributeSet const& values, AttributeRegistry const& registry, AttributeScope scope)
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
+/// Encodes a complete job/run snapshot as the selected runner's public attribute view.
+/// Every stored name and value is validated, including known legacy extras, before irrelevant entries are omitted.
+/// All applicable Job-scope definitions are required; cross-field rules use only the applicable view. The source
+/// snapshot is never modified and defaults are not reapplied. Queue/default layers use the scope-based overload.
+/// @return Owning JSON object containing shared and applicable attributes, or a `jobu.attribute.*` error.
+[[nodiscard]] auto attribute_set_to_json(AttributeSet const& values, AttributeRegistry const& registry, JobType type)
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
+
 /// Decodes the public definition-directed JSON object into an attribute set.
 ///
 /// The conversion validates every name and value at @p scope, together with applicable standard cross-field
@@ -149,5 +157,13 @@ attribute_set_to_json(AttributeSet const& values, AttributeRegistry const& regis
 [[nodiscard]] auto attribute_set_from_json(jb::core::JsonValue const& value,
                                            AttributeRegistry const&   registry,
                                            AttributeScope scope) -> jb::core::Result<AttributeSet, jb::core::Error>;
+
+/// Decodes a complete job/run reply for the selected runner without materializing omitted attributes.
+/// Requires all applicable definitions and validates every supplied name and value. Valid known legacy extras from
+/// older peers are retained, but cross-field rules use only the applicable view. No references to @p value are kept.
+/// @return Owning attribute set, or a `jobu.attribute.*` error.
+[[nodiscard]] auto attribute_set_from_json(jb::core::JsonValue const& value,
+                                           AttributeRegistry const&   registry,
+                                           JobType type) -> jb::core::Result<AttributeSet, jb::core::Error>;
 
 } // namespace jb::jobu

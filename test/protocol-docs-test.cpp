@@ -118,6 +118,41 @@ TEST_CASE("Published protocol results use production decoders", "[jobu][protocol
     REQUIRE(statistics_page_from_json(example("system-stats.result.json")));
 }
 
+TEST_CASE("Published API 1.7 job and run views contain exactly the applicable complete set",
+          "[jobu][protocol][docs][runner]")
+{
+    StandardAttributeRegistry registry;
+    for (auto const* runner : {"cli", "http"}) {
+        auto const suffix    = std::string{runner} + ".result.json";
+        auto const job_value = example("job-get-" + suffix);
+        auto const run_value = example("run-get-" + suffix);
+        auto const job       = job_from_json(job_value, registry);
+        auto const run       = run_details_from_json(run_value, registry);
+        REQUIRE(job);
+        REQUIRE(run);
+        CHECK(job->type == run->type);
+        CHECK(job->id == run->job_id);
+        CHECK(job->revision == run->job_revision);
+        for (auto const& definition : registry.definitions()) {
+            auto const applicable = attribute_applies_to(definition, job->type);
+            CHECK(job->attributes.contains(definition.name) == applicable);
+            CHECK(run->attributes.contains(definition.name) == applicable);
+        }
+
+        // Compare wire values because parsing positive JSON integers and encoding durations use different variants.
+        auto encoded_job = job_to_json(*job, registry);
+        auto encoded_run = run_details_to_json(*run, registry);
+        REQUIRE(encoded_job);
+        REQUIRE(encoded_run);
+        CHECK(serialize_json(*encoded_job).value() == serialize_json(job_value).value());
+        CHECK(serialize_json(*encoded_run).value() == serialize_json(run_value).value());
+    }
+    auto page = job_page_from_json(example("job-list.result.json"), registry);
+    REQUIRE(page);
+    REQUIRE(page->items.size() == 1U);
+    CHECK(page->items.front().attributes.size() == 13U);
+}
+
 TEST_CASE("Published queue recovery retains inspected identity and replacement semantics",
           "[jobu][protocol][docs][queue]")
 {

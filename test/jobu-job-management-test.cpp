@@ -1025,6 +1025,64 @@ TEST_CASE("Job management lists filtered keyset pages and controls deleted visib
     CHECK(historical->items.front().id == first_job);
 }
 
+TEST_CASE("Job list budgeting measures the filtered legacy public view", "[jobu][job][list][runner]")
+{
+    ServiceFixture fixture{
+        {sequence_id(1), sequence_id(2), sequence_id(3), sequence_id(4), sequence_id(5)}
+    };
+    ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
+    auto              queue = service.create_queue({.name = "budget"});
+    REQUIRE(queue);
+    auto first = service.create_job(
+        {.queue = queue->id, .schedule = once_at(UtcTimePoint{60s}), .payload = cli_payload("/bin/true", {""})});
+    REQUIRE(first);
+    auto encoded = job_to_json(*first, fixture.registry);
+    REQUIRE(encoded);
+    auto text = serialize_json(*encoded);
+    REQUIRE(text);
+
+    // Size two payloads to fit with the public view, but exceed the documented 512 KiB limit with legacy extras.
+    constexpr auto budget      = std::size_t{512} * 1024U;
+    auto const     item_budget = (budget - 256U) / 2U;
+    auto const     padding     = item_budget - text->size();
+    auto           payload     = cli_payload("/bin/true", {std::string(padding, 'x')});
+    REQUIRE(service.update_job({.job_id = first->id, .expected_revision = first->revision, .payload = payload}));
+    REQUIRE(service.create_job({.queue = queue->id, .schedule = once_at(UtcTimePoint{60s}), .payload = payload}));
+
+    auto mixed = materialize_attributes(fixture.registry, {}, {}, {});
+    REQUIRE(mixed);
+    auto document = detail::encode_and_serialize_attribute_document(fixture.registry,
+                                                                    *mixed,
+                                                                    AttributeScope::Job,
+                                                                    detail::AttributeDocumentMode::Materialized);
+    REQUIRE(document);
+    {
+        Query query{fixture.database};
+        REQUIRE(query.prepare("UPDATE jobu_jobs SET attributes_json = :document"));
+        REQUIRE(query.bind_value(":document", std::string{document->serialized()}));
+        REQUIRE(query.exec());
+    }
+    auto page = service.list_jobs({.page = {.limit = 2}});
+    REQUIRE(page);
+    REQUIRE(page->items.size() == 2U);
+    CHECK_FALSE(page->next_after_id);
+    CHECK(page->items.front().attributes.size() == 21U);
+    auto public_page = job_page_to_json(*page, fixture.registry);
+    REQUIRE(public_page);
+    auto public_text = serialize_json(*public_page);
+    REQUIRE(public_text);
+    CHECK(public_text->size() <= budget);
+
+    auto mixed_json = attribute_set_to_json(*mixed, fixture.registry, AttributeScope::Job);
+    REQUIRE(mixed_json);
+    for (auto& item : std::get<JsonValue::Array>(object(*public_page).at("items").data)) {
+        object(item).at("attributes") = *mixed_json;
+    }
+    auto unfiltered_text = serialize_json(*public_page);
+    REQUIRE(unfiltered_text);
+    CHECK(unfiltered_text->size() > budget);
+}
+
 TEST_CASE("Job listing filters mixed states before keyset pagination", "[jobu][job][list]")
 {
     auto generated = std::vector<Uuid>{};

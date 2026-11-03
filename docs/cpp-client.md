@@ -163,6 +163,21 @@ payload must match that runner. Create requests, job replies, and list filters
 continue to carry the runner type. Raw `job.update` params containing `type` are
 rejected in full, including when they repeat the current type.
 
+API 1.7 job/run replies contain only shared and runner-applicable materialized
+attributes. The registry's runner-aware JSON overloads require that complete
+applicable set and validate all supplied names/values. Decoding still retains
+valid known extras from older mixed replies; cross-field rules apply only to
+the selected runner. Public encoding projects a copy without changing stored
+snapshots or canonical replay documents. Queue defaults remain dual-runner.
+The scope-based attribute codecs still handle partial submissions/defaults.
+
+The daemon advertises 1.7; the future PHP binding's minimum is 1.7. This does
+not impose a global 1.7 floor on `ControlClient`: compatible advertised methods
+keep their existing minimums (queue revisions 1.6, run-state sets 1.5). Clients
+that assumed every job/run contained both attribute families must update that
+assumption. See the [legacy and update contract](protocol/types.md#attributes-and-defaults)
+for read preservation and successful-update cleanup.
+
 For `list_runs`, `RunFilters::state` selects one state. Since API 1.5,
 `RunFilters::states` selects any of 1–7 distinct valid states, preserving caller
 order in the request. The two selectors are mutually exclusive; an absent set

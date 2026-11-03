@@ -128,6 +128,40 @@ auto nested_arrays(std::size_t count) -> JsonValue
 
 } // namespace
 
+TEST_CASE("Legacy job drafts expose applicable attributes and retain minimal recovery requests",
+          "[jobuctl][edit][runner]")
+{
+    StandardAttributeRegistry registry;
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        auto job = sample_job(registry);
+        job.type = type;
+        if (type == JobType::Http) {
+            job.payload = parsed(R"({"url":"https://example.test/legacy"})");
+        }
+        auto        baseline   = baseline_for(job, registry);
+        auto const& attributes = baseline.value().as_object().at("attributes").as_object();
+        CHECK(attributes.size() == (type == JobType::Cli ? 13U : 17U));
+        CHECK(job.attributes.size() == 21U);
+        for (auto const& definition : registry.definitions()) {
+            CHECK(attributes.contains(definition.name) == attribute_applies_to(definition, type));
+        }
+        check_noop(baseline, baseline.value(), registry);
+
+        auto edited               = baseline.value();
+        object(edited).at("name") = make_json(std::string{"renamed"});
+        auto update               = prepared_update(baseline, edited, registry);
+        CHECK(update.params.as_object().size() == 3U);
+        CHECK_FALSE(update.params.as_object().contains("attributes"));
+        CHECK_FALSE(update.params.as_object().contains("payload"));
+        CHECK(update.request.job_id == job.id);
+        CHECK(update.request.expected_revision == job.revision);
+        auto recovered = update_job_request_from_json(update.params, registry);
+        REQUIRE(recovered);
+        CHECK(recovered->name == "renamed");
+        CHECK(recovered->attribute_changes.empty());
+    }
+}
+
 TEST_CASE("Shared documents accept domain instructions without requiring a job projection", "[jobuctl][edit]")
 {
     auto value        = parsed(R"({"resource_data":[1,18446744073709551615,"// literal /* text */"]})");
@@ -204,7 +238,7 @@ TEST_CASE("Job edit projection selects writable content for each runner and sche
                 if (named) {
                     CHECK(draft.at("name").as_string() == *job.name);
                 }
-                auto attributes = attribute_set_to_json(job.attributes, registry, AttributeScope::Job);
+                auto attributes = attribute_set_to_json(job.attributes, registry, job.type);
                 REQUIRE(attributes);
                 CHECK(draft.at("attributes") == *attributes);
                 auto const& schedule = draft.at("schedule").as_object();
@@ -575,18 +609,20 @@ TEST_CASE("Job edit name changes distinguish clearing from omission", "[jobuctl]
     CHECK(**named.request.name == "replacement");
 }
 
-TEST_CASE("Job edit attributes contain only changed and newly supplied entries", "[jobuctl][edit]")
+TEST_CASE("Job edit attributes contain only changed entries and preserve omitted values", "[jobuctl][edit]")
 {
     StandardAttributeRegistry registry;
-    auto                      job = sample_job(registry);
-    // Model an older definition lacking an attribute now known to the supplied registry.
-    job.attributes.erase("job.timeout");
+    auto                      job        = sample_job(registry);
+    // Repository decoding restores missing applicable defaults before a public definition reaches the editor.
+    auto                      incomplete = job;
+    incomplete.attributes.erase("job.timeout");
+    CHECK_FALSE(JobEditBaseline::from_job(incomplete, registry));
     auto  baseline   = baseline_for(job, registry);
     auto  draft      = baseline.value();
     auto& attributes = object(object(draft).at("attributes"));
     attributes.erase("output.capture");
     attributes.at("retry.max_attempts") = make_json(std::uint64_t{3});
-    attributes.emplace("job.timeout", make_json(std::uint64_t{2500}));
+    attributes.at("job.timeout")        = make_json(std::uint64_t{2500});
 
     auto        update = prepared_update(baseline, draft, registry);
     auto const& patch  = update.params.as_object().at("attributes").as_object();

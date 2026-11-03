@@ -684,6 +684,81 @@ TEST_CASE("Every distinct typed result decodes into its public reply alternative
     CHECK(received.size() == cases.size());
 }
 
+TEST_CASE("Typed clients decode filtered 1.7 replies and mixed 1.6 snapshots for either runner",
+          "[jobu][client][runner]")
+{
+    for (auto minor : {6U, 7U}) {
+        for (auto type : {JobType::Cli, JobType::Http}) {
+            CAPTURE(minor, type);
+            Fixture fixture;
+            fixture.initialize(minor);
+            auto id = Uuid::parse("00112233-4455-6677-8899-aabbccddeeff");
+            REQUIRE(id);
+            auto attributes = materialize_attributes(fixture.attributes, {}, {}, {});
+            REQUIRE(attributes);
+            auto job       = JobDefinition{.id         = *id,
+                                           .queue_id   = *id,
+                                           .type       = type,
+                                           .attributes = *attributes,
+                                           .payload    = {.data = JsonValue::Object{}}};
+            auto run       = JobRun{.id         = *id,
+                                    .job_id     = *id,
+                                    .queue_id   = *id,
+                                    .type       = type,
+                                    .attributes = *attributes,
+                                    .payload    = {.data = JsonValue::Object{}}};
+            auto job_reply = encoded(job_to_json(job, fixture.attributes));
+            auto run_reply = encoded(run_details_to_json(run, fixture.attributes));
+            if (minor == 6U) {
+                auto mixed = encoded(attribute_set_to_json(*attributes, fixture.attributes, AttributeScope::Job));
+                std::get<JsonValue::Object>(job_reply.data).at("attributes") = mixed;
+                std::get<JsonValue::Object>(run_reply.data).at("attributes") = std::move(mixed);
+            }
+
+            auto cases = std::vector<ReplyCase>{
+                {[&](auto& client) { return client.get_job(*id); },             job_reply, ControlReply{JobDefinition{}}.index()},
+                {[&](auto& client) { return client.get_run(*id); },             run_reply, ControlReply{RunDetails{}}.index()   },
+                {[&](auto& client) { return client.run_now({.job_id = *id}); },
+                 run_reply,                                                                ControlReply{RunDetails{}}.index()   },
+            };
+            auto received = std::optional<ControlReply>{};
+            auto failures = std::vector<ControlFailure>{};
+            fixture.typed->reply_received.connect([&](ControlCallId, ControlReply const& reply) { received = reply; });
+            fixture.typed->call_failed.connect(
+                [&](ControlCallId, ControlFailure const& failure) { failures.push_back(failure); });
+
+            for (auto const& test : cases) {
+                auto call = test.submit(*fixture.typed);
+                REQUIRE(call);
+                static_cast<void>(fixture.device.take_written_data());
+                fixture.device.inject_input(success(*call + 1U, test.result));
+                fixture.drain_tasks();
+                REQUIRE(received);
+                CHECK(received->index() == test.reply_index);
+                auto const& values = test.reply_index == ControlReply{JobDefinition{}}.index()
+                                       ? std::get<JobDefinition>(*received).attributes
+                                       : std::get<RunDetails>(*received).attributes;
+                CHECK(values.size() == (minor == 6U ? 21U : (type == JobType::Cli ? 13U : 17U)));
+                received.reset();
+
+                auto malformed = test.result;
+                std::get<JsonValue::Object>(std::get<JsonValue::Object>(malformed.data).at("attributes").data)
+                    .erase("retry.max_attempts");
+                call = test.submit(*fixture.typed);
+                REQUIRE(call);
+                static_cast<void>(fixture.device.take_written_data());
+                fixture.device.inject_input(success(*call + 1U, malformed));
+                fixture.drain_tasks();
+                CHECK_FALSE(received);
+                REQUIRE_FALSE(failures.empty());
+                REQUIRE(failures.back().kind == ControlFailureKind::Local);
+                CHECK(std::get<Error>(failures.back().error).code == "jobu.client.invalid_response");
+            }
+            CHECK(failures.size() == cases.size());
+        }
+    }
+}
+
 TEST_CASE("All typed queue replies preserve revision and reject missing or invalid tokens", "[jobu][client][queue]")
 {
     Fixture fixture;

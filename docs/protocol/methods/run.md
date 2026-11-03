@@ -19,8 +19,10 @@ The required fields are `id`, `job_id`, `queue_id`, positive `job_revision`,
 `origin`, `type`, `state`, `schedule_owned`, `priority`, `planned_at`,
 `runnable_at`, nullable `started_at`, nullable `completed_at`, `attributes`,
 `payload`, and nullable `result`. Times use canonical UTC RFC 3339 text with
-six fractional digits. The attributes are the complete immutable materialized
-job set; the payload is the original durable JSON template. Neither resolved
+six fractional digits. Since API 1.7, attributes contain the complete immutable
+materialized set applicable to the captured `type`, including for legacy mixed
+snapshots. This public projection never rewrites stored run or replay documents.
+The payload is the original durable JSON template. Neither resolved
 secret bytes nor attempts or captured output are included.
 
 ## Get a run (`run.get`)

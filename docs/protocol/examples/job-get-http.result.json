@@ -1,0 +1,50 @@
+{
+  "id": "00112233-4455-6677-8899-aabbccddeeff",
+  "queue_id": "10112233-4455-6677-8899-aabbccddeeff",
+  "revision": 2,
+  "name": "daily report",
+  "state": "succeeded",
+  "type": "http",
+  "schedule": {
+    "kind": "once",
+    "at": "2030-01-01T00:00:00.000000Z"
+  },
+  "priority": 0,
+  "attributes": {
+    "http.follow_redirects": false,
+    "http.idempotency_key": false,
+    "http.max_redirects": 5,
+    "http.retry_errors": [
+      "resolve",
+      "connect",
+      "tls_handshake",
+      "timeout",
+      "send",
+      "receive"
+    ],
+    "http.retry_statuses": [
+      "408",
+      "429",
+      "500-599"
+    ],
+    "http.tls_verify": true,
+    "job.timeout": 120000,
+    "output.capture": "on_error",
+    "output.http_body_limit": 1048576,
+    "output.http_headers_limit": 65536,
+    "retry.initial_delay": 0,
+    "retry.jitter": 0.0,
+    "retry.max_attempts": 1,
+    "retry.max_delay": 86400000,
+    "retry.mode": "reschedule",
+    "retry.multiplier": 2.0,
+    "retry.strategy": "fixed"
+  },
+  "payload": {
+    "url": "https://example.test/report",
+    "method": "GET"
+  },
+  "created_at": "2030-01-01T00:00:00.000000Z",
+  "updated_at": "2030-01-01T00:01:00.000000Z",
+  "deleted_at": null
+}

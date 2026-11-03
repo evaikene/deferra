@@ -900,9 +900,16 @@ auto materialize_attributes(AttributeRegistry const& registry,
     return materialize_attributes_impl(registry, daemon_defaults, queue_defaults, job_values, type);
 }
 
-auto attribute_set_to_json(AttributeSet const& values, AttributeRegistry const& registry, AttributeScope scope)
-    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
+namespace {
+
+auto attribute_set_to_json_impl(AttributeSet const&      values,
+                                AttributeRegistry const& registry,
+                                AttributeScope           scope,
+                                std::optional<JobType>   type) -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
+    if (type && *type != JobType::Cli && *type != JobType::Http) {
+        return Result<jb::core::JsonValue>::failure(invalid_value("JobU runner type is invalid"));
+    }
     auto object = jb::core::JsonValue::Object{};
     for (auto const& [name, value] : values) {
         auto const* definition = registry.find(name);
@@ -920,7 +927,8 @@ auto attribute_set_to_json(AttributeSet const& values, AttributeRegistry const& 
         }
         object.emplace(name, std::move(encoded).value());
     }
-    auto cross_fields = validate_standard_cross_fields(registry, values);
+    auto cross_fields = type ? validate_materialized_attributes(registry, values, *type)
+                             : validate_standard_cross_fields(registry, values);
     if (!cross_fields) {
         return Result<jb::core::JsonValue>::failure(std::move(cross_fields).error());
     }
@@ -930,11 +938,27 @@ auto attribute_set_to_json(AttributeSet const& values, AttributeRegistry const& 
     if (!serialized) {
         return Result<jb::core::JsonValue>::failure(invalid_value("JobU attribute text is not valid UTF-8"));
     }
+
+    // Validate the entire legacy document before projecting it. Filtering must not conceal malformed extras or
+    // change the stored snapshot; durable attribute and idempotency codecs do not use this public projection.
+    if (type) {
+        auto& fields = std::get<jb::core::JsonValue::Object>(result.data);
+        for (auto entry = fields.begin(); entry != fields.end();) {
+            if (!attribute_applies_to(*registry.find(entry->first), *type)) {
+                entry = fields.erase(entry);
+            }
+            else {
+                ++entry;
+            }
+        }
+    }
     return Result<jb::core::JsonValue>::success(std::move(result));
 }
 
-auto attribute_set_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry, AttributeScope scope)
-    -> jb::core::Result<AttributeSet, jb::core::Error>
+auto attribute_set_from_json_impl(jb::core::JsonValue const& value,
+                                  AttributeRegistry const&   registry,
+                                  AttributeScope             scope,
+                                  std::optional<JobType>     type) -> jb::core::Result<AttributeSet, jb::core::Error>
 {
     if (!value.is_object()) {
         return Result<AttributeSet>::failure(invalid_value("JobU attributes must be a JSON object"));
@@ -961,16 +985,37 @@ auto attribute_set_from_json(jb::core::JsonValue const& value, AttributeRegistry
         }
         result.emplace(name, std::move(decoded).value());
     }
-    auto cross_fields = validate_standard_cross_fields(registry, result);
-    if (!cross_fields) {
-        return Result<AttributeSet>::failure(std::move(cross_fields).error());
-    }
-
-    auto encoded = attribute_set_to_json(result, registry, scope);
+    auto encoded = attribute_set_to_json_impl(result, registry, scope, type);
     if (!encoded) {
         return Result<AttributeSet>::failure(std::move(encoded).error());
     }
     return Result<AttributeSet>::success(std::move(result));
+}
+
+} // namespace
+
+auto attribute_set_to_json(AttributeSet const& values, AttributeRegistry const& registry, AttributeScope scope)
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
+{
+    return attribute_set_to_json_impl(values, registry, scope, std::nullopt);
+}
+
+auto attribute_set_to_json(AttributeSet const& values, AttributeRegistry const& registry, JobType type)
+    -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
+{
+    return attribute_set_to_json_impl(values, registry, AttributeScope::Job, type);
+}
+
+auto attribute_set_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry, AttributeScope scope)
+    -> jb::core::Result<AttributeSet, jb::core::Error>
+{
+    return attribute_set_from_json_impl(value, registry, scope, std::nullopt);
+}
+
+auto attribute_set_from_json(jb::core::JsonValue const& value, AttributeRegistry const& registry, JobType type)
+    -> jb::core::Result<AttributeSet, jb::core::Error>
+{
+    return attribute_set_from_json_impl(value, registry, AttributeScope::Job, type);
 }
 
 } // namespace jb::jobu

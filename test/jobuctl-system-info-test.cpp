@@ -1,6 +1,7 @@
 #include "support/temporary_directory.hpp"
 
 #include "database.hpp"
+#include "jobu_version_priv.hpp"
 #include "query.hpp"
 #include "sqlite/sqlite_driver.hpp"
 
@@ -114,7 +115,7 @@ auto fail(std::string_view message) -> int
 auto expected_system_info(std::string_view version) -> std::string
 {
     return fmt::format("Daemon version: {}\n"
-                       "API version: 1.6\n"
+                       "API version: {}\n"
                        "Capabilities:\n"
                        "  attempt.get\n"
                        "  attempt.list\n"
@@ -146,7 +147,8 @@ auto expected_system_info(std::string_view version) -> std::string
                        "  secret.set\n"
                        "  system.info\n"
                        "  system.stats\n",
-                       version);
+                       version,
+                       jb::jobu::detail::rpc_api_version);
 }
 
 auto spawn_jobud(std::filesystem::path const& executable,

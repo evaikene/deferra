@@ -2,12 +2,6 @@ set(TARGET jobuctl)
 
 message("** Setting up ${TARGET}")
 
-configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/../jobu_version_priv.hpp.in
-    ${CMAKE_CURRENT_BINARY_DIR}/jobu_version_priv.hpp
-    @ONLY
-)
-
 # Private implementation shared by the executable and direct parsing/session tests.
 add_library(jobuctl-private STATIC
     command_line_priv.cpp
@@ -46,13 +40,8 @@ target_link_libraries(jobuctl-private PRIVATE jobu-paths-private)
 
 add_executable(${TARGET} main.cpp)
 
-target_include_directories(${TARGET}
-    PRIVATE
-        ${CMAKE_CURRENT_BINARY_DIR}
-)
-
 target_compile_features(${TARGET} PRIVATE cxx_std_20)
 
-target_link_libraries(${TARGET} PRIVATE jobuctl-private)
+target_link_libraries(${TARGET} PRIVATE jobuctl-private jobu-version-private)
 
 jobu_install_application(${TARGET})

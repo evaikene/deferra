@@ -1,3 +1,4 @@
+#include "jobu_version_priv.hpp"
 #include "json.hpp"
 #include "uuid.hpp"
 
@@ -196,8 +197,8 @@ auto expected_system_info(JsonValue const& info, std::string_view version) -> bo
     auto const  api          = object.find("api_version");
     auto const  expected_api = JsonValue{
         .data = JsonValue::Object{
-                                  {"major", JsonValue{.data = std::uint64_t{1}}},
-                                  {"minor", JsonValue{.data = std::uint64_t{6}}},
+                                  {"major", JsonValue{.data = std::uint64_t{jb::jobu::detail::rpc_api_version_major}}},
+                                  {"minor", JsonValue{.data = std::uint64_t{jb::jobu::detail::rpc_api_version_minor}}},
                                   }
     };
     return api != object.end() && api->second == expected_api;

@@ -85,6 +85,7 @@ UUID and reconcile; do not automatically substitute the latest token or retry.
 | `jobu.idempotency.conflict` | Conflict | The retained key belongs to different canonical input. |
 | `jobu.attribute.unknown` | InvalidArgument | Attribute name is not registered. |
 | `jobu.attribute.invalid_scope` | InvalidArgument | Attribute is not accepted in this layer. |
+| `jobu.attribute.invalid_runner` | InvalidArgument | Since 1.7: an explicit job attribute belongs to the other runner. |
 | `jobu.attribute.invalid_type` | InvalidArgument | JSON type does not match the attribute definition. |
 | `jobu.attribute.invalid_value` | InvalidArgument | Value or cross-attribute combination is invalid. |
 | `jobu.attribute.invalid_document` | InvalidArgument | Attribute document is invalid or exceeds its bound. |

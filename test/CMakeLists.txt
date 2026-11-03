@@ -51,7 +51,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT CMAKE_CROSSCOMPILING AND TARGET jo
     file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/jobu-fresh-install-cache.cmake" "${fresh_install_cache}")
 
     add_executable(jobu-fresh-install-lifecycle jobu-fresh-install-lifecycle.cpp)
-    target_link_libraries(jobu-fresh-install-lifecycle PRIVATE core)
+    target_link_libraries(jobu-fresh-install-lifecycle PRIVATE core jobu-version-private)
     configure_file(jobu-fresh-install-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/jobu-fresh-install-test.cmake" @ONLY)
     file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/jobu-fresh-install-worker-$<CONFIG>.cmake"
         CONTENT "set(lifecycle_helper [==[$<TARGET_FILE:jobu-fresh-install-lifecycle>]==])\ninclude([==[${CMAKE_CURRENT_BINARY_DIR}/jobu-fresh-install-test.cmake]==])\n")
@@ -1022,7 +1022,8 @@ if(TARGET jobud)
             support/recovery_fixture.cpp
             support/temporary_directory.cpp
         )
-        target_link_libraries(jobud-runtime-test PRIVATE jobud-runtime jobu-sqlite jobu-http Catch2::Catch2WithMain)
+        target_link_libraries(jobud-runtime-test PRIVATE jobud-runtime jobu-sqlite jobu-http jobu-version-private
+            Catch2::Catch2WithMain)
         add_test(NAME jobud-runtime-test COMMAND $<TARGET_FILE:jobud-runtime-test>)
         if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
             # The default macOS temporary directory can exceed the Unix socket path limit.
@@ -1379,7 +1380,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
         jobuctl-system-info-test.cpp
         support/temporary_directory.cpp
     )
-    target_link_libraries(${TARGET} PRIVATE db-sqlite)
+    target_link_libraries(${TARGET} PRIVATE db-sqlite jobu-version-private)
     add_dependencies(${TARGET} jobud jobuctl)
     add_test(NAME ${TARGET}
         COMMAND $<TARGET_FILE:${TARGET}> $<TARGET_FILE:jobud> $<TARGET_FILE:jobuctl> ${PROJECT_VERSION}
@@ -1496,7 +1497,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
         support/http_test_server.cpp
         support/temporary_directory.cpp)
     target_link_libraries(jobud-recovery-integration-test PRIVATE
-        jobu-sqlite net rpc OpenSSL::SSL OpenSSL::Crypto Catch2::Catch2WithMain)
+        jobu-sqlite net rpc jobu-version-private OpenSSL::SSL OpenSSL::Crypto Catch2::Catch2WithMain)
     target_compile_definitions(jobud-recovery-integration-test PRIVATE
         JOBUD_EXECUTABLE="$<TARGET_FILE:jobud>"
         JOBUCTL_EXECUTABLE="$<TARGET_FILE:jobuctl>"
@@ -1553,7 +1554,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
         support/http_test_server.cpp
         support/temporary_directory.cpp
     )
-    target_link_libraries(${TARGET} PRIVATE net rpc SQLite3::SQLite3
+    target_link_libraries(${TARGET} PRIVATE net rpc SQLite3::SQLite3 jobu-version-private
         OpenSSL::SSL OpenSSL::Crypto Catch2::Catch2WithMain)
     target_compile_definitions(${TARGET} PRIVATE
         JOBUD_EXECUTABLE="$<TARGET_FILE:jobud>"

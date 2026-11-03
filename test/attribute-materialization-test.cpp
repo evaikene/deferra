@@ -1184,3 +1184,91 @@ TEST_CASE("Runner storage round trips reduced sets and restores only applicable 
         CHECK(same_set(*old_decoded, *legacy));
     }
 }
+
+TEST_CASE("Public runner views filter legacy extras without changing snapshots or combined defaults",
+          "[jobu][attribute][runner][json]")
+{
+    StandardAttributeRegistry registry;
+    auto                      legacy = materialize_attributes(registry,
+                                                              {
+    },
+                                                              {},
+                                                              {{"job.timeout", {.data = 42s}}});
+    REQUIRE(legacy);
+    auto const original  = *legacy;
+    auto       old_reply = attribute_set_to_json(*legacy, registry, AttributeScope::Job);
+    REQUIRE(old_reply);
+
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        CAPTURE(type);
+        auto encoded = attribute_set_to_json(*legacy, registry, type);
+        REQUIRE(encoded);
+        CHECK(encoded->as_object().size() == (type == JobType::Cli ? 13U : 17U));
+        CHECK(encoded->as_object().at("job.timeout").as_int() == 42000);
+        for (auto const& definition : registry.definitions()) {
+            CHECK(encoded->as_object().contains(definition.name) == attribute_applies_to(definition, type));
+        }
+        CHECK(same_set(*legacy, original));
+
+        auto decoded = attribute_set_from_json(*encoded, registry, type);
+        REQUIRE(decoded);
+        CHECK(decoded->size() == encoded->as_object().size());
+        auto older = attribute_set_from_json(*old_reply, registry, type);
+        REQUIRE(older);
+        CHECK(same_set(*older, original));
+
+        // Public replies must already be complete; only persistent-document decoding may restore old defaults.
+        for (auto const& definition : registry.definitions()) {
+            if (attribute_applies_to(definition, type)) {
+                auto missing = *legacy;
+                missing.erase(definition.name);
+                CHECK_FALSE(attribute_set_to_json(missing, registry, type));
+                auto missing_reply = *encoded;
+                std::get<JsonValue::Object>(missing_reply.data).erase(definition.name);
+                CHECK_FALSE(attribute_set_from_json(missing_reply, registry, type));
+            }
+        }
+    }
+
+    auto defaults = attribute_set_to_json(*legacy, registry, AttributeScope::QueueDefault);
+    REQUIRE(defaults);
+    CHECK(defaults->as_object().size() == 21U);
+    CHECK_FALSE(attribute_set_to_json(*legacy, registry, static_cast<JobType>(255)));
+}
+
+TEST_CASE("Public runner projection validates hidden values and only applicable cross-field rules",
+          "[jobu][attribute][runner][json]")
+{
+    StandardAttributeRegistry registry;
+    auto                      legacy = materialize_attributes(registry, {}, {}, {});
+    REQUIRE(legacy);
+    auto old_reply = attribute_set_to_json(*legacy, registry, AttributeScope::Job);
+    REQUIRE(old_reply);
+
+    // Both HTTP values are individually valid. Their relationship cannot invalidate a CLI snapshot.
+    legacy->at("http.follow_redirects").data = true;
+    legacy->at("http.max_redirects").data    = std::int64_t{0};
+    auto& fields                             = std::get<JsonValue::Object>(old_reply->data);
+    fields.at("http.follow_redirects")       = make_json(true);
+    fields.at("http.max_redirects")          = make_json(std::int64_t{0});
+    REQUIRE(attribute_set_to_json(*legacy, registry, JobType::Cli));
+    REQUIRE(attribute_set_from_json(*old_reply, registry, JobType::Cli));
+    CHECK_FALSE(attribute_set_to_json(*legacy, registry, JobType::Http));
+    CHECK_FALSE(attribute_set_from_json(*old_reply, registry, JobType::Http));
+
+    // Filtering must not hide unknown names, invalid types, or out-of-range values in the other family.
+    for (auto const& value : {make_json(std::int64_t{-1}), make_json(std::string{"invalid"})}) {
+        fields.at("http.max_redirects") = value;
+        CHECK_FALSE(attribute_set_from_json(*old_reply, registry, JobType::Cli));
+    }
+    legacy->at("http.max_redirects").data = std::int64_t{-1};
+    CHECK_FALSE(attribute_set_to_json(*legacy, registry, JobType::Cli));
+    legacy->at("http.max_redirects").data = std::string{"invalid"};
+    CHECK_FALSE(attribute_set_to_json(*legacy, registry, JobType::Cli));
+    legacy->at("http.max_redirects").data = std::int64_t{0};
+    legacy->emplace("unknown.extra", AttributeValue{.data = true});
+    CHECK_FALSE(attribute_set_to_json(*legacy, registry, JobType::Cli));
+    fields.at("http.max_redirects") = make_json(std::int64_t{0});
+    fields.emplace("unknown.extra", make_json(true));
+    CHECK_FALSE(attribute_set_from_json(*old_reply, registry, JobType::Cli));
+}

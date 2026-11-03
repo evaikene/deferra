@@ -1014,7 +1014,7 @@ auto job_to_json(JobDefinition const& job, AttributeRegistry const& registry)
     auto const state      = job_state_text(job.state);
     auto const type       = job_type_text(job.type);
     auto       schedule   = schedule_to_json(job.schedule, false);
-    auto       attributes = attribute_set_to_json(job.attributes, registry, AttributeScope::Job);
+    auto       attributes = attribute_set_to_json(job.attributes, registry, job.type);
     auto       created    = encode_time(job.created_at);
     auto       updated    = encode_time(job.updated_at);
     if (!state || !type || !schedule || !attributes || !created || !updated || job.revision == 0 ||
@@ -1091,9 +1091,8 @@ auto job_from_json(jb::core::JsonValue const& value, AttributeRegistry const& re
     }
 
     auto decoded_schedule   = schedule_from_json(*schedule, false);
-    auto decoded_attributes = attribute_set_from_json(*attributes, registry, AttributeScope::Job);
-    if (!decoded_schedule || !decoded_attributes ||
-        !validate_materialized_attributes(registry, *decoded_attributes, result.type)) {
+    auto decoded_attributes = attribute_set_from_json(*attributes, registry, result.type);
+    if (!decoded_schedule || !decoded_attributes) {
         return invalid<JobDefinition>(false);
     }
     result.schedule   = std::move(decoded_schedule).value();

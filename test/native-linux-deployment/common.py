@@ -28,6 +28,16 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def package_api_version(client):
+    """Read the expected contract from the selected runtime package, independently of its RPC reply."""
+    metadata_file = Path(client).parent.parent / "share/jobu/package/build-info-runtime.txt"
+    for line in metadata_file.read_text().splitlines():
+        if line.startswith("rpc-api-version="):
+            major, minor = line.split("=", 1)[1].split(".")
+            return {"major": int(major), "minor": int(minor)}
+    raise GateFailure(f"Missing RPC API version in {metadata_file}")
+
+
 def metadata(path):
     value = Path(path).lstat()
     return {
@@ -155,7 +165,7 @@ class Gate:
             return None
         info = self.wait(probe, f"RPC readiness at {socket}")
         self.event("ready", socket=str(socket), info=info)
-        require(info["api_version"] == {"major": 1, "minor": 6}, "Unexpected deployed RPC API")
+        require(info["api_version"] == package_api_version(client), "Unexpected deployed RPC API")
         require(info["daemon_version"] == "0.1.0", "Unexpected deployed project version")
         return info
 

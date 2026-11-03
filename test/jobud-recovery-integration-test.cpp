@@ -6,6 +6,7 @@
 #include "event_loop.hpp"
 #include "framing.hpp"
 #include "job_repository_priv.hpp"
+#include "jobu_version_priv.hpp"
 #include "json.hpp"
 #include "local_socket.hpp"
 #include "management_json.hpp"
@@ -352,7 +353,11 @@ public:
         return output;
     }
 
-    void control_info() { REQUIRE(control({"system", "info"}).find("API version: 1.6") != std::string::npos); }
+    void control_info()
+    {
+        auto const expected = "API version: " + std::string{rpc_api_version} + "\n";
+        REQUIRE(control({"system", "info"}).find(expected) != std::string::npos);
+    }
 
     auto rpc(std::string_view method, JsonValue parameters) -> JsonValue
     {
