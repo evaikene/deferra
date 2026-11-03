@@ -1,5 +1,7 @@
 #include "history_json.hpp"
 
+#include "attribute_registry.hpp"
+
 #include "support/catch_utils.hpp" // IWYU pragma: keep for Catch::StringMaker specializations
 #include "utc_timestamp.hpp"
 
@@ -699,5 +701,33 @@ TEST_CASE("History attempt identities stay within the durable number domain", "[
         auto changed_output                                                = encoded_output;
         std::get<JsonValue::Object>(changed_output.data)["attempt_number"] = value;
         invalid_response(attempt_output_chunk_from_json(changed_output));
+    }
+}
+
+TEST_CASE("Run detail replies require only the snapshotted runner's complete attributes",
+          "[jobu][history][json][runner]")
+{
+    StandardAttributeRegistry registry;
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        auto run        = RunDetails{};
+        run.id          = id("00112233-4455-6677-8899-aabbccddeeff");
+        run.job_id      = id("10112233-4455-6677-8899-aabbccddeeff");
+        run.queue_id    = id("20112233-4455-6677-8899-aabbccddeeff");
+        run.type        = type;
+        run.planned_at  = at("2026-01-01T00:00:00Z");
+        run.runnable_at = run.planned_at;
+        run.payload     = json(JsonValue::Object{});
+        auto attributes = materialize_attributes(registry, type, {}, {}, {});
+        REQUIRE(attributes);
+        run.attributes = *attributes;
+        auto encoded   = run_details_to_json(run, registry);
+        REQUIRE(encoded);
+        auto decoded = run_details_from_json(*encoded, registry);
+        REQUIRE(decoded);
+        CHECK(decoded->attributes.size() == attributes->size());
+
+        auto& fields = std::get<JsonValue::Object>(std::get<JsonValue::Object>(encoded->data).at("attributes").data);
+        fields.erase(type == JobType::Cli ? "cli.termination_grace" : "http.tls_verify");
+        CHECK_FALSE(run_details_from_json(*encoded, registry));
     }
 }

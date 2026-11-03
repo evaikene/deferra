@@ -334,12 +334,16 @@ void RecoveryFixture::require_run(RecoveryRunFixture const& expected)
     CHECK(actual.completed_at == run.completed_at);
     CHECK(actual.type == run.type);
     CHECK(actual.priority == run.priority);
-    auto actual_attributes = encode_attribute_document(registry,
-                                                       actual.attributes,
-                                                       AttributeScope::Job,
-                                                       AttributeDocumentMode::Materialized);
-    auto expected_attributes =
-        encode_attribute_document(registry, run.attributes, AttributeScope::Job, AttributeDocumentMode::Materialized);
+    auto actual_attributes   = encode_attribute_document(registry,
+                                                         actual.attributes,
+                                                         AttributeScope::Job,
+                                                         AttributeDocumentMode::Materialized,
+                                                         actual.type);
+    auto expected_attributes = encode_attribute_document(registry,
+                                                         run.attributes,
+                                                         AttributeScope::Job,
+                                                         AttributeDocumentMode::Materialized,
+                                                         run.type);
     REQUIRE(actual_attributes);
     REQUIRE(expected_attributes);
     CHECK(*actual_attributes == *expected_attributes);

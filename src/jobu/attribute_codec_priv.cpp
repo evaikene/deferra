@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -328,7 +330,8 @@ auto typed_value_from_json(jb::core::JsonValue const& value, std::size_t depth) 
 auto validate_encoding(AttributeRegistry const& registry,
                        AttributeSet const&      values,
                        AttributeScope           scope,
-                       AttributeDocumentMode    mode) -> Result<void>
+                       AttributeDocumentMode    mode,
+                       std::optional<JobType>   type) -> Result<void>
 {
     if (mode == AttributeDocumentMode::Materialized && scope != AttributeScope::Job) {
         return Result<void>::failure(attribute_input_error("Materialized JobU attributes require Job scope"));
@@ -341,6 +344,9 @@ auto validate_encoding(AttributeRegistry const& registry,
     }
     if (mode == AttributeDocumentMode::Partial) {
         return Result<void>::success();
+    }
+    if (type) {
+        return validate_materialized_attributes(registry, values, *type);
     }
     for (auto const& definition : registry.definitions()) {
         if (definition.scopes.test(AttributeScope::Job) && !values.contains(definition.name)) {
@@ -363,9 +369,10 @@ SerializedAttributeDocument::SerializedAttributeDocument(std::string serialized)
 auto encode_attribute_document(AttributeRegistry const& registry,
                                AttributeSet const&      values,
                                AttributeScope           scope,
-                               AttributeDocumentMode    mode) -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
+                               AttributeDocumentMode    mode,
+                               std::optional<JobType>   type) -> jb::core::Result<jb::core::JsonValue, jb::core::Error>
 {
-    auto validated = validate_encoding(registry, values, scope, mode);
+    auto validated = validate_encoding(registry, values, scope, mode, type);
     if (!validated) {
         return Result<jb::core::JsonValue>::failure(std::move(validated).error());
     }
@@ -388,10 +395,11 @@ auto encode_attribute_document(AttributeRegistry const& registry,
 auto encode_and_serialize_attribute_document(AttributeRegistry const& registry,
                                              AttributeSet const&      values,
                                              AttributeScope           scope,
-                                             AttributeDocumentMode    mode)
+                                             AttributeDocumentMode    mode,
+                                             std::optional<JobType>   type)
     -> jb::core::Result<SerializedAttributeDocument, jb::core::Error>
 {
-    auto encoded = encode_attribute_document(registry, values, scope, mode);
+    auto encoded = encode_attribute_document(registry, values, scope, mode, type);
     if (!encoded) {
         return Result<SerializedAttributeDocument>::failure(std::move(encoded).error());
     }
@@ -406,7 +414,8 @@ auto encode_and_serialize_attribute_document(AttributeRegistry const& registry,
 auto decode_attribute_document(AttributeRegistry const&   registry,
                                jb::core::JsonValue const& document,
                                AttributeScope             scope,
-                               AttributeDocumentMode      mode) -> jb::core::Result<AttributeSet, jb::core::Error>
+                               AttributeDocumentMode      mode,
+                               std::optional<JobType>     type) -> jb::core::Result<AttributeSet, jb::core::Error>
 {
     if (!document.is_object() || document.as_object().size() != 2U) {
         return document_failure<AttributeSet>("document_shape");
@@ -448,10 +457,19 @@ auto decode_attribute_document(AttributeRegistry const&   registry,
 
     // Re-materialize stored snapshots to add built-in job attributes introduced
     // after an older document was written; partial documents retain omissions.
-    auto materialized = materialize_attributes(registry, {}, {}, result);
+    auto applicable = result;
+    if (type) {
+        std::erase_if(applicable,
+                      [&](auto const& entry) { return !attribute_applies_to(*registry.find(entry.first), *type); });
+    }
+    auto materialized = type ? materialize_attributes(registry, *type, {}, {}, applicable)
+                             : materialize_attributes(registry, {}, {}, applicable);
     if (!materialized) {
         return document_failure<AttributeSet>(materialized.error().code);
     }
+    // Reads preserve stored legacy extras in memory without refilling the other runner's missing defaults.
+    // Cleanup belongs to an accepted definition update, never to a repository read.
+    materialized->merge(result);
     return materialized;
 }
 

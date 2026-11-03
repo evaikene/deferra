@@ -78,7 +78,7 @@ auto snapshot_attribute(AttributeSet const& attributes, std::string_view name) -
 auto decode_request_policy(AttributeSet const& attributes, StandardAttributeRegistry const& registry)
     -> ExecutorResult<RequestPolicy>
 {
-    auto validated = registry.validate_materialized(attributes);
+    auto validated = registry.validate_materialized(attributes, JobType::Http);
     if (!validated) {
         return ExecutorResult<RequestPolicy>::failure(invalid_snapshot("attributes.invalid"));
     }

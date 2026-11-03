@@ -9,11 +9,29 @@
 #pragma once
 
 #include "attribute.hpp"
+#include "job.hpp"
 #include "json.hpp"
 
 #include <array>
 
 namespace jb::jobu {
+
+/// Returns whether a definition contributes policy to the selected runner, independently of its allowed scopes.
+[[nodiscard]] auto attribute_applies_to(AttributeDefinition const& definition, JobType type) noexcept -> bool;
+
+/// Validates an explicit partial job submission, rejecting attributes belonging to another runner.
+/// Names, Job scope, values, and supplied applicable cross-field relationships are checked without adding defaults.
+/// @return Success, or an error with a stable `jobu.attribute.*` code.
+[[nodiscard]] auto validate_job_attributes(AttributeRegistry const& registry, AttributeSet const& values, JobType type)
+    -> jb::core::Result<void, jb::core::Error>;
+
+/// Validates a materialized snapshot for one runner.
+/// Every applicable Job-scope definition is required. Known legacy extras are value-validated and retained, but their
+/// cross-field relationships do not affect this runner. Unknown names and invalid values remain errors.
+/// @return Success, or an error with a stable `jobu.attribute.*` code.
+[[nodiscard]] auto validate_materialized_attributes(AttributeRegistry const& registry,
+                                                    AttributeSet const&      values,
+                                                    JobType type) -> jb::core::Result<void, jb::core::Error>;
 
 /// Registry containing the standard process-wide JobU attribute definitions.
 ///
@@ -58,15 +76,21 @@ public:
     [[nodiscard]] auto validate_materialized(AttributeSet const& values) const
         -> jb::core::Result<void, jb::core::Error>;
 
+    /// Validates this runner's complete policy while accepting valid known legacy extras.
+    /// @return Success, or an error with a stable `jobu.attribute.*` code.
+    [[nodiscard]] auto validate_materialized(AttributeSet const& values, JobType type) const
+        -> jb::core::Result<void, jb::core::Error>;
+
 private:
     std::array<AttributeDefinition, 21> _definitions;
 };
 
-/// Materializes the effective attributes for one job.
+/// Materializes all Job-scope definitions, independently of runner applicability.
 ///
 /// Each supplied layer is validated at its corresponding scope. Values are then applied in built-in, daemon, queue,
 /// and job order before the complete Job-scope set and standard cross-field rules are validated. Inputs are copied and
-/// are not retained.
+/// are not retained. This overload supports combined-default validation and legacy callers; new jobs use the
+/// runner-aware overload.
 ///
 /// @param registry Registry defining known attributes, scopes, defaults, and value validation.
 /// @param daemon_defaults Partial daemon-default layer.
@@ -75,6 +99,18 @@ private:
 /// @return Complete lexicographically ordered set, or an error with a stable `jobu.attribute.*` code.
 ///
 [[nodiscard]] auto materialize_attributes(AttributeRegistry const& registry,
+                                          AttributeSet const&      daemon_defaults,
+                                          AttributeSet const&      queue_defaults,
+                                          AttributeSet const&      job_values)
+    -> jb::core::Result<AttributeSet, jb::core::Error>;
+
+/// Materializes only shared and applicable attributes for a new job.
+/// All supplied defaults are validated at their scopes, including the other runner's entries. Applicable values use
+/// built-in < daemon < queue < job precedence. Explicit job values for the other runner are rejected. Inputs are
+/// copied.
+/// @return Complete applicable set, or an error with a stable `jobu.attribute.*` code.
+[[nodiscard]] auto materialize_attributes(AttributeRegistry const& registry,
+                                          JobType                  type,
                                           AttributeSet const&      daemon_defaults,
                                           AttributeSet const&      queue_defaults,
                                           AttributeSet const&      job_values)

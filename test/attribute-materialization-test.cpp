@@ -994,3 +994,193 @@ TEST_CASE("Attribute persistence retains numeric and nesting validation", "[jobu
     CHECK(decoded_number.error().code == "jobu.attribute.invalid_document");
     CHECK(decoded_number.error().detail == "reason=number_shape");
 }
+
+TEST_CASE("Runner applicability is explicit metadata independent of default scopes", "[jobu][attribute][runner]")
+{
+    StandardAttributeRegistry registry;
+    constexpr auto            cli_names =
+        std::array{"cli.retry_exit_codes", "cli.termination_grace", "output.stderr_limit", "output.stdout_limit"};
+    constexpr auto http_names = std::array{"http.follow_redirects",
+                                           "http.idempotency_key",
+                                           "http.max_redirects",
+                                           "http.retry_errors",
+                                           "http.retry_statuses",
+                                           "http.tls_verify",
+                                           "output.http_body_limit",
+                                           "output.http_headers_limit"};
+    for (auto const& definition : registry.definitions()) {
+        CAPTURE(definition.name);
+        auto expected = AttributeApplicability::Both;
+        for (auto const* name : cli_names) {
+            if (definition.name == name) {
+                expected = AttributeApplicability::Cli;
+            }
+        }
+        for (auto const* name : http_names) {
+            if (definition.name == name) {
+                expected = AttributeApplicability::Http;
+            }
+        }
+        CHECK(definition.applicability == expected);
+        CHECK(definition.scopes.test(AttributeScope::DaemonDefault));
+        CHECK(definition.scopes.test(AttributeScope::QueueDefault));
+    }
+
+    // These custom names intentionally have no runner prefix. Existing omitted metadata remains shared.
+    auto shared = AttributeDefinition{.name = "custom.shared", .type = AttributeType::Boolean};
+    auto cli    = AttributeDefinition{.name          = "custom.process",
+                                      .type          = AttributeType::Boolean,
+                                      .applicability = AttributeApplicability::Cli};
+    CHECK(attribute_applies_to(shared, JobType::Cli));
+    CHECK(attribute_applies_to(shared, JobType::Http));
+    CHECK(attribute_applies_to(cli, JobType::Cli));
+    CHECK_FALSE(attribute_applies_to(cli, JobType::Http));
+}
+
+TEST_CASE("Runner materialization selects defaults while validating every supplied value", "[jobu][attribute][runner]")
+{
+    StandardAttributeRegistry registry;
+    auto                      daemon = AttributeSet{
+        {"job.timeout",           {.data = 10s}            },
+        {"cli.termination_grace", {.data = 2s}             },
+        {"http.max_redirects",    {.data = std::int64_t{8}}}
+    };
+    auto queue = AttributeSet{
+        {"job.timeout",           {.data = 20s}            },
+        {"cli.termination_grace", {.data = 3s}             },
+        {"http.max_redirects",    {.data = std::int64_t{7}}}
+    };
+    auto job = AttributeSet{
+        {"job.timeout", {.data = 30s}}
+    };
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        CAPTURE(type);
+        auto result = materialize_attributes(registry, type, daemon, queue, job);
+        REQUIRE(result);
+        CHECK(result->size() == (type == JobType::Cli ? 13U : 17U));
+        CHECK(std::get<Duration>(result->at("job.timeout").data) == 30s);
+        CHECK(registry.validate_materialized(*result, type));
+        for (auto const& definition : registry.definitions()) {
+            CHECK(result->contains(definition.name) == attribute_applies_to(definition, type));
+        }
+        if (type == JobType::Cli) {
+            CHECK(std::get<Duration>(result->at("cli.termination_grace").data) == 3s);
+        }
+        else {
+            CHECK(std::get<std::int64_t>(result->at("http.max_redirects").data) == 7);
+        }
+    }
+    CHECK(daemon.size() == 3U);
+    CHECK(queue.size() == 3U);
+
+    daemon.at("http.max_redirects").data = std::int64_t{-1};
+    CHECK_FALSE(materialize_attributes(registry, JobType::Cli, daemon, queue, job));
+    daemon.at("http.max_redirects").data = std::int64_t{8};
+    queue.emplace("unknown.value", AttributeValue{.data = true});
+    CHECK_FALSE(materialize_attributes(registry, JobType::Cli, daemon, queue, job));
+
+    auto wrong_cli = materialize_attributes(registry,
+                                            JobType::Cli,
+                                            {
+    },
+                                            {},
+                                            {{"output.http_body_limit", {.data = std::int64_t{1}}}});
+    REQUIRE_FALSE(wrong_cli);
+    CHECK(wrong_cli.error().code == "jobu.attribute.invalid_runner");
+    auto wrong_http = materialize_attributes(registry,
+                                             JobType::Http,
+                                             {
+    },
+                                             {},
+                                             {{"output.stdout_limit", {.data = std::int64_t{1}}}});
+    REQUIRE_FALSE(wrong_http);
+    CHECK(wrong_http.error().code == "jobu.attribute.invalid_runner");
+}
+
+TEST_CASE("Runner completeness and cross-field checks accept known legacy extras", "[jobu][attribute][runner]")
+{
+    StandardAttributeRegistry registry;
+    auto                      defaults = AttributeSet{
+        {"http.follow_redirects", {.data = true}           },
+        {"http.max_redirects",    {.data = std::int64_t{0}}}
+    };
+    CHECK(materialize_attributes(registry, JobType::Cli, defaults, {}, {}));
+    CHECK_FALSE(materialize_attributes(registry, JobType::Http, defaults, {}, {}));
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        CAPTURE(type);
+        CHECK_FALSE(materialize_attributes(registry,
+                                           type,
+                                           {
+                                               {"retry.initial_delay", {.data = 10s}}
+        },
+                                           {{"retry.max_delay", {.data = 5s}}},
+                                           {}));
+        auto complete = materialize_attributes(registry, type, {}, {}, {});
+        REQUIRE(complete);
+        for (auto const& definition : registry.definitions()) {
+            if (!attribute_applies_to(definition, type)) {
+                continue;
+            }
+            auto missing = *complete;
+            missing.erase(definition.name);
+            CHECK_FALSE(registry.validate_materialized(missing, type));
+        }
+    }
+
+    auto legacy = materialize_attributes(registry, {}, {}, {});
+    REQUIRE(legacy);
+    legacy->at("http.follow_redirects").data = true;
+    legacy->at("http.max_redirects").data    = std::int64_t{0};
+    CHECK(registry.validate_materialized(*legacy, JobType::Cli));
+    CHECK_FALSE(registry.validate_materialized(*legacy, JobType::Http));
+    legacy->at("http.max_redirects").data = std::int64_t{-1};
+    CHECK_FALSE(registry.validate_materialized(*legacy, JobType::Cli));
+}
+
+TEST_CASE("Runner storage round trips reduced sets and restores only applicable missing defaults",
+          "[jobu][attribute][runner][compatibility]")
+{
+    StandardAttributeRegistry registry;
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        CAPTURE(type);
+        auto complete = materialize_attributes(registry, type, {}, {}, {});
+        REQUIRE(complete);
+        auto document = encode_attribute_document(registry,
+                                                  *complete,
+                                                  AttributeScope::Job,
+                                                  AttributeDocumentMode::Materialized,
+                                                  type);
+        REQUIRE(document);
+        auto decoded = decode_attribute_document(registry,
+                                                 *document,
+                                                 AttributeScope::Job,
+                                                 AttributeDocumentMode::Materialized,
+                                                 type);
+        REQUIRE(decoded);
+        CHECK(same_set(*decoded, *complete));
+
+        // An older document can omit newly introduced definitions. Decode fills applicable defaults in memory only.
+        auto older = *document;
+        std::get<JsonValue::Object>(std::get<JsonValue::Object>(older.data).at("values").data).clear();
+        auto restored =
+            decode_attribute_document(registry, older, AttributeScope::Job, AttributeDocumentMode::Materialized, type);
+        REQUIRE(restored);
+        CHECK(same_set(*restored, *complete));
+        CHECK(older.as_object().at("values").as_object().empty());
+
+        auto legacy = materialize_attributes(registry, {}, {}, {});
+        REQUIRE(legacy);
+        legacy->at("http.max_redirects").data    = std::int64_t{9};
+        legacy->at("cli.termination_grace").data = 42s;
+        auto old_document =
+            encode_attribute_document(registry, *legacy, AttributeScope::Job, AttributeDocumentMode::Materialized);
+        REQUIRE(old_document);
+        auto old_decoded = decode_attribute_document(registry,
+                                                     *old_document,
+                                                     AttributeScope::Job,
+                                                     AttributeDocumentMode::Materialized,
+                                                     type);
+        REQUIRE(old_decoded);
+        CHECK(same_set(*old_decoded, *legacy));
+    }
+}

@@ -427,7 +427,9 @@ TEST_CASE("Job management creates durable one-time definitions and immutable run
     CHECK(cli->updated_at == cli->created_at);
     CHECK_FALSE(cli->deleted_at);
     CHECK(std::get<OnceSchedule>(cli->schedule).planned_at == planned);
-    CHECK(cli->attributes.size() == fixture.registry.definitions().size());
+    CHECK(cli->attributes.size() == 13U);
+    CHECK_FALSE(cli->attributes.contains("http.tls_verify"));
+    CHECK_FALSE(cli->attributes.contains("output.http_body_limit"));
     CHECK(std::get<std::int64_t>(cli->attributes.at("retry.max_attempts").data) == 4);
 
     auto const documents = stored_documents(fixture.database, cli_id);
@@ -438,7 +440,8 @@ TEST_CASE("Job management creates durable one-time definitions and immutable run
     auto decoded_attributes = jb::jobu::detail::decode_attribute_document(fixture.registry,
                                                                           *parsed_attributes,
                                                                           AttributeScope::Job,
-                                                                          detail::AttributeDocumentMode::Materialized);
+                                                                          detail::AttributeDocumentMode::Materialized,
+                                                                          JobType::Cli);
     REQUIRE(decoded_attributes);
     CHECK(attributes_json(*decoded_attributes, fixture.registry) == attributes_json(cli->attributes, fixture.registry));
 
@@ -491,6 +494,9 @@ TEST_CASE("Job management creates durable one-time definitions and immutable run
     });
     REQUIRE(http);
     CHECK(http->id == http_id);
+    CHECK(http->attributes.size() == 17U);
+    CHECK_FALSE(http->attributes.contains("cli.termination_grace"));
+    CHECK_FALSE(http->attributes.contains("output.stdout_limit"));
     CHECK(http->created_at == UtcTimePoint{11s});
     CHECK(std::get<std::int64_t>(http->attributes.at("retry.max_attempts").data) == 3);
     CHECK(std::get<bool>(http->attributes.at("http.follow_redirects").data));
@@ -2485,4 +2491,203 @@ TEST_CASE("Immediate replay rejects malformed request records and symbolic resul
     }
     require_error(service.create_job(request), ErrorCategory::Internal, "jobu.idempotency.invalid_record");
     require_error(service.create_job(request), ErrorCategory::Unavailable, "jobu.service.stopping");
+}
+
+TEST_CASE("Job submissions enforce runner applicability without changing durable state", "[jobu][job][runner]")
+{
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        CAPTURE(type);
+        ServiceFixture fixture{
+            {sequence_id(1), sequence_id(2), sequence_id(3)}
+        };
+        ManagementService service{fixture.database,
+                                  fixture.registry,
+                                  fixture.cron,
+                                  fixture.generator,
+                                  fixture.time,
+                                  {.daemon_defaults = {{"cli.termination_grace", {.data = 2s}},
+                                                       {"http.max_redirects", {.data = std::int64_t{8}}}}}};
+        auto              queue = service.create_queue({
+            .name     = "both-runners",
+            .defaults = {{"cli.termination_grace", {.data = 3s}}, {"http.max_redirects", {.data = std::int64_t{7}}}}
+        });
+        REQUIRE(queue);
+        CHECK(queue->defaults.size() == 2U);
+        auto request = CreateJobRequest{.queue    = queue->id,
+                                        .type     = type,
+                                        .schedule = once_at(UtcTimePoint{20s}),
+                                        .payload  = type == JobType::Cli ? cli_payload("/bin/tool")
+                                                                         : http_payload("https://example.test/")};
+        auto const* const wrong_name = type == JobType::Cli ? "output.http_body_limit" : "output.stdout_limit";
+        request.attributes.emplace(wrong_name, AttributeValue{.data = std::int64_t{42}});
+        require_error(service.create_job(request), ErrorCategory::InvalidArgument, "jobu.attribute.invalid_runner");
+        CHECK(count_rows(fixture.database, "jobu_jobs") == 0);
+        CHECK(count_rows(fixture.database, "jobu_runs") == 0);
+
+        request.attributes.clear();
+        auto created = service.create_job(request);
+        REQUIRE(created);
+        CHECK_FALSE(created->attributes.contains(wrong_name));
+        if (type == JobType::Cli) {
+            CHECK(std::get<Duration>(created->attributes.at("cli.termination_grace").data) == 3s);
+        }
+        else {
+            CHECK(std::get<std::int64_t>(created->attributes.at("http.max_redirects").data) == 7);
+        }
+        auto before = stored_documents(fixture.database, created->id);
+        require_error(service.update_job({.job_id            = created->id,
+                                          .expected_revision = created->revision,
+                                          .name              = "must-not-change",
+                                          .attribute_changes = {{wrong_name, {.data = std::int64_t{42}}}}}),
+                      ErrorCategory::InvalidArgument,
+                      "jobu.attribute.invalid_runner");
+        auto unchanged = service.get_job(created->id);
+        REQUIRE(unchanged);
+        CHECK(unchanged->revision == created->revision);
+        CHECK(unchanged->name == created->name);
+        auto after = stored_documents(fixture.database, created->id);
+        CHECK(after.job_attributes == before.job_attributes);
+        CHECK(after.run_attributes == before.run_attributes);
+        auto retained_queue = service.get_queue(queue->id);
+        REQUIRE(retained_queue);
+        CHECK(retained_queue->defaults.size() == 2U);
+    }
+}
+
+TEST_CASE("Legacy attribute reads preserve rows and accepted updates normalize only mutable snapshots",
+          "[jobu][job][runner][legacy]")
+{
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        for (auto started : {false, true}) {
+            CAPTURE(type, started);
+            ServiceFixture fixture{
+                {sequence_id(1), sequence_id(2), sequence_id(3)}
+            };
+            ManagementService service{fixture.database,
+                                      fixture.registry,
+                                      fixture.cron,
+                                      fixture.generator,
+                                      fixture.time,
+                                      {.daemon_defaults = {{"job.timeout", {.data = 55s}}}}};
+            auto queue = service.create_queue({.name = "legacy", .defaults = {{"job.timeout", {.data = 66s}}}});
+            REQUIRE(queue);
+            auto schedule = CronSchedule{.expression = "* * * * *", .timezone = "UTC"};
+            fixture.cron.set_occurrences(schedule, {UtcTimePoint{20s}, UtcTimePoint{80s}});
+            auto created = service.create_job(
+                {.queue    = queue->id,
+                 .type     = type,
+                 .schedule = CronScheduleInput{.expression = schedule.expression},
+                 .payload  = type == JobType::Cli ? cli_payload("/bin/tool") : http_payload("https://example.test/")});
+            REQUIRE(created);
+
+            // Seed exactly the old mixed-family shape with distinct values that current defaults must not replace.
+            auto legacy = materialize_attributes(fixture.registry,
+                                                 {
+            },
+                                                 {},
+                                                 {{"job.timeout", {.data = 42s}}});
+            REQUIRE(legacy);
+            auto document =
+                detail::encode_and_serialize_attribute_document(fixture.registry,
+                                                                *legacy,
+                                                                AttributeScope::Job,
+                                                                detail::AttributeDocumentMode::Materialized);
+            REQUIRE(document);
+            for (auto const* sql : {"UPDATE jobu_jobs SET attributes_json = :attributes",
+                                    "UPDATE jobu_runs SET attributes_json = :attributes"}) {
+                Query query{fixture.database};
+                REQUIRE(query.prepare(sql));
+                REQUIRE(query.bind_value(":attributes", std::string{document->serialized()}));
+                REQUIRE(query.exec());
+            }
+            if (started) {
+                execute(fixture.database, "UPDATE jobu_runs SET state = 'running', started_at_us = 10000000");
+            }
+            auto before = stored_documents(fixture.database, created->id);
+            auto read   = service.get_job(created->id);
+            REQUIRE(read);
+            CHECK(read->attributes.size() == 21U);
+            detail::RunRepository runs{fixture.database, fixture.registry};
+            auto                  run = runs.find_schedule_owned(created->id);
+            REQUIRE(run);
+            REQUIRE(*run);
+            CHECK((**run).attributes.size() == 21U);
+            auto after_read = stored_documents(fixture.database, created->id);
+            CHECK(after_read.job_attributes == before.job_attributes);
+            CHECK(after_read.run_attributes == before.run_attributes);
+
+            require_error(service.update_job({.job_id = created->id, .expected_revision = 99, .name = "rejected"}),
+                          ErrorCategory::Conflict,
+                          "jobu.job.revision_conflict");
+            CHECK(stored_documents(fixture.database, created->id).job_attributes == before.job_attributes);
+
+            if (!started) {
+                // A failure after replacing the definition must roll back cleanup, revision, and successor together.
+                execute(fixture.database,
+                        "CREATE TRIGGER reject_snapshot BEFORE UPDATE OF attributes_json ON jobu_runs "
+                        "BEGIN SELECT RAISE(ABORT, 'snapshot failure'); END");
+                // A storage failure stops that service's mutations; isolate the injected failure from the next check.
+                ManagementService failing_service{fixture.database,
+                                                  fixture.registry,
+                                                  fixture.cron,
+                                                  fixture.generator,
+                                                  fixture.time};
+                REQUIRE_FALSE(
+                    failing_service.update_job({.job_id = created->id, .expected_revision = 1, .name = "rollback"}));
+                auto rolled_back = stored_documents(fixture.database, created->id);
+                CHECK(rolled_back.job_attributes == before.job_attributes);
+                CHECK(rolled_back.run_attributes == before.run_attributes);
+                auto unchanged = service.get_job(created->id);
+                REQUIRE(unchanged);
+                CHECK(unchanged->revision == 1);
+                CHECK_FALSE(unchanged->name);
+                execute(fixture.database, "DROP TRIGGER reject_snapshot");
+            }
+
+            auto updated = service.update_job({.job_id = created->id, .expected_revision = 1, .name = "normalized"});
+            REQUIRE(updated);
+            CHECK(updated->revision == 2);
+            CHECK(updated->attributes.size() == (type == JobType::Cli ? 13U : 17U));
+            CHECK(std::get<Duration>(updated->attributes.at("job.timeout").data) == 42s);
+            auto after_update = stored_documents(fixture.database, created->id);
+            CHECK(after_update.job_attributes != before.job_attributes);
+            if (started) {
+                CHECK(after_update.run_attributes == before.run_attributes);
+            }
+            else {
+                CHECK(after_update.run_attributes == after_update.job_attributes);
+            }
+            // Seed a retained occurrence from the original legacy snapshot. Later definition edits must not
+            // rewrite its execution policy, even though the current definition has already been normalized.
+            auto historical         = **run;
+            historical.id           = sequence_id(4);
+            historical.state        = RunState::Succeeded;
+            historical.started_at   = UtcTimePoint{20s};
+            historical.completed_at = UtcTimePoint{21s};
+            historical.result       = json_object({});
+            execute(fixture.database, "BEGIN");
+            REQUIRE(runs.insert_schedule_owned(historical));
+            execute(fixture.database, "COMMIT");
+            REQUIRE(service.update_job({.job_id = created->id, .expected_revision = 2, .priority = 1}));
+
+            Query history{fixture.database};
+            REQUIRE(history.prepare("SELECT attributes_json FROM jobu_runs WHERE id = :run_id"));
+            REQUIRE(history.bind_value(":run_id", detail::uuid_to_storage(historical.id)));
+            REQUIRE(history.exec());
+            REQUIRE(history.next());
+            auto const* history_value = history.value("attributes_json");
+            REQUIRE(history_value != nullptr);
+            REQUIRE(std::holds_alternative<std::string>(*history_value));
+            CHECK(std::get<std::string>(*history_value) == before.run_attributes);
+            auto retained = runs.find_by_id(historical.id);
+            REQUIRE(retained);
+            REQUIRE(*retained);
+            CHECK((**retained).attributes.size() == 21U);
+
+            auto fetched = service.get_job(created->id);
+            REQUIRE(fetched);
+            CHECK(attributes_json(fetched->attributes, fixture.registry) ==
+                  attributes_json(updated->attributes, fixture.registry));
+        }
+    }
 }

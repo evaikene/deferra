@@ -180,7 +180,8 @@ auto decode_job(jb::db::Record const& record, AttributeRegistry const& attribute
     auto decoded_attributes = decode_attribute_document(attributes,
                                                         *attributes_json,
                                                         AttributeScope::Job,
-                                                        AttributeDocumentMode::Materialized);
+                                                        AttributeDocumentMode::Materialized,
+                                                        *type);
     if (!decoded_attributes) {
         return RepositoryResult<JobDefinition>::failure(std::move(decoded_attributes).error());
     }
