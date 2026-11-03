@@ -109,7 +109,7 @@ Every job definition result contains:
 | `type` | `JobType` | 1.1 | Runner family |
 | `schedule` | schedule object | 1.1 | Stored concrete once or cron schedule |
 | `priority` | integer | 1.1 | Signed 32-bit scheduling priority |
-| `attributes` | attribute object | 1.1 | Complete materialized job attributes |
+| `attributes` | attribute object | 1.1 | Complete materialized attributes for this runner; filtered since 1.7 |
 | `payload` | object | 1.1 | Admitted runner payload or secret-reference template |
 | `created_at` | time | 1.1 | Creation time |
 | `updated_at` | time | 1.1 | Last durable mutation time |
@@ -172,7 +172,7 @@ Its execution state and attempts can still change as work proceeds.
 | `runnable_at` | time | 1.3 | Earliest eligibility time |
 | `started_at` | time or null | 1.3 | First actual start |
 | `completed_at` | time or null | 1.3 | Terminal completion |
-| `attributes` | attribute object | 1.3 | Full details only; immutable materialized values |
+| `attributes` | attribute object | 1.3 | Full details only; immutable materialized values for the captured runner |
 | `payload` | object | 1.3 | Full details only; original template, never resolved bytes |
 | `result` | object or null | 1.3 | Full details only; safe terminal summary |
 
@@ -310,10 +310,41 @@ fixed. Counts and measurements apply only to history still retained.
 Queue `defaults` are a partial layer applied to subsequently created jobs.
 The daemon's startup `defaults.*` layer sits between built-in and queue defaults;
 see the [configuration reference](../configuration.md#default-job-attributes).
-The job's `attributes` result is complete and materialized. On `job.create`,
-an omitted attribute inherits the applicable default. On `job.update`, the
-supplied object patches named values; omitted names stay unchanged. JSON null
-is not an attribute value. The
+Since API 1.7, job and full run results contain the complete materialized set
+for their `type`: nine shared attributes plus four CLI attributes (13 total),
+or nine shared plus eight HTTP attributes (17 total). The same view applies to
+mutation results, recorded create/Run Now replay, and cancellation's nested run.
+Run/attempt list summaries have no attribute collection, and attempts do not
+have a separate attribute snapshot. Consumers, including JobuTU, can display
+the returned view directly.
+
+Applicability is independent of default scope. CLI-only attributes are
+`cli.retry_exit_codes`, `cli.termination_grace`, `output.stdout_limit`, and
+`output.stderr_limit`. All `http.*` attributes, `output.http_body_limit`, and
+`output.http_headers_limit` are HTTP-only. `job.timeout`, `retry.*`, and
+`output.capture` are shared. Daemon and queue defaults remain partial layers
+supporting both runners. Explicit `job.create`/`job.update` attributes for the
+other runner fail with `jobu.attribute.invalid_runner`.
+
+On `job.create`, omitted applicable attributes inherit built-in, daemon, then
+queue defaults, with explicit job values taking precedence. On `job.update`,
+the supplied object patches named applicable values; omitted applicable values
+stay unchanged and current defaults are not reapplied. Every successful
+definition update, including name-only and same-value updates, also removes
+irrelevant legacy attributes. Revision checking, cleanup, and any eligible
+unstarted scheduled snapshot refresh commit atomically. Rejected or rolled-back
+updates preserve the documents and revision. Started and historical run
+snapshots retain their captured contents; lifecycle operations keep their
+existing persistence semantics.
+
+Older jobs/runs may store both families and omit later built-in defaults.
+Reads restore missing applicable defaults in memory and filter the public
+view without rewriting rows. Known legacy extras remain value-validated;
+cross-field rules use the selected runner's policy. Canonical idempotency
+request/result documents are preserved, so replay still represents the original
+acceptance. Storage format 5 and attribute-document version 1 are unchanged.
+
+JSON null is not an attribute value. The
 public JSON representation of a duration is an integer count of
 milliseconds. Attribute names and values are validated by the daemon's
 standard registry.

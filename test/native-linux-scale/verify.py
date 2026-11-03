@@ -172,6 +172,10 @@ class Gate:
             metadata = archive.extractfile("share/jobu/package/build-info-runtime.txt").read().decode()
             require(self.args.product_revision in metadata and "source-state=clean" in metadata,
                     "Runtime provenance differs from the selected unchanged product revision")
+            # The retained package declares its own contract; this gate must not pin a later checkout's version.
+            fields = dict(line.split("=", 1) for line in metadata.splitlines() if "=" in line)
+            major, minor = fields["rpc-api-version"].split(".")
+            self.api_version = {"major": int(major), "minor": int(minor)}
             self.args.prefix.mkdir(mode=0o755)
             self.prefix_created = True
             archive.extractall(self.args.prefix, filter="data")
@@ -269,7 +273,7 @@ class Gate:
             require(time.monotonic() < deadline, "Native scale startup did not expose its socket")
             time.sleep(0.05)
         info = self.rpc("system.info")
-        require(info["api_version"] == {"major": 1, "minor": 6}, "Unexpected native API")
+        require(info["api_version"] == self.api_version, "Unexpected native API")
         pid = int(self.run(["systemctl", "show", self.unit.name, "-p", "MainPID", "--value"]).stdout)
         status = Path(f"/proc/{pid}/status").read_text()
         require(f"Uid:\t{self.account.pw_uid}\t" in status, "Service did not retain its dedicated identity")

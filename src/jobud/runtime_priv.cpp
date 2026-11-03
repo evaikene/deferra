@@ -455,7 +455,8 @@ struct DaemonRuntime::Private : jb::core::priv::ObjectPrivate {
         }
         auto info = SystemInfo{
             .daemon_version = std::string{jb::jobu::detail::project_version},
-            .api_version    = {.major = 1, .minor = 6},
+            .api_version    = {.major = jb::jobu::detail::rpc_api_version_major,
+                                          .minor = jb::jobu::detail::rpc_api_version_minor},
             .capabilities   = std::move(capabilities),
         };
         if (!register_system_info_method(*rpc, std::move(info)) ||

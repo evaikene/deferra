@@ -520,7 +520,7 @@ auto run_summary_from_json(JsonValue const& value) -> ConversionResult<RunSummar
 auto run_details_to_json(RunDetails const& details, AttributeRegistry const& registry) -> ConversionResult<JsonValue>
 {
     auto summary    = run_summary_to_json(details);
-    auto attributes = attribute_set_to_json(details.attributes, registry, AttributeScope::Job);
+    auto attributes = attribute_set_to_json(details.attributes, registry, details.type);
     if (!summary || !attributes || !details.payload.is_object() || (details.result && !details.result->is_object())) {
         return reject<JsonValue>(false);
     }
@@ -575,14 +575,10 @@ auto run_details_from_json(JsonValue const& value, AttributeRegistry const& regi
     if (!attributes || !payload || !payload->is_object() || !result || (!result->is_null() && !result->is_object())) {
         return reject<RunDetails>(false);
     }
-    auto decoded_attributes = attribute_set_from_json(*attributes, registry, AttributeScope::Job);
+    auto decoded_attributes = attribute_set_from_json(*attributes, registry, summary->type);
     if (!decoded_attributes) {
         return reject<RunDetails>(false);
     }
-    if (!validate_materialized_attributes(registry, *decoded_attributes, summary->type)) {
-        return reject<RunDetails>(false);
-    }
-
     auto details                      = RunDetails{};
     static_cast<RunSummary&>(details) = std::move(summary).value();
     details.attributes                = std::move(decoded_attributes).value();

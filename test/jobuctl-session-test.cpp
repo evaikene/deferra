@@ -600,6 +600,11 @@ TEST_CASE("jobuctl JSON mode emits one typed result or structured error", "[jobu
         auto value = parse_json(exchange.output);
         REQUIRE(value);
         CHECK(value->as_object().at("revision").as_uint() == std::numeric_limits<std::uint64_t>::max());
+        auto const& attributes = value->as_object().at("attributes").as_object();
+        CHECK(attributes.size() == 13U);
+        CHECK(attributes.contains("output.stdout_limit"));
+        CHECK_FALSE(attributes.contains("http.max_redirects"));
+        CHECK_FALSE(attributes.contains("output.http_body_limit"));
     }
 }
 

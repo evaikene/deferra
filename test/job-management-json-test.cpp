@@ -163,14 +163,11 @@ TEST_CASE("Job JSON uses the stable shape and round trips owning values", "[jobu
     CHECK(wire.at("schedule").as_object().at("at").as_string() == "2026-07-21T21:00:00.123456Z");
     CHECK(wire.at("priority").as_int() == -4);
     auto const& attributes = wire.at("attributes").as_object();
-    REQUIRE(attributes.size() == registry.definitions().size());
-    CHECK_FALSE(attributes.at("http.follow_redirects").as_bool());
-    CHECK(attributes.at("http.max_redirects").as_int() == 5);
-    REQUIRE(attributes.at("http.retry_errors").as_array().size() == 6U);
-    CHECK(attributes.at("http.retry_errors").as_array()[0].as_string() == "resolve");
-    CHECK(attributes.at("http.retry_statuses").as_array()[2].as_string() == "500-599");
-    CHECK(attributes.at("output.http_body_limit").as_int() == std::int64_t{1024} * 1024);
-    CHECK(attributes.at("output.http_headers_limit").as_int() == std::int64_t{64} * 1024);
+    REQUIRE(attributes.size() == 13U);
+    CHECK_FALSE(attributes.contains("http.follow_redirects"));
+    CHECK_FALSE(attributes.contains("output.http_body_limit"));
+    CHECK(attributes.at("cli.termination_grace").as_int() == 5000);
+    CHECK(attributes.at("output.stdout_limit").as_int() == std::int64_t{1024} * 1024);
     CHECK(attributes.at("job.timeout").as_int() == 2500);
     CHECK(wire.at("payload").as_object().at("future").as_bool());
     CHECK(wire.at("created_at").as_string() == "2026-07-21T08:00:00.000000Z");
@@ -193,7 +190,7 @@ TEST_CASE("Job JSON uses the stable shape and round trips owning values", "[jobu
     CHECK(decoded->type == JobType::Cli);
     CHECK(std::get<OnceSchedule>(decoded->schedule).planned_at == parse_time("2026-07-21T21:00:00.123456Z"));
     CHECK(decoded->priority == -4);
-    CHECK(decoded->attributes.size() == registry.definitions().size());
+    CHECK(decoded->attributes.size() == 13U);
     CHECK(decoded->payload.as_object().at("future").as_bool());
     REQUIRE(decoded->deleted_at);
 

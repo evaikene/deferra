@@ -166,10 +166,12 @@ struct CreateJobRequest {
 /// Changes selected fields of one durable job definition using optimistic concurrency.
 ///
 /// The name's outer optional distinguishes unchanged from changed, while its inner optional distinguishes clearing the
-/// name from replacing it. Attribute changes patch the stored complete materialized set; omitted attributes remain
-/// unchanged and no daemon or queue defaults are reapplied. Recurring changes refresh an unstarted scheduled occurrence
-/// or apply only to the definition while its current occurrence is running or waiting to retry.
-/// The runner family is immutable; a replacement payload must match the existing job type.
+/// name from replacing it. Attribute changes patch the stored complete materialized set; omitted applicable values stay
+/// unchanged and no daemon or queue defaults are reapplied. Every accepted update also removes irrelevant legacy
+/// attributes atomically with the revision and any eligible snapshot refresh. Started/historical snapshots are
+/// retained. Recurring changes refresh an unstarted scheduled occurrence or apply only to the definition while its
+/// current occurrence is running or waiting to retry. The runner family is immutable; a replacement payload must match
+/// the existing job type.
 ///
 struct UpdateJobRequest {
     /// Stable job-definition UUID to update.

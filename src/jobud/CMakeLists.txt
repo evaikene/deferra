@@ -2,12 +2,6 @@ set(TARGET jobud)
 
 message("** Setting up ${TARGET}")
 
-configure_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/../jobu_version_priv.hpp.in
-    ${CMAKE_CURRENT_BINARY_DIR}/jobu_version_priv.hpp
-    @ONLY
-)
-
 add_executable(${TARGET} main.cpp composition_priv.cpp)
 
 add_library(jobud-runtime STATIC runtime_priv.cpp startup_priv.cpp configuration_priv.cpp configuration_file_priv.cpp
@@ -15,10 +9,9 @@ add_library(jobud-runtime STATIC runtime_priv.cpp startup_priv.cpp configuration
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(jobud-runtime PRIVATE privileges_posix.cpp privileges_linux.cpp endpoint_guard_priv.cpp)
 endif()
-target_include_directories(jobud-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-    PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(jobud-runtime PUBLIC jobu net rpc PRIVATE net-http jobu-paths-private)
-target_link_libraries(${TARGET} PRIVATE jobud-runtime jobu-paths-private)
+target_include_directories(jobud-runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(jobud-runtime PUBLIC jobu net rpc PRIVATE net-http jobu-paths-private jobu-version-private)
+target_link_libraries(${TARGET} PRIVATE jobud-runtime jobu-paths-private jobu-version-private)
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
     if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
@@ -31,11 +24,6 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
     target_include_directories(jobud-signal PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(${TARGET} PRIVATE jobud-signal)
 endif()
-
-target_include_directories(${TARGET}
-    PRIVATE
-        ${CMAKE_CURRENT_BINARY_DIR}
-)
 
 target_compile_features(${TARGET} PRIVATE cxx_std_20)
 

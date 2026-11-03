@@ -3,7 +3,7 @@
 `jobud` serves JSON-RPC 2.0 over a local Unix-domain socket. A client first
 calls [`system.info`](methods/system.md#daemon-information-systeminfo) and uses
 its `capabilities` array to learn which methods that daemon accepts. The
-current daemon advertises API version 1.6 and 30 methods. A compatible 1.x
+current daemon advertises API version 1.7 and 30 methods. A compatible 1.x
 client should check the major version, the individual capability it needs, and
 the minor version required by an additive request field such as `run.list.states`.
 
@@ -14,6 +14,21 @@ queue result member, but updates without it fail with Invalid params (`-32602`).
 Clients must adopt the [protected queue update contract](methods/queue.md#update-queueupdate).
 The current C++ client requires API 1.6 for revision-bearing queue replies and
 protected updates, while preserving support for other advertised methods.
+
+API 1.7 completes the pre-release runner contract: `job.update.type` is
+rejected, explicit job attributes must apply to that runner, and every full
+job/run result exposes only shared and applicable attributes. Queue defaults
+still support both runners. Legacy rows remain readable without migration;
+reads preserve their stored documents, while a successful `job.update` removes
+irrelevant attributes atomically. See [attributes and defaults](types.md#attributes-and-defaults).
+The future PHP binding requires API 1.7 or newer. The C++ client keeps its
+per-feature minor checks and decodes both mixed legacy and filtered results;
+clients that require every runner's attributes must adopt the applicable view.
+
+The implemented API major/minor is defined centrally beside the project version
+in [the root CMakeLists.txt](../../CMakeLists.txt). Daemon advertisement, package
+metadata, and current-build checks derive from those values. Compatibility
+tests, feature minimums, and documented introduction versions remain explicit.
 
 Daemon storage is format 5. Older databases are rejected unchanged, with no
 automatic migration or reset; choose a fresh database deliberately. See the

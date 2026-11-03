@@ -2,6 +2,7 @@
 
 #include "attempt.hpp"
 #include "attempt_repository_priv.hpp"
+#include "attribute_codec_priv.hpp"
 #include "control_json.hpp"
 #include "control_rpc.hpp"
 #include "execution_telemetry.hpp"
@@ -10,6 +11,8 @@
 #include "history_rpc.hpp"
 #include "history_service.hpp"
 #include "http/http_attempt_executor.hpp"
+#include "idempotency_codec_priv.hpp"
+#include "jobu_version_priv.hpp"
 #include "json.hpp"
 #include "local_socket.hpp"
 #include "management.hpp"
@@ -354,6 +357,39 @@ auto rpc_result(jb::rpc::detail::ResponseEnvelope const& response) -> JsonValue 
 {
     REQUIRE(std::holds_alternative<JsonValue>(response.payload));
     return std::get<JsonValue>(response.payload);
+}
+
+// Compare exact stored documents rather than projected replies, so public reads cannot conceal a rewrite.
+auto legacy_documents(jb::db::Database& database) -> std::vector<std::string>
+{
+    jb::db::Query query{database};
+    REQUIRE(query.prepare("SELECT attributes_json AS document FROM jobu_jobs "
+                          "UNION ALL SELECT attributes_json FROM jobu_runs "
+                          "UNION ALL SELECT request_json FROM jobu_idempotency "
+                          "UNION ALL SELECT result_json FROM jobu_idempotency ORDER BY document"));
+    REQUIRE(query.exec());
+    auto documents = std::vector<std::string>{};
+    while (true) {
+        auto next = query.next();
+        REQUIRE(next);
+        if (!*next) {
+            break;
+        }
+        auto const* value = query.value("document");
+        REQUIRE(value != nullptr);
+        documents.push_back(std::get<std::string>(*value));
+    }
+    return documents;
+}
+
+void check_runner_view(JsonValue const& result, AttributeRegistry const& registry, JobType type)
+{
+    auto const& attributes = result.as_object().at("attributes").as_object();
+    REQUIRE(attributes.size() == (type == JobType::Cli ? 13U : 17U));
+    for (auto const& definition : registry.definitions()) {
+        CHECK(attributes.contains(definition.name) == attribute_applies_to(definition, type));
+    }
+    CHECK(attributes.at("job.timeout").as_uint() == 42000U);
 }
 
 auto rpc_error(jb::rpc::detail::ResponseEnvelope const& response) -> jb::rpc::RpcError const&
@@ -1601,7 +1637,9 @@ TEST_CASE("Daemon capabilities follow every registered Phase 8 server method", "
         auto               info    = endpoint.call("system.info", JsonValue{.data = JsonValue::Object{}});
         auto const&        fields  = rpc_result(info).as_object();
         auto const&        methods = fields.at("capabilities").as_array();
-        CHECK(fields.at("api_version").as_object().at("minor").as_uint() == 6);
+        auto const&        api     = fields.at("api_version").as_object();
+        CHECK(api.at("major").as_uint() == jb::jobu::detail::rpc_api_version_major);
+        CHECK(api.at("minor").as_uint() == jb::jobu::detail::rpc_api_version_minor);
         REQUIRE(methods.size() == 30U);
         for (auto index = std::size_t{1}; index < methods.size(); ++index) {
             CHECK(methods[index - 1U].as_string() < methods[index].as_string());
@@ -2056,7 +2094,7 @@ TEST_CASE("Fatal history RPC read closes all daemon admission before teardown", 
     require_consumed_faults(*fixture.faults);
 }
 
-TEST_CASE("Daemon advertises API 1.6 and serves cron preview controls", "[jobud][control][rpc]")
+TEST_CASE("Daemon advertises the configured API version and serves cron preview controls", "[jobud][control][rpc]")
 {
     SystemCronEngine engine;
     RuntimeFixture   fixture;
@@ -2065,7 +2103,9 @@ TEST_CASE("Daemon advertises API 1.6 and serves cron preview controls", "[jobud]
         RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
         auto               info        = endpoint.call("system.info", JsonValue{.data = JsonValue::Object{}});
         auto const&        info_fields = rpc_result(info).as_object();
-        CHECK(info_fields.at("api_version").as_object().at("minor").as_uint() == 6);
+        auto const&        api         = info_fields.at("api_version").as_object();
+        CHECK(api.at("major").as_uint() == jb::jobu::detail::rpc_api_version_major);
+        CHECK(api.at("minor").as_uint() == jb::jobu::detail::rpc_api_version_minor);
         auto const& methods = info_fields.at("capabilities").as_array();
         for (auto const* name : {"job.run_now", "run.cancel", "schedule.validate", "schedule.next"}) {
             CHECK(std::ranges::count_if(methods,
@@ -2131,6 +2171,218 @@ TEST_CASE("Daemon advertises API 1.6 and serves cron preview controls", "[jobud]
         return EXIT_SUCCESS;
     });
     CHECK(result == EXIT_SUCCESS);
+}
+
+TEST_CASE("Legacy public RPC views filter both runners without rewriting stored or replay documents",
+          "[jobud][rpc][runner][legacy]")
+{
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        CAPTURE(type);
+        RuntimeFixture fixture;
+        fixture.time.set_utc(UtcTimePoint{1s});
+        fixture.create_runtime();
+        auto result = fixture.run([&] {
+            auto&              registry = fixture.storage.registry;
+            auto&              database = fixture.storage.database;
+            RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
+
+            auto queue_params = update_queue_request_to_json(
+                {
+                    .queue             = recovery_id(1),
+                    .expected_revision = 1,
+                    .defaults          = AttributeSet{{"cli.termination_grace", {.data = 3s}},
+                                                      {"http.max_redirects", {.data = std::int64_t{9}}}}
+            },
+                registry);
+            REQUIRE(queue_params);
+            auto        queue_reply = endpoint.call("queue.update", *queue_params);
+            auto const& defaults    = rpc_result(queue_reply).as_object().at("defaults").as_object();
+            CHECK(defaults.contains("cli.termination_grace"));
+            CHECK(defaults.contains("http.max_redirects"));
+
+            auto payload =
+                JsonValue{.data = type == JobType::Cli
+                                    ? JsonValue::Object{{"command", {.data = std::string{"/bin/true"}}}}
+                                    : JsonValue::Object{{"url", {.data = std::string{"http://127.0.0.1/legacy"}}}}};
+            auto create_params = create_job_request_to_json({.queue           = recovery_id(1),
+                                                             .type            = type,
+                                                             .schedule        = OnceSchedule{UtcTimePoint{180s}},
+                                                             .attributes      = {{"job.timeout", {.data = 42s}}},
+                                                             .payload         = payload,
+                                                             .idempotency_key = "legacy-create"},
+                                                            registry);
+            REQUIRE(create_params);
+            auto created_reply = endpoint.call("job.create", *create_params);
+            check_runner_view(rpc_result(created_reply), registry, type);
+            auto created = job_from_json(rpc_result(created_reply), registry);
+            REQUIRE(created);
+
+            // Model pre-applicability rows and an old accepted create result. Later defaults are omitted only
+            // from persisted attribute documents; repository reads must restore them in memory without a write.
+            auto mixed = materialize_attributes(registry,
+                                                {
+            },
+                                                {},
+                                                {{"job.timeout", {.data = 42s}}});
+            REQUIRE(mixed);
+            auto document = detail::encode_attribute_document(registry,
+                                                              *mixed,
+                                                              AttributeScope::Job,
+                                                              detail::AttributeDocumentMode::Materialized);
+            REQUIRE(document);
+            auto& values = std::get<JsonValue::Object>(std::get<JsonValue::Object>(document->data).at("values").data);
+            REQUIRE(values.erase("retry.jitter") == 1U);
+            REQUIRE(values.erase("retry.multiplier") == 1U);
+            auto stored = serialize_json(*document);
+            REQUIRE(stored);
+            for (auto const* sql : {"UPDATE jobu_jobs SET attributes_json = :document",
+                                    "UPDATE jobu_runs SET attributes_json = :document"}) {
+                jb::db::Query query{database};
+                REQUIRE(query.prepare(sql));
+                REQUIRE(query.bind_value(":document", *stored));
+                REQUIRE(query.exec());
+            }
+            created->attributes  = *mixed;
+            auto replay_document = detail::encode_job_idempotency_result(*created, registry);
+            REQUIRE(replay_document);
+            {
+                jb::db::Query query{database};
+                REQUIRE(
+                    query.prepare("UPDATE jobu_idempotency SET result_json = :document WHERE method = 'job.create'"));
+                REQUIRE(query.bind_value(":document", *replay_document));
+                REQUIRE(query.exec());
+                REQUIRE(query.num_rows_affected() == 1);
+            }
+
+            detail::RunRepository runs{database, registry};
+            auto                  scheduled = runs.find_schedule_owned(created->id);
+            REQUIRE(scheduled);
+            REQUIRE(*scheduled);
+            CHECK((**scheduled).attributes.size() == 21U);
+            auto job_id = job_id_to_json(created->id);
+            auto run_id = run_get_request_to_json((**scheduled).id);
+            REQUIRE(job_id);
+            REQUIRE(run_id);
+
+            auto before = legacy_documents(database);
+            check_runner_view(rpc_result(endpoint.call("job.get", *job_id)), registry, type);
+            auto        listed = endpoint.call("job.list", JsonValue{.data = JsonValue::Object{}});
+            auto const& items  = rpc_result(listed).as_object().at("items").as_array();
+            REQUIRE(items.size() == 1U);
+            check_runner_view(items.front(), registry, type);
+            check_runner_view(rpc_result(endpoint.call("run.get", *run_id)), registry, type);
+            auto replay = endpoint.call("job.create", *create_params);
+            check_runner_view(rpc_result(replay), registry, type);
+            CHECK(rpc_result(replay).as_object().at("id").as_string() == created->id.to_string());
+            CHECK(legacy_documents(database) == before);
+
+            check_runner_view(rpc_result(endpoint.call("job.suspend", *job_id)), registry, type);
+            check_runner_view(rpc_result(endpoint.call("job.resume", *job_id)), registry, type);
+            auto run_now_params = run_now_request_to_json({.job_id = created->id, .idempotency_key = "legacy-run"});
+            REQUIRE(run_now_params);
+            auto manual_reply = endpoint.call("job.run_now", *run_now_params);
+            check_runner_view(rpc_result(manual_reply), registry, type);
+            auto manual = run_details_from_json(rpc_result(manual_reply), registry);
+            REQUIRE(manual);
+
+            // Run Now's private result keeps the original mixed snapshot even though its public result is filtered.
+            before = legacy_documents(database);
+            CHECK(rpc_result(endpoint.call("job.run_now", *run_now_params)) == rpc_result(manual_reply));
+            CHECK(legacy_documents(database) == before);
+            auto cancel = cancel_run_request_to_json(manual->id);
+            REQUIRE(cancel);
+            auto cancelled = endpoint.call("run.cancel", *cancel);
+            check_runner_view(rpc_result(cancelled).as_object().at("run"), registry, type);
+            before = legacy_documents(database);
+            CHECK(rpc_result(endpoint.call("job.run_now", *run_now_params)) == rpc_result(manual_reply));
+            CHECK(legacy_documents(database) == before);
+
+            auto update_params = update_job_request_to_json(
+                {.job_id = created->id, .expected_revision = manual->job_revision, .name = "normalized"},
+                registry);
+            REQUIRE(update_params);
+            auto updated_reply = endpoint.call("job.update", *update_params);
+            check_runner_view(rpc_result(updated_reply), registry, type);
+            auto updated = job_from_json(rpc_result(updated_reply), registry);
+            REQUIRE(updated);
+            auto target = RuntimeTestAccess::management(*fixture.runtime)->create_queue({.name = "destination"});
+            REQUIRE(target);
+            auto suspended_reply = endpoint.call("job.suspend", *job_id);
+            auto suspended       = job_from_json(rpc_result(suspended_reply), registry);
+            REQUIRE(suspended);
+            auto move_params = move_job_request_to_json(
+                {.job_id = created->id, .expected_revision = suspended->revision, .target_queue = target->id});
+            REQUIRE(move_params);
+            check_runner_view(rpc_result(endpoint.call("job.move", *move_params)), registry, type);
+            // A later definition revision cannot replace the original create/Run Now acceptance.
+            before = legacy_documents(database);
+            CHECK(rpc_result(endpoint.call("job.create", *create_params)) == rpc_result(replay));
+            CHECK(rpc_result(endpoint.call("job.run_now", *run_now_params)) == rpc_result(manual_reply));
+            CHECK(legacy_documents(database) == before);
+            auto retained = runs.find_by_id(manual->id);
+            REQUIRE(retained);
+            REQUIRE(*retained);
+            CHECK((**retained).attributes.size() == 21U);
+
+            fixture.runtime->request_stop();
+            return EXIT_SUCCESS;
+        });
+        CHECK(result == EXIT_SUCCESS);
+    }
+}
+
+TEST_CASE("Legacy run and attempt history stays readable after its job is deleted", "[jobud][rpc][runner][legacy]")
+{
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        CAPTURE(type);
+        RuntimeFixture fixture;
+        auto           job                    = fixture.storage.make_job(recovery_id(11), recovery_id(1), type);
+        job.state                             = JobState::Succeeded;
+        job.attributes.at("job.timeout").data = 42s;
+        auto historical                       = fixture.storage.make_run(recovery_id(101), job, RunState::Succeeded);
+        fixture.storage.insert_job(job);
+        fixture.storage.insert_run(historical);
+        fixture.create_runtime();
+
+        auto result = fixture.run([&] {
+            RuntimeRpcEndpoint endpoint{*RuntimeTestAccess::rpc(*fixture.runtime)};
+            auto               params = run_get_request_to_json(historical.run.id);
+            REQUIRE(params);
+            auto before = legacy_documents(fixture.storage.database);
+            auto reply  = endpoint.call("run.get", *params);
+            check_runner_view(rpc_result(reply), fixture.storage.registry, type);
+            auto run = run_details_from_json(rpc_result(reply), fixture.storage.registry);
+            REQUIRE(run);
+            CHECK(run->state == RunState::Succeeded);
+
+            auto attempt_params = attempt_get_request_to_json({.run_id = run->id, .attempt_number = 1});
+            REQUIRE(attempt_params);
+            auto attempt_reply = endpoint.call("attempt.get", *attempt_params);
+            CHECK_FALSE(rpc_result(attempt_reply).as_object().contains("attributes"));
+            auto attempt = attempt_details_from_json(rpc_result(attempt_reply));
+            REQUIRE(attempt);
+            CHECK(attempt->outcome == AttemptOutcome::Succeeded);
+            auto list_params = attempt_list_request_to_json(AttemptQuery{.run_id = run->id});
+            REQUIRE(list_params);
+            auto attempts = attempt_page_from_json(rpc_result(endpoint.call("attempt.list", *list_params)));
+            REQUIRE(attempts);
+            REQUIRE(attempts->items.size() == 1U);
+            CHECK(attempts->items.front().attempt_number == 1);
+            CHECK(legacy_documents(fixture.storage.database) == before);
+
+            auto deletion = delete_job_request_to_json({.job_id = job.id, .expected_revision = job.revision});
+            REQUIRE(deletion);
+            CHECK(rpc_result(endpoint.call("job.delete", *deletion)).is_null());
+            before = legacy_documents(fixture.storage.database);
+            CHECK(rpc_result(endpoint.call("run.get", *params)) == rpc_result(reply));
+            CHECK(rpc_result(endpoint.call("attempt.get", *attempt_params)) == rpc_result(attempt_reply));
+            CHECK(legacy_documents(fixture.storage.database) == before);
+            fixture.storage.require_run(historical);
+            fixture.runtime->request_stop();
+            return EXIT_SUCCESS;
+        });
+        CHECK(result == EXIT_SUCCESS);
+    }
 }
 
 TEST_CASE("Run Now RPC replays its original view and pending cancellation commits", "[jobud][control][rpc]")

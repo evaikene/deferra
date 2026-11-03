@@ -2,6 +2,7 @@
 #include "byte_buffer.hpp"
 #include "client.hpp"
 #include "event_loop.hpp"
+#include "jobu_version_priv.hpp"
 #include "json.hpp"
 #include "local_socket.hpp"
 #include "process.hpp"
@@ -560,7 +561,8 @@ public:
 
     void responsive()
     {
-        CHECK(control({"system", "info"}).find("API version: 1.6") != std::string::npos);
+        auto const expected_api = "API version: " + std::string{jb::jobu::detail::rpc_api_version} + "\n";
+        CHECK(control({"system", "info"}).find(expected_api) != std::string::npos);
         CHECK(log.find("daemon-ambient-marker") == std::string::npos);
         CHECK(log.find("literal $x = value") == std::string::npos);
         if (::geteuid() == 0 && _allow_root_cli) {
@@ -1233,7 +1235,8 @@ TEST_CASE("root daemon denies CLI targets without the unsafe override", "[jobud]
 #ifdef __linux__
     CHECK(fixture.log.find("jobud.unsafe.root_daemon") != std::string::npos);
 #endif
-    CHECK(fixture.control({"system", "info"}).find("API version: 1.6") != std::string::npos);
+    auto const expected_api = "API version: " + std::string{jb::jobu::detail::rpc_api_version} + "\n";
+    CHECK(fixture.control({"system", "info"}).find(expected_api) != std::string::npos);
 }
 
 TEST_CASE("real daemon keeps the Phase 8 workflow durable across retry, controls, and restart",

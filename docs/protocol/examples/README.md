@@ -20,6 +20,8 @@ names, IDs, and timestamps.
 | [HTTP job creation](job-create-http.params.json) | Mixed-case POST input admitted and stored as uppercase POST |
 | [HTTP payload replacement](job-update-http.params.json) | Explicit revision and a complete replacement admitted as PATCH |
 | [Job listing request](job-list.params.json) and its [terminal result](job-list.result.json) | An explicit succeeded-state filter and one finished one-time definition |
+| [CLI job result](job-get-cli.result.json) and [HTTP job result](job-get-http.result.json) | API 1.7 complete runner-specific views with 13 and 17 attributes |
+| [CLI run result](run-get-cli.result.json) and [HTTP run result](run-get-http.result.json) | The same API 1.7 projection for immutable run snapshots, Run Now, and nested cancellation results |
 | [Unfiltered job listing](job-list-all.params.json) | The raw API's absent-state default, also used by `--request-file` |
 | [Run listing](run-list.params.json) | Combined owner/state filters |
 | [Run listing with a state set](run-list-states.params.json) | API 1.5 union of failed/interrupted states combined with an owner filter |

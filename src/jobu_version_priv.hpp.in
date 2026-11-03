@@ -1,13 +1,19 @@
 /** @file jobu_version_priv.hpp
- * @brief Declares the configure-time project version used privately by JobU executables.
+ * @brief Declares configure-time software and RPC API versions for JobU executables and current-build checks.
  */
 #pragma once
 
+#include <cstdint>
 #include <string_view>
 
 namespace jb::jobu::detail {
 
 /// Project version substituted from the root CMake project during configuration.
 inline constexpr std::string_view project_version{"@PROJECT_VERSION@"};
+
+/// Implemented daemon RPC contract, independent of the software release and client feature minimums.
+inline constexpr std::uint32_t    rpc_api_version_major{@JOBU_RPC_API_VERSION_MAJOR@};
+inline constexpr std::uint32_t    rpc_api_version_minor{@JOBU_RPC_API_VERSION_MINOR@};
+inline constexpr std::string_view rpc_api_version{"@JOBU_RPC_API_VERSION@"};
 
 } // namespace jb::jobu::detail

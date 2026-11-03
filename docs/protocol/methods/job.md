@@ -20,6 +20,10 @@ captured when that occurrence was created. See [shared result fields](../types.m
 Every method takes object params and rejects unknown members. `job.get`,
 `job.suspend`, and `job.resume` take exactly `{"job_id":"<ID>"}` and return
 one full job definition. The ID remains stable across updates and moves.
+Since API 1.7, every returned definition, including create replay and list
+items, has only its runner's complete applicable
+[attribute view](../types.md#attributes-and-defaults). Reads do not clean up
+stored legacy rows.
 
 ## Create (`job.create`)
 
@@ -125,12 +129,19 @@ one; the service never fetches a new revision and retries for you.
 | `name` | string or null | No | 1.1 | Replace or clear; omission leaves unchanged |
 | `schedule` | schedule object | No | 1.1 | Concrete once or cron; `at:"now"` is invalid |
 | `priority` | signed integer | No | 1.1 | Replacement priority |
-| `attributes` | attribute object | No | 1.1 | Partial patch; supplied names replace values, omitted names stay unchanged |
+| `attributes` | attribute object | No | 1.1 | Partial applicable patch; supplied names replace values, omitted applicable names stay unchanged |
 | `payload` | object | No | 1.1 | Complete replacement payload |
 
 The result is the new full definition with an advanced revision. A supplied
 field may equal its current value; an accepted same-value update still advances
 the revision.
+
+Since API 1.7, every accepted update also removes the other runner's legacy
+attributes, including a name-only or same-value update. Applicable values are
+preserved without reapplying current defaults. Cleanup, revision advancement,
+and any eligible unstarted successor refresh are one transaction; rejected or
+rolled-back updates leave them unchanged. Started and historical run snapshots
+retain their original policy.
 
 The runner family is fixed at creation. Supplying `type` is invalid even when
 it matches the current runner or accompanies otherwise valid edits. The entire

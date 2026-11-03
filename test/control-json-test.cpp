@@ -186,7 +186,8 @@ TEST_CASE("Run controls reuse the full durable template view", "[jobu][control][
     auto decoded = run_details_from_json(*encoded, registry);
     REQUIRE(decoded);
     CHECK(decoded->id == run.id);
-    CHECK(decoded->attributes.size() == run.attributes.size());
+    CHECK(decoded->attributes.size() == 13U);
+    CHECK(run.attributes.size() == 21U);
     CHECK(decoded->payload == run.payload);
 
     auto cancel = cancel_run_result_to_json({.run = run, .disposition = CancelDisposition::Requested}, registry);
