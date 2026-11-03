@@ -958,6 +958,95 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
     }
 }
 
+TEST_CASE("Job RPC rejects every runner type update without committing accompanying edits",
+          "[jobu][management-rpc][job][update][sqlite]")
+{
+    Application app{0, nullptr};
+    for (auto const runner : {JobType::Cli, JobType::Http}) {
+        DYNAMIC_SECTION(static_cast<int>(runner))
+        {
+            ServiceFixture fixture{
+                {sequence_id(1), sequence_id(2), sequence_id(3)}
+            };
+            RpcEndpoint endpoint{fixture};
+            auto        queue = endpoint.service().create_queue({.name = "fixed-runner"});
+            REQUIRE(queue);
+
+            // Registered references make partial payload commits observable in the complete storage snapshot.
+            Query secrets{fixture.database};
+            REQUIRE(secrets.exec("INSERT INTO jobu_secrets(name, value_blob, created_at_us, updated_at_us) "
+                                 "VALUES ('original', X'01', 1, 1), ('replacement', X'02', 1, 1)"));
+            auto payload = parse_json(
+                runner == JobType::Cli
+                    ? R"({"command":"/bin/true","arguments":[{"secret":"original"}]})"
+                    : R"({"url":"https://example.test/","headers":[{"name":"X-Token","value":{"secret":"original"}}]})");
+            REQUIRE(payload);
+            auto replacement = parse_json(
+                runner == JobType::Cli
+                    ? R"({"command":"/bin/false","arguments":[{"secret":"replacement"}]})"
+                    : R"({"url":"https://replacement.test/","headers":[{"name":"X-Token","value":{"secret":"replacement"}}]})");
+            REQUIRE(replacement);
+            auto const request = CreateJobRequest{
+                .queue    = queue->id,
+                .type     = runner,
+                .schedule = once_at(UtcTimePoint{20s}),
+                .payload  = *payload,
+            };
+            auto created =
+                decode_job(endpoint.call("job.create", encode_create(request, fixture.registry)), fixture.registry);
+            CHECK(created.type == runner);
+
+            auto committed = std::size_t{0};
+            endpoint.service().mutation_committed.connect(&endpoint.service(), [&committed] { ++committed; });
+            auto const before = storage_snapshot(fixture.database);
+
+            // Bypass the typed codec so the framed RPC boundary must reject same-type and cross-type input.
+            for (auto const& type :
+                 {make_json(std::string{"cli"}), make_json(std::string{"http"}), make_json(JsonNull{})}) {
+                for (auto const with_edits : {false, true}) {
+                    auto params = make_json(JsonValue::Object{
+                        {"job_id",            make_json(created.id.to_string())},
+                        {"expected_revision", make_json(created.revision)      },
+                        {"type",              type                             },
+                    });
+                    if (with_edits) {
+                        auto& fields = std::get<JsonValue::Object>(params.data);
+                        fields.emplace("priority", make_json(std::int64_t{9}));
+                        fields.emplace("payload", *replacement);
+                    }
+                    require_standard_error(endpoint.call("job.update", params), ErrorCode::InvalidParams);
+                    CHECK(storage_snapshot(fixture.database) == before);
+                    CHECK(committed == 0);
+                }
+            }
+
+            auto params  = make_json(JsonValue::Object{
+                {"job_id",            make_json(created.id.to_string())},
+                {"expected_revision", make_json(created.revision)      },
+                {"priority",          make_json(std::int64_t{9})       },
+                {"payload",           *replacement                     },
+            });
+            auto updated = decode_job(endpoint.call("job.update", params), fixture.registry);
+            CHECK(updated.type == runner);
+            CHECK(updated.priority == 9);
+            CHECK(updated.revision == created.revision + 1);
+            CHECK(committed == 1);
+
+            auto fetched = decode_job(endpoint.call("job.get", encode_job_id(created.id)), fixture.registry);
+            CHECK(fetched.type == runner);
+            CHECK(fetched.payload == updated.payload);
+
+            jb::jobu::detail::RunRepository runs{fixture.database, fixture.registry};
+            auto                            run = runs.find_schedule_owned(created.id);
+            REQUIRE(run);
+            REQUIRE(*run);
+            CHECK((**run).type == runner);
+            CHECK((**run).job_revision == updated.revision);
+            CHECK((**run).payload == updated.payload);
+        }
+    }
+}
+
 TEST_CASE("Management RPC applies central HTTP admission and preserves legacy updates", "[jobu][management-rpc][http]")
 {
     Application    app{0, nullptr};
@@ -1053,9 +1142,7 @@ TEST_CASE("Management RPC applies central HTTP admission and preserves legacy up
     });
     updated       = decode_job(endpoint.call("job.update", metadata), fixture.registry);
     CHECK(updated.payload == legacy);
-    auto& fields = std::get<JsonValue::Object>(metadata.data);
-    fields.erase("priority");
-    fields.emplace("type", make_json(std::string{"http"}));
+    auto& fields                   = std::get<JsonValue::Object>(metadata.data);
     fields.at("expected_revision") = make_json(std::uint64_t{3});
     updated                        = decode_job(endpoint.call("job.update", metadata), fixture.registry);
     CHECK(updated.revision == 4);

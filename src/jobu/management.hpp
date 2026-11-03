@@ -148,7 +148,7 @@ struct CreateJobRequest {
     QueueSelector              queue;
     /// Optional non-unique display name containing at most 256 valid UTF-8 bytes and no ASCII controls.
     std::optional<std::string> name;
-    /// Runner family whose structural payload rules are applied.
+    /// Runner family fixed at creation, whose structural payload rules are applied.
     JobType                    type{JobType::Cli};
     /// Immediate, explicit one-time, or recurring schedule used to plan the first occurrence.
     /// The default retains the explicit epoch schedule; wire requests must supply a schedule.
@@ -169,6 +169,7 @@ struct CreateJobRequest {
 /// name from replacing it. Attribute changes patch the stored complete materialized set; omitted attributes remain
 /// unchanged and no daemon or queue defaults are reapplied. Recurring changes refresh an unstarted scheduled occurrence
 /// or apply only to the definition while its current occurrence is running or waiting to retry.
+/// The runner family is immutable; a replacement payload must match the existing job type.
 ///
 struct UpdateJobRequest {
     /// Stable job-definition UUID to update.
@@ -177,8 +178,6 @@ struct UpdateJobRequest {
     JobRevision                               expected_revision{0};
     /// Unchanged name, cleared name, or replacement display name.
     std::optional<std::optional<std::string>> name;
-    /// Replacement runner family, validated together with the resulting payload.
-    std::optional<JobType>                    type;
     /// Replacement one-time or recurring input; omitted cron timezone uses the current daemon default.
     /// Conversion requires a scheduled current occurrence with no attempt.
     std::optional<JobScheduleInput>           schedule;

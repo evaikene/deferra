@@ -728,7 +728,6 @@ TEST_CASE("Update job request JSON preserves nested optionals and partial change
     auto                      request = UpdateJobRequest{
         .job_id            = id,
         .expected_revision = 7,
-        .type              = JobType::Http,
         .schedule          = CronScheduleInput{.expression = "0 * * * *", .timezone = "UTC"},
         .priority          = -2,
         .attribute_changes = {{"job.timeout", {.data = Duration{4s}}}},
@@ -743,14 +742,13 @@ TEST_CASE("Update job request JSON preserves nested optionals and partial change
     CHECK(encoded->as_object().at("job_id").as_string() == id.to_string());
     CHECK(encoded->as_object().at("expected_revision").as_uint() == 7U);
     CHECK(encoded->as_object().at("name").is_null());
-    CHECK(encoded->as_object().at("type").as_string() == "http");
+    CHECK_FALSE(encoded->as_object().contains("type"));
     CHECK(encoded->as_object().at("schedule").as_object().at("kind").as_string() == "cron");
     CHECK(encoded->as_object().at("attributes").as_object().size() == 1U);
     auto decoded = update_job_request_from_json(*encoded, registry);
     REQUIRE(decoded);
     REQUIRE(decoded->name);
     CHECK_FALSE(*decoded->name);
-    CHECK(decoded->type == JobType::Http);
     CHECK(std::get<CronScheduleInput>(*decoded->schedule).expression == "0 * * * *");
     CHECK(decoded->priority == -2);
     REQUIRE(decoded->attribute_changes.size() == 1U);
@@ -803,6 +801,18 @@ TEST_CASE("Update job request decoding enforces strict structure and an effectiv
     object(unknown).emplace("priority", make_json(std::int64_t{1}));
     check_invalid_request(update_job_request_from_json(unknown, registry));
 
+    // Even a repeated type is an unknown update member; valid accompanying edits must not hide it.
+    for (auto const& type : {make_json(std::string{"cli"}), make_json(std::string{"http"}), make_json(JsonNull{})}) {
+        for (auto const with_priority : {false, true}) {
+            auto params = base;
+            object(params).emplace("type", type);
+            if (with_priority) {
+                object(params).emplace("priority", make_json(std::int64_t{1}));
+            }
+            check_invalid_request(update_job_request_from_json(params, registry));
+        }
+    }
+
     auto empty_attributes = base;
     object(empty_attributes).emplace("attributes", make_json(JsonValue::Object{}));
     check_invalid_request(update_job_request_from_json(empty_attributes, registry));
@@ -837,10 +847,6 @@ TEST_CASE("Update job request decoding enforces strict structure and an effectiv
 
     auto empty = UpdateJobRequest{.job_id = id, .expected_revision = 7};
     check_invalid_request(update_job_request_to_json(empty, registry));
-
-    auto invalid_enum = empty;
-    invalid_enum.type = static_cast<JobType>(255);
-    check_invalid_request(update_job_request_to_json(invalid_enum, registry));
 
     auto invalid_payload    = empty;
     invalid_payload.payload = make_json(JsonValue::Array{});

@@ -633,7 +633,7 @@ TEST_CASE("HTTP creation rejects method failures without durable changes", "[job
     CHECK(created->id == sequence_id(2));
 }
 
-TEST_CASE("HTTP metadata and repeated-type updates preserve legacy payloads", "[jobu][job][http][legacy]")
+TEST_CASE("HTTP metadata and same-value updates preserve legacy payloads", "[jobu][job][http][legacy]")
 {
     for (auto const method :
          {std::string_view{"get"}, std::string_view{"CUSTOM"}, std::string_view{"head"}, std::string_view{}}) {
@@ -685,7 +685,7 @@ TEST_CASE("HTTP metadata and repeated-type updates preserve legacy payloads", "[
             });
             REQUIRE(updated);
             CHECK(updated->payload == legacy);
-            updated = service.update_job({.job_id = created->id, .expected_revision = 3, .type = JobType::Http});
+            updated = service.update_job({.job_id = created->id, .expected_revision = 3, .priority = 7});
             REQUIRE(updated);
             CHECK(updated->revision == 4);
             CHECK(updated->payload == legacy);
@@ -725,75 +725,6 @@ TEST_CASE("HTTP metadata and repeated-type updates preserve legacy payloads", "[
             REQUIRE(*run);
             CHECK((**run).payload == updated->payload);
         }
-    }
-}
-
-TEST_CASE("Actual type conversions admit the effective retained payload", "[jobu][job][http][admission][conversion]")
-{
-    for (auto const* method : {"get", "OPTIONS", ""}) {
-        DYNAMIC_SECTION(method)
-        {
-            ServiceFixture fixture{
-                {sequence_id(1), sequence_id(2), sequence_id(3)}
-            };
-            ManagementService service{fixture.database,
-                                      fixture.registry,
-                                      fixture.cron,
-                                      fixture.generator,
-                                      fixture.time};
-            auto              queue = service.create_queue({.name = "conversion"});
-            REQUIRE(queue);
-            // A CLI payload may contain unknown HTTP members; switching type makes those members authoritative.
-            auto payload = cli_payload("/bin/true");
-            object(payload).emplace("url", json_string("https://conversion.test/"));
-            if (*method != '\0') {
-                object(payload).emplace("method", json_string(method));
-            }
-            auto created =
-                service.create_job({.queue = queue->id, .schedule = once_at(UtcTimePoint{20s}), .payload = payload});
-            REQUIRE(created);
-            CHECK(created->payload == payload);
-            auto const before = storage_snapshot(fixture.database);
-            auto converted = service.update_job({.job_id = created->id, .expected_revision = 1, .type = JobType::Http});
-            if (std::string_view{method} == "OPTIONS") {
-                require_error(converted, ErrorCategory::InvalidArgument, "jobu.job.invalid_payload");
-                CHECK(storage_snapshot(fixture.database) == before);
-            }
-            else {
-                REQUIRE(converted);
-                object(payload).insert_or_assign("method", json_string("GET"));
-                CHECK(converted->type == JobType::Http);
-                CHECK(converted->payload == payload);
-                detail::RunRepository runs{fixture.database, fixture.registry};
-                auto                  run = runs.find_schedule_owned(created->id);
-                REQUIRE(run);
-                REQUIRE(*run);
-                CHECK((**run).type == JobType::Http);
-                CHECK((**run).payload == payload);
-            }
-        }
-    }
-
-    SECTION("HTTP to CLI keeps an unrelated legacy method member")
-    {
-        ServiceFixture fixture{
-            {sequence_id(1), sequence_id(2), sequence_id(3)}
-        };
-        ManagementService service{fixture.database, fixture.registry, fixture.cron, fixture.generator, fixture.time};
-        auto              queue = service.create_queue({.name = "conversion"});
-        REQUIRE(queue);
-        auto created = service.create_job({.queue    = queue->id,
-                                           .type     = JobType::Http,
-                                           .schedule = once_at(UtcTimePoint{20s}),
-                                           .payload  = http_payload("https://conversion.test/")});
-        REQUIRE(created);
-        auto legacy = http_payload("https://conversion.test/", "CUSTOM");
-        object(legacy).emplace("command", json_string("/bin/true"));
-        seed_legacy_http_payload(fixture.database, created->id, legacy);
-        auto converted = service.update_job({.job_id = created->id, .expected_revision = 1, .type = JobType::Cli});
-        REQUIRE(converted);
-        CHECK(converted->type == JobType::Cli);
-        CHECK(converted->payload == legacy);
     }
 }
 
@@ -1396,10 +1327,11 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
     auto created = service.create_job({
         .queue      = queue_id,
         .name       = "before",
+        .type       = JobType::Http,
         .schedule   = once_at(UtcTimePoint{5s}),
         .priority   = 1,
         .attributes = max_attempts(4),
-        .payload    = cli_payload("/before"),
+        .payload    = http_payload("https://before.test/", "GET"),
     });
     REQUIRE(created);
     REQUIRE(service.update_queue({.queue = queue_id, .expected_revision = 1, .defaults = updated_queue_defaults()}));
@@ -1410,7 +1342,6 @@ TEST_CASE("Job update patches one-time definitions and their pending run snapsho
         .job_id            = job_id,
         .expected_revision = 1,
         .name              = std::optional<std::optional<std::string>>{std::in_place, std::nullopt},
-        .type              = JobType::Http,
         .schedule          = once_at(UtcTimePoint{20s}
                        ),
         .priority          = 9,
@@ -2094,9 +2025,11 @@ TEST_CASE("Job update validates revisions state and replacement fields", "[jobu]
                       {.job_id = job_id, .expected_revision = 1, .attribute_changes = {{"unknown", {.data = true}}}}),
                   ErrorCategory::InvalidArgument,
                   "jobu.attribute.unknown");
-    require_error(service.update_job({.job_id = job_id, .expected_revision = 1, .type = JobType::Http}),
-                  ErrorCategory::InvalidArgument,
-                  "jobu.job.invalid_payload");
+    require_error(
+        service.update_job(
+            {.job_id = job_id, .expected_revision = 1, .payload = http_payload("https://wrong-runner.test/")}),
+        ErrorCategory::InvalidArgument,
+        "jobu.job.invalid_payload");
     require_error(service.update_job(
                       {.job_id = uuid("00000000-0000-7000-8000-000000000099"), .expected_revision = 1, .priority = 1}),
                   ErrorCategory::NotFound,
@@ -2351,12 +2284,10 @@ TEST_CASE("Job templates survive definition updates snapshots and idempotency re
     CHECK((**initial_run).payload == *original_payload);
 
     auto replacement =
-        jb::core::parse_json(R"({"url":"https://example.test/","method":"POST","body":{"secret":"request.bytes"}})");
+        jb::core::parse_json(R"({"command":"/bin/replacement","arguments":[{"secret":"request.bytes"}]})");
     REQUIRE(replacement);
-    auto updated = service.update_job({.job_id            = created->id,
-                                       .expected_revision = created->revision,
-                                       .type              = JobType::Http,
-                                       .payload           = *replacement});
+    auto updated =
+        service.update_job({.job_id = created->id, .expected_revision = created->revision, .payload = *replacement});
     REQUIRE(updated);
     auto fetched = service.get_job(created->id);
     REQUIRE(fetched);
@@ -2377,8 +2308,8 @@ TEST_CASE("Job templates survive definition updates snapshots and idempotency re
 
     auto malformed = jb::core::parse_json(R"({"command":"/bin/tool","arguments":[{"secret":"private marker"}]})");
     REQUIRE(malformed);
-    auto rejected = service.update_job(
-        {.job_id = created->id, .expected_revision = updated->revision, .type = JobType::Cli, .payload = *malformed});
+    auto rejected =
+        service.update_job({.job_id = created->id, .expected_revision = updated->revision, .payload = *malformed});
     auto error = require_error(rejected, ErrorCategory::InvalidArgument, "jobu.job.invalid_payload");
     CHECK(error.detail == "reason=invalid_secret_name");
     CHECK(error.message.find("private marker") == std::string::npos);

@@ -310,7 +310,8 @@ namespace jb::jobu {
 ///
 /// Only supplied changes are emitted. A supplied outer name optional with no inner value becomes JSON null, preserving
 /// the distinction between an unchanged and cleared name. Attribute changes remain a partial Job-scope patch.
-/// ManagementService remains responsible for positive revisions and domain semantics.
+/// The runner type cannot be changed. ManagementService remains responsible for positive revisions and domain
+/// semantics.
 ///
 /// @param request Typed update request to encode without retaining it.
 /// @param registry Attribute registry borrowed while encoding supplied Job-scope changes.
@@ -324,6 +325,7 @@ namespace jb::jobu {
 /// `job_id`, a representable `expected_revision`, and at least one effective change are required. Missing `name` leaves
 /// it unchanged, JSON null clears it, and a string replaces it. Unknown request and nested schedule members are
 /// rejected. An omitted cron timezone uses the current daemon default; an omitted entire schedule stays unchanged.
+/// `type` is not an update member and is rejected even when it matches the stored runner family.
 /// Revision positivity and cron availability remain ManagementService policy.
 ///
 /// @param value JSON request object to decode without retaining references to it.

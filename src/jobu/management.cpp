@@ -439,8 +439,8 @@ auto is_empty_update(UpdateQueueRequest const& request) noexcept -> bool
 
 auto is_empty_update(UpdateJobRequest const& request) noexcept -> bool
 {
-    return !request.name && !request.type && !request.schedule && !request.priority &&
-           request.attribute_changes.empty() && !request.payload;
+    return !request.name && !request.schedule && !request.priority && request.attribute_changes.empty() &&
+           !request.payload;
 }
 
 } // anonymous namespace
@@ -1973,13 +1973,8 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
         return ServiceResult<JobDefinition>::failure(schedule_refresh_conflict());
     }
 
-    // An explicitly repeated type is not a conversion: retained legacy payloads keep their original semantics.
-    auto const type_changed = request.type && *request.type != replacement.type;
     if (request.name) {
         replacement.name = std::move(*request.name);
-    }
-    if (request.type) {
-        replacement.type = *request.type;
     }
     if (request.schedule) {
         replacement.schedule = std::move(*resolved_schedule);
@@ -1990,11 +1985,9 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
     for (auto& [name, value] : request.attribute_changes) {
         replacement.attributes.insert_or_assign(name, std::move(value));
     }
+    // Apply current admission only to an explicit replacement; retained legacy payloads keep their semantics.
     if (request.payload) {
-        replacement.payload = std::move(*request.payload);
-    }
-    if (request.payload || type_changed) {
-        auto normalized = detail::normalize_submitted_job_payload(replacement.type, std::move(replacement.payload));
+        auto normalized = detail::normalize_submitted_job_payload(replacement.type, std::move(*request.payload));
         if (!normalized) {
             return ServiceResult<JobDefinition>::failure(std::move(normalized).error());
         }
@@ -2006,7 +1999,7 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
         return ServiceResult<JobDefinition>::failure(std::move(payload).error());
     }
 
-    // Validate the complete replacement, including a retained payload when only its type or other fields change.
+    // Retained payloads keep their legacy admission semantics, but their secret references must still be valid.
     auto references = detail::validate_payload_template(replacement.type, replacement.payload);
     if (!references) {
         return ServiceResult<JobDefinition>::failure(invalid_job_payload(references.error()));

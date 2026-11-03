@@ -379,8 +379,8 @@ secret resolution. The prepared argv/environment request is limited to
 | `body` | encoded body or reference | No | Absent | 1.1; reference 1.2 | Request-body bytes |
 | `expected_statuses` | string array | No | `["200-299"]` | 1.1 | Successful HTTP status selectors |
 
-HTTP creation, explicit payload replacement, and actual type conversion to HTTP
-apply method admission centrally. Omission stores an explicit `method:"GET"`.
+HTTP creation and explicit payload replacement apply method admission centrally.
+Omission stores an explicit `method:"GET"`.
 Null, non-string, empty, whitespace-padded, unsupported (including `OPTIONS`),
 and custom values are rejected with `jobu.job.invalid_payload`. Whitespace is
 not trimmed. Errors describe the supported methods without dumping the payload.

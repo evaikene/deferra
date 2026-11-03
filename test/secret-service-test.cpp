@@ -535,15 +535,14 @@ TEST_CASE("Management maintains recognized references and replay ignores later s
     }
 
     REQUIRE(fixture.service.set({.name = "body"}));
-    auto replacement = payload(R"({"url":"https://example.test/","method":"POST","body":{"secret":"body"}})");
+    auto replacement = payload(R"({"command":"/bin/replacement","arguments":[{"secret":"body"}]})");
     auto before      = storage_snapshot(fixture.storage.database);
-    check_error(fixture.management.update_job(
-                    {.job_id = created->id, .expected_revision = 2, .type = JobType::Http, .payload = replacement}),
+    check_error(fixture.management.update_job({.job_id = created->id, .expected_revision = 2, .payload = replacement}),
                 ErrorCategory::Conflict,
                 "jobu.job.revision_conflict");
     CHECK(storage_snapshot(fixture.storage.database) == before);
-    auto updated = fixture.management.update_job(
-        {.job_id = created->id, .expected_revision = 1, .type = JobType::Http, .payload = replacement});
+    auto updated =
+        fixture.management.update_job({.job_id = created->id, .expected_revision = 1, .payload = replacement});
     REQUIRE(updated);
     CHECK(*fixture.repository.reference_count("token") == 0);
     CHECK(*fixture.repository.reference_count("body") == 1);
@@ -564,12 +563,14 @@ TEST_CASE("Management maintains recognized references and replay ignores later s
     CHECK(*fixture.repository.reference_count("token") == 0);
     CHECK(*fixture.repository.reference_count("body") == 1);
 
-    // An update retaining the payload must retain its references too; changing type alone cannot invalidate it.
+    // Metadata edits retain references; a payload for the other runner must fail without releasing them.
     updated = fixture.management.update_job({.job_id = created->id, .expected_revision = 2, .priority = 8});
     REQUIRE(updated);
     CHECK(*fixture.repository.reference_count("body") == 1);
     before = storage_snapshot(fixture.storage.database);
-    check_error(fixture.management.update_job({.job_id = created->id, .expected_revision = 3, .type = JobType::Cli}),
+    check_error(fixture.management.update_job({.job_id            = created->id,
+                                               .expected_revision = 3,
+                                               .payload = payload(R"({"url":"https://wrong-runner.test/"})")}),
                 ErrorCategory::InvalidArgument,
                 "jobu.job.invalid_payload");
     CHECK(storage_snapshot(fixture.storage.database) == before);

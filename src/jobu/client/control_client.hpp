@@ -199,7 +199,8 @@ public:
     [[nodiscard]] auto list_jobs(JobListRequest const& request, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 
-    /// Updates a job at its expected revision; replies with the committed JobDefinition.
+    /// Updates a job at its expected revision without changing its runner type; replies with the committed
+    /// JobDefinition.
     [[nodiscard]] auto update_job(UpdateJobRequest const& request, ControlCallOptions options = {})
         -> jb::core::Result<ControlCallId, jb::core::Error>;
 

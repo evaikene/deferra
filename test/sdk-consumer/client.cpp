@@ -36,9 +36,18 @@ int main(int argc, char const* argv[])
     auto richer = client.get_queue(*decoded);
     auto live   = client.get_queue(request.queue, jb::jobu::ControlCallOptions{});
     auto call   = client.get_system_info();
+
+    // Installed consumers use the same immutable-runner update DTO and codec as the daemon.
+    auto const update        = jb::jobu::UpdateJobRequest{.expected_revision = 1, .priority = 2};
+    auto       update_params = jb::jobu::update_job_request_to_json(update, attributes);
+    if (!update_params || update_params->as_object().contains("type")) {
+        return 5;
+    }
+    auto update_call = client.update_job(update);
     return !call && call.error().code == "jobu.client.not_ready" && !richer &&
                    richer.error().code == "jobu.client.not_ready" && !live &&
-                   live.error().code == "jobu.client.not_ready"
+                   live.error().code == "jobu.client.not_ready" && !update_call &&
+                   update_call.error().code == "jobu.client.not_ready"
              ? 0
              : 1;
 }

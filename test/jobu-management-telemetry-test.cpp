@@ -304,7 +304,8 @@ TEST_CASE("Queue updates preserve wait under full capacity and wall clock correc
     CHECK(f.timing(second.id).open_tick_us == 7000000);
 }
 
-TEST_CASE("Pending schedule and type replacement retain accumulated operational wait", "[jobu][telemetry][management]")
+TEST_CASE("Pending schedule and payload replacement retain accumulated operational wait",
+          "[jobu][telemetry][management]")
 {
     Fixture f;
     auto    queue = f.queue();
@@ -319,21 +320,22 @@ TEST_CASE("Pending schedule and type replacement retain accumulated operational 
     REQUIRE(updated);
     CHECK(f.timing(run.id).runnable_wait_us == 4000000);
     CHECK_FALSE(f.timing(run.id).open_epoch);
+
     f.time.advance(10s);
-    auto model = f.storage.make_job(recovery_id(9000), queue.id, JobType::Http);
-    updated    = f.service->update_job({
+    auto replacement                                                 = job.payload;
+    std::get<JsonValue::Object>(replacement.data).at("command").data = std::string{"/replacement"};
+
+    updated = f.service->update_job({
         .job_id            = job.id,
         .expected_revision = updated->revision,
-        .type              = JobType::Http,
         .schedule          = OnceSchedule{.planned_at = UtcTimePoint{100s}},
-        .payload           = model.payload,
+        .payload           = replacement,
     });
     REQUIRE(updated);
     CHECK(f.timing(run.id).runnable_wait_us == 4000000);
-    CHECK_FALSE(f.timing(run.id).open_epoch);
-    model = f.storage.make_job(recovery_id(9000), queue.id);
-    REQUIRE(f.service->update_job(
-        {.job_id = job.id, .expected_revision = updated->revision, .type = JobType::Cli, .payload = model.payload}));
+    CHECK(f.timing(run.id).open_tick_us == 14000000);
+
+    REQUIRE(f.service->update_job({.job_id = job.id, .expected_revision = updated->revision, .payload = job.payload}));
     CHECK(f.timing(run.id).open_tick_us == 14000000);
     CHECK(f.timing(run.id).quality == WaitQuality::Complete);
 }
