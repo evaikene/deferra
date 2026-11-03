@@ -15,7 +15,7 @@ namespace {
 using namespace jb::core;
 using namespace jb::jobu;
 
-constexpr auto writable_members = std::array{"name", "type", "schedule", "priority", "attributes", "payload"};
+constexpr auto writable_members = std::array{"name", "schedule", "priority", "attributes", "payload"};
 
 auto edit_error(std::string code, std::string message) -> Error
 {
@@ -97,6 +97,7 @@ auto format_job_edit_draft(JsonValue const& value) -> Result<std::string, Error>
 {
     constexpr auto instructions = "// JSONC draft: comments are ignored; trailing commas are not allowed.\n"
                                   "// Keep job_id and expected_revision unchanged.\n"
+                                  "// Runner type is fixed at creation; payload edits must match the existing type.\n"
                                   "// Omitted fields leave server values unchanged.\n"
                                   "// Exit without effective changes to cancel the update.\n\n";
     return format_edit_draft(EditResource::Job, value, instructions);

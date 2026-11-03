@@ -748,47 +748,62 @@ TEST_CASE("invalid saved drafts are retained unchanged without mutation", "[jobu
     auto                         bytes      = std::string{};
     auto                         missing    = false;
     auto const                   sensitive  = std::string{"literal-sensitive-edit-value"};
-    auto result = run_workflow(edit_command(peer), test_io(files.path(), [&](auto, auto const& draft) {
-                                   draft_path = draft;
-                                   SECTION("invalid JSON")
-                                   {
-                                       write_text(draft, "{" + sensitive);
-                                   }
-                                   SECTION("invalid revision")
-                                   {
-                                       auto value = read_draft(draft);
-                                       std::get<JsonValue::Object>(value.data).at("expected_revision") =
-                                           JsonValue{.data = std::uint64_t{2}};
-                                       write_text(draft, serialized(value));
-                                   }
-                                   SECTION("invalid attribute value")
-                                   {
-                                       auto  value      = read_draft(draft);
-                                       auto& attributes = std::get<JsonValue::Object>(
-                                           std::get<JsonValue::Object>(value.data).at("attributes").data);
-                                       attributes.at("retry.max_attempts") = JsonValue{.data = sensitive};
-                                       write_text(draft, serialized(value));
-                                   }
-                                   SECTION("unknown property containing sensitive input")
-                                   {
-                                       auto value = read_draft(draft);
-                                       std::get<JsonValue::Object>(value.data).emplace(sensitive, JsonValue{});
-                                       write_text(draft, serialized(value));
-                                   }
-                                   SECTION("empty file")
-                                   {
-                                       write_text(draft, "");
-                                   }
-                                   SECTION("missing file")
-                                   {
-                                       REQUIRE(std::filesystem::remove(draft));
-                                       missing = true;
-                                   }
-                                   if (!missing) {
-                                       bytes = read_text(draft);
-                                   }
-                                   return Result<void, Error>::success();
-                               }));
+    auto                         result     = run_workflow(
+        edit_command(peer),
+        test_io(files.path(), [&](auto, auto const& draft) {
+            draft_path = draft;
+            SECTION("invalid JSON")
+            {
+                write_text(draft, "{" + sensitive);
+            }
+            SECTION("invalid revision")
+            {
+                auto value                                                      = read_draft(draft);
+                std::get<JsonValue::Object>(value.data).at("expected_revision") = JsonValue{.data = std::uint64_t{2}};
+                write_text(draft, serialized(value));
+            }
+            SECTION("same runner type")
+            {
+                auto value = read_draft(draft);
+                CHECK_FALSE(value.as_object().contains("type"));
+                std::get<JsonValue::Object>(value.data).emplace("type", JsonValue{.data = std::string{"cli"}});
+                write_text(draft, serialized(value));
+            }
+            SECTION("runner conversion with valid edits")
+            {
+                edit_priority(draft);
+                auto value = read_draft(draft);
+                std::get<JsonValue::Object>(value.data).emplace("type", JsonValue{.data = std::string{"http"}});
+                write_text(draft, serialized(value));
+            }
+            SECTION("invalid attribute value")
+            {
+                auto  value = read_draft(draft);
+                auto& attributes =
+                    std::get<JsonValue::Object>(std::get<JsonValue::Object>(value.data).at("attributes").data);
+                attributes.at("retry.max_attempts") = JsonValue{.data = sensitive};
+                write_text(draft, serialized(value));
+            }
+            SECTION("unknown property containing sensitive input")
+            {
+                auto value = read_draft(draft);
+                std::get<JsonValue::Object>(value.data).emplace(sensitive, JsonValue{});
+                write_text(draft, serialized(value));
+            }
+            SECTION("empty file")
+            {
+                write_text(draft, "");
+            }
+            SECTION("missing file")
+            {
+                REQUIRE(std::filesystem::remove(draft));
+                missing = true;
+            }
+            if (!missing) {
+                bytes = read_text(draft);
+            }
+            return Result<void, Error>::success();
+        }));
     CHECK(result.code == 2);
     CHECK(result.output.empty());
     CHECK(result.error.find(sensitive) == std::string::npos);

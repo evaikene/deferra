@@ -194,10 +194,10 @@ TEST_CASE("Job edit projection selects writable content for each runner and sche
 
                 auto        baseline = baseline_for(job, registry);
                 auto const& draft    = baseline.value().as_object();
-                REQUIRE(draft.size() == 8);
+                REQUIRE(draft.size() == 7);
                 CHECK(draft.at("job_id").as_string() == job.id.to_string());
                 CHECK(draft.at("expected_revision").as_uint() == job.revision);
-                CHECK(draft.at("type").as_string() == (type == JobType::Cli ? "cli" : "http"));
+                CHECK_FALSE(draft.contains("type"));
                 CHECK(draft.at("priority").as_int() == job.priority);
                 CHECK(draft.at("payload") == job.payload);
                 CHECK(draft.at("name").is_null() == !named);
@@ -417,7 +417,7 @@ TEST_CASE("Job edit no-op tolerates omissions and reordered object members", "[j
     check_noop(baseline, baseline.value(), registry);
 
     auto draft = baseline.value();
-    for (auto const* name : {"name", "type", "schedule", "priority", "payload"}) {
+    for (auto const* name : {"name", "schedule", "priority", "payload"}) {
         object(draft).erase(name);
         check_noop(baseline, draft, registry);
     }
@@ -522,6 +522,8 @@ TEST_CASE("Job edit validates all retained content before classifying a no-op", 
     }
     auto const invalid_members = std::array{
         std::pair{"name",       "false"                                                                     },
+        std::pair{"type",       "\"cli\""                                                                   },
+        std::pair{"type",       "\"http\""                                                                  },
         std::pair{"type",       "null"                                                                      },
         std::pair{"type",       "\"private-draft-marker\""                                                  },
         std::pair{"schedule",   "null"                                                                      },
@@ -540,8 +542,8 @@ TEST_CASE("Job edit validates all retained content before classifying a no-op", 
     };
     for (auto const& [name, text] : invalid_members) {
         CAPTURE(name, text);
-        auto draft             = baseline.value();
-        object(draft).at(name) = parsed(text);
+        auto draft = baseline.value();
+        object(draft).insert_or_assign(name, parsed(text));
         check_safe_failure(prepare(baseline, draft, registry));
     }
     for (auto const* text :
@@ -617,17 +619,18 @@ TEST_CASE("Job edit payload and schedule changes are complete replacements", "[j
     CHECK_FALSE(cron.timezone);
     CHECK(update.params.as_object().at("schedule").as_object().size() == 2);
 
+    job.type                     = JobType::Http;
+    job.payload                  = parsed(R"({"url":"https://example.test","method":"GET"})");
+    baseline                     = baseline_for(job, registry);
     draft                        = baseline.value();
-    object(draft).at("type")     = make_json(std::string{"http"});
     object(draft).at("payload")  = parsed(R"({"url":"https://example.test","method":"OPTIONS"})");
     object(draft).at("schedule") = parsed(R"({"kind":"once","at":"2026-10-17T12:00:00Z"})");
-    auto conversion              = prepared_update(baseline, draft, registry);
-    CHECK(conversion.request.type == JobType::Http);
-    REQUIRE(conversion.request.payload);
+    auto replacement             = prepared_update(baseline, draft, registry);
+    REQUIRE(replacement.request.payload);
     // The pure helper validates the request schema; HTTP method admission remains the service's decision.
-    CHECK(conversion.request.payload->as_object().at("method").as_string() == "OPTIONS");
-    REQUIRE(conversion.request.schedule);
-    CHECK(std::holds_alternative<OnceSchedule>(*conversion.request.schedule));
+    CHECK(replacement.request.payload->as_object().at("method").as_string() == "OPTIONS");
+    REQUIRE(replacement.request.schedule);
+    CHECK(std::holds_alternative<OnceSchedule>(*replacement.request.schedule));
 }
 
 TEST_CASE("Job edit preserves legacy HTTP payloads and returns owning minimal shared-codec data", "[jobuctl][edit]")

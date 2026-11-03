@@ -235,15 +235,18 @@ jobuctl job create --queue-name reports --type http --now \
 ```
 
 Use `--request-file` for complete nested configuration, binary HTTP bodies,
-HTTP secret references, or a full job type/payload replacement on update. For
+HTTP secret references, or a full payload replacement on update. For
 example, a job request file can contain a header value such as
 `{"secret":"service.token"}`; the secret name must already exist on the daemon.
 
 Older HTTP jobs retain their exact method spelling and execution behavior when
-read or updated in unrelated fields. A same-type update without a replacement
+read or updated in unrelated fields. An update without a replacement
 payload also preserves it. Explicit payload replacement applies current
 admission; changing priority does not repair a legacy lowercase or custom
 method. Started and historical run snapshots remain unchanged.
+
+Runner type is fixed at creation. Update request files reject `type`, including
+the current value; replacement payloads must match the existing CLI or HTTP job.
 
 For a complete replacement, put `job_id`, the current `expected_revision`, and
 the complete `payload` in the file, following this
@@ -479,12 +482,14 @@ The JSON contains `job_id`, `expected_revision`, and writable definition fields.
 Keep identity and revision present and unchanged. Response-only properties,
 unknown fields, and invalid retained values are rejected. Secret references stay
 references; the CLI does not fetch or expand secret values.
+Runner type is immutable and absent from the draft; adding `type` is rejected
+before submission.
 
 | Edit | Meaning |
 | --- | --- |
 | Leave a value unchanged or reorder object keys | Omit it from the update |
 | Remove a writable top-level property | Leave the server value unchanged |
-| Change `name`, `type`, `priority`, or `schedule` | Replace the complete changed value |
+| Change `name`, `priority`, or `schedule` | Replace the complete changed value |
 | Set `name` to `null` | Clear the name |
 | Change or add an attribute | Send that entry as an attribute patch |
 | Remove an attribute entry | Leave that server attribute unchanged |

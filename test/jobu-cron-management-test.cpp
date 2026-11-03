@@ -556,13 +556,11 @@ TEST_CASE("Recurring update replans one unstarted run with a complete new snapsh
     REQUIRE(created);
     fixture.time.advance(10s);
 
-    auto const replacement_payload = http_payload("https://updated.test/");
-    auto const canonical_payload   = http_payload("https://updated.test/", "GET");
+    auto const replacement_payload = cli_payload("/after");
     auto       updated             = service.update_job({
         .job_id            = job_id,
         .expected_revision = 1,
         .name              = std::optional<std::optional<std::string>>{std::in_place,                             std::string{"after"}                 },
-        .type              = JobType::Http,
         .schedule = CronScheduleInput{.expression = updated_schedule.expression, .timezone = updated_schedule.timezone},
         .priority = 9,
         .attribute_changes = max_attempts(6),
@@ -571,11 +569,11 @@ TEST_CASE("Recurring update replans one unstarted run with a complete new snapsh
     REQUIRE(updated);
     CHECK(updated->revision == 2);
     CHECK(updated->name == "after");
-    CHECK(updated->type == JobType::Http);
+    CHECK(updated->type == JobType::Cli);
     check_schedule(updated->schedule, updated_schedule);
     CHECK(updated->priority == 9);
     CHECK(std::get<std::int64_t>(updated->attributes.at("retry.max_attempts").data) == 6);
-    CHECK(updated->payload == canonical_payload);
+    CHECK(updated->payload == replacement_payload);
     CHECK(updated->created_at == UtcTimePoint{10s});
     CHECK(updated->updated_at == UtcTimePoint{20s});
 
@@ -593,10 +591,10 @@ TEST_CASE("Recurring update replans one unstarted run with a complete new snapsh
     CHECK((**stored).job_revision == 2);
     CHECK((**stored).planned_at == UtcTimePoint{120s});
     CHECK((**stored).runnable_at == UtcTimePoint{120s});
-    CHECK((**stored).type == JobType::Http);
+    CHECK((**stored).type == JobType::Cli);
     CHECK((**stored).priority == 9);
     CHECK(std::get<std::int64_t>((**stored).attributes.at("retry.max_attempts").data) == 6);
-    CHECK((**stored).payload == canonical_payload);
+    CHECK((**stored).payload == replacement_payload);
 
     fixture.cron.set_validation_error(
         injected_error(ErrorCategory::InvalidArgument, "jobu.schedule.invalid_expression"));
@@ -626,23 +624,21 @@ TEST_CASE("Recurring update replans one unstarted run with a complete new snapsh
     execute(fixture.database,
             "CREATE TRIGGER fail_recurring_refresh BEFORE UPDATE ON jobu_runs "
             "BEGIN SELECT RAISE(ABORT, 'injected failure'); END");
-    require_error(service.update_job({.job_id            = job_id,
-                                      .expected_revision = 2,
-                                      .priority          = 10,
-                                      .payload           = http_payload("https://rollback.test/", "pOsT")}),
+    require_error(service.update_job(
+                      {.job_id = job_id, .expected_revision = 2, .priority = 10, .payload = cli_payload("/rollback")}),
                   ErrorCategory::Conflict,
                   "db.constraint");
     unchanged = service.get_job(job_id);
     REQUIRE(unchanged);
     CHECK(unchanged->revision == 2);
     CHECK(unchanged->priority == 9);
-    CHECK(unchanged->payload == canonical_payload);
+    CHECK(unchanged->payload == replacement_payload);
     stored = runs.find_schedule_owned(job_id);
     REQUIRE(stored);
     REQUIRE(stored->has_value());
     CHECK((**stored).job_revision == 2);
     CHECK((**stored).priority == 9);
-    CHECK((**stored).payload == canonical_payload);
+    CHECK((**stored).payload == replacement_payload);
 }
 
 TEST_CASE("Recurring update ignores historical attempts while refreshing the current occurrence",
@@ -768,12 +764,10 @@ TEST_CASE("Running recurring updates preserve the active snapshot for the newest
         }));
     }
 
-    auto const replacement_payload = http_payload("https://successor.test/");
-    auto const canonical_payload   = http_payload("https://successor.test/", "GET");
+    auto const replacement_payload = cli_payload("/after");
     auto       updated             = service.update_job({
         .job_id            = job_id,
         .expected_revision = 1,
-        .type              = JobType::Http,
         .schedule = CronScheduleInput{.expression = updated_schedule.expression, .timezone = updated_schedule.timezone},
         .priority = 9,
         .attribute_changes = max_attempts(6),
@@ -781,10 +775,10 @@ TEST_CASE("Running recurring updates preserve the active snapshot for the newest
     });
     REQUIRE(updated);
     CHECK(updated->revision == 2);
-    CHECK(updated->type == JobType::Http);
+    CHECK(updated->type == JobType::Cli);
     check_schedule(updated->schedule, updated_schedule);
     CHECK(updated->priority == 9);
-    CHECK(updated->payload == canonical_payload);
+    CHECK(updated->payload == replacement_payload);
     REQUIRE(fixture.cron.validation_calls().size() == 2);
     CHECK(fixture.cron.next_calls().size() == 1);
 

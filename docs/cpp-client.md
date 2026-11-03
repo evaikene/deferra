@@ -157,6 +157,12 @@ deleted name. Multiple deleted matches fail remotely with
 revision-bearing `Queue` reply and use the same API 1.6 admission checks.
 Use explicit `GetQueueRequest` construction when selecting historical visibility.
 
+Job runner type is fixed at creation. `UpdateJobRequest` has no `type` member;
+`update_job()` accepts edits to the existing CLI or HTTP job, and any replacement
+payload must match that runner. Create requests, job replies, and list filters
+continue to carry the runner type. Raw `job.update` params containing `type` are
+rejected in full, including when they repeat the current type.
+
 For `list_runs`, `RunFilters::state` selects one state. Since API 1.5,
 `RunFilters::states` selects any of 1–7 distinct valid states, preserving caller
 order in the request. The two selectors are mutually exclusive; an absent set

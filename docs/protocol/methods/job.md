@@ -123,7 +123,6 @@ one; the service never fetches a new revision and retries for you.
 | `job_id` | ID | Yes | 1.1 | Definition to change |
 | `expected_revision` | positive integer | Yes | 1.1 | Optimistic revision |
 | `name` | string or null | No | 1.1 | Replace or clear; omission leaves unchanged |
-| `type` | `JobType` | No | 1.1 | Replacement runner family |
 | `schedule` | schedule object | No | 1.1 | Concrete once or cron; `at:"now"` is invalid |
 | `priority` | signed integer | No | 1.1 | Replacement priority |
 | `attributes` | attribute object | No | 1.1 | Partial patch; supplied names replace values, omitted names stay unchanged |
@@ -133,6 +132,12 @@ The result is the new full definition with an advanced revision. A supplied
 field may equal its current value; an accepted same-value update still advances
 the revision.
 
+The runner family is fixed at creation. Supplying `type` is invalid even when
+it matches the current runner or accompanies otherwise valid edits. The entire
+request is rejected with JSON-RPC `-32602`, without changing the definition,
+revision, run snapshots, or secret references. A replacement payload must match
+the existing runner type. Creation, result fields, and list filters retain `type`.
+
 A changed schedule can replace an unstarted scheduled occurrence; a running
 or retry-waiting occurrence keeps its immutable snapshot. Terminal definitions
 cannot be updated. A stale revision returns `jobu.job.revision_conflict`
@@ -140,11 +145,9 @@ without modifying either definition or
 secret-reference ownership. Updates commit before replying.
 
 An explicit HTTP `payload` replacement applies the same method admission as
-creation, even when its contents equal the stored payload. An actual runner-type
-conversion to HTTP also applies admission to the effective payload. A name,
+creation, even when its contents equal the stored payload. A name,
 priority, attribute, or schedule edit without payload replacement preserves an
-older method's exact spelling and execution behavior. Repeating `type:"http"`
-without changing the type or replacing the payload also preserves it. Existing
+older method's exact spelling and execution behavior. Existing
 structural, template, and secret-reference checks still apply.
 
 Successful admission normalizes the definition and any eligible untouched

@@ -499,7 +499,7 @@ auto has_queue_update(UpdateQueueRequest const& request) -> bool
 
 auto has_job_update(UpdateJobRequest const& request) -> bool
 {
-    return request.name || request.type || request.schedule || request.priority || !request.attribute_changes.empty() ||
+    return request.name || request.schedule || request.priority || !request.attribute_changes.empty() ||
            request.payload;
 }
 
@@ -1401,13 +1401,6 @@ auto update_job_request_to_json(UpdateJobRequest const& request, AttributeRegist
     if (request.name) {
         object.emplace("name", *request.name ? make_json(**request.name) : make_json(jb::core::JsonNull{}));
     }
-    if (request.type) {
-        auto const type = job_type_text(*request.type);
-        if (!type) {
-            return invalid<jb::core::JsonValue>(true);
-        }
-        object.emplace("type", make_json(std::string{*type}));
-    }
     if (request.schedule) {
         auto schedule = schedule_input_to_json(*request.schedule);
         if (!schedule) {
@@ -1438,9 +1431,8 @@ auto update_job_request_from_json(jb::core::JsonValue const& value, AttributeReg
     -> jb::core::Result<UpdateJobRequest, jb::core::Error>
 {
     if (!value.is_object() ||
-        !has_only_members(
-            value.as_object(),
-            {"job_id", "expected_revision", "name", "type", "schedule", "priority", "attributes", "payload"})) {
+        !has_only_members(value.as_object(),
+                          {"job_id", "expected_revision", "name", "schedule", "priority", "attributes", "payload"})) {
         return invalid<UpdateJobRequest>(true);
     }
     auto const& object   = value.as_object();
@@ -1460,13 +1452,6 @@ auto update_job_request_from_json(jb::core::JsonValue const& value, AttributeReg
         else {
             return invalid<UpdateJobRequest>(true);
         }
-    }
-    if (auto const* type = find_member(object, "type")) {
-        auto decoded = JobType{};
-        if (!job_type_from_json(*type, decoded)) {
-            return invalid<UpdateJobRequest>(true);
-        }
-        result.type = decoded;
     }
     if (auto const* schedule = find_member(object, "schedule")) {
         auto decoded = schedule_input_from_json(*schedule);

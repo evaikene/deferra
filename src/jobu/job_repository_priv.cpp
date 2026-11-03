@@ -336,13 +336,14 @@ auto JobRepository::update_definition(JobDefinition const&               replace
         return RepositoryResult<bool>::failure(std::move(updated).error());
     }
 
+    // The runner family is fixed at creation. Fence an inconsistent replacement instead of changing that identity.
     jb::db::Query query{_database};
     auto          prepared = query.prepare(
-        "UPDATE jobu_jobs SET revision = :revision, name = :name, type = :type, schedule_kind = :schedule_kind, "
+        "UPDATE jobu_jobs SET revision = :revision, name = :name, schedule_kind = :schedule_kind, "
         "scheduled_at_us = :scheduled_at_us, cron_expression = :cron_expression, cron_timezone = :cron_timezone, "
         "priority = :priority, attributes_json = :attributes_json, payload_json = :payload_json, "
         "updated_at_us = :updated_at_us WHERE id = :id AND revision = :expected_revision "
-        "AND state IN ('active', 'suspended')");
+        "AND type = :type AND state IN ('active', 'suspended')");
     if (!prepared) {
         return RepositoryResult<bool>::failure(std::move(prepared).error());
     }

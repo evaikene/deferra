@@ -585,8 +585,8 @@ TEST_CASE("legacy HTTP spelling and lowercase head body behavior survive metadat
             }));
             seed_legacy_payload(fixture, job.definition.id, legacy);
 
-            auto updated = fixture.management->update_job(
-                {.job_id = job.definition.id, .expected_revision = 1, .type = JobType::Http, .priority = 5});
+            auto updated =
+                fixture.management->update_job({.job_id = job.definition.id, .expected_revision = 1, .priority = 5});
             REQUIRE(updated);
             CHECK(updated->payload == legacy);
             CHECK(fixture.find_run(job.run.id).payload == legacy);

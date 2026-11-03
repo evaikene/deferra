@@ -163,7 +163,7 @@ TEST_CASE("Interrupted recurrence uses the current definition and explicit recov
     fixture.storage.insert_run(original);
     REQUIRE(fixture.recovery.find_run(original.run.id));
 
-    auto latest     = fixture.storage.make_job(job.id, queue.id, JobType::Http);
+    auto latest     = fixture.storage.make_job(job.id, queue.id, job.type);
     latest.revision = job.revision + 1;
     latest.schedule = CronSchedule{.expression = "*/2 * * * *", .timezone = "Europe/Tallinn"};
     latest.priority = 42;

@@ -669,7 +669,7 @@ TEST_CASE("jobuctl request files are bounded and strictly decoded", "[jobuctl][i
         auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
         REQUIRE(file);
         file
-            << R"({"job_id":"00000000-0000-7000-8000-000000000001","expected_revision":7,"name":null,"type":"http","schedule":{"kind":"cron","expression":"0 9 * * *","timezone":"UTC"},"attributes":{"retry.max_attempts":2},"payload":{"url":"https://example.test","headers":[{"name":"Authorization","value":{"secret":"service.token"}}]}})";
+            << R"({"job_id":"00000000-0000-7000-8000-000000000001","expected_revision":7,"name":null,"schedule":{"kind":"cron","expression":"0 9 * * *","timezone":"UTC"},"attributes":{"retry.max_attempts":2},"payload":{"url":"https://example.test","headers":[{"name":"Authorization","value":{"secret":"service.token"}}]}})";
     }
     auto update = parse({"--socket", "fixture.sock", "job", "update", "--request-file", path.string()});
     REQUIRE(update.command);
@@ -678,7 +678,6 @@ TEST_CASE("jobuctl request files are bounded and strictly decoded", "[jobuctl][i
     REQUIRE(update_request.name);
     CHECK_FALSE(*update_request.name);
     CHECK(update_request.expected_revision == 7);
-    CHECK(update_request.type == JobType::Http);
     CHECK(std::holds_alternative<CronScheduleInput>(*update_request.schedule));
     CHECK(update_request.attribute_changes.contains("retry.max_attempts"));
     REQUIRE(update_request.payload);
@@ -691,6 +690,19 @@ TEST_CASE("jobuctl request files are bounded and strictly decoded", "[jobuctl][i
               .as_object()
               .at("secret")
               .as_string() == "service.token");
+
+    // Request files use the strict update codec even when the removed member repeats the runner type.
+    for (auto const* type : {"cli", "http"}) {
+        {
+            auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
+            REQUIRE(file);
+            file << R"({"job_id":"00000000-0000-7000-8000-000000000001","expected_revision":7,"priority":50,"type":")"
+                 << type << R"("})";
+        }
+        auto rejected = load_request_file(*update.command, registry);
+        REQUIRE_FALSE(rejected);
+        CHECK(rejected.error().code == "jobuctl.input.invalid_params");
+    }
 
     {
         auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};
