@@ -62,21 +62,31 @@ enum class AttributeType : std::uint8_t {
     Map,
 };
 
+/// Runner families to which an attribute contributes execution policy.
+/// This is independent of the scopes at which callers may supply defaults.
+enum class AttributeApplicability : std::uint8_t {
+    Both,
+    Cli,
+    Http,
+};
+
 /// Metadata and built-in policy for one known JobU attribute.
 /// Registries validate names, scopes, and values without exposing serialization details.
 struct AttributeDefinition {
     /// Canonical name accepted by the registry.
-    AttributeName   name;
+    AttributeName          name;
     /// Required storage alternative for supplied values.
-    AttributeType   type;
+    AttributeType          type;
     /// Scopes in which callers may supply a value.
-    AttributeScopes scopes;
+    AttributeScopes        scopes;
     /// Value used when materializing an omitted attribute.
-    AttributeValue  built_in_default;
+    AttributeValue         built_in_default;
     /// Human-readable explanation of the attribute.
-    std::string     description;
+    std::string            description;
     /// Whether future adapters must handle the value as sensitive.
-    bool            sensitive{false};
+    bool                   sensitive{false};
+    /// Runner applicability; existing custom definitions remain shared unless explicitly restricted.
+    AttributeApplicability applicability{AttributeApplicability::Both};
 };
 
 /// Validates canonical lower-case dotted attribute-name syntax.

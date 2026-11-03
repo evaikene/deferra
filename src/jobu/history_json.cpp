@@ -579,10 +579,8 @@ auto run_details_from_json(JsonValue const& value, AttributeRegistry const& regi
     if (!decoded_attributes) {
         return reject<RunDetails>(false);
     }
-    for (auto const& definition : registry.definitions()) {
-        if (definition.scopes.test(AttributeScope::Job) && !decoded_attributes->contains(definition.name)) {
-            return reject<RunDetails>(false);
-        }
+    if (!validate_materialized_attributes(registry, *decoded_attributes, summary->type)) {
+        return reject<RunDetails>(false);
     }
 
     auto details                      = RunDetails{};

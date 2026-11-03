@@ -281,3 +281,17 @@ TEST_CASE("daemon configuration errors retain no rejected values", "[jobud][conf
         CHECK_FALSE((error.key && error.key->find(secret) != std::string::npos));
     }
 }
+
+TEST_CASE("daemon defaults retain policy for both runners and validate both effective contexts",
+          "[jobud][configuration]")
+{
+    auto parsed = parse_configuration_text("defaults.cli.termination_grace = 3000\n"
+                                           "defaults.http.max_redirects = 7\n");
+    REQUIRE(parsed);
+    CHECK(parsed->daemon_defaults.size() == 2U);
+    CHECK(parsed->daemon_defaults.contains("cli.termination_grace"));
+    CHECK(parsed->daemon_defaults.contains("http.max_redirects"));
+    CHECK_FALSE(parse_configuration_text("defaults.cli.termination_grace = -1\n"));
+    CHECK_FALSE(parse_configuration_text("defaults.http.follow_redirects = true\n"
+                                         "defaults.http.max_redirects = 0\n"));
+}

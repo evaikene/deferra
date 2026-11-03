@@ -109,7 +109,7 @@ auto string_list(std::initializer_list<std::string_view> values) -> AttributeVal
 auto materialized_attributes(AttributeSet const& overrides = {}) -> AttributeSet
 {
     StandardAttributeRegistry registry;
-    auto                      attributes = materialize_attributes(registry, {}, {}, overrides);
+    auto                      attributes = materialize_attributes(registry, JobType::Cli, {}, {}, overrides);
     REQUIRE(attributes);
     return std::move(attributes).value();
 }
@@ -355,7 +355,7 @@ public:
         : _process_id{process_id}
     {
         REQUIRE(process_id > 0);
-#  if defined(__APPLE__)
+#  ifdef __APPLE__
         // Register while the coordinated helper is alive; NOTE_EXIT remains observable after its owner reaps it.
         _descriptor = ::kqueue();
         REQUIRE(_descriptor >= 0);
@@ -391,7 +391,7 @@ public:
     /// @throws Catch::TestFailureException when the watched identity remains alive past the watchdog.
     void check_terminated() const
     {
-#  if defined(__APPLE__)
+#  ifdef __APPLE__
         struct kevent   event;
         struct timespec timeout{.tv_sec = 5, .tv_nsec = 0};
         int             ready;
@@ -530,7 +530,7 @@ TEST_CASE("CLI attempt executor prepares explicit process policy and metadata", 
     CHECK(accepted.start_info.timeout == 42s);
     CHECK(accepted.start_info.termination_grace == 3s);
     CHECK(accepted.start_info.require_non_root);
-#if defined(__linux__)
+#ifdef __linux__
     CHECK(accepted.start_info.prevent_privilege_gain);
 #else
     CHECK_FALSE(accepted.start_info.prevent_privilege_gain);
@@ -1039,7 +1039,7 @@ TEST_CASE("CLI production adapter executes explicit Process requests", "[jobu][c
     path_lookup.environment.emplace("PATH", json_string(helper_path.parent_path().string()));
     CHECK(fixture.execute(real_start_request(3, std::move(path_lookup))).outcome == AttemptOutcome::Succeeded);
 
-#  if defined(__linux__)
+#  ifdef __linux__
     auto capture_output = AttributeSet{
         {"output.capture",      {.data = std::string{"always"}}},
         {"output.stdout_limit", {.data = std::int64_t{64}}     },

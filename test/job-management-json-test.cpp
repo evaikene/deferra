@@ -1010,3 +1010,23 @@ TEST_CASE("Cron input omission round trips without relaxing stored schedule resp
     std::get<CronSchedule>(job.schedule).timezone.clear();
     CHECK_FALSE(job_to_json(job, registry));
 }
+
+TEST_CASE("Job replies require only the selected runner's complete attributes", "[jobu][job][json][runner]")
+{
+    StandardAttributeRegistry registry;
+    for (auto type : {JobType::Cli, JobType::Http}) {
+        auto job        = sample_job(registry);
+        job.type        = type;
+        auto attributes = materialize_attributes(registry, type, {}, {}, {});
+        REQUIRE(attributes);
+        job.attributes = *attributes;
+        auto encoded   = job_to_json(job, registry);
+        REQUIRE(encoded);
+        auto decoded = job_from_json(*encoded, registry);
+        REQUIRE(decoded);
+        CHECK(decoded->attributes.size() == attributes->size());
+
+        object(object(*encoded).at("attributes")).erase("retry.max_attempts");
+        CHECK_FALSE(job_from_json(*encoded, registry));
+    }
+}

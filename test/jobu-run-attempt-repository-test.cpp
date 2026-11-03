@@ -369,7 +369,8 @@ TEST_CASE("Run repository upgrades Phase 3 snapshots with later defaults", "[job
     auto found = fixture.runs.find_by_id(run_id);
     REQUIRE(found);
     REQUIRE(found->has_value());
-    REQUIRE((*found)->attributes.size() == fixture.registry.definitions().size());
+    REQUIRE((*found)->attributes.size() == 13U);
+    CHECK_FALSE((*found)->attributes.contains("http.max_redirects"));
     auto const& retry_exit_codes = std::get<AttributeValue::List>((*found)->attributes.at("cli.retry_exit_codes").data);
     REQUIRE(retry_exit_codes.size() == 1U);
     CHECK(std::get<std::string>(retry_exit_codes[0].data) == "0-255");
@@ -377,7 +378,6 @@ TEST_CASE("Run repository upgrades Phase 3 snapshots with later defaults", "[job
     CHECK(std::get<std::int64_t>((*found)->attributes.at("retry.max_attempts").data) == 4);
     CHECK(std::get<double>((*found)->attributes.at("retry.jitter").data) == 0.0);
     CHECK(std::get<double>((*found)->attributes.at("retry.multiplier").data) == 2.0);
-    CHECK(std::get<std::int64_t>((*found)->attributes.at("http.max_redirects").data) == 5);
 }
 
 TEST_CASE("Run repository enforces execution start lifecycle invariants", "[jobu][run][sqlite]")

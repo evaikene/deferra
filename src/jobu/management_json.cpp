@@ -503,16 +503,6 @@ auto has_job_update(UpdateJobRequest const& request) -> bool
            request.payload;
 }
 
-auto has_complete_job_attributes(AttributeSet const& values, AttributeRegistry const& registry) -> bool
-{
-    for (auto const& definition : registry.definitions()) {
-        if (definition.scopes.test(AttributeScope::Job) && !values.contains(definition.name)) {
-            return false;
-        }
-    }
-    return true;
-}
-
 template <typename Page>
 auto valid_page(Page const& page) -> bool
 {
@@ -1102,7 +1092,8 @@ auto job_from_json(jb::core::JsonValue const& value, AttributeRegistry const& re
 
     auto decoded_schedule   = schedule_from_json(*schedule, false);
     auto decoded_attributes = attribute_set_from_json(*attributes, registry, AttributeScope::Job);
-    if (!decoded_schedule || !decoded_attributes || !has_complete_job_attributes(*decoded_attributes, registry)) {
+    if (!decoded_schedule || !decoded_attributes ||
+        !validate_materialized_attributes(registry, *decoded_attributes, result.type)) {
         return invalid<JobDefinition>(false);
     }
     result.schedule   = std::move(decoded_schedule).value();

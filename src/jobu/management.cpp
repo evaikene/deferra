@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map> // IWYU pragma: keep for std::erase_if on AttributeSet
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -347,9 +348,11 @@ auto attribute_document_size_message(AttributeScope scope) noexcept -> std::stri
 auto serialize_attributes(AttributeRegistry const&      attributes,
                           AttributeSet const&           values,
                           AttributeScope                scope,
-                          detail::AttributeDocumentMode mode) -> ServiceResult<detail::SerializedAttributeDocument>
+                          detail::AttributeDocumentMode mode,
+                          std::optional<JobType>        type = std::nullopt)
+    -> ServiceResult<detail::SerializedAttributeDocument>
 {
-    auto serialized = detail::encode_and_serialize_attribute_document(attributes, values, scope, mode);
+    auto serialized = detail::encode_and_serialize_attribute_document(attributes, values, scope, mode, type);
     if (!serialized) {
         return ServiceResult<detail::SerializedAttributeDocument>::failure(std::move(serialized).error());
     }
@@ -1439,6 +1442,10 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
     if (!partial_attributes) {
         return ServiceResult<JobDefinition>::failure(std::move(partial_attributes).error());
     }
+    auto applicable = validate_job_attributes(data->attributes, request.attributes, request.type);
+    if (!applicable) {
+        return ServiceResult<JobDefinition>::failure(std::move(applicable).error());
+    }
     auto idempotency = validate_idempotency_key(request.idempotency_key);
     if (!idempotency) {
         return ServiceResult<JobDefinition>::failure(std::move(idempotency).error());
@@ -1583,15 +1590,19 @@ auto ManagementService::create_job_impl(CreateJobRequest request) -> jb::core::R
         schedule   = cron_schedule;
     }
 
-    auto materialized =
-        materialize_attributes(data->attributes, data->options.daemon_defaults, queue.defaults, request.attributes);
+    auto materialized = materialize_attributes(data->attributes,
+                                               request.type,
+                                               data->options.daemon_defaults,
+                                               queue.defaults,
+                                               request.attributes);
     if (!materialized) {
         return ServiceResult<JobDefinition>::failure(std::move(materialized).error());
     }
     auto serialized_attributes = serialize_attributes(data->attributes,
                                                       *materialized,
                                                       AttributeScope::Job,
-                                                      detail::AttributeDocumentMode::Materialized);
+                                                      detail::AttributeDocumentMode::Materialized,
+                                                      request.type);
     if (!serialized_attributes) {
         return ServiceResult<JobDefinition>::failure(std::move(serialized_attributes).error());
     }
@@ -1973,6 +1984,17 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
         return ServiceResult<JobDefinition>::failure(schedule_refresh_conflict());
     }
 
+    auto applicable = validate_job_attributes(data->attributes, request.attribute_changes, replacement.type);
+    if (!applicable) {
+        return ServiceResult<JobDefinition>::failure(std::move(applicable).error());
+    }
+
+    // A successful definition update stores only this runner's policy. Retain captured applicable values rather
+    // than applying today's daemon/queue defaults. Revision and eligible successor changes commit together below.
+    std::erase_if(replacement.attributes, [&](auto const& entry) {
+        return !attribute_applies_to(*data->attributes.find(entry.first), replacement.type);
+    });
+
     if (request.name) {
         replacement.name = std::move(*request.name);
     }
@@ -2011,7 +2033,8 @@ auto ManagementService::update_job_impl(UpdateJobRequest request) -> jb::core::R
     auto serialized_attributes = serialize_attributes(data->attributes,
                                                       replacement.attributes,
                                                       AttributeScope::Job,
-                                                      detail::AttributeDocumentMode::Materialized);
+                                                      detail::AttributeDocumentMode::Materialized,
+                                                      replacement.type);
     if (!serialized_attributes) {
         return ServiceResult<JobDefinition>::failure(std::move(serialized_attributes).error());
     }

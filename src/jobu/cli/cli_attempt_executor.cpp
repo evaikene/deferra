@@ -133,7 +133,7 @@ auto decode_capture_mode(std::string const& value) -> std::optional<jb::jobu::de
 auto decode_execution_policy(AttributeSet const& attributes, StandardAttributeRegistry const& registry)
     -> ExecutorResult<CliExecutionPolicy>
 {
-    auto validated = registry.validate_materialized(attributes);
+    auto validated = registry.validate_materialized(attributes, JobType::Cli);
     if (!validated) {
         return ExecutorResult<CliExecutionPolicy>::failure(invalid_snapshot("attributes.invalid"));
     }
@@ -299,7 +299,7 @@ struct CliAttemptExecutor::Private : jb::core::priv::ObjectPrivate {
             .timeout           = policy->timeout,
             .termination_grace = policy->termination_grace,
             .require_non_root  = !options.allow_root,
-#if defined(__linux__)
+#ifdef __linux__
             .prevent_privilege_gain = true,
 #else
             .prevent_privilege_gain = false,

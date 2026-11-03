@@ -278,7 +278,7 @@ auto delete_terminal_chunk(jb::db::Database&               database,
         }
         sql += ":id" + std::to_string(index);
     }
-    sql += ")";
+    sql += ')';
 
     jb::db::Query query{database};
     auto          prepared = query.prepare(sql);
@@ -336,7 +336,8 @@ auto RunRepository::insert_schedule_owned(JobRun const& run, InitialRunMeasureme
     auto attributes = encode_and_serialize_attribute_document(_attributes,
                                                               run.attributes,
                                                               AttributeScope::Job,
-                                                              AttributeDocumentMode::Materialized);
+                                                              AttributeDocumentMode::Materialized,
+                                                              run.type);
     if (!attributes) {
         return RepositoryResult<void>::failure(std::move(attributes).error());
     }
@@ -534,7 +535,8 @@ auto RunRepository::insert_manual(JobRun const& run, InitialRunMeasurement measu
     auto attributes = encode_and_serialize_attribute_document(_attributes,
                                                               run.attributes,
                                                               AttributeScope::Job,
-                                                              AttributeDocumentMode::Materialized);
+                                                              AttributeDocumentMode::Materialized,
+                                                              run.type);
     if (!attributes) {
         return RepositoryResult<void>::failure(std::move(attributes).error());
     }
@@ -734,7 +736,8 @@ auto RunRepository::refresh_unstarted_schedule_owned(jb::core::Uuid const& job_i
     auto attributes = encode_and_serialize_attribute_document(_attributes,
                                                               snapshot.attributes,
                                                               AttributeScope::Job,
-                                                              AttributeDocumentMode::Materialized);
+                                                              AttributeDocumentMode::Materialized,
+                                                              snapshot.type);
     if (!attributes) {
         return RepositoryResult<bool>::failure(std::move(attributes).error());
     }

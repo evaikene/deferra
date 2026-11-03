@@ -133,7 +133,7 @@ auto maximum_header_payload() -> JsonValue
 auto materialized_attributes(AttributeSet const& overrides = {}) -> AttributeSet
 {
     StandardAttributeRegistry registry;
-    auto                      attributes = materialize_attributes(registry, {}, {}, overrides);
+    auto                      attributes = materialize_attributes(registry, JobType::Http, {}, {}, overrides);
     REQUIRE(attributes);
     return std::move(attributes).value();
 }

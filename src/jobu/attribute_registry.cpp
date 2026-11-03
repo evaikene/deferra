@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 #include <variant>
@@ -148,18 +149,32 @@ auto validate_standard_cross_fields(AttributeRegistry const& registry, Attribute
     return validate_http_cross_fields(registry, values);
 }
 
-auto validate_complete_set(AttributeRegistry const& registry, AttributeSet const& values) -> AttributeResult
+auto validate_complete_set(AttributeRegistry const& registry,
+                           AttributeSet const&      values,
+                           std::optional<JobType>   type = std::nullopt) -> AttributeResult
 {
     auto validated = validate_set(registry, values, AttributeScope::Job);
     if (!validated) {
         return validated;
     }
     for (auto const& definition : registry.definitions()) {
-        if (definition.scopes.test(AttributeScope::Job) && !values.contains(definition.name)) {
+        if (definition.scopes.test(AttributeScope::Job) && (!type || attribute_applies_to(definition, *type)) &&
+            !values.contains(definition.name)) {
             return AttributeResult::failure(invalid_value("Materialized JobU attributes are incomplete"));
         }
     }
-    return validate_standard_cross_fields(registry, values);
+    if (!type) {
+        return validate_standard_cross_fields(registry, values);
+    }
+
+    // Legacy snapshots can retain another runner's policy. Check relationships only in the applicable view.
+    auto applicable = AttributeSet{};
+    for (auto const& [name, value] : values) {
+        if (attribute_applies_to(*registry.find(name), *type)) {
+            applicable.emplace(name, value);
+        }
+    }
+    return validate_standard_cross_fields(registry, applicable);
 }
 
 auto is_one_of(std::string const& value, std::initializer_list<std::string_view> choices) -> bool
@@ -473,30 +488,35 @@ StandardAttributeRegistry::StandardAttributeRegistry()
                   .scopes           = standard_scopes(),
                   .built_in_default = {.data = AttributeValue::List{{.data = std::string{"0-255"}}}},
                   .description      = "Unexpected CLI exit codes eligible for retry",
+                  .applicability    = AttributeApplicability::Cli,
               }, {
                   .name             = "cli.termination_grace",
                   .type             = AttributeType::Duration,
                   .scopes           = standard_scopes(),
                   .built_in_default = {.data = std::chrono::duration_cast<jb::core::Duration>(std::chrono::seconds{5})},
                   .description      = "Grace period between CLI termination and forced process-group cleanup",
+                  .applicability    = AttributeApplicability::Cli,
               }, {
                   .name             = "http.follow_redirects",
                   .type             = AttributeType::Boolean,
                   .scopes           = standard_scopes(),
                   .built_in_default = {.data = false},
                   .description      = "Whether HTTP redirects are followed",
+                  .applicability    = AttributeApplicability::Http,
               }, {
                   .name             = "http.idempotency_key",
                   .type             = AttributeType::Boolean,
                   .scopes           = standard_scopes(),
                   .built_in_default = {.data = false},
                   .description      = "Whether HTTP execution injects the run identifier as an idempotency key",
+                  .applicability    = AttributeApplicability::Http,
               }, {
                   .name             = "http.max_redirects",
                   .type             = AttributeType::Integer,
                   .scopes           = standard_scopes(),
                   .built_in_default = {.data = std::int64_t{5}},
                   .description      = "Maximum number of HTTP redirects",
+                  .applicability    = AttributeApplicability::Http,
               }, {
                   .name             = "http.retry_errors",
                   .type             = AttributeType::List,
@@ -511,6 +531,7 @@ StandardAttributeRegistry::StandardAttributeRegistry()
                                                {.data = std::string{"receive"}},
                                            }},
                   .description      = "HTTP transport error categories eligible for retry",
+                  .applicability    = AttributeApplicability::Http,
               }, {
                   .name             = "http.retry_statuses",
                   .type             = AttributeType::List,
@@ -522,12 +543,14 @@ StandardAttributeRegistry::StandardAttributeRegistry()
                                                {.data = std::string{"500-599"}},
                                            }},
                   .description      = "Unexpected HTTP response statuses eligible for retry",
+                  .applicability    = AttributeApplicability::Http,
               }, {
                   .name             = "http.tls_verify",
                   .type             = AttributeType::Boolean,
                   .scopes           = standard_scopes(),
                   .built_in_default = {.data = true},
                   .description      = "Whether HTTP TLS certificates and hostnames are verified",
+                  .applicability    = AttributeApplicability::Http,
               }, {
                   .name             = "job.timeout",
                   .type             = AttributeType::Duration,
@@ -547,24 +570,28 @@ StandardAttributeRegistry::StandardAttributeRegistry()
                   .scopes           = standard_scopes(),
                   .built_in_default = {.data = kDefaultOutputLimitBytes},
                   .description      = "Maximum captured HTTP response body bytes",
+                  .applicability    = AttributeApplicability::Http,
               }, {
                   .name             = "output.http_headers_limit",
                   .type             = AttributeType::Integer,
                   .scopes           = standard_scopes(),
                   .built_in_default = {.data = std::int64_t{64} * 1024},
                   .description      = "Maximum captured raw HTTP response header bytes",
+                  .applicability    = AttributeApplicability::Http,
               }, {
                   .name             = "output.stderr_limit",
                   .type             = AttributeType::Integer,
                   .scopes           = standard_scopes(),
                   .built_in_default = {.data = kDefaultOutputLimitBytes},
                   .description      = "Maximum captured standard error bytes",
+                  .applicability    = AttributeApplicability::Cli,
               }, {
                   .name             = "output.stdout_limit",
                   .type             = AttributeType::Integer,
                   .scopes           = standard_scopes(),
                   .built_in_default = {.data = kDefaultOutputLimitBytes},
                   .description      = "Maximum captured standard output bytes",
+                  .applicability    = AttributeApplicability::Cli,
               }, {
                   .name             = "retry.initial_delay",
                   .type             = AttributeType::Duration,
@@ -759,10 +786,54 @@ auto StandardAttributeRegistry::validate_materialized(AttributeSet const& values
     return validate_complete_set(*this, values);
 }
 
-auto materialize_attributes(AttributeRegistry const& registry,
-                            AttributeSet const&      daemon_defaults,
-                            AttributeSet const&      queue_defaults,
-                            AttributeSet const&      job_values) -> jb::core::Result<AttributeSet, jb::core::Error>
+auto attribute_applies_to(AttributeDefinition const& definition, JobType type) noexcept -> bool
+{
+    switch (type) {
+        case JobType::Cli:
+            return definition.applicability == AttributeApplicability::Both ||
+                   definition.applicability == AttributeApplicability::Cli;
+        case JobType::Http:
+            return definition.applicability == AttributeApplicability::Both ||
+                   definition.applicability == AttributeApplicability::Http;
+    }
+    return false;
+}
+
+auto validate_job_attributes(AttributeRegistry const& registry, AttributeSet const& values, JobType type)
+    -> jb::core::Result<void, jb::core::Error>
+{
+    auto validated = validate_set(registry, values, AttributeScope::Job);
+    if (!validated) {
+        return validated;
+    }
+    for (auto const& [name, value] : values) {
+        if (!attribute_applies_to(*registry.find(name), type)) {
+            return AttributeResult::failure(
+                attribute_error("jobu.attribute.invalid_runner", "JobU attribute does not apply to this runner"));
+        }
+    }
+    return validate_standard_cross_fields(registry, values);
+}
+
+auto validate_materialized_attributes(AttributeRegistry const& registry, AttributeSet const& values, JobType type)
+    -> jb::core::Result<void, jb::core::Error>
+{
+    return validate_complete_set(registry, values, type);
+}
+
+auto StandardAttributeRegistry::validate_materialized(AttributeSet const& values, JobType type) const
+    -> jb::core::Result<void, jb::core::Error>
+{
+    return validate_materialized_attributes(*this, values, type);
+}
+
+namespace {
+
+auto materialize_attributes_impl(AttributeRegistry const& registry,
+                                 AttributeSet const&      daemon_defaults,
+                                 AttributeSet const&      queue_defaults,
+                                 AttributeSet const&      job_values,
+                                 std::optional<JobType>   type) -> jb::core::Result<AttributeSet, jb::core::Error>
 {
     for (auto const& [values, scope] : {
              std::pair{&daemon_defaults, AttributeScope::DaemonDefault},
@@ -775,11 +846,18 @@ auto materialize_attributes(AttributeRegistry const& registry,
         }
     }
 
+    if (type) {
+        auto validated = validate_job_attributes(registry, job_values, *type);
+        if (!validated) {
+            return Result<AttributeSet>::failure(std::move(validated).error());
+        }
+    }
+
     // Seed built-ins, then apply daemon, queue, and job layers from least to
     // most specific before validating the completed cross-field policy.
     auto result = AttributeSet{};
     for (auto const& definition : registry.definitions()) {
-        if (!definition.scopes.test(AttributeScope::Job)) {
+        if (!definition.scopes.test(AttributeScope::Job) || (type && !attribute_applies_to(definition, *type))) {
             continue;
         }
         auto validated = registry.validate(definition.name, definition.built_in_default, AttributeScope::Job);
@@ -790,15 +868,36 @@ auto materialize_attributes(AttributeRegistry const& registry,
     }
     for (auto const* layer : {&daemon_defaults, &queue_defaults, &job_values}) {
         for (auto const& [name, value] : *layer) {
-            result.insert_or_assign(name, value);
+            if (!type || attribute_applies_to(*registry.find(name), *type)) {
+                result.insert_or_assign(name, value);
+            }
         }
     }
 
-    auto validated = validate_complete_set(registry, result);
+    auto validated = validate_complete_set(registry, result, type);
     if (!validated) {
         return Result<AttributeSet>::failure(std::move(validated).error());
     }
     return Result<AttributeSet>::success(std::move(result));
+}
+
+} // anonymous namespace
+
+auto materialize_attributes(AttributeRegistry const& registry,
+                            AttributeSet const&      daemon_defaults,
+                            AttributeSet const&      queue_defaults,
+                            AttributeSet const&      job_values) -> jb::core::Result<AttributeSet, jb::core::Error>
+{
+    return materialize_attributes_impl(registry, daemon_defaults, queue_defaults, job_values, std::nullopt);
+}
+
+auto materialize_attributes(AttributeRegistry const& registry,
+                            JobType                  type,
+                            AttributeSet const&      daemon_defaults,
+                            AttributeSet const&      queue_defaults,
+                            AttributeSet const&      job_values) -> jb::core::Result<AttributeSet, jb::core::Error>
+{
+    return materialize_attributes_impl(registry, daemon_defaults, queue_defaults, job_values, type);
 }
 
 auto attribute_set_to_json(AttributeSet const& values, AttributeRegistry const& registry, AttributeScope scope)

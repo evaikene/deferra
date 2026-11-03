@@ -555,7 +555,7 @@ TEST_CASE("Every distinct typed result decodes into its public reply alternative
     auto at = parse_utc_timestamp("2026-07-21T21:00:00Z");
     REQUIRE(id);
     REQUIRE(at);
-    auto attributes = materialize_attributes(fixture.attributes, {}, {}, {});
+    auto attributes = materialize_attributes(fixture.attributes, JobType::Cli, {}, {}, {});
     REQUIRE(attributes);
 
     auto queue       = Queue{.id = *id, .name = "queue", .created_at = *at, .updated_at = *at};

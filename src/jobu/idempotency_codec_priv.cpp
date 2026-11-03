@@ -404,12 +404,12 @@ auto decode_attributes(jb::core::JsonValue const& value, AttributeRegistry const
     return CodecResult<AttributeSet>::success(std::move(decoded).value());
 }
 
-auto require_materialized(AttributeSet const& values, AttributeRegistry const& attributes) -> CodecResult<void>
+auto require_materialized(AttributeSet const& values, AttributeRegistry const& attributes, JobType type)
+    -> CodecResult<void>
 {
-    for (auto const& definition : attributes.definitions()) {
-        if (definition.scopes.test(AttributeScope::Job) && !values.contains(definition.name)) {
-            return CodecResult<void>::failure(invalid_record("incomplete_attributes"));
-        }
+    // Replay must accept the same complete runner policy as the committed job/run reply, including legacy extras.
+    if (!validate_materialized_attributes(attributes, values, type)) {
+        return CodecResult<void>::failure(invalid_record("incomplete_attributes"));
     }
     return CodecResult<void>::success();
 }
@@ -805,7 +805,7 @@ auto decode_job_idempotency_result(std::string_view result_json, AttributeRegist
         !deleted || deleted->has_value() || *created != *updated || !valid_payload(*type, (**object).at("payload"))) {
         return CodecResult<JobDefinition>::failure(invalid_record("invalid_job_result"));
     }
-    auto complete = require_materialized(*decoded_attributes, attributes);
+    auto complete = require_materialized(*decoded_attributes, attributes, *type);
     if (!complete) {
         return CodecResult<JobDefinition>::failure(std::move(complete).error());
     }
@@ -873,7 +873,7 @@ auto encode_run_now_idempotency_result(JobRun const& run, AttributeRegistry cons
         !valid_payload(run.type, run.payload)) {
         return CodecResult<std::string>::failure(invalid_record("invalid_run_now_result"));
     }
-    auto complete = require_materialized(run.attributes, attributes);
+    auto complete = require_materialized(run.attributes, attributes, run.type);
     if (!complete) {
         return CodecResult<std::string>::failure(std::move(complete).error());
     }
@@ -948,7 +948,7 @@ auto decode_run_now_idempotency_result(std::string_view result_json, AttributeRe
         !valid_payload(*type, (**object).at("payload"))) {
         return CodecResult<JobRun>::failure(invalid_record("invalid_run_now_result"));
     }
-    auto complete = require_materialized(*decoded_attributes, attributes);
+    auto complete = require_materialized(*decoded_attributes, attributes, *type);
     if (!complete) {
         return CodecResult<JobRun>::failure(std::move(complete).error());
     }

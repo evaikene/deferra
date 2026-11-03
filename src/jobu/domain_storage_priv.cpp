@@ -547,7 +547,8 @@ auto read_job_run(jb::db::Record const& record, AttributeRegistry const& attribu
     auto decoded_attributes = decode_attribute_document(attributes,
                                                         *attributes_json,
                                                         AttributeScope::Job,
-                                                        AttributeDocumentMode::Materialized);
+                                                        AttributeDocumentMode::Materialized,
+                                                        *type);
     if (!decoded_attributes) {
         return StorageResult<JobRun>::failure(std::move(decoded_attributes).error());
     }

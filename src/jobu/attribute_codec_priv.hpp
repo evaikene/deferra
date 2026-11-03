@@ -1,10 +1,12 @@
 #pragma once
 
 #include "attribute.hpp"
+#include "job.hpp"
 #include "json.hpp"
 #include "result.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -31,7 +33,8 @@ private:
     friend auto encode_and_serialize_attribute_document(AttributeRegistry const& registry,
                                                         AttributeSet const&      values,
                                                         AttributeScope           scope,
-                                                        AttributeDocumentMode    mode)
+                                                        AttributeDocumentMode    mode,
+                                                        std::optional<JobType>   type)
         -> jb::core::Result<SerializedAttributeDocument, jb::core::Error>;
 
     std::string _serialized;
@@ -40,19 +43,22 @@ private:
 [[nodiscard]] auto encode_attribute_document(AttributeRegistry const& registry,
                                              AttributeSet const&      values,
                                              AttributeScope           scope,
-                                             AttributeDocumentMode    mode)
+                                             AttributeDocumentMode    mode,
+                                             std::optional<JobType>   type = std::nullopt)
     -> jb::core::Result<jb::core::JsonValue, jb::core::Error>;
 
 [[nodiscard]] auto encode_and_serialize_attribute_document(AttributeRegistry const& registry,
                                                            AttributeSet const&      values,
                                                            AttributeScope           scope,
-                                                           AttributeDocumentMode    mode)
+                                                           AttributeDocumentMode    mode,
+                                                           std::optional<JobType>   type = std::nullopt)
     -> jb::core::Result<SerializedAttributeDocument, jb::core::Error>;
 
 [[nodiscard]] auto decode_attribute_document(AttributeRegistry const&   registry,
                                              jb::core::JsonValue const& document,
                                              AttributeScope             scope,
-                                             AttributeDocumentMode      mode)
+                                             AttributeDocumentMode      mode,
+                                             std::optional<JobType>     type = std::nullopt)
     -> jb::core::Result<AttributeSet, jb::core::Error>;
 
 } // namespace jb::jobu::detail

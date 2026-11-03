@@ -832,6 +832,9 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
         CHECK(created.name == "rpc-job");
         CHECK(created.state == JobState::Active);
         CHECK(created.priority == 1);
+        CHECK(created.attributes.size() == 13U);
+        CHECK_FALSE(created.attributes.contains("http.tls_verify"));
+        CHECK_FALSE(created.attributes.contains("output.http_body_limit"));
         CHECK(std::get<std::int64_t>(created.attributes.at("retry.max_attempts").data) == 4);
         CHECK(created.payload == create_request.payload);
         CHECK(rescans.request_count() == 3U);
@@ -852,6 +855,19 @@ TEST_CASE("Job management RPC completes revisions idempotency and a durable life
         REQUIRE(page->items.size() == 1U);
         CHECK(page->items.front().id == job_id);
         CHECK_FALSE(page->next_after_id);
+        CHECK(rescans.request_count() == 3U);
+
+        auto const before_rejection = storage_snapshot(fixture.database);
+        auto wrong_runner = update_job_request_to_json({.job_id            = job_id,
+                                                        .expected_revision = 1,
+                                                        .name              = "rejected",
+                                                        .attribute_changes = {{"http.tls_verify", {.data = false}}}},
+                                                       fixture.registry);
+        REQUIRE(wrong_runner);
+        require_application_error(endpoint.call("job.update", *wrong_runner),
+                                  "invalid_argument",
+                                  "jobu.attribute.invalid_runner");
+        CHECK(storage_snapshot(fixture.database) == before_rejection);
         CHECK(rescans.request_count() == 3U);
 
         auto update_params = update_job_request_to_json(
