@@ -1096,6 +1096,10 @@ add_executable(jobuctl-queue-edit-test jobuctl-queue-edit-test.cpp)
 target_link_libraries(jobuctl-queue-edit-test PRIVATE jobuctl-private Catch2::Catch2WithMain)
 add_test(NAME jobuctl-queue-edit-test COMMAND $<TARGET_FILE:jobuctl-queue-edit-test>)
 
+add_executable(core-command-argv-test core-command-argv-test.cpp)
+target_link_libraries(core-command-argv-test PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME core-command-argv-test COMMAND $<TARGET_FILE:core-command-argv-test>)
+
 add_executable(jobuctl-command-argv-test jobuctl-command-argv-test.cpp)
 target_link_libraries(jobuctl-command-argv-test PRIVATE jobuctl-private Catch2::Catch2WithMain)
 add_test(NAME jobuctl-command-argv-test COMMAND $<TARGET_FILE:jobuctl-command-argv-test>)

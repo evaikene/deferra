@@ -12,6 +12,7 @@ set_property(GLOBAL PROPERTY JOBU_JSON_VERSION "${nlohmann_json_VERSION}")
 set(HDRS
     application.hpp
     byte_buffer.hpp
+    command_argv.hpp
     command_line_parser.hpp
     connection.hpp
     error.hpp
@@ -58,6 +59,7 @@ set(PRIV_HDRS
 # Library source files
 set(SRCS
     application.cpp
+    command_argv.cpp
     command_line_parser.cpp
     event_loop.cpp
     event_thread.cpp

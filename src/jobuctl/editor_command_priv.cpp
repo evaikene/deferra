@@ -1,6 +1,6 @@
 #include "editor_command_priv.hpp"
 
-#include "command_argv_priv.hpp"
+#include "command_argv.hpp"
 
 #include <fmt/format.h>
 
@@ -26,7 +26,7 @@ auto resolve_editor_command(EditorCommandInputs const& inputs)
         source  = "EDITOR";
     }
 
-    auto arguments = parse_command_argv(command);
+    auto arguments = jb::core::parse_command_argv(command);
     if (!arguments) {
         auto error    = std::move(arguments).error();
         error.code    = "jobuctl.editor.invalid_command";

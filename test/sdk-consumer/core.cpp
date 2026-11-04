@@ -1,7 +1,11 @@
 #include "core_check.hpp"
 
+#include <jb/core/command_argv.hpp>
 #include <jb/core/json.hpp>
 #include <jb/core/object.hpp>
+
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -30,6 +34,12 @@ auto check_core_sdk() -> int
     auto commented = jb::core::parse_json_with_comments("// SDK consumer\n{\"answer\":42}");
     if (!commented || *commented != *parsed || jb::core::parse_json("// SDK consumer\n{\"answer\":42}")) {
         return 4;
+    }
+
+    // Exercise the installed tokenizer's compiled symbol through Core alone, including the shared-library consumer.
+    auto arguments = jb::core::parse_command_argv(R"("/opt/My Tools/worker" --verbose '')");
+    if (!arguments || *arguments != std::vector<std::string>{"/opt/My Tools/worker", "--verbose", ""}) {
+        return 5;
     }
 
     int              observed = 0;
