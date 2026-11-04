@@ -1,0 +1,64 @@
+cmake_minimum_required(VERSION 3.20)
+
+set(fixture "@CMAKE_CURRENT_BINARY_DIR@/install-layout-fixture")
+file(REMOVE_RECURSE "${fixture}")
+file(MAKE_DIRECTORY "${fixture}")
+set(configuration_arguments)
+if(NOT "${test_configuration}" STREQUAL "")
+    list(APPEND configuration_arguments --config "${test_configuration}")
+endif()
+
+function(run_checked label)
+    execute_process(COMMAND ${ARGN} RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    file(WRITE "${fixture}/${label}.log" "${output}\n${error}")
+    if(NOT "${result}" STREQUAL "0")
+        message(FATAL_ERROR "${label} failed; see ${fixture}/${label}.log\n${output}\n${error}")
+    endif()
+endfunction()
+
+foreach(case absolute-library absolute-headers parent-library parent-headers)
+    set(build "${fixture}/${case}")
+    set(library_directory lib)
+    set(include_directory include)
+    if(case STREQUAL "absolute-library")
+        set(library_directory "${fixture}/operator-library")
+    elseif(case STREQUAL "absolute-headers")
+        set(include_directory "${fixture}/operator-headers")
+    elseif(case STREQUAL "parent-library")
+        set(library_directory ../../../../operator-library)
+    elseif(case STREQUAL "parent-headers")
+        set(include_directory ../../../../operator-headers)
+    endif()
+
+    # Every hypothetical escape stays inside this outer fixture, even if the
+    # guard regresses. Build the archive so an accidental install could succeed.
+    run_checked("${case}-configure" "@CMAKE_COMMAND@" -S "@phpcxx_source@" -B "${build}"
+        -G "@CMAKE_GENERATOR@" "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+        "-DCMAKE_BUILD_TYPE=@CMAKE_BUILD_TYPE@" "-DPHP_CONFIG=@php_config@" -DBUILD_TESTING=ON
+        "-DCMAKE_INSTALL_LIBDIR=${library_directory}" "-DCMAKE_INSTALL_INCLUDEDIR=${include_directory}")
+    run_checked("${case}-build" "@CMAKE_COMMAND@" --build "${build}" --target php-cxx
+        ${configuration_arguments})
+
+    # Unsupported layouts must return before cleanup as well as installation.
+    # A future guard failure must not silently delete existing fixture contents.
+    set(contract_fixture "${build}/test/build-contract-fixture")
+    file(MAKE_DIRECTORY "${contract_fixture}")
+    file(WRITE "${contract_fixture}/sentinel" "preserve this fixture\n")
+    execute_process(COMMAND "@CMAKE_CTEST_COMMAND@" --test-dir "${build}/test"
+        -C "${test_configuration}" -R "^php-cxx-build-contract-test$" --verbose
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    file(WRITE "${fixture}/${case}-test.log" "${output}\n${error}")
+    if(NOT "${result}" STREQUAL "0" OR NOT output MATCHES "Unsupported php-cxx install-test layout:"
+        OR NOT output MATCHES "Skipped")
+        message(FATAL_ERROR "${case}: expected an explicit skip before installation\n${output}\n${error}")
+    endif()
+    file(READ "${contract_fixture}/sentinel" sentinel)
+    file(GLOB entries RELATIVE "${contract_fixture}" "${contract_fixture}/*")
+    if(NOT sentinel STREQUAL "preserve this fixture\n" OR NOT entries STREQUAL "sentinel")
+        message(FATAL_ERROR "${case}: unsupported layout modified the install fixture")
+    endif()
+endforeach()
+
+if(EXISTS "${fixture}/operator-library" OR EXISTS "${fixture}/operator-headers")
+    message(FATAL_ERROR "Unsupported layout wrote outside its install fixture")
+endif()

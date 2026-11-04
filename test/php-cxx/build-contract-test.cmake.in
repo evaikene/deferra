@@ -1,5 +1,17 @@
 cmake_minimum_required(VERSION 3.20)
 
+# --prefix cannot redirect absolute destinations, and parent traversal can
+# escape the staging prefix. Check every install destination before touching it.
+set(library_directory [==[@CMAKE_INSTALL_LIBDIR@]==])
+set(header_directory [==[@CMAKE_INSTALL_INCLUDEDIR@/phpcxx]==])
+set(sdk_directory "${library_directory}/cmake/PhpCxx")
+foreach(directory library_directory header_directory sdk_directory)
+    if(IS_ABSOLUTE "${${directory}}" OR "${${directory}}" MATCHES "(^|/)[.][.](/|$)")
+        message(STATUS "Unsupported php-cxx install-test layout: ${directory} is not prefix-relative")
+        return()
+    endif()
+endforeach()
+
 set(fixture "@CMAKE_CURRENT_BINARY_DIR@/build-contract-fixture")
 file(REMOVE_RECURSE "${fixture}")
 file(MAKE_DIRECTORY "${fixture}")

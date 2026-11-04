@@ -24,4 +24,10 @@ add_test(NAME php-cxx-module-test COMMAND "${php_binary}" -n
 configure_file(build-contract-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/build-contract-test.cmake" @ONLY)
 add_test(NAME php-cxx-build-contract-test COMMAND ${CMAKE_COMMAND}
     "-Dtest_configuration=$<CONFIG>" -P "${CMAKE_CURRENT_BINARY_DIR}/build-contract-test.cmake")
-set_tests_properties(php-cxx-build-contract-test PROPERTIES TIMEOUT 180)
+set_tests_properties(php-cxx-build-contract-test PROPERTIES TIMEOUT 180
+    SKIP_REGULAR_EXPRESSION "Unsupported php-cxx install-test layout:")
+
+configure_file(install-layout-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/install-layout-test.cmake" @ONLY)
+add_test(NAME php-cxx-install-layout-test COMMAND ${CMAKE_COMMAND}
+    "-Dtest_configuration=$<CONFIG>" -P "${CMAKE_CURRENT_BINARY_DIR}/install-layout-test.cmake")
+set_tests_properties(php-cxx-install-layout-test PROPERTIES TIMEOUT 120)
