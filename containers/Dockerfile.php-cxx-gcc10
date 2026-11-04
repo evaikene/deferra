@@ -1,0 +1,12 @@
+FROM ubuntu:22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        cmake \
+        g++-10 \
+        ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CC=gcc-10 CXX=g++-10

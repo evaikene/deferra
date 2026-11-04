@@ -1,0 +1,21 @@
+cmake_minimum_required(VERSION 3.20)
+set(fixture "@CMAKE_CURRENT_BINARY_DIR@/php-cxx-default-fixture")
+file(REMOVE_RECURSE "${fixture}")
+file(MAKE_DIRECTORY "${fixture}")
+file(WRITE "${fixture}/php-config" "#!/bin/sh\nprintf called > '${fixture}/called'\nexit 1\n")
+file(CHMOD "${fixture}/php-config" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+execute_process(COMMAND "@CMAKE_COMMAND@" -S "@PROJECT_SOURCE_DIR@" -B "${fixture}/build"
+    -G "@CMAKE_GENERATOR@" "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+    "-DCMAKE_PREFIX_PATH=@CMAKE_PREFIX_PATH@" "-Dfmt_DIR=@fmt_DIR@"
+    "-Dnlohmann_json_DIR=@nlohmann_json_DIR@" "-DOPENSSL_ROOT_DIR=@OPENSSL_ROOT_DIR@"
+    "-DJB_BUILD_SQLITE_DRIVER=@JB_BUILD_SQLITE_DRIVER@" "-DSQLite3_DIR=@SQLite3_DIR@" "-DCURL_DIR=@CURL_DIR@"
+    -DBUILD_TESTING=OFF -DJB_BUILD_EXAMPLES=OFF "-DPHP_CONFIG=${fixture}/php-config"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+file(WRITE "${fixture}/configure.log" "${output}\n${error}")
+if(NOT "${result}" STREQUAL "0" OR EXISTS "${fixture}/called")
+    message(FATAL_ERROR "Default configuration failed or executed php-config: ${output}\n${error}")
+endif()
+file(STRINGS "${fixture}/build/CMakeCache.txt" option REGEX "^JB_BUILD_PHP_CPP:BOOL=")
+if(NOT option STREQUAL "JB_BUILD_PHP_CPP:BOOL=OFF")
+    message(FATAL_ERROR "PHP helper must default to OFF: ${option}")
+endif()

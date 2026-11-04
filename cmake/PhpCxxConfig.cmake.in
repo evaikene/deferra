@@ -1,0 +1,23 @@
+@PACKAGE_INIT@
+
+set(PhpCxx_FOUND TRUE)
+unset(PhpCxx_NOT_FOUND_MESSAGE)
+include("${CMAKE_CURRENT_LIST_DIR}/PhpConfig.cmake")
+phpcxx_find_php()
+if(NOT PHP_FOUND)
+    set(PhpCxx_FOUND FALSE)
+    set(PhpCxx_NOT_FOUND_MESSAGE "${PHP_NOT_FOUND_MESSAGE}")
+    return()
+endif()
+
+set(PhpCxx_PHP_ABI "@PHP_MODULE_API@;@PHP_DEBUG@;@PHP_ZTS@;@PHP_ZEND_LONG_SIZE@")
+if(NOT "${PHP_MODULE_API};${PHP_DEBUG};${PHP_ZTS};${PHP_ZEND_LONG_SIZE}" STREQUAL PhpCxx_PHP_ABI)
+    set(PhpCxx_FOUND FALSE)
+    set(PhpCxx_NOT_FOUND_MESSAGE
+        "PHP ABI mismatch: this php-cxx archive requires module API @PHP_MODULE_API@, debug=@PHP_DEBUG@, ZTS=@PHP_ZTS@, zend_long=@PHP_ZEND_LONG_SIZE@ bytes; select a matching PHP_CONFIG or rebuild php-cxx")
+    return()
+endif()
+
+phpcxx_add_php_target()
+include("${CMAKE_CURRENT_LIST_DIR}/PhpCxxTargets.cmake")
+check_required_components(PhpCxx)

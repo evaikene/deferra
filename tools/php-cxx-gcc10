@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if (( $# == 0 )); then
+    printf '%s\n' 'Usage: tools/php-cxx-gcc10 /path/to/php-config [...]' >&2
+    exit 2
+fi
+
+script_directory=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd -P)
+build_root=$repository_root/.bld-php-cxx-gcc10
+image=deferra-php-cxx:gcc10-ubuntu22.04
+
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+    printf '%s\n' "Missing image $image; build containers/Dockerfile.php-cxx-gcc10 first" >&2
+    exit 2
+fi
+mkdir -p "$build_root"
+
+case_number=0
+for config in "$@"; do
+    config=$(realpath -- "$config")
+    prefix=$("$config" --prefix)
+    if [[ $prefix != /* || ! -d $prefix ]]; then
+        printf '%s\n' "Invalid installation prefix from $config: $prefix" >&2
+        exit 2
+    fi
+
+    case_number=$((case_number + 1))
+    build=$build_root/php-$case_number
+    docker_arguments=(
+        --rm --network none
+        --user "$(id -u):$(id -g)"
+        --mount "type=bind,src=$repository_root,dst=$repository_root,readonly"
+        --mount "type=bind,src=$build_root,dst=$build_root"
+        --mount "type=bind,src=$prefix,dst=$prefix,readonly"
+        --workdir "$repository_root"
+    )
+
+    # This fixture compiles the library and both consumer translation units.
+    # It neither executes the host PHP nor links/runs an Embed test process.
+    docker run "${docker_arguments[@]}" "$image" cmake \
+        -S "$repository_root/test/php-cxx/consumer" -B "$build" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++-10 \
+        "-DPHPCXX_SOURCE_DIR=$repository_root/src/php-cxx" \
+        -DPHPCXX_CONSUMER_COMPILE_ONLY=ON "-DPHP_CONFIG=$config"
+    docker run "${docker_arguments[@]}" "$image" cmake --build "$build" --parallel 2
+done
