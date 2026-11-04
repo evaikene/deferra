@@ -1,5 +1,8 @@
 # Containerized Linux builds
 
+The independent PHP helper has a separate, compile-only GCC 10 environment;
+see [its build documentation](../docs/php-cxx.md#gcc-10-compilation-check).
+
 The `tools/container` wrapper provides versioned Ubuntu and Alpine development
 environments. It builds images from one shared Dockerfile per distribution and
 keeps each version's incremental build tree under the repository root.

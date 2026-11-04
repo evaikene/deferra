@@ -3,6 +3,14 @@ find_package(OpenSSL REQUIRED)
 
 enable_testing()
 
+# The default-build check uses a trap script rather than an installed PHP.
+configure_file(php-cxx/default-build-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/php-cxx-default-build-test.cmake" @ONLY)
+add_test(NAME php-cxx-default-build-test COMMAND ${CMAKE_COMMAND}
+    -P "${CMAKE_CURRENT_BINARY_DIR}/php-cxx-default-build-test.cmake")
+if(TARGET php-cxx)
+    add_subdirectory(php-cxx)
+endif()
+
 # Installation is checked in a fresh private prefix. No deployment identities or
 # service-manager access are required. The SDK gate uses independent consumers.
 get_property(JOBU_INSTALL_LIBRARIES GLOBAL PROPERTY JOBU_INSTALL_LIBRARIES)

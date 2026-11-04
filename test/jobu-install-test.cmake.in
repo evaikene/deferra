@@ -84,7 +84,19 @@ foreach(directory "${prefix}" "${prefix}/etc" "${prefix}/var" "${prefix}/var/lib
         message(FATAL_ERROR "Installation changed existing directory metadata: ${directory}")
     endif()
 endforeach()
-set(all_files ${runtime_files} ${development_files} ${documentation_files})
+# The helper has its own install component and package. A complete install also
+# includes it when enabled, while JobU's Development component stays independent.
+set(phpcxxdevelopment_files)
+if("@JB_BUILD_PHP_CPP@")
+    set(phpcxx_sdk_directory "${library_directory}/cmake/PhpCxx")
+    set(phpcxxdevelopment_files
+        "${include_directory}/phpcxx/build.hpp" "${include_directory}/phpcxx/zend.hpp"
+        "${library_directory}/@CMAKE_STATIC_LIBRARY_PREFIX@php-cxx@CMAKE_STATIC_LIBRARY_SUFFIX@"
+        "${phpcxx_sdk_directory}/PhpConfig.cmake" "${phpcxx_sdk_directory}/PhpCxxConfig.cmake"
+        "${phpcxx_sdk_directory}/PhpCxxConfigVersion.cmake" "${phpcxx_sdk_directory}/PhpCxxTargets.cmake"
+        "${phpcxx_sdk_directory}/PhpCxxTargets-${sdk_configuration}.cmake")
+endif()
+set(all_files ${runtime_files} ${development_files} ${documentation_files} ${phpcxxdevelopment_files})
 check_manifest("${prefix}" "${all_files};${operator_files}")
 check_documentation("${prefix}")
 check_runtime_guidance("${prefix}" "${build_directory}/jobu-generated")
@@ -123,7 +135,11 @@ if("jobud" IN_LIST applications)
     check_manifest("${prefix}" "${all_files};${operator_files}")
 endif()
 
-foreach(component Runtime Development Documentation)
+set(components Runtime Development Documentation)
+if("@JB_BUILD_PHP_CPP@")
+    list(APPEND components PhpCxxDevelopment)
+endif()
+foreach(component IN LISTS components)
     string(TOLOWER "${component}" component_name)
     set(component_prefix "${fixture}/${component_name}")
     install_to("${component_prefix}" "${component}")

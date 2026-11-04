@@ -1,0 +1,122 @@
+cmake_minimum_required(VERSION 3.20)
+
+set(fixture "@CMAKE_CURRENT_BINARY_DIR@/build-contract-fixture")
+file(REMOVE_RECURSE "${fixture}")
+file(MAKE_DIRECTORY "${fixture}")
+set(configuration_arguments)
+if(NOT "${test_configuration}" STREQUAL "")
+    list(APPEND configuration_arguments --config "${test_configuration}")
+endif()
+
+function(run_checked label)
+    execute_process(COMMAND ${ARGN} RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    file(WRITE "${fixture}/${label}.log" "${output}\n${error}")
+    if(NOT "${result}" STREQUAL "0")
+        message(FATAL_ERROR "${label} failed (${result}); see ${fixture}/${label}.log\n${output}\n${error}")
+    endif()
+endfunction()
+
+# Install only this helper, then relocate it before configuring the consumer.
+# The exported package must not rely on JobU or producer source/build paths.
+run_checked(install "@CMAKE_COMMAND@" --install "@phpcxx_build@" --prefix "${fixture}/prefix"
+    --component PhpCxxDevelopment ${configuration_arguments})
+file(RENAME "${fixture}/prefix" "${fixture}/relocated")
+file(COPY "@CMAKE_CURRENT_SOURCE_DIR@/consumer" DESTINATION "${fixture}")
+set(common_arguments -G "@CMAKE_GENERATOR@" "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+    "-DCMAKE_BUILD_TYPE=@CMAKE_BUILD_TYPE@" "-DPHP_CONFIG=@php_config@"
+    -DCMAKE_DISABLE_FIND_PACKAGE_fmt=ON -DCMAKE_DISABLE_FIND_PACKAGE_SQLite3=ON
+    -DCMAKE_DISABLE_FIND_PACKAGE_nlohmann_json=ON -DCMAKE_DISABLE_FIND_PACKAGE_Catch2=ON)
+foreach(mode installed build-tree)
+    set(arguments "-DCMAKE_PREFIX_PATH=${fixture}/relocated")
+    if(mode STREQUAL "build-tree")
+        list(APPEND arguments "-DPHPCXX_SOURCE_DIR=@phpcxx_source@")
+    endif()
+    run_checked("${mode}-configure" "@CMAKE_COMMAND@" -S "${fixture}/consumer" -B "${fixture}/${mode}"
+        ${common_arguments} ${arguments})
+    run_checked("${mode}-build" "@CMAKE_COMMAND@" --build "${fixture}/${mode}" ${configuration_arguments})
+    run_checked("${mode}-test" "@CMAKE_CTEST_COMMAND@" --test-dir "${fixture}/${mode}"
+        -C "${test_configuration}" --output-on-failure)
+endforeach()
+
+file(GLOB_RECURSE exports "${fixture}/relocated/*/cmake/PhpCxx/PhpCxxTargets*.cmake")
+foreach(export IN LISTS exports)
+    file(READ "${export}" content)
+    foreach(forbidden "@phpcxx_source@" "@phpcxx_build@" "${fixture}/prefix" "JobU::" "libphp." "sqlite")
+        string(FIND "${content}" "${forbidden}" position)
+        if(NOT position EQUAL -1)
+            message(FATAL_ERROR "Installed export leaks ${forbidden}: ${export}")
+        endif()
+    endforeach()
+endforeach()
+
+# Synthetic headers make error checks independent of other PHP installations.
+# The advertised CLI is intentionally unusable: discovery must only compile.
+set(fake_prefix "${fixture}/fake-php")
+set(fake_version 8.2.0)
+set(fake_version_id 80200)
+file(MAKE_DIRECTORY "${fake_prefix}/include/Zend")
+file(WRITE "${fake_prefix}/include/php.h"
+    "#define PHP_VERSION_ID 80200\n#define ZEND_DEBUG 0\nusing zend_long = long long;\n")
+file(WRITE "${fake_prefix}/include/Zend/zend_modules.h" "#define ZEND_MODULE_API_NO 20220829\n")
+function(write_fake_config)
+    configure_file("@CMAKE_CURRENT_SOURCE_DIR@/fake-php-config.sh.in" "${fake_prefix}/php-config" @ONLY
+        FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE)
+endfunction()
+write_fake_config()
+
+function(check_discovery label config expected_error)
+    execute_process(COMMAND "@CMAKE_COMMAND@" -S "@CMAKE_CURRENT_SOURCE_DIR@/discovery"
+        -B "${fixture}/${label}" -G "@CMAKE_GENERATOR@" "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+        "-DPHPCXX_CMAKE_MODULE=@phpcxx_source@/../../cmake/PhpConfig.cmake" "-DPHP_CONFIG=${config}"
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    file(WRITE "${fixture}/${label}.log" "${output}\n${error}")
+    if(expected_error STREQUAL "")
+        if(NOT "${result}" STREQUAL "0")
+            message(FATAL_ERROR "${label} failed: ${output}\n${error}")
+        endif()
+    elseif("${result}" STREQUAL "0" OR NOT "${output}\n${error}" MATCHES "${expected_error}")
+        message(FATAL_ERROR "${label}: expected ${expected_error}; got ${output}\n${error}")
+    endif()
+endfunction()
+
+check_discovery(header-only "${fake_prefix}/php-config" "")
+file(READ "${fixture}/header-only/php-metadata.txt" metadata)
+if(NOT metadata STREQUAL "20220829;0;0;8")
+    message(FATAL_ERROR "Incorrect release/NTS metadata: ${metadata}")
+endif()
+file(WRITE "${fake_prefix}/include/php.h"
+    "#define PHP_VERSION_ID 80200\n#define ZEND_DEBUG 1\n#define ZTS 1\nusing zend_long = long long;\n")
+check_discovery(header-only "${fake_prefix}/php-config" "")
+file(READ "${fixture}/header-only/php-metadata.txt" metadata)
+if(NOT metadata STREQUAL "20220829;1;1;8")
+    message(FATAL_ERROR "Discovery reused stale debug/ZTS metadata: ${metadata}")
+endif()
+check_discovery(missing-tool "${fixture}/missing-php-config" "set PHP_CONFIG")
+file(WRITE "${fake_prefix}/broken-config" "#!/bin/sh\nexit 42\n")
+file(CHMOD "${fake_prefix}/broken-config" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+check_discovery(broken-tool "${fake_prefix}/broken-config" "failed .42.")
+set(fake_version 8.0.0)
+set(fake_version_id 80000)
+write_fake_config()
+check_discovery(old-php "${fake_prefix}/php-config" "requires PHP 8.1 or newer")
+set(fake_version 8.2.1)
+set(fake_version_id 80201)
+write_fake_config()
+check_discovery(mixed-headers "${fake_prefix}/php-config" "headers cannot compile")
+set(fake_version_id 80200)
+write_fake_config()
+file(WRITE "${fake_prefix}/include/php.h"
+    "#define PHP_VERSION_ID 80200\n#define ZEND_DEBUG 0\nusing zend_long = int;\n")
+check_discovery(narrow-integers "${fake_prefix}/php-config" "64-bit zend_long")
+file(WRITE "${fake_prefix}/include/php.h"
+    "#define PHP_VERSION_ID 80200\n#define ZEND_DEBUG 0\nusing zend_long = long long;\n")
+file(WRITE "${fake_prefix}/include/Zend/zend_modules.h" "#define ZEND_MODULE_API_NO 1\n")
+execute_process(COMMAND "@CMAKE_COMMAND@" -S "${fixture}/consumer" -B "${fixture}/wrong-abi"
+    -G "@CMAKE_GENERATOR@" "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+    "-DCMAKE_PREFIX_PATH=${fixture}/relocated" "-DPHP_CONFIG=${fake_prefix}/php-config"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if("${result}" STREQUAL "0" OR NOT "${output}\n${error}" MATCHES "PHP ABI mismatch")
+    message(FATAL_ERROR "Installed package did not reject a mismatching PHP ABI: ${output}\n${error}")
+endif()
+file(REMOVE "${fake_prefix}/include/Zend/zend_modules.h")
+check_discovery(missing-headers "${fake_prefix}/php-config" "usable installed PHP/Zend headers")
