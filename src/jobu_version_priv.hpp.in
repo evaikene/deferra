@@ -1,6 +1,5 @@
-/** @file jobu_version_priv.hpp
- * @brief Declares configure-time software and RPC API versions for JobU executables and current-build checks.
- */
+/// @file jobu_version_priv.hpp
+// @brief Declares configure-time software and RPC API versions for JobU executables and current-build checks.
 #pragma once
 
 #include <cstdint>

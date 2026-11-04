@@ -5,10 +5,86 @@ Its public CMake target is `PhpCxx::PhpCxx`. It has no JobU, SQLite, fmt, or PHP
 Embed link dependency. The archive uses PIC and hidden symbol visibility, so
 each extension can embed its own copy.
 
-The initial build foundation supplies `<phpcxx/zend.hpp>`, which includes the
-selected PHP/Zend headers with C linkage, and `<phpcxx/build.hpp>`.
+`<phpcxx/zend.hpp>` includes the selected PHP/Zend headers with C linkage.
+`<phpcxx/build.hpp>` supplies build metadata.
 `php::build_info()` reports the archive's PHP version and ABI without requiring
-an initialized PHP request. Zend ownership wrappers are added in later stages.
+an initialized PHP request. `<phpcxx/string.hpp>`, `<phpcxx/array.hpp>`, and
+`<phpcxx/value.hpp>` supply move-only Zend owners; `<phpcxx/views.hpp>` supplies
+their lightweight borrowed views.
+
+## Ownership and borrowed lifetimes
+
+Owners must be created, used, and destroyed on their owning PHP execution
+thread, inside the lifetime of the initialized PHP request. This applies to
+both NTS and ZTS. The library does not store mutable request state globally or
+transfer Zend values between threads. A longer-lived interned allocation does
+not authorize carrying its wrapper into another request.
+
+| Operation | Contract |
+| --- | --- |
+| `adopt` | Consume one existing owned reference without retaining it. `Value::adopt(zval&)` also sets the source slot to `IS_UNDEF`. |
+| `retain(view)` | Acquire an owned reference explicitly. String/array retention respects immutable Zend values; value retention uses `ZVAL_COPY`, preserving PHP reference wrappers. |
+| `duplicate()` | Use Zend duplication semantics, described below. An absent/uninitialized owner produces the same state. |
+| `release()` | Transfer ownership to the caller and empty the owner, without decrementing the transferred reference. |
+| `view()` | Borrow without changing reference counts. Views from temporary owners are rejected. |
+
+Default and moved-from `String`/`Array` owners hold no pointer. Their views
+report no value; absent string bytes and array size are empty/zero.
+`String::create({})` and `Array::create()` instead construct valid empty PHP
+values. `Value` defaults/moves/releases to `IS_UNDEF`; `Value::null()` creates a
+valid PHP null. `ValueView::is_initialized()` distinguishes these states.
+An absent `ValueView` also reports `IS_UNDEF`.
+
+Views expose read-only access. They never extend a slot, payload, or request's
+lifetime. Keep the backing owner alive and reacquire views after mutations or
+separation. Moving/releasing a `Value` invalidates views of its internal slot.
+Array element views can be invalidated by table growth or replacement. Returned
+string bytes are binary-safe and carry the same borrowed lifetime.
+
+```cpp
+// Run within an initialized PHP request. Every owner below dies before shutdown.
+auto text = php::String::create(std::string_view("a\0b", 3));
+auto shared_text = php::String::retain(text.view());
+auto copied_text = text.duplicate();
+
+auto array = php::Array::create();
+zval entry{};
+ZVAL_STR(&entry, shared_text.release());
+zend_hash_index_update(array.writable(), 0, &entry); // HashTable consumes entry's value.
+ZVAL_UNDEF(&entry); // The local slot no longer owns that reference.
+
+zval slot{};
+ZVAL_ARR(&slot, array.release());
+auto value = php::Value::adopt(slot); // slot is now IS_UNDEF.
+auto shared_value = php::Value::retain(value.view());
+```
+
+`String::duplicate()` copies ordinary string bytes; interned strings may stay
+shared. `Array::duplicate()` duplicates the top-level PHP array using
+`zend_array_dup`. `Value::duplicate()` uses `ZVAL_DUP`: a direct array receives
+duplicated top-level storage, while other types retain/copy their PHP value.
+These operations preserve Zend's nested copy-on-write, object identity, and
+reference semantics, including Zend's handling of unshared reference slots.
+They are not recursive graph copies or PHP object clones.
+
+Call `Array::writable()` before mutating an array. It separates shared or
+immutable top-level storage, then returns a borrowed mutable pointer; an absent
+owner returns `nullptr`. Reacquire it after any operation that may share the
+array, and separate nested arrays independently when modifying them. Do not
+change the returned pointer's reference count or release it. `Array` accepts
+regular request-allocated PHP arrays and immutable Zend arrays, not arbitrary
+native or persistent HashTables.
+
+`Value` accepts ordinary PHP values, PHP references, and `IS_UNDEF`; internal
+engine-only slot types such as `IS_INDIRECT` are outside its contract. Releasing
+a `Value` transfers a raw zval that the caller must consume or destroy with
+`zval_ptr_dtor`. Releasing strings transfers responsibility for
+`zend_string_release`. Consume a released array into another `Array` or a zval
+so its eventual destruction also nominates surviving cycles for Zend GC;
+`zend_array_release` alone does not nominate an untracked cycle.
+Destroying an object/resource value may invoke PHP cleanup code. Native
+destructors are non-throwing; PHP `zend_bailout()` can bypass C++ destructors.
+RAII is not a bailout recovery mechanism.
 
 ## Select a PHP installation
 
@@ -29,10 +105,16 @@ Embed. It records the selected CLI, extension directory, PHP version, module
 API, debug/ZTS mode, integer width, PHP link flags, and optional Embed paths.
 The PHP executable's link flags are metadata, not helper dependencies.
 
-`BUILD_TESTING=OFF` disables the CLI tests and their CLI availability check.
-The Embed lifecycle harness belongs to a later stage. Current tests cover the
-compiled ABI metadata, a small CLI-loadable consumer, independent build-tree
-consumption, relocated installation, and discovery failures.
+`BUILD_TESTING=OFF` disables tests and their CLI availability check.
+Tests cover the compiled ABI metadata, a small CLI-loadable consumer, independent build-tree
+consumption, relocated installation, discovery failures, and Zend ownership.
+Ownership tests use the existing Catch2 dependency and the matching optional
+Embed library in a dedicated executable. Its minimal harness initializes one
+request, runs the tests, destroys their local owners, and shuts Embed down.
+Missing Embed registers an explicit CTest skip for ownership execution; helper
+compilation and the other tests remain enabled. Only that executable links
+Embed. Comprehensive repeated lifecycle, threading, and bailout tests belong
+to later stages.
 
 To include the helper in a normal JobU build, use `-DJB_BUILD_PHP_CPP=ON` and
 the selected `PHP_CONFIG`. The option defaults to `OFF`; default configuration

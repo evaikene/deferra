@@ -31,3 +31,19 @@ configure_file(install-layout-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/install
 add_test(NAME php-cxx-install-layout-test COMMAND ${CMAKE_COMMAND}
     "-Dtest_configuration=$<CONFIG>" -P "${CMAKE_CURRENT_BINARY_DIR}/install-layout-test.cmake")
 set_tests_properties(php-cxx-install-layout-test PROPERTIES TIMEOUT 120)
+
+# Only this test executable links Embed. The production archive and installed
+# consumers keep their existing PHP-module linkage and need no Embed runtime.
+get_target_property(php_embed_found php-cxx PHPCXX_EMBED_FOUND)
+get_target_property(php_embed_library php-cxx PHPCXX_EMBED_LIBRARY)
+if(php_embed_found)
+    find_package(Catch2 CONFIG REQUIRED)
+    add_executable(php-cxx-ownership-test embed-main.cpp ownership-test.cpp)
+    target_link_libraries(php-cxx-ownership-test PRIVATE PhpCxx::PhpCxx Catch2::Catch2 "${php_embed_library}")
+    add_test(NAME php-cxx-ownership-test COMMAND php-cxx-ownership-test)
+    set_tests_properties(php-cxx-ownership-test PROPERTIES TIMEOUT 60)
+else()
+    add_test(NAME php-cxx-ownership-test COMMAND ${CMAKE_COMMAND} -E echo
+        "SKIP: PHP Embed is unavailable for ${php_config}; ownership execution requires matching Embed")
+    set_tests_properties(php-cxx-ownership-test PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: PHP Embed")
+endif()

@@ -91,6 +91,8 @@ if("@JB_BUILD_PHP_CPP@")
     set(phpcxx_sdk_directory "${library_directory}/cmake/PhpCxx")
     set(phpcxxdevelopment_files
         "${include_directory}/phpcxx/build.hpp" "${include_directory}/phpcxx/zend.hpp"
+        "${include_directory}/phpcxx/views.hpp" "${include_directory}/phpcxx/string.hpp"
+        "${include_directory}/phpcxx/array.hpp" "${include_directory}/phpcxx/value.hpp"
         "${library_directory}/@CMAKE_STATIC_LIBRARY_PREFIX@php-cxx@CMAKE_STATIC_LIBRARY_SUFFIX@"
         "${phpcxx_sdk_directory}/PhpConfig.cmake" "${phpcxx_sdk_directory}/PhpCxxConfig.cmake"
         "${phpcxx_sdk_directory}/PhpCxxConfigVersion.cmake" "${phpcxx_sdk_directory}/PhpCxxTargets.cmake"
