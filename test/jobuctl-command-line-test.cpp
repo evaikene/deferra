@@ -67,7 +67,9 @@ auto parse(std::vector<std::string> arguments) -> CommandBuildResult
     return {.error = std::move(result.error)};
 }
 
-auto parse_cli_job_create(std::vector<std::string> options, std::string action = "create") -> CommandBuildResult
+auto parse_cli_job_create(std::vector<std::string> options,
+                          std::string              action  = "create",
+                          std::string              command = "/bin/true") -> CommandBuildResult
 {
     auto arguments = std::vector<std::string>{"--socket",
                                               "fixture.sock",
@@ -80,7 +82,7 @@ auto parse_cli_job_create(std::vector<std::string> options, std::string action =
                                               "--at",
                                               "2030-01-01T00:00:00Z",
                                               "--command",
-                                              "/bin/true"};
+                                              std::move(command)};
     arguments.insert(arguments.end(), options.begin(), options.end());
     return parse(std::move(arguments));
 }
@@ -1019,6 +1021,52 @@ TEST_CASE("jobuctl parser retains exact repeated subprocess argument bytes", "[j
         R"({"command":"/bin/true","arguments":["","-abc","--unknown","--env","--env=NAME=value","--command","--help",""],"environment":{"ACTUAL":"value"}})");
     REQUIRE(expected);
     CHECK(request.payload == *expected);
+}
+
+TEST_CASE("jobuctl tokenizes full commands before appending literal and secret arguments", "[jobuctl][parse][argv]")
+{
+    for (auto const& action : {"create", "add"}) {
+        auto parsed =
+            parse_cli_job_create({"--arg=two words", "--arg-secret=reports.token", "--arg=", R"(--arg="a\b")"},
+                                 action,
+                                 R"("/opt/My Tools/worker" --mode='daily report' '' a\ b)");
+        REQUIRE(parsed.command);
+        auto expected = parse_json(
+            R"({"command":"/opt/My Tools/worker","arguments":["--mode=daily report","","a b","two words",{"secret":"reports.token"},"","\"a\\b\""]})");
+        REQUIRE(expected);
+        CHECK(std::get<CreateJobRequest>(parsed.command->request).payload == *expected);
+    }
+}
+
+TEST_CASE("jobuctl creation help explains command tokenization and argument ordering", "[jobuctl][help][argv]")
+{
+    for (auto const& action : {"create", "add"}) {
+        auto parsed = parse_action({"job", action, "--help"});
+        REQUIRE(parsed.action);
+        auto const* help = std::get_if<HelpCommand>(&*parsed.action);
+        REQUIRE(help);
+        auto text = render_help(*help);
+        CHECK(text.find("--command COMMAND") != std::string::npos);
+        CHECK(text.find("--command is always tokenized") != std::string::npos);
+        CHECK(text.find("append verbatim in option order") != std::string::npos);
+        CHECK(text.find("No shell evaluation or expansion") != std::string::npos);
+        CHECK(text.find("explicit --env PATH=") != std::string::npos);
+    }
+}
+
+TEST_CASE("jobuctl counts command tokens and explicit arguments against the same payload limits",
+          "[jobuctl][parse][argv][secret]")
+{
+    auto arguments = std::vector<std::string>(jb::jobu::detail::maximum_cli_arguments - 2U, "--arg=");
+    arguments.emplace_back("--arg-secret=reports.token");
+    auto accepted = parse_cli_job_create(arguments, "create", "/bin/true first");
+    REQUIRE(accepted.command);
+    CHECK(std::get<CreateJobRequest>(accepted.command->request).payload.as_object().at("arguments").as_array().size() ==
+          jb::jobu::detail::maximum_cli_arguments);
+
+    CHECK_FALSE(parse_cli_job_create(arguments, "create", "/bin/true first second").command);
+    arguments.emplace_back("--arg=last");
+    CHECK_FALSE(parse_cli_job_create(std::move(arguments), "create", "/bin/true first").command);
 }
 
 TEST_CASE("jobuctl constructs ordered symbolic CLI secret references", "[jobuctl][parse][secret]")

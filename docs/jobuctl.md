@@ -795,23 +795,61 @@ attached values, such as `--arg-secret=reports.token` and
 ```sh
 jobuctl job create \
     --queue-name reports --type cli --at 2030-01-01T00:00:00Z \
-    --command /usr/local/bin/report \
-    --arg=--token --arg-secret reports.token --arg=--mode --arg=daily \
+    --command '/usr/local/bin/report --token' \
+    --arg-secret reports.token --arg=--mode --arg=daily \
     --env MODE=daily --env-secret REPORT_PASSWORD=reports.password
 ```
 
-Arguments retain the order of literal `--arg` and `--arg-secret` options. Each
-secret reference replaces one whole argument or environment value; the CLI does
-not interpolate part of a string. Environment names must be unique across
+Arguments parsed from `--command` come first, followed by literal `--arg` and
+`--arg-secret` options in their caller order, even when those options precede
+`--command`. Each secret reference replaces one whole argument or environment
+value; the CLI does not interpolate part of a string. Environment names must be unique across
 `--env`, `--env-secret`, and `--unset-env`, regardless of order. References cannot
 target `PATH` or a `JOBU_*` environment name. The existing argument and template
 reference limits apply. These options cannot be mixed with `--request-file` or
 used for HTTP jobs. Replace an existing payload through interactive editing or
 a complete request file; these creation flags do not apply to `job update`.
 
+## Command tokenization
+
+`job create` and `job add` always tokenize the full `--command` value. ASCII
+whitespace separates words outside quotes. Single quotes preserve their contents;
+double quotes allow spaces and preserve backslashes except before `"`, `\`, `$`,
+backtick, or newline. Outside quotes, a backslash escapes the next byte.
+Adjacent quoted and unquoted fragments form one word. Backslash-newline is
+removed outside single quotes, and quoted empty arguments are preserved.
+Empty executables, NUL bytes, unmatched quotes, and incomplete escapes are errors.
+
+The first word is the executable. Use an absolute path, or a bare name with an
+explicit `--env PATH=/usr/bin:/bin`. JobU does not inherit the daemon's `PATH`.
+No shell is evaluated: variables, wildcards, command substitutions, pipes,
+redirections, and other shell operators remain literal argument bytes. Your
+invoking shell processes its own quoting first; quote the whole command value
+to keep text such as `$HOME` literal when passing it to `jobuctl`.
+
+**CLI behavior change:** `--command` previously treated the whole value as the
+executable. A path containing spaces now requires quotes or backslash escapes
+*inside* that value. For example, both forms select `/opt/My Tools/worker` and
+pass `--verbose` as its first argument:
+
+```sh
+jobuctl job create --queue-name reports --type cli --now \
+    --command '"/opt/My Tools/worker" --verbose'
+jobuctl job create --queue-name reports --type cli --now \
+    --command '/opt/My\ Tools/worker --verbose'
+```
+
+The CLI still sends separate executable and argument fields to the daemon.
+`--request-file` keeps that schema: its `payload.command` is a literal executable
+path, and `payload.arguments` is an array. Stored commands and request-file
+commands are not tokenized.
+
 ## Literal arguments
 
-Repeat `--arg` to pass multiple arguments to a CLI job. Each value becomes one argument, preserving order and empty strings. Use `--arg=VALUE` for values beginning with a dash, especially values that resemble `jobuctl` options:
+Repeat `--arg` to append arguments after those in `--command`. Each value becomes
+one argument verbatim, preserving order, spaces, quotes, backslashes, and empty
+strings. Use `--arg=VALUE` for values beginning with a dash, especially values
+that resemble `jobuctl` options:
 
 ```sh
 jobuctl job create \

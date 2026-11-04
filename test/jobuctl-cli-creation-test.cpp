@@ -202,6 +202,46 @@ TEST_CASE("jobuctl sends secret references as symbolic job.create fields", "[job
         R"({"command":"/bin/true","arguments":["--token",{"secret":"reports.token"},"--mode","daily"],"environment":{"MODE":"daily","REPORT_TOKEN":{"secret":"reports.token"}}})");
 }
 
+TEST_CASE("jobuctl sends tokenized commands before explicit arguments through job.create", "[jobuctl][cli][argv]")
+{
+    for (auto const& command : {R"("/opt/My Tools/worker" --mode='daily report' '' a\ b)",
+                                R"(/opt/My\ Tools/worker --mode='daily report' '' a\ b)"}) {
+        for (auto const& action : {"create", "add"}) {
+            auto arguments =
+                cli_create({"--arg=two words", "--arg-secret=reports.token", "--arg=", R"(--arg="a\b")"}, command);
+            arguments[1] = action;
+            // Even an explicit flag before --command appends after all tokens from the command value.
+            arguments.insert(arguments.begin() + 2, "--arg=before");
+            check_request(
+                run_client(std::move(arguments)),
+                R"({"command":"/opt/My Tools/worker","arguments":["--mode=daily report","","a b","before","two words",{"secret":"reports.token"},"","\"a\\b\""]})");
+        }
+    }
+}
+
+TEST_CASE("jobuctl sends shell syntax as literal command arguments", "[jobuctl][cli][argv]")
+{
+    check_request(
+        run_client(cli_create({}, R"(/bin/echo $HOME ${USER} $(id) `id` *.json ~ | > >> < ; && #text)")),
+        R"json({"command":"/bin/echo","arguments":["$HOME","${USER}","$(id)","`id`","*.json","~","|",">",">>","<",";","&&","#text"]})json");
+}
+
+TEST_CASE("jobuctl rejects malformed command text before connecting without echoing it", "[jobuctl][cli][argv]")
+{
+    for (auto const& command : {" ",
+                                "'' argument",
+                                "\"\" argument",
+                                "\\\n",
+                                "/bin/echo 'private-literal",
+                                "/bin/echo \"private-literal",
+                                "/bin/echo private-literal\\",
+                                "/bin/echo \"private-literal\\"}) {
+        auto exchange = run_client(cli_create({}, command));
+        check_local_rejection(exchange);
+        CHECK(exchange.output.find("private-literal") == std::string::npos);
+    }
+}
+
 TEST_CASE("jobuctl sends a complete request file through the typed session", "[jobuctl][cli]")
 {
     jb::test::TemporaryDirectory directory;
@@ -210,14 +250,17 @@ TEST_CASE("jobuctl sends a complete request file through the typed session", "[j
         auto file = std::ofstream{path, std::ios::binary};
         REQUIRE(file);
         file
-            << R"({"queue_name":"fixture","type":"cli","schedule":{"kind":"once","at":"2030-01-01T00:00:00Z"},"payload":{"command":"/bin/true"}})";
+            << R"({"queue_name":"fixture","type":"cli","schedule":{"kind":"once","at":"2030-01-01T00:00:00Z"},"payload":{"command":"/opt/My Tools/worker","arguments":["two words","\"quoted\"","$HOME"]}})";
     }
 
     auto exchange = run_client({"job", "create", "--request-file", path.string()});
     REQUIRE(exchange.methods == std::vector<std::string>{"system.info", "job.create"});
     REQUIRE(exchange.params);
     CHECK(exchange.params->as_object().at("queue_name").as_string() == "fixture");
-    CHECK(exchange.params->as_object().at("payload").as_object().at("command").as_string() == "/bin/true");
+    auto expected_payload =
+        parse_json(R"({"command":"/opt/My Tools/worker","arguments":["two words","\"quoted\"","$HOME"]})");
+    REQUIRE(expected_payload);
+    CHECK(exchange.params->as_object().at("payload") == *expected_payload);
 
     {
         auto file = std::ofstream{path, std::ios::binary | std::ios::trunc};

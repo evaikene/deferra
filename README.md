@@ -119,9 +119,11 @@ desired UTC time):
     --command /usr/bin/printf --arg '%s\n' --arg 'hello from JobU'
 ```
 
-Commands and arguments are passed directly as an argv array; JobU does not
-perform shell parsing or expansion. Use an absolute executable path, or set an
-explicit `PATH` with `--env PATH=/usr/bin:/bin` for a bare command name.
+`--command` accepts a full command with shell-like quoting and escapes. Arguments
+from it precede literal `--arg` values. JobU passes the resulting argv directly
+to the program without shell evaluation or expansion. Quote or escape executable
+paths containing spaces inside the command value. Use an absolute executable
+path, or set an explicit `PATH` with `--env PATH=/usr/bin:/bin` for a bare name.
 
 Run `jobud --help` or `jobuctl --help` to see the available options.
 

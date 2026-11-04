@@ -1,12 +1,12 @@
-#include "command_argv_priv.hpp"
+#include "command_argv.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <utility>
 
-namespace jb::jobuctl::detail {
+namespace jb::core {
 namespace {
 
-using namespace jb::core;
 using Arguments = Result<std::vector<std::string>, Error>;
 
 enum class Quote : std::uint8_t {
@@ -18,7 +18,7 @@ enum class Quote : std::uint8_t {
 auto invalid_command(char const* message) -> Arguments
 {
     return Arguments::failure(
-        {.category = ErrorCategory::InvalidArgument, .code = "jobuctl.command.invalid_argv", .message = message});
+        {.category = ErrorCategory::InvalidArgument, .code = "core.command.invalid_argv", .message = message});
 }
 
 auto whitespace(char value) -> bool
@@ -39,6 +39,7 @@ auto parse_command_argv(std::string_view command) -> Arguments
         return invalid_command("Command arguments cannot contain NUL");
     }
 
+    // Assemble owning words while tracking quote context; no token is interpreted as shell syntax.
     auto arguments    = std::vector<std::string>{};
     auto word         = std::string{};
     auto quote        = Quote::None;
@@ -102,6 +103,7 @@ auto parse_command_argv(std::string_view command) -> Arguments
         }
     }
 
+    // Finish only complete input, then enforce the executable requirement separately from empty arguments.
     if (quote != Quote::None) {
         return invalid_command("Command has an unterminated quote");
     }
@@ -114,4 +116,4 @@ auto parse_command_argv(std::string_view command) -> Arguments
     return Arguments::success(std::move(arguments));
 }
 
-} // namespace jb::jobuctl::detail
+} // namespace jb::core

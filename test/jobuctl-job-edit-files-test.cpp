@@ -4,7 +4,7 @@
 #include "edit_resource_priv.hpp"
 
 #include "attribute_registry.hpp"
-#include "command_argv_priv.hpp"
+#include "command_argv.hpp"
 #include "command_line_priv.hpp"
 #include "framing.hpp"
 #include "input_priv.hpp"
@@ -750,7 +750,7 @@ TEST_CASE("Shared recovery selects fixed resource commands and submission confli
     REQUIRE(advice);
     REQUIRE(advice->retry_command);
     CHECK(advice->instructions.find("old revision") != std::string::npos);
-    auto arguments = parse_command_argv(*advice->retry_command);
+    auto arguments = jb::core::parse_command_argv(*advice->retry_command);
     REQUIRE(arguments);
     auto argv = std::vector<char*>{};
     for (auto& argument : *arguments) {
@@ -811,7 +811,7 @@ TEST_CASE("Recovery preserves connection settings and the existing request-file 
         }
 
         // Feed the displayed quoting through the real CLI parser without executing it.
-        auto arguments = parse_command_argv(*advice->retry_command);
+        auto arguments = jb::core::parse_command_argv(*advice->retry_command);
         REQUIRE(arguments);
         auto argv = std::vector<char*>{};
         for (auto& argument : *arguments) {

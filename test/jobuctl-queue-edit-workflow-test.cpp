@@ -3,7 +3,7 @@
 #include "queue_edit_workflow_priv.hpp"
 
 #include "application.hpp"
-#include "command_argv_priv.hpp"
+#include "command_argv.hpp"
 #include "command_line_priv.hpp"
 #include "database.hpp"
 #include "event_loop.hpp"
@@ -593,7 +593,7 @@ auto load_recovery_request(std::string_view diagnostic, StandardAttributeRegistr
     auto const     position = diagnostic.find(prefix);
     REQUIRE(position != std::string_view::npos);
     diagnostic.remove_prefix(position + prefix.size());
-    auto arguments = parse_command_argv(diagnostic.substr(0, diagnostic.find('\n')));
+    auto arguments = jb::core::parse_command_argv(diagnostic.substr(0, diagnostic.find('\n')));
     REQUIRE(arguments);
     auto argv = std::vector<char*>{};
     for (auto& argument : *arguments) {

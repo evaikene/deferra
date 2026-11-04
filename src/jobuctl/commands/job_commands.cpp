@@ -1,6 +1,7 @@
 #include "commands_priv.hpp"
 
 #include "attribute_registry.hpp"
+#include "command_argv.hpp"
 #include "command_helpers_priv.hpp"
 #include "control_json.hpp"
 #include "job_validation_priv.hpp"
@@ -402,9 +403,25 @@ auto parse_job_create(std::filesystem::path                socket_path,
         if (!command || url || http_method || !headers_json.empty() || body) {
             return parse_failure("CLI job creation requires --command and rejects HTTP options");
         }
-        payload.emplace("command", JsonValue{.data = std::move(*command)});
-        if (!arguments_json.empty()) {
-            payload.emplace("arguments", JsonValue{.data = std::move(arguments_json)});
+        auto parsed_command = parse_command_argv(*command);
+        if (!parsed_command) {
+            return parse_failure(fmt::format("invalid --command: {}", parsed_command.error().message));
+        }
+
+        // Command words come first even when explicit argument flags precede --command in the caller's argv.
+        // Explicit values remain whole literals or structured secret references; never tokenize them again.
+        auto combined_arguments = JsonValue::Array{};
+        combined_arguments.reserve(parsed_command->size() - 1U + arguments_json.size());
+        for (auto index = std::size_t{1}; index < parsed_command->size(); ++index) {
+            combined_arguments.push_back(JsonValue{.data = std::move((*parsed_command)[index])});
+        }
+        for (auto& argument : arguments_json) {
+            combined_arguments.push_back(std::move(argument));
+        }
+
+        payload.emplace("command", JsonValue{.data = std::move(parsed_command->front())});
+        if (!combined_arguments.empty()) {
+            payload.emplace("arguments", JsonValue{.data = std::move(combined_arguments)});
         }
         // Omit absent fields so the daemon remains responsible for payload defaults.
         if (cli_options.working_directory) {
