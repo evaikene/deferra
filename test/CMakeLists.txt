@@ -1222,6 +1222,16 @@ add_executable(${TARGET} event-loop-test.cpp)
 target_link_libraries(${TARGET} PRIVATE core Catch2::Catch2WithMain)
 add_test(NAME ${TARGET} COMMAND $<TARGET_FILE:${TARGET}>)
 
+# Host-owned scoped loops and bounded waits, without an Application singleton.
+add_executable(scoped-event-loop-test scoped-event-loop-test.cpp)
+target_link_libraries(scoped-event-loop-test PRIVATE core Catch2::Catch2WithMain)
+add_test(NAME scoped-event-loop-test COMMAND $<TARGET_FILE:scoped-event-loop-test>)
+set_tests_properties(scoped-event-loop-test PROPERTIES TIMEOUT 30)
+
+add_executable(core-scoped-event-loop-public-header-test core-scoped-event-loop-public-header-test.cpp)
+target_link_libraries(core-scoped-event-loop-public-header-test PRIVATE core)
+add_test(NAME core-scoped-event-loop-public-header-test COMMAND $<TARGET_FILE:core-scoped-event-loop-public-header-test>)
+
 # Private child-exit watch tests, including real pidfds on Linux
 add_executable(event-loop-process-watch-test event-loop-process-watch-test.cpp)
 target_link_libraries(event-loop-process-watch-test PRIVATE core Catch2::Catch2WithMain)
@@ -1375,6 +1385,18 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin")
         set_tests_properties(${TARGET} PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
     endif()
 
+endif()
+
+if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)
+    add_executable(jobu-client-embedding-test jobu-client-embedding-test.cpp support/temporary_directory.cpp)
+    target_link_libraries(jobu-client-embedding-test PRIVATE jobu-client Catch2::Catch2WithMain)
+    target_compile_definitions(jobu-client-embedding-test PRIVATE JOBUD_EXECUTABLE="$<TARGET_FILE:jobud>")
+    add_dependencies(jobu-client-embedding-test jobud)
+    add_test(NAME jobu-client-embedding-test COMMAND $<TARGET_FILE:jobu-client-embedding-test>)
+    set_tests_properties(jobu-client-embedding-test PROPERTIES TIMEOUT 90)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        set_tests_properties(jobu-client-embedding-test PROPERTIES ENVIRONMENT "TMPDIR=/tmp")
+    endif()
 endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "Linux|Darwin" AND TARGET jobud)

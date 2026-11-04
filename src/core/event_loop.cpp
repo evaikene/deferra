@@ -6,10 +6,58 @@
 #include "object_priv.hpp"
 #include "thread_context.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <limits>
+#include <utility>
 
 namespace jb::core {
+namespace {
+
+/// Preserve outer dispatch state when existing asynchronous callers process events recursively.
+class DispatchScope final {
+public:
+    explicit DispatchScope(bool& dispatching)
+        : _dispatching(dispatching)
+        , _previous(std::exchange(dispatching, true))
+    {}
+
+    ~DispatchScope() { _dispatching = _previous; }
+
+    DispatchScope(DispatchScope const&)                    = delete;
+    auto operator=(DispatchScope const&) -> DispatchScope& = delete;
+
+private:
+    bool& _dispatching;
+    bool  _previous;
+};
+
+/// A bounded wait leaves the loop idle on every return without performing run()'s shutdown drains.
+class RunningScope final {
+public:
+    explicit RunningScope(std::atomic_bool& running)
+        : _running(running)
+    {
+        _running.store(true, std::memory_order_relaxed);
+    }
+
+    ~RunningScope() { _running.store(false, std::memory_order_relaxed); }
+
+    RunningScope(RunningScope const&)                    = delete;
+    auto operator=(RunningScope const&) -> RunningScope& = delete;
+
+private:
+    std::atomic_bool& _running;
+};
+
+auto wait_error(ErrorCategory category, char const* code, char const* message) -> Result<void, Error>
+{
+    return Result<void, Error>::failure({.category = category, .code = code, .message = message});
+}
+
+} // namespace
+
+thread_local bool EventLoop::s_dispatching = false;
 
 auto EventLoop::current() noexcept -> EventLoop*
 {
@@ -34,7 +82,7 @@ auto EventLoop::is_valid() const noexcept -> bool
 
 auto EventLoop::post(Task task) -> bool
 {
-    std::lock_guard lock{_task_queue_mx};
+    std::scoped_lock lock{_task_queue_mx};
     // Wake before insertion while holding the queue lock so a consumer cannot
     // pass the queue before the successfully signalled entry is visible.
     if (!_backend || !_backend->wakeup()) {
@@ -47,7 +95,7 @@ auto EventLoop::post(Task task) -> bool
 auto EventLoop::post_event(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, std::unique_ptr<Event> event)
     -> bool
 {
-    std::lock_guard lock{_event_queue_mx};
+    std::scoped_lock lock{_event_queue_mx};
     // Wake before insertion while holding the queue lock so a consumer cannot
     // pass the queue before the successfully signalled entry is visible.
     if (!_backend || !_backend->wakeup()) {
@@ -65,7 +113,7 @@ auto EventLoop::post_event(Object* receiver, std::weak_ptr<priv::ObjectLifetime>
 auto EventLoop::post_event_delivery(Object* receiver, std::weak_ptr<priv::ObjectLifetime> lifetime, Task delivery)
     -> bool
 {
-    std::lock_guard lock{_event_queue_mx};
+    std::scoped_lock lock{_event_queue_mx};
     // Wake before insertion while holding the queue lock so a consumer cannot
     // pass the queue before the successfully signalled entry is visible.
     if (!_backend || !_backend->wakeup()) {
@@ -82,7 +130,7 @@ auto EventLoop::post_event_delivery(Object* receiver, std::weak_ptr<priv::Object
 
 auto EventLoop::defer_delete(Object* object, std::weak_ptr<priv::ObjectLifetime> lifetime) -> bool
 {
-    std::lock_guard lock{_deferred_delete_queue_mx};
+    std::scoped_lock lock{_deferred_delete_queue_mx};
     // Wake before insertion while holding the queue lock so a consumer cannot
     // pass the queue before the successfully signalled entry is visible.
     if (!_backend || !_backend->wakeup()) {
@@ -255,6 +303,8 @@ void EventLoop::request_quit() noexcept
 
 auto EventLoop::run() -> bool
 {
+    DispatchScope dispatch{s_dispatching};
+
     // set the thread context for this event loop
     auto* orig_ctx = _thread_ctx.load(std::memory_order_relaxed);
     _thread_ctx.store(ThreadCtx::current(), std::memory_order_relaxed);
@@ -284,6 +334,56 @@ auto EventLoop::run() -> bool
     return success;
 }
 
+auto EventLoop::run_until(TimePoint deadline, std::function<bool()> const& complete) -> Result<void, Error>
+{
+    // A thread-wide guard also covers predicates and callbacks on other loops, not just this loop's run state.
+    if (s_dispatching) {
+        return wait_error(ErrorCategory::Conflict,
+                          "core.event_loop.reentrant_wait",
+                          "Cannot start a synchronous wait during event dispatch or another wait");
+    }
+    if (thread_ctx() != ThreadCtx::current() || current() != this || is_running()) {
+        return wait_error(ErrorCategory::Conflict,
+                          "core.event_loop.invalid_context",
+                          "Synchronous wait requires the current idle owner event loop");
+    }
+    if (!complete) {
+        return wait_error(ErrorCategory::InvalidArgument,
+                          "core.event_loop.invalid_predicate",
+                          "Synchronous wait requires a completion predicate");
+    }
+    if (!is_valid()) {
+        return wait_error(ErrorCategory::Io, "core.event_loop.processing_failed", "Event-loop backend is unavailable");
+    }
+
+    DispatchScope dispatch{s_dispatching};
+    RunningScope  running{_running};
+
+    // All phases retain the caller's original deadline. A completed result needs no additional poll.
+    for (;;) {
+        if (complete()) {
+            return Result<void, Error>::success();
+        }
+        auto const now = Clock::now();
+        if (now >= deadline) {
+            return wait_error(ErrorCategory::Timeout, "core.event_loop.timeout", "Synchronous wait deadline expired");
+        }
+
+        auto const remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now).count();
+        auto const timeout =
+            static_cast<int>(std::min(remaining, static_cast<decltype(remaining)>(std::numeric_limits<int>::max())));
+        auto const result = process_events(EventFlag::All, timeout);
+        if (result == ProcessEventsResult::Failed) {
+            return wait_error(ErrorCategory::Io, "core.event_loop.processing_failed", "Event-loop processing failed");
+        }
+        if (result == ProcessEventsResult::Stopped) {
+            return wait_error(ErrorCategory::Cancelled,
+                              "core.event_loop.stopped",
+                              "Event loop stopped before completion");
+        }
+    }
+}
+
 auto EventLoop::process_events(EventFlags flags) -> ProcessEventsResult
 {
     return process_events(flags, -1);
@@ -298,6 +398,8 @@ auto EventLoop::process_events(EventFlags flags, int ms) -> ProcessEventsResult
         _running.store(false, std::memory_order_relaxed);
         return ProcessEventsResult::Failed;
     }
+
+    DispatchScope dispatch{s_dispatching};
 
     auto const was_running = _running.load(std::memory_order_relaxed);
 
@@ -406,7 +508,7 @@ void EventLoop::drain_task_queue()
 {
     std::queue<Task> local;
     {
-        std::lock_guard lock{_task_queue_mx};
+        std::scoped_lock lock{_task_queue_mx};
         local.swap(_task_queue);
     }
     while (!local.empty()) {
@@ -419,7 +521,7 @@ void EventLoop::drain_event_queue()
 {
     std::queue<EventEntry> local;
     {
-        std::lock_guard lock{_event_queue_mx};
+        std::scoped_lock lock{_event_queue_mx};
         local.swap(_event_queue);
     }
 
@@ -442,7 +544,7 @@ void EventLoop::discard_event_queue()
 {
     std::queue<EventEntry> discarded;
     {
-        std::lock_guard lock{_event_queue_mx};
+        std::scoped_lock lock{_event_queue_mx};
         discarded.swap(_event_queue);
     }
 }
@@ -451,7 +553,7 @@ void EventLoop::drain_deferred_delete_queue()
 {
     std::queue<DeferredDeleteEntry> local;
     {
-        std::lock_guard lock{_deferred_delete_queue_mx};
+        std::scoped_lock lock{_deferred_delete_queue_mx};
         local.swap(_deferred_delete_queue);
     }
 

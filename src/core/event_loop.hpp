@@ -21,6 +21,7 @@ class Application;
 class Event;
 class Object;
 class Process;
+class ScopedEventLoop;
 class ThreadCtx;
 
 namespace priv {
@@ -170,6 +171,20 @@ public:
     ///         or a backend polling failure
     auto run() -> bool;
 
+    /// Processes all event kinds until @p complete returns true or the absolute monotonic deadline expires.
+    /// @param deadline Shared deadline for the whole operation, including earlier connection/handshake work.
+    /// @param complete Nonempty, non-throwing in-memory predicate; must not destroy this loop or pump events.
+    /// @return Success for completion, core.event_loop.timeout (Timeout) for expiry,
+    ///         processing_failed (Io) for backend failure, stopped (Cancelled) for an explicit quit,
+    ///         invalid_context (Conflict) unless this is the current owner loop, reentrant_wait (Conflict)
+    ///         inside another wait or any loop dispatch, or invalid_predicate (InvalidArgument).
+    ///
+    /// Completion is checked before expiry, including before the first poll. Native waits use only the
+    /// remaining time. Callbacks and the current dispatch batch run to completion, so deadlines are cooperative.
+    /// Return does not cancel outstanding operations or drain shutdown work; objects and queued tasks may remain
+    /// for the next wait. Cancel/destroy their owners before destroying the loop. Use on its owner thread only.
+    [[nodiscard]] auto run_until(TimePoint deadline, std::function<bool()> const& complete) -> Result<void, Error>;
+
     /// Returns true if the event loop is running, false otherwise
     ///
     /// This method is thread-safe and can be called from any thread.
@@ -233,7 +248,11 @@ private:
     friend class Application;
     friend class Object;
     friend class Process;
+    friend class ScopedEventLoop;
     friend struct priv::EventLoopTestAccess;
+
+    // Shared by all loops on one thread: a different loop must not bypass the synchronous-wait guard.
+    static thread_local bool s_dispatching;
 
     explicit EventLoop(std::unique_ptr<priv::Backend> backend);
 

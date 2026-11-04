@@ -29,6 +29,7 @@ set(HDRS
     object.hpp
     process.hpp
     result.hpp
+    scoped_event_loop.hpp
     shared_data.hpp
     signal.hpp
     timer.hpp
@@ -71,6 +72,7 @@ set(SRCS
     object.cpp
     process.cpp
     process_request_priv.cpp
+    scoped_event_loop.cpp
     thread_context.cpp
     timer.cpp
     text_validation.cpp

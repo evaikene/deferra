@@ -8,9 +8,10 @@ checkout, `examples/jobu-client/main.cpp` provides a buildable local-socket
 example. The same typed client can wrap another already-connected
 `jb::rpc::Client`.
 
-The caller owns `Application`, the socket or other IODevice, the raw RPC client,
-and an attribute registry. Construct `ControlClient` after the raw client and
-destroy it first. All objects share one event-loop thread. The registry must
+The caller owns an event-loop host (`Application` or `ScopedEventLoop`), the
+socket or other IODevice, the raw RPC client, and an attribute registry.
+Construct `ControlClient` after the raw client and destroy it first. All objects
+share one event-loop thread. The registry must
 describe the attributes that the daemon may return. `ControlClient` does not
 open a socket or run an event loop.
 
@@ -72,6 +73,59 @@ accepted call receives exactly one reply or failure. Handlers may call
 terminal `failed` handler does not discard the already-latched per-call
 failures. A synchronous raw response still produces its typed signal only
 after the accepting call returns.
+
+## Embedding in an existing host
+
+Hosts that already own their process runtime can include
+`<jb/core/scoped_event_loop.hpp>` and call `ScopedEventLoop::create()`. This
+returns `Result<std::unique_ptr<ScopedEventLoop>, Error>` without constructing
+the process-global `Application`. The owner binds its loop to the current
+thread before any dependent `Object` is constructed and restores the previous
+binding on destruction. A previous dormant loop may be temporarily replaced;
+nested scopes must be destroyed in reverse order. Keep a shared scope for
+multiple clients, giving each client its own socket, raw RPC client, typed
+wrapper and receiver context. No polling thread is required.
+
+Include `<jb/core/event_loop.hpp>` to drive `scope->loop()` with
+`run_until(deadline, complete)`. The deadline is an absolute `core::TimePoint`
+using `core::Clock` (`steady_clock`). The nonempty completion predicate must
+only inspect local state, must not throw, and must not destroy the loop. Install
+receiver-aware observers before connecting or initializing: connection can
+complete synchronously, while typed outcomes are deferred. Reuse the same
+deadline across connection, handshake and the requested management read, passing
+only its remaining duration in `ControlCallOptions`. Never grant a fresh full
+timeout at a phase boundary.
+
+`run_until` checks completion before polling and before deadline expiry. It
+returns `core.event_loop.timeout` on expiry, `processing_failed` for a backend
+failure, and `stopped` for explicit loop quit, all under the `core.event_loop.`
+prefix. Wrong thread/current-loop binding, missing predicate and reentrant
+entry are local errors. Synchronous waits and scope creation are rejected
+inside event-loop dispatch, even if the callback attempts to use a different
+loop. Existing asynchronous `Application` and `EventThread` clients retain their
+behavior. Deadlines are cooperative: an executing callback and the current
+dispatch batch cannot be preempted.
+
+Returning from a wait leaves the session alive and does not cancel requests or
+perform `EventLoop::run()` shutdown drains. Before releasing the scope, destroy
+all associated objects, including anything scheduled for deferred deletion.
+Disconnect observers or destroy their receiver before releasing borrowed state;
+destroy the typed wrapper before the raw client, then the socket. Cancel owned
+timers and tasks, or ensure queued work owns its captures. Scope destruction
+does not dispatch callbacks: it drops remaining tasks/events and releases the
+backend. Do not rely on destructor-time event pumping to complete cleanup.
+
+A failed raw/typed client is terminal. To communicate after a daemon restart,
+destroy the entire session bundle and construct a new socket/raw/typed bundle
+on the still-live scoped loop. This adds no automatic retry policy and does not
+change mutation uncertainty or asynchronous call semantics.
+
+`test/jobu-client-embedding-test.cpp` is the non-PHP feasibility fixture. Build
+`jobu-client-embedding-test` and run it through CTest to exercise sequential
+scopes, two independent clients on one loop, connection/handshake failure,
+timeouts, daemon restart and bundle replacement against a temporary database
+and Unix socket. This gate proves ordinary C++ lifetimes; PHP request shutdown,
+Zend bailout and host hard-timeout behavior require the later PHP stages.
 
 ## Method coverage
 
