@@ -1,3 +1,5 @@
+#include "functions.hpp"
+
 #include <phpcxx/array.hpp>
 #include <phpcxx/build.hpp>
 #include <phpcxx/string.hpp>
@@ -78,6 +80,7 @@ zend_module_entry module{.size                 = sizeof(zend_module_entry),
                          .zend_debug           = ZEND_DEBUG,
                          .zts                  = USING_ZTS,
                          .name                 = "phpcxx_consumer",
+                         .functions            = phpcxx_test_functions(),
                          .module_startup_func  = start_module,
                          .request_startup_func = start_request,
                          .version              = "0.1.0",

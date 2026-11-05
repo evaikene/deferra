@@ -21,12 +21,12 @@ if(NOT library_type STREQUAL "STATIC_LIBRARY" OR NOT dependencies STREQUAL "PhpC
 endif()
 
 if(PHPCXX_CONSUMER_COMPILE_ONLY)
-    add_library(consumer OBJECT build.cpp module.cpp)
+    add_library(consumer OBJECT build.cpp module.cpp functions.cpp)
     target_link_libraries(consumer PRIVATE PhpCxx::PhpCxx)
 else()
     add_executable(consumer build.cpp)
     target_link_libraries(consumer PRIVATE PhpCxx::PhpCxx)
-    add_library(consumer-module MODULE module.cpp)
+    add_library(consumer-module MODULE module.cpp functions.cpp)
     target_link_libraries(consumer-module PRIVATE PhpCxx::PhpCxx)
     set_target_properties(consumer-module PROPERTIES PREFIX "" CXX_VISIBILITY_PRESET hidden)
     if(APPLE)
@@ -37,4 +37,6 @@ else()
     add_test(NAME module COMMAND "${PHP_BINARY}" -n
         "-dextension=$<TARGET_FILE:consumer-module>" -r
         "if (!extension_loaded('phpcxx_consumer')) { exit(1); }")
+    add_test(NAME conversions COMMAND "${PHP_BINARY}" -n
+        "-dextension=$<TARGET_FILE:consumer-module>" "${CMAKE_CURRENT_SOURCE_DIR}/check.php")
 endif()
