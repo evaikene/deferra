@@ -16,7 +16,7 @@ endif()
 phpcxx_add_php_target()
 message(STATUS "php-cxx: PHP ${PHP_VERSION}, module API ${PHP_MODULE_API}, debug=${PHP_DEBUG}, ZTS=${PHP_ZTS}")
 
-add_library(php-cxx STATIC src/build.cpp src/string.cpp src/array.cpp src/value.cpp)
+add_library(php-cxx STATIC src/build.cpp src/string.cpp src/array.cpp src/value.cpp src/views.cpp)
 add_library(PhpCxx::PhpCxx ALIAS php-cxx)
 target_compile_features(php-cxx PUBLIC cxx_std_20)
 target_include_directories(php-cxx PUBLIC

@@ -86,6 +86,75 @@ Destroying an object/resource value may invoke PHP cleanup code. Native
 destructors are non-throwing; PHP `zend_bailout()` can bypass C++ destructors.
 RAII is not a bailout recovery mechanism.
 
+## Read-only view operations
+
+`StringView` exposes `data()`/`c_str()` (always zero-terminated, including for an
+absent view), `size()`/`length()`, `empty()`, unchecked `operator[]`, `front()` and
+`back()`, and const character iterators. Character indexing requires an index
+less than `size()`; `front()`/`back()` require a nonempty view. Embedded NULs
+remain part of the string: use its size when passing bytes to native APIs.
+
+Equality, `compare()`, `starts_with()`, `ends_with()`, `contains()`, `find()` and
+`rfind()` accept `std::string_view` or another `StringView`; prefix/suffix/search
+helpers also accept a character. Searches return `StringView::npos` when absent.
+`icompare()`, `iequals()`, `istarts_with()`, and `iends_with()` fold ASCII A-Z
+only, without locale dependence or Unicode case folding. The prefix/suffix
+variants accept strings, views, or characters; an empty prefix/suffix always
+matches, including on an absent view. `starts_with()` and `ends_with()` remain
+case-sensitive. Comparisons and searches include
+bytes after embedded NULs. An absent view has the same byte operations as an
+empty string, while its explicit boolean conversion still reports absence.
+
+`ValueView` queries the exact stored type with `is_undef()`, `is_null()`,
+`is_bool()`, `is_true()`, `is_false()`, `is_long()`, `is_double()`, `is_string()`,
+`is_array()`, `is_object()`, `is_resource()`, and `is_reference()`.
+`get_bool()`, `get_long()`, `get_double()`, `get_string()`, `get_array()`,
+`get_object()`, and `get_resource()` are unchecked: the slot must be present
+and have the corresponding type. They do not convert PHP values, retain
+payloads, or raise exceptions. String/array getters return borrowed views;
+object/resource getters return borrowed const Zend pointers.
+
+`get_bool_or(fallback)`, `get_long_or(fallback)`, and `get_double_or(fallback)`
+return the fallback on absence or an exact type mismatch. For example, a PHP
+integer does not satisfy `get_double_or()`, and a numeric string does not
+satisfy `get_long_or()`. Type queries and getters preserve PHP reference wrappers;
+call `dereference()` explicitly to borrow the referenced slot. On an ordinary
+or absent view, `dereference()` returns that view unchanged.
+
+`is_truthy()` evaluates PHP boolean conversion through `zend_is_true()`,
+including automatic reference dereferencing. Absent/undefined views, null,
+false, numeric zero, `""`, `"0"`, and empty arrays are false; for example,
+`"false"` and nonempty arrays are true. It does not retain or convert the stored
+value. Zend may invoke object conversion handlers or emit PHP diagnostics, so
+normal PHP error/exception handling applies. Keep the backing value alive
+throughout the call, including any handler execution.
+
+`ArrayView` supplies `empty()`, `find(key)`, `operator[](key)`, and `contains(key)`
+for signed PHP integer keys and binary-safe `std::string_view` keys. Lookups
+never insert. String lookup follows PHP's numeric-key normalization: `"1"`
+addresses integer key `1`, while `"01"` remains a string key. A missing key or
+absent array returns an absent `ValueView` (`get() == nullptr`), distinct from
+a present PHP null. `contains()` reports a present null as present.
+
+Array `begin()`/`end()` and `cbegin()`/`cend()` provide read-only input iterators
+yielding `ArrayView::Entry` by value. Each entry contains a `key` of type
+`std::variant<zend_long, StringView>` and a borrowed `ValueView value`.
+Iteration preserves PHP insertion order, skips deleted slots, and handles
+packed and mixed arrays. Iterator copies have independent cursors and do not
+change PHP's internal array pointer. Any mutation or separation invalidates
+iterators and borrowed entries; keep the backing array/request alive.
+
+```cpp
+auto const view = value.view().dereference();
+if (view.is_array()) {
+    auto const entries = view.get_array();
+    auto const limit = entries["limit"].get_long_or(100);
+    for (auto const [key, item] : entries) {
+        // key and item borrow from entries; no reference counts change.
+    }
+}
+```
+
 ## Select a PHP installation
 
 PHP 8.1 or newer with development headers and 64-bit `zend_long` is required.
@@ -108,7 +177,7 @@ The PHP executable's link flags are metadata, not helper dependencies.
 `BUILD_TESTING=OFF` disables tests and their CLI availability check.
 Tests cover the compiled ABI metadata, a small CLI-loadable consumer, independent build-tree
 consumption, relocated installation, discovery failures, and Zend ownership.
-Ownership tests use the existing Catch2 dependency and the matching optional
+Ownership and view tests use the existing Catch2 dependency and the matching optional
 Embed library in a dedicated executable. Its minimal harness initializes one
 request, runs the tests, destroys their local owners, and shuts Embed down.
 Missing Embed registers an explicit CTest skip for ownership execution; helper
