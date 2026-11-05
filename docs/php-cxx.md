@@ -155,6 +155,107 @@ if (view.is_array()) {
 }
 ```
 
+## Results, extraction, and PHP errors
+
+`<phpcxx/error.hpp>` and `<phpcxx/result.hpp>` are independent of Zend and JobU.
+`Result<T>` contains a value or an owned `Error`; `Result<void>` represents an
+operation with no payload. Test the result before calling `value()` or `error()`.
+Accessing the wrong alternative violates a precondition. Move-only values remain
+move-only, and moving an owner into/out of a result does not retain its payload.
+
+`<phpcxx/conversion.hpp>` adds checked extraction over the existing views:
+
+| Operation | Accepted value and result |
+| --- | --- |
+| `as_string` | PHP string → borrowed binary-safe `StringView` |
+| `as_bool` | PHP boolean → `bool`, without truthiness conversion |
+| `as_integer` | PHP integer → `zend_long` |
+| `as_double` | PHP double → `double`, preserving NaN/infinity |
+| `as_array` | PHP array → borrowed `ArrayView` |
+| `as_object` | Instance of a requested class/interface, including subclasses → borrowed const object pointer |
+
+These functions dereference PHP references without changing their targets or
+reference counts. Missing, undefined, null, and wrong-type values fail. They do
+not execute user code or change pending PHP exception state. In particular,
+`as_double` does not widen integers and `as_integer` does not parse strings.
+Use `retain()` explicitly if a borrowed result must survive its backing value.
+All Zend-backed values remain on their owning execution thread and request.
+
+`checked_integer<T>(zend_long)` checks signedness and target range, for non-bool
+integral types. `integer_from_double()` explicitly rejects fractional, non-finite,
+and out-of-range input before casting. `double_from_integer()` explicitly allows
+PHP-style floating-point rounding. Never use that rounding conversion for dates,
+revisions, or exact offsets.
+
+`<phpcxx/arguments.hpp>` supplies `Arguments(execute_data)` for the **currently
+active internal PHP call**. Indices are one-based. `count(minimum, maximum)`
+validates an inclusive range. `get(index)` borrows the raw slot: absence
+(`get() == nullptr`), a present undefined slot, and PHP null are distinct.
+The caller handles optional defaults and nullable values explicitly before
+requesting typed extraction. Zend resolves named arguments and any materialized
+defaults using generated arginfo; this library does not duplicate that mechanism.
+
+The scalar `string`, `boolean`, `integer`, and `floating` argument methods use
+Zend's parser and the caller's `strict_types` setting. Thus a weak call can accept
+a numeric string as an integer, while a strict call rejects it. Integer-to-float
+widening follows Zend even in strict calls. These methods require non-null input;
+they reject null rather than relying on Zend's deprecated null coercion. `array`
+and `object` check the required type/class without coercion. Parsing may modify
+argument slots and execute object conversion handlers, so reacquire borrowed
+views after a coercion and keep the call frame active throughout.
+
+`<phpcxx/exception.hpp>` bridges returned errors to PHP. `raise(error)` maps type,
+value/range, and count failures to native `TypeError`, `ValueError`, and
+`ArgumentCountError`. Runtime errors use `Exception`, or a supplied class derived
+from `Exception`/`Error`. A nonzero `Error::argument` adds native argument context
+for type/value errors. Diagnostic messages should describe requirements rather
+than interpolate sensitive submitted values; messages passed to Zend must not
+contain embedded NULs.
+
+Raising requires an active PHP execution frame. Without one, Zend may fatally
+bail out. `raise` preserves an already pending exception, without chaining or
+replacing it. `PendingException` is a marker for an exception still owned by Zend,
+not an exception owner: do not clear the exception and later expect the marker
+to recreate it. Argument parsing and date conversion return this marker if an
+exception is already pending or their PHP operation raises one. Callers must
+return to Zend after signalling failure. Keep C ABI callbacks non-throwing;
+allocation failure is process-fatal, and PHP bailout can bypass destructors.
+
+```cpp
+// Inside an internal function's non-throwing implementation; arginfo is generated.
+php::Arguments const arguments(execute_data);
+auto count = arguments.count(1, 1);
+if (!count) {
+    php::raise(count.error());
+    return;
+}
+
+auto text = arguments.string(1);
+if (!text) {
+    php::raise(text.error());
+    return;
+}
+// text.value() borrows the current argument; retain explicitly before storing it.
+```
+
+## Native dates
+
+`Timestamp` stores floor Unix seconds (`int64_t`) and microseconds (`int32_t`,
+0–999999). For example, `{-1, 500000}` is half a second before the epoch.
+`as_timestamp()` accepts native `DateTimeInterface` objects, including mutable and
+immutable subclasses. It reads native date state rather than overridden userland
+methods, and may update Zend's cached epoch seconds. An object whose constructor
+did not initialize its date state returns a value error.
+
+`datetime_immutable()` produces an owned UTC `DateTimeImmutable` with exact
+microseconds, independent of the request's default timezone. It uses PHP's date
+parser (and may update its last-error state), checks normalization, and verifies
+the resulting instant. `unix_microseconds()` checks the signed 64-bit range;
+`timestamp_from_microseconds()` handles the entire signed range, including
+negative values, without floating-point arithmetic. Date objects still obey the
+normal request/thread ownership rules. JobU schedules and durations are outside
+this independent helper.
+
 ## Select a PHP installation
 
 PHP 8.1 or newer with development headers and 64-bit `zend_long` is required.
@@ -177,13 +278,20 @@ The PHP executable's link flags are metadata, not helper dependencies.
 `BUILD_TESTING=OFF` disables tests and their CLI availability check.
 Tests cover the compiled ABI metadata, a small CLI-loadable consumer, independent build-tree
 consumption, relocated installation, discovery failures, and Zend ownership.
-Ownership and view tests use the existing Catch2 dependency and the matching optional
-Embed library in a dedicated executable. Its minimal harness initializes one
+Ownership, view, argument, conversion, and exception tests use the existing
+Catch2 dependency and matching optional Embed library in dedicated executables.
+The minimal harness initializes one
 request, runs the tests, destroys their local owners, and shuts Embed down.
-Missing Embed registers an explicit CTest skip for ownership execution; helper
-compilation and the other tests remain enabled. Only that executable links
-Embed. Comprehensive repeated lifecycle, threading, and bailout tests belong
+Missing Embed registers explicit CTest skips for ownership and conversion
+execution; helper compilation and the other tests remain enabled. Only the Embed test executables
+link Embed. Comprehensive repeated lifecycle, threading, and bailout tests belong
 to later stages.
+
+The test-only `consumer/functions.stub.php` is authoritative for its checked-in
+`functions_arginfo.h`, generated with PHP's `build/gen_stub.php`. Normal builds
+and tests consume that header directly; they do not need PHP sources, a stub
+compiler, or a generated-header freshness check. The fixture deliberately uses
+`mixed` input so helper parsing is exercised rather than preempted by arginfo.
 
 To include the helper in a normal JobU build, use `-DJB_BUILD_PHP_CPP=ON` and
 the selected `PHP_CONFIG`. The option defaults to `OFF`; default configuration

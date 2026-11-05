@@ -16,7 +16,8 @@ endif()
 phpcxx_add_php_target()
 message(STATUS "php-cxx: PHP ${PHP_VERSION}, module API ${PHP_MODULE_API}, debug=${PHP_DEBUG}, ZTS=${PHP_ZTS}")
 
-add_library(php-cxx STATIC src/build.cpp src/string.cpp src/array.cpp src/value.cpp src/views.cpp)
+add_library(php-cxx STATIC src/build.cpp src/string.cpp src/array.cpp src/value.cpp src/views.cpp
+    src/arguments.cpp src/conversion.cpp src/exception.cpp)
 add_library(PhpCxx::PhpCxx ALIAS php-cxx)
 target_compile_features(php-cxx PUBLIC cxx_std_20)
 target_include_directories(php-cxx PUBLIC
@@ -46,6 +47,8 @@ install(TARGETS php-cxx EXPORT PhpCxxTargets
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT PhpCxxDevelopment)
 install(FILES include/phpcxx/build.hpp include/phpcxx/zend.hpp
     include/phpcxx/views.hpp include/phpcxx/string.hpp include/phpcxx/array.hpp include/phpcxx/value.hpp
+    include/phpcxx/error.hpp include/phpcxx/result.hpp include/phpcxx/arguments.hpp
+    include/phpcxx/conversion.hpp include/phpcxx/exception.hpp
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/phpcxx" COMPONENT PhpCxxDevelopment)
 install(EXPORT PhpCxxTargets NAMESPACE PhpCxx::
     DESTINATION "${PHPCXX_INSTALL_CMAKEDIR}" COMPONENT PhpCxxDevelopment)
