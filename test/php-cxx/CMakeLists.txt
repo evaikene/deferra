@@ -68,3 +68,34 @@ else()
         "SKIP: PHP Embed is unavailable for ${php_config}; object execution requires matching Embed")
     set_tests_properties(php-cxx-object-test PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: PHP Embed")
 endif()
+
+# Reliability fixtures reuse generated consumer classes and conversions. Keep
+# their lifecycle support private to tests, with no new production dependency.
+if(php_embed_found)
+    add_library(php-cxx-lifecycle-fixture STATIC lifecycle-fixture.cpp consumer/functions.cpp consumer/objects.cpp)
+    target_link_libraries(php-cxx-lifecycle-fixture PUBLIC PhpCxx::PhpCxx "${php_embed_library}")
+    target_compile_definitions(php-cxx-lifecycle-fixture PRIVATE
+        PHPCXX_CONVERSION_CHECK_PATH="${CMAKE_CURRENT_SOURCE_DIR}/consumer/check.php"
+        PHPCXX_OBJECT_CHECK_PATH="${CMAKE_CURRENT_SOURCE_DIR}/consumer/objects-check.php")
+    find_package(Threads REQUIRED)
+    add_executable(php-cxx-lifecycle-test lifecycle-test.cpp)
+    target_link_libraries(php-cxx-lifecycle-test PRIVATE php-cxx-lifecycle-fixture Catch2::Catch2WithMain Threads::Threads)
+    add_test(NAME php-cxx-lifecycle-test COMMAND php-cxx-lifecycle-test)
+    set_tests_properties(php-cxx-lifecycle-test PROPERTIES TIMEOUT 60
+        FAIL_REGULAR_EXPRESSION "memory leaks detected;Warning:;Fatal error:")
+
+    add_executable(php-cxx-bailout-test bailout-main.cpp)
+    target_link_libraries(php-cxx-bailout-test PRIVATE php-cxx-lifecycle-fixture)
+    foreach(scenario bailout fatal)
+        add_test(NAME php-cxx-${scenario}-isolation-test COMMAND ${CMAKE_COMMAND}
+            "-Dexecutable=$<TARGET_FILE:php-cxx-bailout-test>" "-Dscenario=${scenario}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/bailout-test.cmake")
+        set_tests_properties(php-cxx-${scenario}-isolation-test PROPERTIES TIMEOUT 30)
+    endforeach()
+else()
+    foreach(scenario lifecycle bailout-isolation fatal-isolation)
+        add_test(NAME php-cxx-${scenario}-test COMMAND ${CMAKE_COMMAND} -E echo
+            "SKIP: PHP Embed is unavailable for ${php_config}; ${scenario} requires matching Embed")
+        set_tests_properties(php-cxx-${scenario}-test PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: PHP Embed")
+    endforeach()
+endif()
