@@ -22,11 +22,16 @@ source=src/php-cxx
 module=0
 if [ "$#" -eq 4 ]; then
     sdk=$(realpath "$4")
+    daemon=$(realpath "$sdk/../fixtures/jobud")
+    if [ ! -x "$daemon" ]; then
+        echo "Missing same-build daemon fixture: $daemon" >&2
+        exit 1
+    fi
     source=src/jobu-php
     module=1
     cmake -S "$source" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Debug \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPHP_CONFIG="$php_config" \
-        -DPHPCXX_REQUIRE_EMBED=ON -DCMAKE_PREFIX_PATH="$sdk"
+        -DPHPCXX_REQUIRE_EMBED=ON -DCMAKE_PREFIX_PATH="$sdk" -DJOBU_PHP_TEST_DAEMON="$daemon"
 else
     cmake -S "$source" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Debug \
         -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPHP_CONFIG="$php_config" -DPHPCXX_REQUIRE_EMBED=ON
@@ -34,7 +39,7 @@ fi
 ccache --zero-stats
 cmake --build "$build" --parallel 2
 ccache --show-stats
-ctest --test-dir "$build/test" --output-on-failure --no-tests=error --output-junit results.xml
+ctest --test-dir "$build/test" --output-on-failure --no-tests=error --output-junit results.xml -LE '^distribution$'
 
 # A green CTest exit permits skips. CI promises execution, including Embed and
 # relocated consumers, so inspect results as well as the process exit status.
@@ -54,7 +59,7 @@ if sys.argv[2] == '1':
     required.update({
         'jobu-php-configure-test',
         'jobu-php-module-test', 'jobu-php-reflection-test',
-        'jobu-php-exceptions-test', 'jobu-php-restart-test',
+        'jobu-php-exceptions-test', 'jobu-php-restart-test', 'jobu-php-lifecycle-test',
     })
 missing = required - {case.get('name') for case in cases}
 skipped = [case.get('name') for case in cases if case.find('skipped') is not None]

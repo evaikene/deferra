@@ -1,3 +1,5 @@
+#include "request.hpp"
+
 #include <phpcxx/arguments.hpp>
 #include <phpcxx/build.hpp>
 #include <phpcxx/exception.hpp>
@@ -9,11 +11,26 @@ extern "C" {
 #include <ext/standard/info.h>
 }
 
+#include <memory>
 #include <string_view>
+#include <utility>
 
 #include "jobu_arginfo.h"
 
 namespace {
+
+// NTS-only module globals carry just the active request pointer. Zend initializes
+// the slot at module startup; RSHUTDOWN clears it before native cleanup begins.
+struct Globals {
+    jb::php::Request* request;
+};
+
+Globals globals{};
+
+auto initialize_globals(void* storage) noexcept -> void
+{
+    static_cast<Globals*>(storage)->request = nullptr;
+}
 
 auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number) noexcept -> zend_result
 {
@@ -51,19 +68,19 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
 
 auto stop_module([[maybe_unused]] int type, [[maybe_unused]] int module_number) noexcept -> zend_result
 {
-    // All module-lifetime data is owned by Zend; there are no native globals.
+    // Request-owned native state has already been released by RSHUTDOWN.
     return SUCCESS;
 }
 
 auto start_request([[maybe_unused]] int type, [[maybe_unused]] int module_number) noexcept -> zend_result
 {
-    // The skeleton has no request resources. Session ownership belongs to the
-    // next stage and must be introduced at this boundary, never in MINIT.
+    globals.request = std::make_unique<jb::php::Request>().release();
     return SUCCESS;
 }
 
 auto stop_request([[maybe_unused]] int type, [[maybe_unused]] int module_number) noexcept -> zend_result
 {
+    delete std::exchange(globals.request, nullptr);
     return SUCCESS;
 }
 
@@ -109,9 +126,17 @@ zend_module_entry module{.size                  = sizeof(zend_module_entry),
                          .request_shutdown_func = stop_request,
                          .info_func             = module_info,
                          .version               = JOBU_PHP_VERSION,
+                         .globals_size          = sizeof(Globals),
+                         .globals_ptr           = &globals,
+                         .globals_ctor          = initialize_globals,
                          .build_id              = ZEND_MODULE_BUILD_ID};
 
 } // namespace
+
+auto jb::php::current_request() noexcept -> Request*
+{
+    return globals.request;
+}
 
 // Zend's generated declarations cannot carry noexcept. Delegate immediately to
 // a non-throwing boundary: operational errors use PHP exceptions, and allocation

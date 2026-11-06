@@ -27,7 +27,7 @@ else()
     set(jobu_php_client jobu-client)
 endif()
 
-add_library(jobu-php MODULE module.cpp)
+add_library(jobu-php MODULE module.cpp request.cpp)
 target_compile_features(jobu-php PRIVATE cxx_std_20)
 target_link_libraries(jobu-php PRIVATE PhpCxx::PhpCxx ${jobu_php_client})
 target_compile_definitions(jobu-php PRIVATE JOBU_PHP_VERSION="${PROJECT_VERSION}")
@@ -35,11 +35,15 @@ set_target_properties(jobu-php PROPERTIES
     PREFIX "" OUTPUT_NAME jobu SUFFIX ".so"
     CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON CXX_EXTENSIONS OFF)
 if(APPLE)
-    target_link_options(jobu-php PRIVATE "LINKER:-undefined,dynamic_lookup")
+    target_link_options(jobu-php PRIVATE "LINKER:-undefined,dynamic_lookup" "LINKER:-exported_symbol,_get_module")
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # Native SDK archives may have public symbols. Only the PHP entry point is
     # exported by the module; its statically linked implementation stays private.
-    target_link_options(jobu-php PRIVATE "LINKER:--exclude-libs,ALL")
+    # libstdc++ templates can explicitly request default visibility even in our
+    # own translation units. Keep those symbols private along with SDK archives.
+    target_link_options(jobu-php PRIVATE "LINKER:--exclude-libs,ALL"
+        "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/exports.map")
+    set_property(TARGET jobu-php APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/exports.map")
 endif()
 
 if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)

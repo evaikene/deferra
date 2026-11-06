@@ -20,5 +20,9 @@ cmake -S test/sdk-consumer -B "$staging/consumer" -G Ninja \
     "-DSDK_FORBIDDEN_PATHS=$PWD;$build;$staging/original"
 cmake --build "$staging/consumer" --parallel 2
 ctest --test-dir "$staging/consumer" --output-on-failure --no-tests=error
+# Stage the existing daemon as a test fixture, outside the installed Client SDK.
+# PHP rows use this exact native build and never rebuild the server per ABI.
+mkdir -p "$staging/fixtures"
+cp "$build/src/jobud/jobud" "$staging/fixtures/jobud"
 # Tar preserves paths and permissions through GitHub artifact transport.
-tar -czf "$artifact/jobu-sdk.tar.gz" -C "$staging" sdk
+tar -czf "$artifact/jobu-sdk.tar.gz" -C "$staging" sdk fixtures
