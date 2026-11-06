@@ -63,7 +63,7 @@ foreach ($exceptions as $name) {
     }
 }
 
-$expectedClasses = array_map(fn(string $name): string => 'JobU\\' . $name, [...array_keys($enums), ...$exceptions]);
+$expectedClasses = array_map(fn(string $name): string => 'JobU\\' . $name, [...array_keys($enums), ...$exceptions, 'Duration', 'Client']);
 $actualClasses = $extension->getClassNames();
 sort($expectedClasses);
 sort($actualClasses);

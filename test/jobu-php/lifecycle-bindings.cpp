@@ -1,5 +1,6 @@
 #include "lifecycle-bindings.hpp"
 
+#include "client_binding.hpp"
 #include "request.hpp"
 
 #include <jb/core/event_loop.hpp>
@@ -173,6 +174,7 @@ auto register_classes() noexcept -> zend_result
 {
     auto* client = register_class_JobUTestClient();
     auto* holder = register_class_JobUTestHolder();
+    register_class_JobUTestBridge();
     return ClientBinding::bind(client) && HolderBinding::bind(holder) ? SUCCESS : FAILURE;
 }
 
@@ -248,5 +250,40 @@ ZEND_METHOD(JobUTestHolder, client)
             return;
         }
         ZVAL_COPY(return_value, native.value()->client().get());
+    }();
+}
+
+ZEND_METHOD(JobUTestBridge, ping)
+{
+    [&]() noexcept {
+        auto value  = php::Arguments(execute_data).get(1).dereference();
+        auto native = jb::php::native_client(Z_OBJ_P(value.get()));
+        if (!native) {
+            php::raise(native.error());
+            return;
+        }
+        auto* client   = native.value();
+        auto  deadline = jb::php::make_deadline(jb::core::Clock::now(), client->timeout());
+        if (!deadline) {
+            ZVAL_FALSE(return_value);
+            return;
+        }
+        auto result = client->call(deadline.value(), [client](jb::jobu::ControlCallOptions options) {
+            return client->typed()->get_system_info(options);
+        });
+        ZVAL_BOOL(return_value, static_cast<bool>(result));
+    }();
+}
+
+ZEND_METHOD(JobUTestBridge, timeout)
+{
+    [&]() noexcept {
+        auto value  = php::Arguments(execute_data).get(1).dereference();
+        auto native = jb::php::native_client(Z_OBJ_P(value.get()));
+        if (!native) {
+            php::raise(native.error());
+            return;
+        }
+        ZVAL_LONG(return_value, native.value()->timeout().count());
     }();
 }

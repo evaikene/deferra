@@ -1,3 +1,4 @@
+#include "client_binding.hpp"
 #include "request.hpp"
 
 #include <phpcxx/arguments.hpp>
@@ -63,6 +64,9 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
     register_class_JobU_UnsavedChangesException(exception);
     register_class_JobU_OutcomeUnknownException(exception);
     register_class_JobU_UnsupportedFeatureException(exception);
+    if (!jb::php::bind_client_classes(register_class_JobU_Duration(), register_class_JobU_Client())) {
+        return FAILURE;
+    }
     return SUCCESS;
 }
 

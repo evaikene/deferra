@@ -1,9 +1,10 @@
 # JobU PHP extension
 
-The optional `jobu` extension currently provides native string-backed enums and
-an exception hierarchy. The private native layer now owns request-scoped event loops and independent
-session bundles. Public Client connections, resources, and management methods
-are not implemented yet. It supports PHP 8.1+ with 64-bit integers in NTS mode
+The optional `jobu` extension provides native string-backed enums, an exception
+hierarchy, immutable fixed durations, and request-scoped `Client` connections.
+The constructor eagerly connects and handshakes; public resource and management
+methods remain deferred. A private synchronous bridge is exercised by tests.
+It supports PHP 8.1+ with 64-bit integers in NTS mode
 on Linux/macOS. Runtime validation covers PHP 8.2–8.6 NTS; PHP 8.1 retains the
 minimum build/API contract but is not in the test matrix. macOS runtime coverage
 must be recorded separately. The independent [php-cxx helper](php-cxx.md) also
@@ -81,9 +82,10 @@ attempt's outcome is represented by null, not an extra enum case.
 The inherited constructor accepts `message`, integer `code`, and `previous`.
 `getErrorCode(): ?string` and `getCategory(): ?string` read separate daemon
 metadata, initially null for user-created exceptions. `getCode()` keeps its
-standard integer meaning. Operational error translation and outcome-identity
-metadata will accompany the RPC bridge. PHP `TypeError` and `ValueError` remain
-native engine errors. Exceptions and their subclasses reject serialization and
+standard integer meaning. Constructor failures now populate stable error
+code/category metadata. Full operation-specific error translation and
+outcome-identity metadata remain deferred. PHP `TypeError` and `ValueError`
+remain native engine errors. Exceptions and their subclasses reject serialization and
 unserialization, including user-defined serialization hooks.
 
 Registration happens during MINIT. Zend owns the registered classes and
@@ -101,9 +103,41 @@ Later native wrapper destruction is safe even when Zend frees object storage
 after RSHUTDOWN. Explicit close is idempotent and affects only that session.
 The loop stays attached until request shutdown, even after all sessions close.
 
-Production `JobU\Client` remains deferred until its constructor can eagerly
-connect and complete the handshake. Test-only client/holder bindings exercise
-this ownership layer without introducing placeholder production methods.
+`new JobU\Client(string $socketPath, ?JobU\Duration $timeout = null)` eagerly
+connects to the Unix socket and completes `system.info`. It requires API major 1,
+minor at least 7, and all thirty v1 capabilities; extra capabilities and newer
+compatible minors are accepted. Failure releases the partial session. `close()`
+is idempotent and affects only that client. Client cloning and serialization
+are rejected; reconstructing an already initialized object is also rejected.
+
+The default timeout is ten seconds. A custom constructor timeout becomes the
+client's default for future operations. It must be positive and representable
+by the monotonic clock. One absolute deadline covers all phases of an operation;
+connection, handshake, and typed-call waiting never receive fresh full budgets.
+Deadlines are cooperative: an executing native callback cannot be preempted.
+Nested waits and displaced loop bindings fail before submitting an RPC.
+
+`Duration::milliseconds(int)`, `seconds(int)`, `minutes(int)`, `hours(int)`, and
+`days(int)` create immutable signed durations with checked integer millisecond
+storage. Days are exactly 24 hours. Overflow raises `ValueError`; no floating-point
+time conversion is used. Zero/negative durations can be represented but are
+invalid as timeouts. Direct construction, cloning, and serialization are rejected.
+
+Wrong argument types/ranges raise PHP `TypeError`/`ValueError`. Constructor
+connection/handshake failures raise `ConnectionException`, deadline expiry raises
+`TimeoutException`, and incompatible API/capabilities raise
+`UnsupportedFeatureException`. Other initialization failures use `JobU\Exception`.
+Messages omit socket paths and remote/backend detail; stable codes/categories are
+available through the existing getters. An already pending PHP exception wins.
+
+The private bridge wraps typed `ControlClient` calls, preserving owning replies,
+local/remote failures, and mutation uncertainty. A terminal notification does not
+replace its subsequent per-call outcome. Timeout or stopped-wait cleanup retires
+local observation only; it does not cancel remote work or prove rollback. A
+terminal failure already queued but not delivered at expiry is conservatively
+uncertain. Retry/reconnect, full operational exception translation, public
+`getSystemInfo()`, and resources remain later-stage work. There is no public raw
+RPC entry point. Test-only bindings exercise calls without adding placeholder APIs.
 No C++ exception may unwind into Zend. Allocation failure remains fatal, and
 PHP bailout does not guarantee C++ stack cleanup.
 
@@ -133,12 +167,19 @@ work, late native wrapper destruction, and reentrancy rejection. Linux also
 checks descriptor accounting. This models reused PHP-FPM request boundaries;
 it is not a claim of testing an actual PHP-FPM deployment.
 
+Bridge tests additionally cover immediate/deferred replies, capability/version
+rejection, constructor errors, one remaining deadline, pre-acceptance and remote
+failures, timeout/stopped-wait cleanup, late replies, terminal mutation uncertainty,
+and reentrancy. The real module is also loaded by a separate PHP CLI process
+against the same-build daemon. Reused-runtime tests exercise production Client
+construction, independent sessions, Duration conversions, and request teardown.
+
 The fixture classes and their generated arginfo are linked only into the test
 executable. The production module exports no test API and does not link Embed.
 Integrated builds use the `jobud` target. Standalone tests take
-`JOBU_PHP_TEST_DAEMON`; missing Embed or daemon produces an explicit lifecycle
-skip, which the CI gate rejects. The new lifecycle regression covers normal
-request shutdown, not arbitrary recovery after Zend bailout or a process kill.
+`JOBU_PHP_TEST_DAEMON`; missing Embed or daemon produces explicit skips for
+lifecycle/bridge checks, which the CI gate rejects. The lifecycle regression
+covers normal request shutdown, not arbitrary recovery after Zend bailout or a process kill.
 Standalone module tests also run the independent helper suite, including
 relocated helper consumers.
 

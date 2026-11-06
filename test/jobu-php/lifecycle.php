@@ -6,9 +6,10 @@ function check(bool $condition, string $message): void
     }
 }
 
-check(!class_exists('JobU\\Client', false), 'public Client remains deferred');
+check(class_exists('JobU\\Client', false), 'production Client is registered');
 check(JobUTestClient::live() === 0, 'request starts without native clients');
 check(!isset($GLOBALS['previous_request']), 'request globals do not leak');
+check(!isset($GLOBALS['production_client']), 'production client does not cross requests');
 
 $first = new JobUTestClient(JOBU_TEST_SOCKET);
 $second = new JobUTestClient(JOBU_TEST_SOCKET);
@@ -59,6 +60,30 @@ foreach ([$client, $holder] as $object) {
 }
 unset($object, $holder, $client);
 check(JobUTestClient::live() === 0, 'policy checks release clients');
+
+// Exercise the production constructor and bridge in every reused request.
+$first = new JobU\Client(JOBU_TEST_SOCKET);
+$second = new JobU\Client(socketPath: JOBU_TEST_SOCKET, timeout: JobU\Duration::seconds(2));
+check(JobUTestBridge::timeout($first) === 10000, 'default ten-second timeout');
+check(JobUTestBridge::timeout($second) === 2000, 'custom timeout');
+check(JobUTestBridge::ping($first) && JobUTestBridge::ping($second), 'production clients ready');
+$first->close();
+$first->close();
+check(!JobUTestBridge::ping($first) && JobUTestBridge::ping($second), 'close is session-local');
+foreach (['milliseconds' => 1, 'seconds' => 1000, 'minutes' => 60000, 'hours' => 3600000, 'days' => 86400000] as $factory => $scale) {
+    $converted = new JobU\Client(JOBU_TEST_SOCKET, JobU\Duration::$factory(1000));
+    check(JobUTestBridge::timeout($converted) === 1000 * $scale, 'exact Duration conversion');
+    $converted->close();
+}
+try { $second->__construct(JOBU_TEST_SOCKET); throw new LogicException('reinitialization accepted'); }
+catch (Exception $error) { check(!$error instanceof LogicException, 'reinitialization rejected'); }
+check(JobUTestBridge::ping($second), 'reinitialization preserves original session');
+try { $copy = clone $second; throw new LogicException('client clone accepted'); }
+catch (Error $error) {}
+try { serialize($second); throw new LogicException('client serialization accepted'); }
+catch (Exception $error) { check(!$error instanceof LogicException, 'client serialization rejected'); }
+$GLOBALS['production_client'] = $second;
+unset($first, $second, $converted);
 
 // Keep a holder/client cycle and accepted native work alive until engine teardown.
 // RSHUTDOWN must close sessions before Zend frees these native wrappers.

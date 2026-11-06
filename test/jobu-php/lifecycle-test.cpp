@@ -1,3 +1,4 @@
+#include "client.hpp"
 #include "lifecycle-bindings.hpp"
 #include "request.hpp"
 #include "support/temporary_directory.hpp"
@@ -5,11 +6,15 @@
 #include <jb/core/byte_buffer.hpp>
 #include <jb/core/event_loop.hpp>
 #include <jb/core/event_loop_types.hpp>
+#include <jb/core/json.hpp>
 #include <jb/core/object.hpp>
 #include <jb/core/process.hpp>
 #include <jb/core/scoped_event_loop.hpp>
 #include <jb/core/signal.hpp>
+#include <jb/net/local_server.hpp>
 #include <jb/net/local_socket.hpp>
+#include <jb/rpc/protocol.hpp>
+#include <jb/rpc/server.hpp>
 
 #include <Zend/zend_exceptions.h>
 #include <phpcxx/exception.hpp>
@@ -17,6 +22,7 @@
 #include <sapi/embed/php_embed.h>
 
 #include <catch2/catch_test_macros.hpp>
+#include <fmt/format.h>
 
 #include <chrono> // IWYU pragma: keep duration literals
 #include <csignal>
@@ -279,4 +285,121 @@ TEST_CASE("Request attachment and waits preserve the core reentrancy boundary", 
         rejected    = !nested && nested.error().code == "core.event_loop.reentrant_wait";
     }));
     REQUIRE(request_loop.run_until(Clock::now() + 1s, [&] { return rejected; }));
+}
+
+TEST_CASE("Production constructor translates terminal and timed-out handshakes", "[php][bridge]")
+{
+    for (auto const* scenario : {"timeout", "malformed", "remote", "incompatible"}) {
+        INFO(scenario);
+        Runtime runtime;
+        auto*   request = jb::php::current_request();
+        auto    anchor  = request->create_session();
+        REQUIRE(anchor);
+        jb::test::TemporaryDirectory                       directory{std::filesystem::perms::owner_all};
+        jb::net::LocalServer                               listener;
+        jb::rpc::Server                                    server;
+        jb::core::Object                                   receiver;
+        std::vector<std::unique_ptr<jb::net::LocalSocket>> silent;
+        REQUIRE(server.register_method("system.info", [&](auto const&, auto const&) {
+            if (std::string_view{scenario} == "remote") {
+                return jb::rpc::MethodResult::failure({.code = -32000, .message = "PRIVATE PEER DETAIL"});
+            }
+            if (std::string_view{scenario} == "incompatible") {
+                auto json = jb::core::parse_json(
+                    R"({"daemon_version":"test","api_version":{"major":2,"minor":7},"capabilities":[]})");
+                REQUIRE(json);
+                return jb::rpc::MethodResult::success(std::move(json).value());
+            }
+            return jb::rpc::MethodResult::success(jb::core::JsonValue{});
+        }));
+        listener.new_connection.connect(&receiver, [&] {
+            while (auto socket = listener.take_next_connection()) {
+                if (std::string_view{scenario} == "timeout") {
+                    silent.push_back(std::move(socket));
+                }
+                else {
+                    REQUIRE(server.add_connection(std::move(socket)));
+                }
+            }
+        });
+        auto endpoint = (directory.path() / "peer.sock").string();
+        REQUIRE(listener.listen(endpoint));
+        zend_register_string_constant("JOBU_TEST_SOCKET",
+                                      sizeof("JOBU_TEST_SOCKET") - 1,
+                                      endpoint.c_str(),
+                                      CONST_CS,
+                                      0);
+        auto const* expected = "ConnectionException";
+        if (std::string_view{scenario} == "timeout") {
+            expected = "TimeoutException";
+        }
+        else if (std::string_view{scenario} == "incompatible") {
+            expected = "UnsupportedFeatureException";
+        }
+        auto const milliseconds = std::string_view{scenario} == "timeout" ? 20 : 1000;
+        auto       expression =
+            fmt::format("(function () {{ try {{ new JobU\\Client(JOBU_TEST_SOCKET, JobU\\Duration::milliseconds({})); "
+                        "return false; }} catch (JobU\\{} $e) {{ return $e->getErrorCode() !== null && "
+                        "$e->getCategory() !== null && !str_contains($e->getMessage(), 'PRIVATE'); }} }})()",
+                        milliseconds,
+                        expected);
+        REQUIRE(evaluate(expression));
+    }
+}
+
+TEST_CASE("Production CLI module connects to the same-build daemon", "[php][bridge]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    auto&                        loop = host.value()->loop();
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(loop, directory.path());
+
+    jb::core::Process                    process;
+    jb::core::Object                     receiver;
+    std::optional<jb::core::ProcessExit> exit;
+    std::string                          errors;
+    process.standard_error.connect(&receiver, [&](jb::core::ByteBuffer const& bytes) {
+        errors.append(jb::core::as_string_view(bytes));
+    });
+    process.finished.connect(&receiver, [&](jb::core::ProcessExit const& value) { exit = value; });
+    REQUIRE(process.start({
+        .executable = JOBU_PHP_BINARY,
+        .arguments  = {"-n",
+                       "-dextension=" JOBU_PHP_MODULE,
+                       JOBU_PHP_CLIENT_SCRIPT, (directory.path() / "daemon.sock").string()}
+    }));
+    REQUIRE(loop.run_until(Clock::now() + 10s, [&] { return exit.has_value(); }));
+    INFO(errors);
+    CHECK(errors.empty());
+    CHECK(exit->kind == jb::core::ProcessExitKind::Exited);
+    CHECK(exit->exit_code == 0);
+    daemon.stop(loop);
+}
+
+TEST_CASE("Production native Client safely outlives request shutdown", "[php][lifecycle]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    auto&                        loop = host.value()->loop();
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(loop, directory.path());
+    auto client = std::make_unique<jb::php::Client>();
+    {
+        Runtime runtime;
+        REQUIRE(client->initialize(*jb::php::current_request(),
+                                   (directory.path() / "daemon.sock").string(),
+                                   Clock::now() + 1s,
+                                   10s));
+        // Leave an accepted call pending. RSHUTDOWN must retire it and detach
+        // the bundle without pumping callbacks into this surviving wrapper.
+        REQUIRE(client->typed()->get_system_info());
+    }
+    CHECK(EventLoop::current() == &loop);
+    CHECK(client->typed() == nullptr);
+    client->close();
+    client.reset();
+    daemon.stop(loop);
 }
