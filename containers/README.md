@@ -75,8 +75,9 @@ compiler or system-library changes.
 ## PHP CI environments
 
 GitHub CI uses the same pinned Ubuntu 26.04 and Alpine 3.24 releases. Its PHP
-jobs install one public ZendPHP ABI per environment and build only the standalone
-helper. See [the PHP CI documentation](../docs/php-cxx.md#github-ci-and-public-php-versions)
+jobs install one public ZendPHP ABI per environment and build the helper and
+JobU PHP module against their same-run native SDK. See
+[the PHP CI documentation](../docs/php-cxx.md#github-ci-and-public-php-versions)
 for the shared version list, signed package installation, reproduction command,
-and the SDK artifacts prepared for the future module. The ordinary development
+and [module build instructions](../docs/php.md) for SDK reuse. The ordinary development
 images above continue to have no PHP dependency.

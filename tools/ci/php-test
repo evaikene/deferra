@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 3 ]; then
-    echo 'Usage: tools/ci/php-test VERSION PHP_CONFIG BUILD_DIRECTORY' >&2
+if [ "$#" -ne 3 ] && [ "$#" -ne 4 ]; then
+    echo 'Usage: tools/ci/php-test VERSION PHP_CONFIG BUILD_DIRECTORY [JOBU_SDK_PREFIX]' >&2
     exit 2
 fi
 version=$1
@@ -16,10 +16,21 @@ if [ "$actual" != "$version" ]; then
 fi
 "$php_binary" -n -r 'printf("PHP %s, ZTS=%d, debug=%d, integer=%d bytes\n", PHP_VERSION, PHP_ZTS, PHP_DEBUG, PHP_INT_SIZE); exit(PHP_ZTS || PHP_INT_SIZE != 8 ? 1 : 0);'
 
-# This source entry point has no JobU targets. Each matrix row rebuilds only
-# PHP-dependent code; the native jobs own full-project validation and SDK output.
-cmake -S src/php-cxx -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Debug \
-    -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPHP_CONFIG="$php_config" -DPHPCXX_REQUIRE_EMBED=ON
+# Both entry points rebuild only PHP-dependent code. When testing the module,
+# the caller supplies the matching native SDK from this workflow run.
+source=src/php-cxx
+module=0
+if [ "$#" -eq 4 ]; then
+    sdk=$(realpath "$4")
+    source=src/jobu-php
+    module=1
+    cmake -S "$source" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPHP_CONFIG="$php_config" \
+        -DPHPCXX_REQUIRE_EMBED=ON -DCMAKE_PREFIX_PATH="$sdk"
+else
+    cmake -S "$source" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPHP_CONFIG="$php_config" -DPHPCXX_REQUIRE_EMBED=ON
+fi
 ccache --zero-stats
 cmake --build "$build" --parallel 2
 ccache --show-stats
@@ -27,7 +38,7 @@ ctest --test-dir "$build/test" --output-on-failure --no-tests=error --output-jun
 
 # A green CTest exit permits skips. CI promises execution, including Embed and
 # relocated consumers, so inspect results as well as the process exit status.
-python3 - "$build/test/results.xml" <<'PY'
+python3 - "$build/test/results.xml" "$module" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 
@@ -39,6 +50,12 @@ required = {
     'php-cxx-ownership-test', 'php-cxx-conversion-test', 'php-cxx-object-test',
     'php-cxx-lifecycle-test', 'php-cxx-bailout-isolation-test', 'php-cxx-fatal-isolation-test',
 }
+if sys.argv[2] == '1':
+    required.update({
+        'jobu-php-configure-test',
+        'jobu-php-module-test', 'jobu-php-reflection-test',
+        'jobu-php-exceptions-test', 'jobu-php-restart-test',
+    })
 missing = required - {case.get('name') for case in cases}
 skipped = [case.get('name') for case in cases if case.find('skipped') is not None]
 if missing or skipped:

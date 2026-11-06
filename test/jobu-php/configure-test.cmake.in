@@ -1,0 +1,42 @@
+cmake_minimum_required(VERSION 3.20)
+set(fixture "@CMAKE_CURRENT_BINARY_DIR@/configure-fixture")
+file(REMOVE_RECURSE "${fixture}")
+set(fake_prefix "${fixture}/php")
+file(MAKE_DIRECTORY "${fake_prefix}/include/Zend")
+file(WRITE "${fake_prefix}/include/Zend/zend_modules.h" "#define ZEND_MODULE_API_NO 20220829\n")
+set(fake_version 8.2.0)
+set(fake_version_id 80200)
+# Configuration must never try to run PHP, even when rejecting an ABI.
+set(fake_binary "${fake_prefix}/not-an-executable")
+
+function(check_configuration name source expected_error)
+    configure_file("@CMAKE_CURRENT_SOURCE_DIR@/../php-cxx/fake-php-config.sh.in" "${fake_prefix}/php-config" @ONLY)
+    file(CHMOD "${fake_prefix}/php-config" PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+    execute_process(COMMAND "@CMAKE_COMMAND@" -S "${source}" -B "${fixture}/${name}"
+        -G "@CMAKE_GENERATOR@" "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+        "-DPHP_CONFIG=${fake_prefix}/php-config" -DBUILD_TESTING=OFF
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 15)
+    file(WRITE "${fixture}/${name}.log" "${output}\n${error}")
+    if(expected_error STREQUAL "")
+        if(NOT "${result}" STREQUAL "0")
+            message(FATAL_ERROR "${name} failed: ${output}\n${error}")
+        endif()
+    elseif("${result}" STREQUAL "0" OR NOT "${output}\n${error}" MATCHES "${expected_error}")
+        message(FATAL_ERROR "${name} did not reject the unsupported configuration: ${output}\n${error}")
+    endif()
+endfunction()
+
+# Synthetic development headers exercise configuration probes only. Runtime
+# compatibility is tested separately with real, ABI-matched PHP installations.
+file(WRITE "${fake_prefix}/include/php.h"
+    "#define PHP_VERSION_ID 80200\n#define ZEND_DEBUG 0\n#define ZTS 1\nusing zend_long = long long;\n")
+check_configuration(zts-extension "@jobu_php_source@" "JobU PHP extension requires NTS PHP")
+check_configuration(zts-helper "@jobu_php_source@/../php-cxx" "")
+
+file(WRITE "${fake_prefix}/include/php.h"
+    "#define PHP_VERSION_ID 80200\n#define ZEND_DEBUG 0\nusing zend_long = int;\n")
+check_configuration(narrow-integers "@jobu_php_source@" "64-bit zend_long")
+
+set(fake_version 8.0.0)
+set(fake_version_id 80000)
+check_configuration(old-php "@jobu_php_source@" "requires PHP 8.1 or newer")

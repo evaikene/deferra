@@ -10,6 +10,9 @@ add_test(NAME php-cxx-default-build-test COMMAND ${CMAKE_COMMAND}
 if(TARGET php-cxx)
     add_subdirectory(php-cxx)
 endif()
+if(TARGET jobu-php)
+    add_subdirectory(jobu-php)
+endif()
 
 # Installation is checked in a fresh private prefix. No deployment identities or
 # service-manager access are required. The SDK gate uses independent consumers.
