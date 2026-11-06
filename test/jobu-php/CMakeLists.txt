@@ -14,7 +14,7 @@ add_test(NAME jobu-php-module-test COMMAND ${CMAKE_COMMAND}
     "-Dphp_binary=${php_binary}" "-Dmodule=$<TARGET_FILE:jobu-php>"
     "-Dversion=${PROJECT_VERSION}" "-Dsystem=${CMAKE_SYSTEM_NAME}" "-Dnm=${CMAKE_NM}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/module-test.cmake")
-foreach(scenario reflection exceptions)
+foreach(scenario reflection exceptions client)
     add_test(NAME jobu-php-${scenario}-test COMMAND "${php_binary}" -n
         "-dextension=$<TARGET_FILE:jobu-php>" "${CMAKE_CURRENT_SOURCE_DIR}/${scenario}.php")
 endforeach()
@@ -22,7 +22,7 @@ add_test(NAME jobu-php-restart-test COMMAND ${CMAKE_COMMAND}
     "-Dphp_binary=${php_binary}" "-Dmodule=$<TARGET_FILE:jobu-php>"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/restart-test.cmake")
 set_tests_properties(jobu-php-module-test jobu-php-reflection-test
-    jobu-php-exceptions-test jobu-php-restart-test PROPERTIES
+    jobu-php-exceptions-test jobu-php-client-test jobu-php-restart-test PROPERTIES
     TIMEOUT 30 FAIL_REGULAR_EXPRESSION "Warning:;Fatal error:;memory leaks detected")
 
 # The test executable embeds the real module hooks plus fixture-only classes.
@@ -38,9 +38,11 @@ endif()
 
 if(php_embed_found AND jobu_php_test_daemon)
     find_package(Catch2 CONFIG REQUIRED)
-    add_executable(jobu-php-lifecycle-test lifecycle-test.cpp lifecycle-bindings.cpp
+    add_executable(jobu-php-lifecycle-test lifecycle-test.cpp lifecycle-bindings.cpp bridge-test.cpp
         "${jobu_php_source}/module.cpp" "${jobu_php_source}/request.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/../support/temporary_directory.cpp")
+        "${jobu_php_source}/client.cpp" "${jobu_php_source}/client_binding.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/../support/temporary_directory.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/../support/memory_io_device.cpp")
     get_target_property(jobu_php_libraries jobu-php LINK_LIBRARIES)
     target_link_libraries(jobu-php-lifecycle-test PRIVATE ${jobu_php_libraries}
         Catch2::Catch2WithMain "${php_embed_library}")
@@ -48,15 +50,23 @@ if(php_embed_found AND jobu_php_test_daemon)
     target_compile_definitions(jobu-php-lifecycle-test PRIVATE
         JOBU_PHP_VERSION="${PROJECT_VERSION}"
         JOBUD_EXECUTABLE="${jobu_php_test_daemon}"
+        JOBU_PHP_BINARY="${php_binary}"
+        JOBU_PHP_MODULE="$<TARGET_FILE:jobu-php>"
+        JOBU_PHP_CLIENT_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/client.php"
         JOBU_PHP_LIFECYCLE_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/lifecycle.php")
+    add_dependencies(jobu-php-lifecycle-test jobu-php)
     if(TARGET jobud)
         add_dependencies(jobu-php-lifecycle-test jobud)
     endif()
-    add_test(NAME jobu-php-lifecycle-test COMMAND jobu-php-lifecycle-test)
-    set_tests_properties(jobu-php-lifecycle-test PROPERTIES TIMEOUT 120
+    add_test(NAME jobu-php-lifecycle-test COMMAND jobu-php-lifecycle-test "[lifecycle]")
+    add_test(NAME jobu-php-bridge-test COMMAND jobu-php-lifecycle-test "[bridge]")
+    set_tests_properties(jobu-php-lifecycle-test jobu-php-bridge-test PROPERTIES TIMEOUT 120
         FAIL_REGULAR_EXPRESSION "memory leaks detected;Warning:;Fatal error:")
 else()
     add_test(NAME jobu-php-lifecycle-test COMMAND ${CMAKE_COMMAND} -E echo
         "SKIP: PHP lifecycle tests require matching Embed and JOBU_PHP_TEST_DAEMON (or the jobud target)")
     set_tests_properties(jobu-php-lifecycle-test PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: PHP lifecycle")
+    add_test(NAME jobu-php-bridge-test COMMAND ${CMAKE_COMMAND} -E echo
+        "SKIP: PHP bridge tests require matching Embed and JOBU_PHP_TEST_DAEMON (or the jobud target)")
+    set_tests_properties(jobu-php-bridge-test PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: PHP bridge")
 endif()

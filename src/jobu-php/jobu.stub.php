@@ -7,6 +7,27 @@
 
 namespace JobU;
 
+/** Immutable signed fixed duration with checked integer millisecond storage. @not-serializable */
+final class Duration
+{
+    private function __construct() {}
+    public static function milliseconds(int $value): Duration {}
+    public static function seconds(int $value): Duration {}
+    public static function minutes(int $value): Duration {}
+    public static function hours(int $value): Duration {}
+    /** One day is exactly 24 hours, independent of calendar/timezone changes. */
+    public static function days(int $value): Duration {}
+}
+
+/** Request-scoped synchronous Unix-socket client. @not-serializable */
+final class Client
+{
+    /** Connect and validate the daemon eagerly; timeout defaults to ten seconds and must be positive. */
+    public function __construct(string $socketPath, ?Duration $timeout = null) {}
+    /** Idempotently close this session. Further operations fail locally. */
+    public function close(): void {}
+}
+
 /** Queue lifecycle state, including retained deleted queues. */
 enum QueueState: string
 {

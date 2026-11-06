@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 02be6394a8230d2fdc5cba8b0a988118ac845a22 */
+ * Stub hash: 9574c55465589c35a541ec8810e00362d6a81dea */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobUTestClient___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, socket, IS_STRING, 0)
@@ -24,6 +24,14 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobUTestHolder_client, 0, 0, JobUTestClient, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobUTestBridge_ping, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_OBJ_INFO(0, client, JobU\\Client, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobUTestBridge_timeout, 0, 1, IS_LONG, 0)
+	ZEND_ARG_OBJ_INFO(0, client, JobU\\Client, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_METHOD(JobUTestClient, __construct);
 ZEND_METHOD(JobUTestClient, close);
 ZEND_METHOD(JobUTestClient, ping);
@@ -31,6 +39,8 @@ ZEND_METHOD(JobUTestClient, pending);
 ZEND_METHOD(JobUTestClient, live);
 ZEND_METHOD(JobUTestHolder, __construct);
 ZEND_METHOD(JobUTestHolder, client);
+ZEND_METHOD(JobUTestBridge, ping);
+ZEND_METHOD(JobUTestBridge, timeout);
 
 static const zend_function_entry class_JobUTestClient_methods[] = {
 	ZEND_ME(JobUTestClient, __construct, arginfo_class_JobUTestClient___construct, ZEND_ACC_PUBLIC)
@@ -44,6 +54,12 @@ static const zend_function_entry class_JobUTestClient_methods[] = {
 static const zend_function_entry class_JobUTestHolder_methods[] = {
 	ZEND_ME(JobUTestHolder, __construct, arginfo_class_JobUTestHolder___construct, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobUTestHolder, client, arginfo_class_JobUTestHolder_client, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobUTestBridge_methods[] = {
+	ZEND_ME(JobUTestBridge, ping, arginfo_class_JobUTestBridge_ping, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
+	ZEND_ME(JobUTestBridge, timeout, arginfo_class_JobUTestBridge_timeout, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
 	ZEND_FE_END
 };
 
@@ -73,6 +89,21 @@ static zend_class_entry *register_class_JobUTestHolder(void)
 	zend_class_entry ce, *class_entry;
 
 	INIT_CLASS_ENTRY(ce, "JobUTestHolder", class_JobUTestHolder_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobUTestBridge(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_CLASS_ENTRY(ce, "JobUTestBridge", class_JobUTestBridge_methods);
 #if (PHP_VERSION_ID >= 80400)
 	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
 #else
