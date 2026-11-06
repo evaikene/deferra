@@ -252,17 +252,18 @@ void ControlClient::Private::on_terminated(Error const& raw_error)
     // Latch and release every correlation before public observers can reenter close().
     phase = Phase::Failed;
     disconnect_sources();
-    auto failures = std::vector<std::pair<ControlCallId, bool>>{};
-    for (auto const& [id, call] : pending) {
-        if (id != 0U) {
-            auto const uncertain = is_mutation(call.method) &&
-                                   !std::holds_alternative<jb::rpc::RpcError>(call.outcome) &&
-                                   (call.possibly_sent || raw_error.code == "rpc.short_write" ||
-                                    raw_error.code == "rpc.connection_closed");
-            failures.emplace_back(id, uncertain);
-        }
-    }
+    auto calls = std::move(pending);
     pending.clear();
+
+    // Initialization must not publish readiness on a terminal connection. Ordinary
+    // calls retain their observed outcomes independently of the retired session.
+    calls.erase(0U);
+    for (auto& [id, call] : calls) {
+        static_cast<void>(id);
+        call.possibly_sent =
+            call.possibly_sent || raw_error.code == "rpc.short_write" || raw_error.code == "rpc.connection_closed";
+    }
+
     wire_to_local.clear();
     ready_outcomes.clear();
     ++generation;
@@ -274,7 +275,7 @@ void ControlClient::Private::on_terminated(Error const& raw_error)
     auto*      data               = this;
     post_required(
         *owner->event_loop(),
-        [guard, current_generation, data, safe_error = std::move(safe_error), failures = std::move(failures)] {
+        [guard, current_generation, data, safe_error = std::move(safe_error), calls = std::move(calls)]() mutable {
             if (guard.expired() || data->generation != current_generation) {
                 return;
             }
@@ -283,15 +284,27 @@ void ControlClient::Private::on_terminated(Error const& raw_error)
                 return;
             }
 
-            // The failures were latched before the terminal signal. A live wrapper still owes them after reentrant
-            // close().
-            for (auto const& [id, uncertain] : failures) {
-                data->owner->emit(data->owner->call_failed, id, local_failure(safe_error, uncertain));
+            // Retired calls remain owed after reentrant close(). Completed responses
+            // take precedence over transport loss; only unanswered calls fail locally.
+            for (auto& [id, call] : calls) {
+                data->deliver_retired_call(id, std::move(call), safe_error);
                 if (guard.expired()) {
                     return;
                 }
             }
         });
+}
+
+void ControlClient::Private::deliver_retired_call(ControlCallId id, Pending call, Error const& error)
+{
+    // Correlated wire responses survive session retirement. Use the normal decoder
+    // so malformed results and represented remote errors retain their semantics.
+    if (!std::holds_alternative<std::monostate>(call.outcome)) {
+        deliver_one(id, std::move(call));
+        return;
+    }
+
+    owner->emit(owner->call_failed, id, local_failure(error, is_mutation(call.method) && call.possibly_sent));
 }
 
 void ControlClient::Private::rearm_deadline()
@@ -469,25 +482,22 @@ void ControlClient::Private::close(bool emit_failures)
     auto const defer_initialization_failure = initializing && establishing == 0U;
     phase                                   = Phase::Closed;
     disconnect_sources();
-    auto failures             = std::vector<std::pair<ControlCallId, bool>>{};
-    auto establishing_failure = std::optional<std::pair<ControlCallId, bool>>{};
-    for (auto const& [id, call] : pending) {
+    auto calls = std::move(pending);
+    pending.clear();
+    auto establishing_call = std::optional<std::pair<ControlCallId, Pending>>{};
+    for (auto& [id, call] : calls) {
         if (call.wire_id) {
             rpc.cancel(*call.wire_id);
         }
-        if (id != 0U) {
-            auto const uncertain = is_mutation(call.method) &&
-                                   !std::holds_alternative<jb::rpc::RpcError>(call.outcome) &&
-                                   (call.possibly_sent || establishing == id);
-            if (establishing == id) {
-                establishing_failure.emplace(id, uncertain);
-            }
-            else {
-                failures.emplace_back(id, uncertain);
-            }
+        if (id != 0U && establishing == id) {
+            call.possibly_sent = true;
+            establishing_call.emplace(id, std::move(call));
         }
     }
-    pending.clear();
+    calls.erase(0U);
+    if (establishing_call) {
+        calls.erase(establishing_call->first);
+    }
     wire_to_local.clear();
     ready_outcomes.clear();
     ++generation;
@@ -504,8 +514,8 @@ void ControlClient::Private::close(bool emit_failures)
             return;
         }
     }
-    for (auto const& [id, uncertain] : failures) {
-        owner->emit(owner->call_failed, id, local_failure(closed_error(), uncertain));
+    for (auto& [id, call] : calls) {
+        deliver_retired_call(id, std::move(call), closed_error());
         if (lifetime.expired()) {
             return;
         }
@@ -520,17 +530,18 @@ void ControlClient::Private::close(bool emit_failures)
             }
         });
     }
-    if (establishing_failure) {
-        // A device callback may close us while the accepting raw call is still on the stack.
+    if (establishing_call) {
+        // Even a completed response must wait until its accepting call has returned.
+        // A device callback may close us while the raw write is still on the stack.
         auto       guard              = std::weak_ptr<int>{lifetime_guard};
         auto const current_generation = generation;
-        auto const [id, uncertain]    = *establishing_failure;
-        auto* data                    = this;
-        post_required(*owner->event_loop(), [guard, current_generation, data, id, uncertain] {
-            if (!guard.expired() && data->generation == current_generation) {
-                data->owner->emit(data->owner->call_failed, id, local_failure(closed_error(), uncertain));
-            }
-        });
+        auto*      data               = this;
+        post_required(*owner->event_loop(),
+                      [guard, current_generation, data, call = std::move(*establishing_call)]() mutable {
+                          if (!guard.expired() && data->generation == current_generation) {
+                              data->deliver_retired_call(call.first, std::move(call.second), closed_error());
+                          }
+                      });
     }
 }
 

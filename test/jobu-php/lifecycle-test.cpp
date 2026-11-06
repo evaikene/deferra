@@ -505,6 +505,32 @@ TEST_CASE("Recovery preserves committed effects and frozen requests through lost
             CHECK(invalid.error().code == "php.client.invalid_idempotency_key");
             CHECK(proxy.connections == before);
         }
+        SECTION("remote revision conflict followed by EOF never replays an unsafe update")
+        {
+            // The daemon legitimately rejects this mismatched revision. The proxy forwards
+            // the original error and closes before the client can dispatch deferred tasks.
+            proxy.close_after_response = true;
+            auto save                  = Operation::bind(
+                "queue.update",
+                &ControlClient::update_queue,
+                jb::jobu::UpdateQueueRequest{.queue = queue.id, .expected_revision = queue.revision + 1, .weight = 5});
+            REQUIRE(save);
+            auto const connections = proxy.connections;
+            auto       result      = call(save.value());
+            REQUIRE_FALSE(result);
+            REQUIRE(result.error().kind == jb::jobu::ControlFailureKind::Remote);
+            CHECK_FALSE(result.error().outcome_unknown);
+            auto const metadata = jb::php::failure_metadata(result.error());
+            CHECK(metadata.code == "jobu.queue.revision_conflict");
+            auto const& error = std::get<jb::rpc::RpcError>(result.error().error);
+            CHECK(error.code == -32000);
+            CHECK_FALSE(error.message.empty());
+            REQUIRE(error.data);
+            CHECK(error.data->as_object().at("code").as_string() == "jobu.queue.revision_conflict");
+            CHECK(proxy.requests["queue.update"].size() == 1);
+            CHECK(proxy.connections == connections);
+            CHECK(client.state() == jb::php::ConnectionState::Disconnected);
+        }
         SECTION("desired state actions replay safely")
         {
             for (bool suspend : {true, false}) {

@@ -86,6 +86,7 @@ struct ControlClient::Private final : jb::core::priv::ObjectPrivate {
     void schedule_delivery();
     void deliver_ready_outcomes();
     void deliver_one(ControlCallId id, Pending call);
+    void deliver_retired_call(ControlCallId id, Pending call, jb::core::Error const& error);
     [[nodiscard]] static auto is_mutation(Method method) noexcept -> bool;
     void                      fail_handshake(jb::core::Error error);
     void                      on_timeout();

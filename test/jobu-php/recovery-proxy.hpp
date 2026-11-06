@@ -42,6 +42,7 @@ public:
     int                                                     connections{0};
     bool                                                    incompatible{false};
     bool                                                    silent{false};
+    bool                                                    close_after_response{false};
     std::string                                             error_method;
     std::optional<jb::core::JsonValue>                      response_error;
     std::function<void()>                                   after_drop;
@@ -143,6 +144,11 @@ private:
                 auto frame = jb::rpc::frame_message(encoded.value());
                 REQUIRE(frame);
                 CHECK(_downstream->write(frame.value()) == frame->size());
+                if (_proxy.close_after_response) {
+                    // Drain the complete frame before EOF, in this same event-loop callback.
+                    _downstream->disconnect_from_server();
+                    return;
+                }
             }
         }
 
