@@ -12,7 +12,9 @@ namespace php {
 /// Supports request-allocated arrays and Zend immutable arrays, not persistent or
 /// arbitrary native HashTables. Default/moved-from owners are absent. Destruction
 /// releases contained values and nominates surviving cycles for Zend GC; it must
-/// occur before request shutdown. PHP bailout may skip C++ destructors.
+/// occur before request shutdown for external C++ owners; members of bound native
+/// objects may be released by free_obj during normal Zend request teardown.
+/// PHP bailout may skip C++ destructors.
 class Array {
 public:
     /// Construct an absent owner without allocating an array.

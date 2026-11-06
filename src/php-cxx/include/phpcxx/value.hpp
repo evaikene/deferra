@@ -12,8 +12,10 @@ namespace php {
 /// Default and moved-from values are IS_UNDEF, distinct from PHP null. Accepts
 /// ordinary PHP values, including references, or IS_UNDEF; internal engine-only
 /// slot types such as IS_INDIRECT are outside this contract. Destruction can invoke
-/// PHP object/resource cleanup and must precede request shutdown. PHP bailout may
-/// skip C++ destructors; this type does not provide a bailout recovery boundary.
+/// PHP object/resource cleanup. External C++ owners must die before request shutdown;
+/// members of bound native objects may be released by free_obj during normal Zend
+/// request teardown. PHP bailout may skip C++ destructors; this type does not provide
+/// a bailout recovery boundary.
 class Value {
 public:
     /// Construct an uninitialized IS_UNDEF slot, distinct from PHP null.

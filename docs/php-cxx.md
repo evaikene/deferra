@@ -20,6 +20,11 @@ both NTS and ZTS. The library does not store mutable request state globally or
 transfer Zend values between threads. A longer-lived interned allocation does
 not authorize carrying its wrapper into another request.
 
+External C++ owners must be destroyed before starting request shutdown. Members
+of Zend-bound native objects may instead be released by their `free_obj` handler
+during normal request teardown, while Zend still owns the object and its values.
+Neither kind of owner may remain alive after the request has finished shutting down.
+
 | Operation | Contract |
 | --- | --- |
 | `adopt` | Consume one existing owned reference without retaining it. `Value::adopt(zval&)` also sets the source slot to `IS_UNDEF`. |
@@ -256,6 +261,113 @@ negative values, without floating-point arithmetic. Date objects still obey the
 normal request/thread ownership rules. JobU schedules and durations are outside
 this independent helper.
 
+## Embedded native objects
+
+`<phpcxx/object_binding.hpp>` supplies `ObjectBinding<T, Policy>` and `GcVisitor`.
+The default `ObjectBindingPolicy<T>` requires an explicit
+`T::trace(GcVisitor&) const noexcept` and disables cloning. Supply an empty trace
+method only when the native value owns no PHP references. A custom policy can
+adapt an existing type with `static trace(T const&, GcVisitor&) noexcept` and
+`static constexpr bool cloneable`.
+
+Call `Binding::bind(class_entry)` during module startup, after the authoritative
+stub-generated registration function returns the internal class entry. Check its
+`Result<void>`; nonordinary classes, custom allocators from another binding, and
+custom serialization handlers are rejected. The helper installs handlers without
+introducing a second registration system. Each template specialization has an
+immutable handler table with no class pointers or request state.
+
+Zend allocation creates an **uninitialized native object** with valid standard
+properties. In the PHP constructor or a native factory, validate arguments and
+then call `Binding::construct(object, arguments...)`. It placement-constructs `T`
+and returns `Result<T*>`. Repeated construction and construction with a pending
+PHP exception fail without replacing existing native state. `Binding::get(object,
+optional_expected_class)` returns a borrowed initialized `T*`, checking handler
+identity before applying an allocation offset and optionally checking a PHP
+class/interface. An ordinary object, another binding, or uninitialized/destroying
+native state returns an error. Neither operation implicitly retains the object.
+
+`T` need not be movable or standard-layout. Its constructor and destructor must
+be non-throwing, and its alignment cannot exceed `ZEND_MM_ALIGNMENT`; unsupported
+types fail compilation. One allocation contains a C++ storage prefix followed by
+Zend's object and variable-length property slots. There is no separate native
+allocation. Construction must not execute PHP, invoke GC, or publish partially
+constructed state. Perform recoverable validation before construction, or use
+`Result`-based initialization after construction while an owner protects the
+object. A PHP constructor that raises after successful native construction leaves
+cleanup to the object's eventual `free_obj`; it does not manually destroy `T`.
+
+For example, native state retaining another PHP value can use the existing owner:
+
+```cpp
+class NativeState {
+public:
+    explicit NativeState(php::Value owner) noexcept : _owner(std::move(owner)) {}
+
+    auto trace(php::GcVisitor& visitor) const noexcept -> void
+    {
+        visitor.add(_owner.view());
+    }
+
+private:
+    php::Value _owner;
+};
+
+using Binding = php::ObjectBinding<NativeState>;
+// At MINIT: check Binding::bind(register_class_Example()).
+// Inside a non-throwing PHP constructor callback:
+auto initialized = Binding::construct(Z_OBJ(execute_data->This),
+                                      php::Value::retain(arguments.get(1)));
+if (!initialized) {
+    php::raise(initialized.error());
+    return;
+}
+```
+
+Use `Value` to own an object/reference-valued zval, including results created with
+`object_init_ex`; no separate owning object wrapper is needed. Keep that owner
+alive throughout native pointer access. PHP subclasses inherit the allocation
+layout and can add standard properties. A subclass that skips its parent's
+constructor remains safely uninitialized until explicit native construction.
+Replacing handlers or introducing a different native layout in that hierarchy
+is unsupported.
+
+**GC enumeration is an ownership contract.** Report each native-owned PHP
+reference once with `visitor.add(value.view())`, including distinct owners of the
+same referent. Do not dereference PHP reference wrappers, report borrowed links,
+retain values, mutate native state, execute PHP, or invoke GC while tracing.
+The visitor copies reference information into Zend's scratch buffer without
+changing ownership and must not escape the trace call. The binding also reports
+standard properties, whether stored inline or in a materialized property table.
+Native embedding alone does not make references visible to GC.
+
+The normal Zend destructor handler runs userland `__destruct` while native state
+is still available. Later, `free_obj` marks the state unavailable, destroys a
+successfully constructed `T` exactly once, and then destroys standard properties.
+Reentrant cleanup cannot retrieve a partially destroyed `T`. Never-constructed
+objects skip native destruction. These rules cover GC and normal request shutdown;
+they are not a recovery guarantee after PHP bailout.
+
+To opt into cloning, provide a policy with `cloneable = true` and
+`static clone(T const&) noexcept -> Result<T>`, and make `T` nothrow-movable.
+The policy defines native copy semantics explicitly, including any deep-copy or
+detachment requirements. The binding constructs the clone's native state before
+Zend copies PHP properties and invokes `__clone`. Standard PHP property copies
+retain their normal copy-on-write/reference semantics. Errors preserve an existing
+pending PHP exception; Zend owns cleanup of the failed clone. Targets that fail
+before native initialization skip userland `__destruct` while retaining `free_obj`
+cleanup. After native initialization, normal PHP destruction applies, including
+when the PHP `__clone` hook throws. With the default
+policy, cloning raises PHP's uncloneable-object error. PHP 8.5+ cloning with a
+property-update list is unsupported. Bound ordinary classes and their subclasses
+reject serialization/unserialization, including subclasses defining serialization
+hooks. Native enums are outside this binding.
+
+All native pointers, owners, and GC views remain confined to the owning PHP
+execution thread and request in both NTS and ZTS. No helper owner may survive
+request shutdown. Allocation failure remains process-fatal; no C++ exception may
+unwind through a Zend callback.
+
 ## Select a PHP installation
 
 PHP 8.1 or newer with development headers and 64-bit `zend_long` is required.
@@ -278,17 +390,23 @@ The PHP executable's link flags are metadata, not helper dependencies.
 `BUILD_TESTING=OFF` disables tests and their CLI availability check.
 Tests cover the compiled ABI metadata, a small CLI-loadable consumer, independent build-tree
 consumption, relocated installation, discovery failures, and Zend ownership.
-Ownership, view, argument, conversion, and exception tests use the existing
+Ownership, view, argument, conversion, exception, and native binding tests use the existing
 Catch2 dependency and matching optional Embed library in dedicated executables.
 The minimal harness initializes one
 request, runs the tests, destroys their local owners, and shuts Embed down.
-Missing Embed registers explicit CTest skips for ownership and conversion
+The native binding harness registers generated fixture classes at module startup
+and checks native destruction counts after request shutdown, including objects
+deliberately retained in PHP globals. The CLI and relocated consumers exercise
+the same fixtures. Missing Embed registers explicit CTest skips for ownership, conversion, and binding
 execution; helper compilation and the other tests remain enabled. Only the Embed test executables
 link Embed. Comprehensive repeated lifecycle, threading, and bailout tests belong
 to later stages.
 
-The test-only `consumer/functions.stub.php` is authoritative for its checked-in
-`functions_arginfo.h`, generated with PHP's `build/gen_stub.php`. Normal builds
+The test-only `consumer/functions.stub.php` and `consumer/objects.stub.php` are
+authoritative for their checked-in `*_arginfo.h`, generated with PHP's
+`build/gen_stub.php`. The object stub requests PHP 8.1-compatible registration
+through `@generate-legacy-arginfo 80100`; generation uses the existing PHP 8.5
+generator and PHP-Parser installation. Normal builds
 and tests consume that header directly; they do not need PHP sources, a stub
 compiler, or a generated-header freshness check. The fixture deliberately uses
 `mixed` input so helper parsing is exercised rather than preempted by arginfo.

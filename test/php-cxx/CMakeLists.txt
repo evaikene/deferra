@@ -11,7 +11,7 @@ add_executable(php-cxx-build-test consumer/build.cpp)
 target_link_libraries(php-cxx-build-test PRIVATE PhpCxx::PhpCxx)
 add_test(NAME php-cxx-build-test COMMAND php-cxx-build-test)
 
-add_library(php-cxx-module-test MODULE consumer/module.cpp consumer/functions.cpp)
+add_library(php-cxx-module-test MODULE consumer/module.cpp consumer/functions.cpp consumer/objects.cpp)
 target_link_libraries(php-cxx-module-test PRIVATE PhpCxx::PhpCxx)
 set_target_properties(php-cxx-module-test PROPERTIES PREFIX "" CXX_VISIBILITY_PRESET hidden)
 if(APPLE)
@@ -22,6 +22,8 @@ add_test(NAME php-cxx-module-test COMMAND "${php_binary}" -n
     "if (!extension_loaded('phpcxx_consumer')) { exit(1); }")
 add_test(NAME php-cxx-conversion-consumer-test COMMAND "${php_binary}" -n
     "-dextension=$<TARGET_FILE:php-cxx-module-test>" "${CMAKE_CURRENT_SOURCE_DIR}/consumer/check.php")
+add_test(NAME php-cxx-object-consumer-test COMMAND "${php_binary}" -n
+    "-dextension=$<TARGET_FILE:php-cxx-module-test>" "${CMAKE_CURRENT_SOURCE_DIR}/consumer/objects-check.php")
 
 configure_file(build-contract-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/build-contract-test.cmake" @ONLY)
 add_test(NAME php-cxx-build-contract-test COMMAND ${CMAKE_COMMAND}
@@ -49,6 +51,12 @@ if(php_embed_found)
     target_link_libraries(php-cxx-conversion-test PRIVATE PhpCxx::PhpCxx Catch2::Catch2 "${php_embed_library}")
     add_test(NAME php-cxx-conversion-test COMMAND php-cxx-conversion-test)
     set_tests_properties(php-cxx-conversion-test PROPERTIES TIMEOUT 60)
+    add_executable(php-cxx-object-test object-main.cpp object-test.cpp consumer/objects.cpp)
+    target_compile_definitions(php-cxx-object-test PRIVATE
+        PHPCXX_OBJECT_CHECK_PATH="${CMAKE_CURRENT_SOURCE_DIR}/consumer/objects-check.php")
+    target_link_libraries(php-cxx-object-test PRIVATE PhpCxx::PhpCxx Catch2::Catch2 "${php_embed_library}")
+    add_test(NAME php-cxx-object-test COMMAND php-cxx-object-test)
+    set_tests_properties(php-cxx-object-test PROPERTIES TIMEOUT 60)
 else()
     add_test(NAME php-cxx-ownership-test COMMAND ${CMAKE_COMMAND} -E echo
         "SKIP: PHP Embed is unavailable for ${php_config}; ownership execution requires matching Embed")
@@ -56,4 +64,7 @@ else()
     add_test(NAME php-cxx-conversion-test COMMAND ${CMAKE_COMMAND} -E echo
         "SKIP: PHP Embed is unavailable for ${php_config}; conversion execution requires matching Embed")
     set_tests_properties(php-cxx-conversion-test PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: PHP Embed")
+    add_test(NAME php-cxx-object-test COMMAND ${CMAKE_COMMAND} -E echo
+        "SKIP: PHP Embed is unavailable for ${php_config}; object execution requires matching Embed")
+    set_tests_properties(php-cxx-object-test PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: PHP Embed")
 endif()
