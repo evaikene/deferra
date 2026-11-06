@@ -392,15 +392,30 @@ Tests cover the compiled ABI metadata, a small CLI-loadable consumer, independen
 consumption, relocated installation, discovery failures, and Zend ownership.
 Ownership, view, argument, conversion, exception, and native binding tests use the existing
 Catch2 dependency and matching optional Embed library in dedicated executables.
-The minimal harness initializes one
-request, runs the tests, destroys their local owners, and shuts Embed down.
-The native binding harness registers generated fixture classes at module startup
-and checks native destruction counts after request shutdown, including objects
-deliberately retained in PHP globals. The CLI and relocated consumers exercise
-the same fixtures. Missing Embed registers explicit CTest skips for ownership, conversion, and binding
-execution; helper compilation and the other tests remain enabled. Only the Embed test executables
-link Embed. Comprehensive repeated lifecycle, threading, and bailout tests belong
-to later stages.
+The ownership/conversion and native binding harnesses each initialize one
+request. Their external owners die before shutdown; native binding accounting
+also checks objects deliberately retained in PHP globals until shutdown. The CLI
+and relocated consumers exercise the same generated fixtures.
+
+The lifecycle harness adds three complete runtime cycles, five request cycles
+within one runtime, and (in ZTS builds) two concurrent workers with three requests
+each. Each request exercises binary strings, array separation, conversions,
+exception preservation, native bindings, clone failures, GC cycles, and shutdown
+cleanup. User functions/classes and request globals must disappear between
+requests. Thread-local native counters must balance after every shutdown; no
+Zend pointers are retained to inspect them afterward. Barriers keep both ZTS
+requests active while checking distinct globals and pending exception state.
+
+Two additional CTest cases run deliberate bailout and frameless-error scenarios
+in child processes. They require the expected bailout, a successful shutdown
+marker, and normal child exit; a crash or timeout fails the test. Their jump
+regions contain no C++ objects requiring destruction. These are narrow checks of
+host teardown, not a guarantee of recovery after arbitrary PHP failures.
+
+There are twelve helper checks. Missing Embed explicitly skips the six Embed
+checks; compilation and the six CLI/build/install checks remain enabled. Only
+test targets link Embed. Neither consumers nor production helper linkage acquire
+an Embed or thread-library dependency from these fixtures.
 
 The test-only `consumer/functions.stub.php` and `consumer/objects.stub.php` are
 authoritative for their checked-in `*_arginfo.h`, generated with PHP's
@@ -415,6 +430,97 @@ To include the helper in a normal JobU build, use `-DJB_BUILD_PHP_CPP=ON` and
 the selected `PHP_CONFIG`. The option defaults to `OFF`; default configuration
 does not discover PHP or execute `php-config`. The JobU PHP extension is a
 separate, later-stage target.
+
+## Embed lifecycle and compatibility validation
+
+Runtime/module startup, request startup, and execution-thread initialization are
+different boundaries. `php_embed_init()` performs all startup work, including an
+initial request; `php_embed_shutdown()` shuts that request and the runtime down.
+For subsequent requests in the same runtime, pair `php_request_shutdown()` with
+`php_request_startup()` instead. Destroy external C++ owners before ending each
+request, and resolve pending exceptions before normal teardown.
+
+Register generated persistent functions/classes during module startup. Zend
+borrows a registered module entry until module shutdown, so its storage must
+outlive registration. Reinitialize its bookkeeping for a new runtime and restore
+any replaced SAPI callbacks. Never cache request class entries, zvals, views, or
+native pointers for reuse after shutdown. The fixture's lifecycle owner is
+private test support, not a production lifecycle API.
+
+For ZTS workers, initialize the process/module once before starting workers,
+attach each worker with `ts_resource(0)`, and run its request operations on that
+same thread. After its final request shutdown, call `ts_free_thread()` before
+joining all workers and shutting down the process runtime. Only native test
+results and synchronization cross threads. A passing ZTS helper test does not
+establish support for a ZTS JobU extension.
+
+The functional matrix is PHP 8.2–8.6 NTS plus PHP 8.5 ZTS. Use each installation's
+explicit `PHP_CONFIG` and a separate build directory, following the commands
+above; record the actual patch version, debug mode, and thread mode. PHP 8.1
+remains the minimum contract but is excluded from this execution matrix. The
+GCC 10 check below compiles the independent helper and public-template consumers
+for the same six ABIs, without running PHP or Embed.
+
+## Memory checks
+
+Use a separate sanitizer build. For example, with a compiler providing ASan,
+UBSan, and LeakSanitizer:
+
+```sh
+cmake -S src/php-cxx -B .bld/php-cxx-asan-8.5 -G Ninja \
+    -DCMAKE_BUILD_TYPE=Debug \
+    -DPHP_CONFIG="$HOME/php/8.5/bin/php-config" \
+    '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer'
+cmake --build .bld/php-cxx-asan-8.5 --target \
+    php-cxx-ownership-test php-cxx-conversion-test php-cxx-object-test \
+    php-cxx-lifecycle-test php-cxx-bailout-test
+USE_ZEND_ALLOC=0 ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 \
+    ctest --test-dir .bld/php-cxx-asan-8.5/test --output-on-failure \
+    -R 'php-cxx-(ownership|conversion|object|lifecycle)-test$'
+USE_ZEND_ALLOC=1 ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 \
+    ctest --test-dir .bld/php-cxx-asan-8.5/test --output-on-failure \
+    -R 'php-cxx-(bailout|fatal)-isolation-test$'
+```
+
+Repeat with PHP 8.5 ZTS and a distinct build directory. These commands instrument
+the helper and fixture code, including binding templates; an uninstrumented
+`libphp` does not gain compiler instrumentation. Disabling Zend's allocator for
+normal cases exposes individual Zend allocations to the memory checker. The
+bailout cases deliberately retain the Zend allocator: unclean shutdown may leave
+individual blocks for request-arena reclamation. Native destruction counters
+still apply, but this does not establish individual-allocation safety after a
+bailout. No test deliberately jumps over a live automatic C++ owner: doing so
+would violate C++ `longjmp` requirements, not just skip a convenient cleanup.
+LeakSanitizer also needs a host environment that permits its process inspection.
+
+Valgrind can exercise the shared conversion and object fixtures through a
+matching, **unsanitized** CLI module build:
+
+```sh
+USE_ZEND_ALLOC=0 valgrind --error-exitcode=97 --leak-check=full \
+    --show-leak-kinds=definite,indirect --errors-for-leak-kinds=definite,indirect \
+    "$HOME/php/8.2/bin/php" -n \
+    "-dextension=$PWD/.bld/php-cxx-8.2/test/php-cxx-module-test.so" \
+    test/php-cxx/consumer/objects-check.php
+```
+
+Repeat for `consumer/check.php` and matching ZTS paths. Inspect the complete
+report, including reachable blocks and the tool's default suppressions; no
+project suppression file is used. On the tested Linux installations, PHP CLI's
+built-in Valgrind string-comparison replacement works, while Embed's shared
+`libphp` reports uninitialized reads in its assembly `zend_string_equal_val`.
+Those Embed runs are not clean Valgrind evidence; the sanitizer lifecycle runs
+provide the corresponding checks. Do not silence that limitation with blanket
+suppressions or describe an uninstrumented runtime as fully sanitizer-validated.
+
+## Portability boundary
+
+The helper's public API contains no JobU transport or POSIX types. It relies on
+the selected Zend ABI, allocator alignment, and C++20 support. Linux is the
+validated environment for this regression matrix. Windows and macOS execution
+are not established by these results; Windows compiler, PHP discovery,
+link/export, and Embed integration still require platform validation. Keep
+platform-specific JobU event-loop and socket adapters outside this library.
 
 ## Consume the library independently
 
