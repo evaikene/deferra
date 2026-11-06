@@ -176,7 +176,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            ca-certificates curl gnupg ccache catch2 cmake g++ ninja-build python3 libfmt-dev
+            ca-certificates curl gnupg ccache catch2 cmake g++ ninja-build python3 libfmt-dev \
+            libcurl4-openssl-dev libsqlite3-dev libssl-dev
 
       - name: Download same-run native SDK
         uses: actions/download-artifact@v4
@@ -244,7 +245,7 @@ jobs:
       - name: Install build tools
         run: |
           apk add --no-cache ca-certificates curl ccache catch2-3 cmake g++ \
-            gcompat git samurai python3 tar tzdata fmt-dev
+            gcompat git samurai python3 tar tzdata fmt-dev curl-dev sqlite-dev openssl-dev
 
       - name: Check out sources
         uses: actions/checkout@v5

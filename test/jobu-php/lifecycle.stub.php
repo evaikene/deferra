@@ -1,0 +1,21 @@
+<?php
+/**
+ * @generate-class-entries
+ * @generate-legacy-arginfo 80100
+ */
+
+final class JobUTestClient
+{
+    public mixed $reference = null;
+    public function __construct(string $socket, bool $fail = false) {}
+    public function close(): void {}
+    public function ping(): bool {}
+    public function pending(): void {}
+    public static function live(): int {}
+}
+
+final class JobUTestHolder
+{
+    public function __construct(JobUTestClient $client) {}
+    public function client(): JobUTestClient {}
+}
