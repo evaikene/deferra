@@ -40,7 +40,7 @@ if(php_embed_found AND jobu_php_test_daemon)
     find_package(Catch2 CONFIG REQUIRED)
     add_executable(jobu-php-lifecycle-test lifecycle-test.cpp lifecycle-bindings.cpp bridge-test.cpp
         "${jobu_php_source}/module.cpp" "${jobu_php_source}/request.cpp"
-        "${jobu_php_source}/client.cpp" "${jobu_php_source}/client_binding.cpp"
+        "${jobu_php_source}/client.cpp" "${jobu_php_source}/client_binding.cpp" "${jobu_php_source}/operation.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../support/temporary_directory.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../support/memory_io_device.cpp")
     get_target_property(jobu_php_libraries jobu-php LINK_LIBRARIES)
@@ -59,7 +59,7 @@ if(php_embed_found AND jobu_php_test_daemon)
         add_dependencies(jobu-php-lifecycle-test jobud)
     endif()
     add_test(NAME jobu-php-lifecycle-test COMMAND jobu-php-lifecycle-test "[lifecycle]")
-    add_test(NAME jobu-php-bridge-test COMMAND jobu-php-lifecycle-test "[bridge]")
+    add_test(NAME jobu-php-bridge-test COMMAND jobu-php-lifecycle-test "[bridge],[recovery]")
     set_tests_properties(jobu-php-lifecycle-test jobu-php-bridge-test PROPERTIES TIMEOUT 120
         FAIL_REGULAR_EXPRESSION "memory leaks detected;Warning:;Fatal error:")
 else()

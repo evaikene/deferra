@@ -4,6 +4,7 @@
 #include <jb/core/io_device.hpp>
 #include <jb/core/object.hpp>
 #include <jb/core/signal.hpp>
+#include <jb/core/timer.hpp>
 #include <jb/jobu/system_info.hpp>
 #include <jb/net/local_socket.hpp>
 
@@ -12,6 +13,7 @@
 #include <optional>
 #include <string_view>
 #include <utility>
+#include <variant>
 
 namespace jb::php {
 namespace {
@@ -213,39 +215,169 @@ auto Client::initialize(Request&                  request,
     if (!created) {
         return core::Result<void, core::Error>::failure(created.error());
     }
-    auto  session = std::move(created).value();
-    auto& loop    = *request.loop();
+    _session       = std::move(created).value();
+    _endpoint      = endpoint;
+    _state         = ConnectionState::Connecting;
+    auto connected = connect(deadline, false);
+    if (!connected) {
+        _session->close();
+        _state = ConnectionState::Unusable;
+    }
+    return connected;
+}
+
+// The timer uses the same loop/deadline as the RPC. Waiting between failed
+// connections also services other clients without spinning or blocking a thread.
+static auto wait_to_reconnect(core::EventLoop& loop, core::TimePoint deadline, std::chrono::milliseconds delay)
+    -> core::Result<void, core::Error>
+{
+    bool         ready = false;
+    core::Object receiver;
+    core::Timer  timer;
+    timer.timeout.connect(&receiver, [&] { ready = true; });
+    timer.start(delay);
+    return loop.run_until(deadline, [&] { return ready; });
+}
+
+auto Client::observe_terminal() -> void
+{
+    _session->typed().failed.connect(&_session->receiver(), [this](core::Error const&) {
+        // The per-call signal still determines uncertainty. Do not destroy the
+        // bundle here: the native terminal emitter still owes pending outcomes.
+        if (_state == ConnectionState::Ready) {
+            _state = ConnectionState::Disconnected;
+        }
+    });
+}
+
+auto Client::connect(core::TimePoint deadline, bool recovering) -> core::Result<void, core::Error>
+{
+    auto* request = _session->request();
+    if (!request) {
+        return core::Result<void, core::Error>::failure(closed_error());
+    }
+    auto& loop    = *request->loop();
     auto  context = loop.run_until(deadline, [] { return true; });
     if (!context) {
         return context;
     }
-    auto connected = connect_session(*session, loop, endpoint, deadline);
-    if (!connected) {
-        return connected;
+
+    auto delay = std::chrono::milliseconds{10};
+    for (;;) {
+        if (recovering) {
+            // Keep the old session registered until replacement is allocated.
+            // RSHUTDOWN can therefore detach even a disconnected native wrapper.
+            auto created = request->create_session();
+            if (!created) {
+                return core::Result<void, core::Error>::failure(created.error());
+            }
+            _session = std::move(created).value();
+        }
+        _state         = ConnectionState::Connecting;
+        auto connected = connect_session(*_session, loop, _endpoint, deadline);
+        if (connected) {
+            _state = ConnectionState::Ready;
+            observe_terminal();
+            return connected;
+        }
+        if (!recovering || !is_transport_failure(connected.error())) {
+            return connected;
+        }
+        auto waited = wait_to_reconnect(loop, deadline, delay);
+        if (!waited) {
+            return waited;
+        }
+        delay = std::min(delay * 2, std::chrono::milliseconds{250});
     }
-    _session = std::move(session);
-    return core::Result<void, core::Error>::success();
 }
 
 auto Client::close() noexcept -> void
 {
+    _state = ConnectionState::Closed;
     if (_session) {
         _session->close();
     }
 }
 
-auto Client::call(core::TimePoint deadline, Submit const& submit) const -> Reply
+auto Client::call(core::TimePoint deadline, Operation const& operation) -> Reply
 {
-    auto* client = typed();
-    if (!client) {
+    if (!_session || _session->is_closed() || _state == ConnectionState::Closed) {
         return Reply::failure(local_failure(closed_error()));
     }
-    return call_synchronously(*client, *client->event_loop(), deadline, submit);
+    if (_state == ConnectionState::Unusable) {
+        return Reply::failure(local_failure({.category = core::ErrorCategory::Unavailable,
+                                             .code     = "php.client.unusable",
+                                             .message  = "The client is unusable"}));
+    }
+    auto& loop    = *_session->request()->loop();
+    auto  context = loop.run_until(deadline, [] { return true; });
+    if (!context) {
+        return Reply::failure(local_failure(context.error()));
+    }
+
+    bool uncertain = false;
+    auto delay     = std::chrono::milliseconds{10};
+    for (;;) {
+        if (_state == ConnectionState::Disconnected) {
+            auto connected = connect(deadline, true);
+            if (!connected) {
+                _state = ConnectionState::Unusable;
+                // Keep the failure identity (e.g. incompatible peer), but never
+                // lose uncertainty from an earlier possibly committed attempt.
+                return Reply::failure(local_failure(connected.error(), uncertain));
+            }
+        }
+        auto result = call_synchronously(_session->typed(), loop, deadline, [&](jobu::ControlCallOptions options) {
+            return operation.submit(_session->typed(), options);
+        });
+        if (result) {
+            return result;
+        }
+        auto& failure           = result.error();
+        uncertain               = uncertain || mutation_outcome_unknown(operation, failure);
+        failure.outcome_unknown = uncertain;
+
+        // Observed application errors do not trigger replay. In particular an
+        // oversized success response is not evidence that a mutation rolled back.
+        if (failure.kind == jobu::ControlFailureKind::Remote) {
+            return result;
+        }
+        auto const& error = std::get<core::Error>(failure.error);
+        if (uncertain && operation.policy() == ReplayPolicy::Unsafe) {
+            _state = ConnectionState::Disconnected;
+            return result;
+        }
+        if (!is_transport_failure(error)) {
+            if (error.category == core::ErrorCategory::Timeout) {
+                _state = ConnectionState::Unusable;
+            }
+            return result;
+        }
+
+        _state      = ConnectionState::Disconnected;
+        auto waited = wait_to_reconnect(loop, deadline, delay);
+        if (!waited) {
+            _state = ConnectionState::Unusable;
+            return Reply::failure(local_failure(waited.error(), uncertain));
+        }
+        delay = std::min(delay * 2, std::chrono::milliseconds{250});
+    }
+}
+
+auto Client::deadline(core::TimePoint start, std::optional<std::chrono::milliseconds> override) const
+    -> core::Result<core::TimePoint, core::Error>
+{
+    return make_deadline(start, override.value_or(_timeout));
+}
+
+auto Client::state() const noexcept -> ConnectionState
+{
+    return _session && _session->is_closed() ? ConnectionState::Closed : _state;
 }
 
 auto Client::typed() const noexcept -> jobu::ControlClient*
 {
-    return _session && !_session->is_closed() ? &_session->typed() : nullptr;
+    return _session && !_session->is_closed() && _state == ConnectionState::Ready ? &_session->typed() : nullptr;
 }
 
 auto Client::timeout() const noexcept -> std::chrono::milliseconds

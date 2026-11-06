@@ -1,11 +1,13 @@
 #pragma once
 
+#include "operation.hpp"
 #include "request.hpp"
 
 #include <jb/core/event_loop_types.hpp>
 #include <jb/jobu/client/control_client.hpp>
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -29,6 +31,14 @@ auto call_synchronously(jobu::ControlClient& client,
                         core::TimePoint      deadline,
                         Submit const&        submit) -> Reply;
 
+enum class ConnectionState : std::uint8_t {
+    Connecting,
+    Ready,
+    Disconnected,
+    Closed,
+    Unusable
+};
+
 /// Request-affine native Client state. Owns no Zend values; Request closes its
 /// session before loop teardown, even if this wrapper is destroyed afterwards.
 class Client final {
@@ -39,7 +49,7 @@ public:
     auto operator=(Client const&) -> Client& = delete;
 
     /// Eagerly connect and validate API 1.7 plus the v1 capability set. Failure
-    /// closes partial state. Initialize once; no connection recovery is attempted.
+    /// closes partial state. Initialize once; replacement bundles repeat these checks.
     auto initialize(Request&                  request,
                     std::string const&        endpoint,
                     core::TimePoint           deadline,
@@ -48,15 +58,27 @@ public:
     /// Idempotent explicit close, also safe after RSHUTDOWN.
     auto close() noexcept -> void;
 
-    /// Dispatch a typed method with an operation-wide deadline. Closed sessions
-    /// fail before submit is invoked; the callback must obey Submit's contract.
-    auto call(core::TimePoint deadline, Submit const& submit) const -> Reply;
+    /// Execute a frozen typed operation within one total deadline. Transport loss
+    /// may replace the bundle and replay only according to the operation policy.
+    /// Uncertain unsafe mutations return promptly, preserving the caller's inputs.
+    auto call(core::TimePoint deadline, Operation const& operation) -> Reply;
+
+    /// Compute one deadline using the override or stored constructor timeout.
+    /// Callers performing multiple internal reads pass this same deadline to call().
+    auto deadline(core::TimePoint start, std::optional<std::chrono::milliseconds> override = std::nullopt) const
+        -> core::Result<core::TimePoint, core::Error>;
+    auto state() const noexcept -> ConnectionState;
 
     /// Borrow the ready typed client for a Submit callback; null after close.
     auto typed() const noexcept -> jobu::ControlClient*;
     auto timeout() const noexcept -> std::chrono::milliseconds;
 
 private:
+    auto connect(core::TimePoint deadline, bool recovering) -> core::Result<void, core::Error>;
+    auto observe_terminal() -> void;
+
+    std::string               _endpoint;
+    ConnectionState           _state{ConnectionState::Closed};
     std::unique_ptr<Session>  _session;
     std::chrono::milliseconds _timeout{10000};
     bool                      _initialized{false};

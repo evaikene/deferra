@@ -298,23 +298,83 @@ TEST_CASE("Native Client eagerly enforces version and every required capability"
         auto const      compatible = scenario >= original.capabilities.size() + 2;
         CHECK(static_cast<bool>(result) == compatible);
         if (compatible) {
-            auto read = client.call(Clock::now() + 1s, [&](ControlCallOptions options) {
-                return client.typed()->get_system_info(options);
-            });
+            auto read = client.call(Clock::now() + 1s,
+                                    jb::php::Operation::bind("system.info", &jb::jobu::ControlClient::get_system_info));
             REQUIRE(read);
             client.close();
             client.close();
-            bool submitted = false;
-            auto closed    = client.call(Clock::now() + 1s, [&](ControlCallOptions options) {
-                submitted = true;
-                return client.typed()->get_system_info(options);
-            });
+            auto closed =
+                client.call(Clock::now() + 1s,
+                            jb::php::Operation::bind("system.info", &jb::jobu::ControlClient::get_system_info));
             CHECK_FALSE(closed);
-            CHECK_FALSE(submitted);
+            CHECK(client.typed() == nullptr);
         }
         else {
             CHECK(result.error().category == jb::core::ErrorCategory::Unsupported);
             CHECK(client.typed() == nullptr);
         }
     }
+}
+
+TEST_CASE("Recovery classifies all v1 operations conservatively", "[php][recovery]")
+{
+    using jb::php::ReplayPolicy;
+    for (auto const* name : {"system.info",
+                             "system.stats",
+                             "queue.get",
+                             "queue.list",
+                             "queue.stats",
+                             "job.get",
+                             "job.list",
+                             "run.get",
+                             "run.list",
+                             "attempt.get",
+                             "attempt.list",
+                             "attempt.output",
+                             "secret.list",
+                             "schedule.validate",
+                             "schedule.next"}) {
+        CHECK(jb::php::replay_policy(name) == ReplayPolicy::Read);
+    }
+    for (auto const* name : {"queue.suspend", "queue.resume", "job.suspend", "job.resume"}) {
+        CHECK(jb::php::replay_policy(name) == ReplayPolicy::DesiredState);
+    }
+    for (auto const* name : {"queue.create", "job.create", "job.run_now"}) {
+        CHECK(jb::php::replay_policy(name) == ReplayPolicy::Keyed);
+    }
+    for (auto const* name : {"queue.update",
+                             "job.update",
+                             "queue.delete",
+                             "job.delete",
+                             "job.move",
+                             "run.cancel",
+                             "secret.set",
+                             "secret.delete",
+                             "future.mutation"}) {
+        CHECK(jb::php::replay_policy(name) == ReplayPolicy::Unsafe);
+    }
+    std::optional<std::string> first;
+    std::optional<std::string> second;
+    REQUIRE(jb::php::ensure_idempotency_key(first));
+    REQUIRE(jb::php::ensure_idempotency_key(second));
+    CHECK(first != second);
+    auto original = first;
+    REQUIRE(jb::php::ensure_idempotency_key(first));
+    CHECK(first == original);
+    second = "";
+    REQUIRE_FALSE(jb::php::ensure_idempotency_key(second));
+    CHECK(second == ""); // An explicit invalid key is validated, never silently replaced.
+}
+
+TEST_CASE("Invalid explicit replay keys fail before request construction", "[php][recovery]")
+{
+    for (auto key : {std::string{}, std::string(129, 'a'), std::string(1, static_cast<char>(0xff))}) {
+        std::optional<std::string> value{key};
+        auto                       result = jb::php::ensure_idempotency_key(value);
+        REQUIRE_FALSE(result);
+        CHECK(value == key);
+        CHECK(result.error().category == jb::core::ErrorCategory::InvalidArgument);
+    }
+    std::optional<std::string> boundary{std::string(128, 'a')};
+    CHECK(jb::php::ensure_idempotency_key(boundary));
 }

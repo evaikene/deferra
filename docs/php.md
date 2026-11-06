@@ -82,9 +82,11 @@ attempt's outcome is represented by null, not an extra enum case.
 The inherited constructor accepts `message`, integer `code`, and `previous`.
 `getErrorCode(): ?string` and `getCategory(): ?string` read separate daemon
 metadata, initially null for user-created exceptions. `getCode()` keeps its
-standard integer meaning. Constructor failures now populate stable error
-code/category metadata. Full operation-specific error translation and
-outcome-identity metadata remain deferred. PHP `TypeError` and `ValueError`
+standard integer meaning. Constructor and private operation failures populate stable error
+code/category metadata. `OutcomeUnknownException` additionally exposes
+`getOperation(): ?string` and `getIdempotencyKey(): ?string`; both default to null
+for user-created exceptions. Represented remote errors retain their numeric
+JSON-RPC code in `getCode()`. PHP `TypeError` and `ValueError`
 remain native engine errors. Exceptions and their subclasses reject serialization and
 unserialization, including user-defined serialization hooks.
 
@@ -135,11 +137,52 @@ local/remote failures, and mutation uncertainty. A terminal notification does no
 replace its subsequent per-call outcome. Timeout or stopped-wait cleanup retires
 local observation only; it does not cancel remote work or prove rollback. A
 terminal failure already queued but not delivered at expiry is conservatively
-uncertain. Retry/reconnect, full operational exception translation, public
-`getSystemInfo()`, and resources remain later-stage work. There is no public raw
+uncertain. The bridge implements reconnect/retry and operational exception
+translation; public `getSystemInfo()` and resources remain later-stage work. There is no public raw
 RPC entry point. Test-only bindings exercise calls without adding placeholder APIs.
 No C++ exception may unwind into Zend. Allocation failure remains fatal, and
 PHP bailout does not guarantee C++ stack cleanup.
+
+## Recovery contract
+
+Recovery currently lives behind the private typed bridge and test-only bindings;
+public management/resource methods will use it as those APIs are implemented.
+Each operation owns frozen request parameters. Replacement connections repeat the
+API/capability handshake and replace the whole socket/raw/typed-client bundle.
+They never revive a terminal native client. All attempts, reconnect delays, and
+internal reads share the original monotonic deadline. A per-call Duration override
+does not change the client's default. Reconnect waits use bounded event-loop timers.
+
+| Operation after transport loss | Replay policy |
+| --- | --- |
+| Definitely not transmitted | Retry within the deadline, provided the failure is a recoverable transport failure |
+| Reads, including cursor reads | Retry the identical request; never restart pagination |
+| Queue/job suspend or resume | Repeat the same desired-state action |
+| Queue/job creation and Run Now | Repeat identical parameters with the original idempotency key |
+| Save, move, delete, run cancellation, secret changes, other mutations | Never replay after possible transmission |
+
+Creation and Run Now receive an automatically generated, OS-random key unless
+one was supplied. The same key survives every in-call retry. Automatic keys combine
+two freshly seeded UUIDv7 values (148 random bits, 72 UTF-8 bytes), using the existing
+SDK generator. Explicit keys remain unchanged; the bridge validates the 1–128 UTF-8 byte contract
+before sending.
+Daemon idempotency records last only as long as their associated retained resources;
+replay safety is not a promise of permanent key retention.
+
+An uncertain unsafe mutation returns `OutcomeUnknownException` promptly without
+reconciliation. It leaves caller-owned request/dirty inputs untouched; a later
+independent operation may reconnect. If a keyed mutation remains unresolved after
+recovery fails, its exception retains the operation and original key for later
+reconciliation. Connection/reconnect deadline exhaustion makes the client unusable;
+explicit close also prevents subsequent reconnection. An uncertain unsafe mutation
+whose wait expires remains eligible for reconnection on a later independent call.
+
+Observed remote application errors are not retried. Invalid/expired cursors become
+`InvalidCursorException`, revision conflicts become `RevisionConflictException`,
+and represented post-commit `jobu.response.too_large` mutation errors become
+`OutcomeUnknownException`. Error messages omit submitted values, peer text, socket
+paths, and backend detail. Stable code/category metadata remains available, and an
+already pending PHP exception is preserved.
 
 ## Stub maintenance and validation
 
@@ -170,7 +213,11 @@ it is not a claim of testing an actual PHP-FPM deployment.
 Bridge tests additionally cover immediate/deferred replies, capability/version
 rejection, constructor errors, one remaining deadline, pre-acceptance and remote
 failures, timeout/stopped-wait cleanup, late replies, terminal mutation uncertainty,
-and reentrancy. The real module is also loaded by a separate PHP CLI process
+and reentrancy. Recovery tests drop successful real-daemon replies before forwarding
+them, compare replay parameters and keys, and assert committed resource identity
+and single-transmission saves. They also cover restart, incompatible replacement
+peers, terminal deadlines, next-call recovery, per-call overrides, exception
+metadata/redaction, and independent clients. The real module is also loaded by a separate PHP CLI process
 against the same-build daemon. Reused-runtime tests exercise production Client
 construction, independent sessions, Duration conversions, and request teardown.
 

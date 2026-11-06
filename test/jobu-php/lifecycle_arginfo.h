@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 9574c55465589c35a541ec8810e00362d6a81dea */
+ * Stub hash: 19255a78581528ac3bdbd8e8d1d6acf80ccc8f4e */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobUTestClient___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, socket, IS_STRING, 0)
@@ -26,6 +26,23 @@ ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobUTestBridge_ping, 0, 1, _IS_BOOL, 0)
 	ZEND_ARG_OBJ_INFO(0, client, JobU\\Client, 0)
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobUTestBridge_createQueue, 0, 2, IS_STRING, 0)
+	ZEND_ARG_OBJ_INFO(0, client, JobU\\Client, 0)
+	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, key, IS_STRING, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobUTestBridge_failure, 0, 3, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, code, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, category, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, remote, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, unknown, _IS_BOOL, 0, "false")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, key, IS_STRING, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, pending, _IS_BOOL, 0, "false")
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobUTestBridge_timeout, 0, 1, IS_LONG, 0)
@@ -40,6 +57,8 @@ ZEND_METHOD(JobUTestClient, live);
 ZEND_METHOD(JobUTestHolder, __construct);
 ZEND_METHOD(JobUTestHolder, client);
 ZEND_METHOD(JobUTestBridge, ping);
+ZEND_METHOD(JobUTestBridge, createQueue);
+ZEND_METHOD(JobUTestBridge, failure);
 ZEND_METHOD(JobUTestBridge, timeout);
 
 static const zend_function_entry class_JobUTestClient_methods[] = {
@@ -59,6 +78,8 @@ static const zend_function_entry class_JobUTestHolder_methods[] = {
 
 static const zend_function_entry class_JobUTestBridge_methods[] = {
 	ZEND_ME(JobUTestBridge, ping, arginfo_class_JobUTestBridge_ping, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
+	ZEND_ME(JobUTestBridge, createQueue, arginfo_class_JobUTestBridge_createQueue, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
+	ZEND_ME(JobUTestBridge, failure, arginfo_class_JobUTestBridge_failure, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
 	ZEND_ME(JobUTestBridge, timeout, arginfo_class_JobUTestBridge_timeout, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
 	ZEND_FE_END
 };

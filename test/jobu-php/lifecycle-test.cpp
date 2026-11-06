@@ -1,5 +1,7 @@
 #include "client.hpp"
 #include "lifecycle-bindings.hpp"
+#include "operation.hpp"
+#include "recovery-proxy.hpp"
 #include "request.hpp"
 #include "support/temporary_directory.hpp"
 
@@ -402,4 +404,320 @@ TEST_CASE("Production native Client safely outlives request shutdown", "[php][li
     client->close();
     client.reset();
     daemon.stop(loop);
+}
+
+TEST_CASE("Recovery preserves committed effects and frozen requests through lost replies", "[php][recovery]")
+{
+    using jb::jobu::ControlClient;
+    using jb::php::Operation;
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(host.value()->loop(), directory.path());
+    {
+        jb::php::Request request;
+        auto             anchor = request.create_session();
+        REQUIRE(anchor);
+        auto                         endpoint = (directory.path() / "proxy.sock").string();
+        jobu_php_test::RecoveryProxy proxy(endpoint, (directory.path() / "daemon.sock").string());
+        jb::php::Client              client;
+        REQUIRE(client.initialize(request, endpoint, Clock::now() + 2s, 2s));
+        auto call       = [&](Operation const& operation) { return client.call(Clock::now() + 2s, operation); };
+        auto make_queue = Operation::bind("queue.create",
+                                          &ControlClient::create_queue,
+                                          jb::jobu::CreateQueueRequest{.name = "recovery"});
+        REQUIRE(make_queue);
+        proxy.drop_method = "queue.create";
+        proxy.drops       = 1;
+        auto created      = call(make_queue.value());
+        REQUIRE(created);
+        auto queue = std::get<jb::jobu::Queue>(created.value());
+        CHECK(proxy.requests["queue.create"].size() == 2);
+        CHECK(proxy.requests["queue.create"][0] == proxy.requests["queue.create"][1]);
+        CHECK(proxy.dropped_results[0].as_object().at("id").as_string() == queue.id.to_string());
+        CHECK(make_queue.value().key()->size() == 72);
+
+        SECTION("lost save reply never repeats the update and next read reconnects")
+        {
+            jb::jobu::UpdateQueueRequest edits{.queue = queue.id, .expected_revision = queue.revision, .weight = 7};
+            auto                         save = Operation::bind("queue.update", &ControlClient::update_queue, edits);
+            REQUIRE(save);
+            proxy.drop_method = "queue.update";
+            proxy.drops       = 1;
+            auto saved        = call(save.value());
+            REQUIRE_FALSE(saved);
+            CHECK(saved.error().outcome_unknown);
+            CHECK(proxy.requests["queue.update"].size() == 1);
+            CHECK(edits.weight == 7);
+            CHECK(edits.expected_revision == queue.revision);
+            CHECK(client.state() == jb::php::ConnectionState::Disconnected);
+
+            auto get =
+                Operation::bind("queue.get",
+                                static_cast<Operation::Accepted (ControlClient::*)(jb::jobu::GetQueueRequest const&,
+                                                                                   jb::jobu::ControlCallOptions)>(
+                                    &ControlClient::get_queue),
+                                jb::jobu::GetQueueRequest{.queue = queue.id});
+            REQUIRE(get);
+            auto loaded = call(get.value());
+            REQUIRE(loaded);
+            CHECK(std::get<jb::jobu::Queue>(loaded.value()).weight == 7);
+            CHECK(std::get<jb::jobu::Queue>(loaded.value()).revision == queue.revision + 1);
+            CHECK(proxy.requests["queue.update"].size() == 1);
+        }
+        SECTION("post-commit response error is unknown and is not replayed")
+        {
+            auto error = jb::core::parse_json(
+                R"({"code":-32000,"message":"PRIVATE","data":{"code":"jobu.response.too_large","category":"resource_exhausted"}})");
+            REQUIRE(error);
+            proxy.error_method   = "queue.update";
+            proxy.response_error = error.value();
+            auto save            = Operation::bind(
+                "queue.update",
+                &ControlClient::update_queue,
+                jb::jobu::UpdateQueueRequest{.queue = queue.id, .expected_revision = queue.revision, .weight = 5});
+            REQUIRE(save);
+            auto result = call(save.value());
+            REQUIRE_FALSE(result);
+            CHECK(result.error().outcome_unknown);
+            CHECK(result.error().kind == jb::jobu::ControlFailureKind::Remote);
+            CHECK(jb::php::failure_metadata(result.error()).code == "jobu.response.too_large");
+            CHECK(proxy.requests["queue.update"].size() == 1);
+        }
+        SECTION("observed remote errors and invalid local requests never retry")
+        {
+            auto error = jb::core::parse_json(
+                R"({"code":-32000,"message":"PRIVATE","data":{"code":"jobu.history.invalid_cursor","category":"invalid_argument"}})");
+            REQUIRE(error);
+            proxy.error_method   = "system.info";
+            proxy.response_error = error.value();
+            auto before          = proxy.connections;
+            auto result          = call(Operation::bind("system.info", &ControlClient::get_system_info));
+            REQUIRE_FALSE(result);
+            CHECK_FALSE(result.error().outcome_unknown);
+            CHECK(jb::php::failure_metadata(result.error()).code == "jobu.history.invalid_cursor");
+            CHECK(proxy.connections == before);
+            auto invalid = Operation::bind("queue.create",
+                                           &ControlClient::create_queue,
+                                           jb::jobu::CreateQueueRequest{.name = "invalid", .idempotency_key = ""});
+            REQUIRE_FALSE(invalid);
+            CHECK(invalid.error().code == "php.client.invalid_idempotency_key");
+            CHECK(proxy.connections == before);
+        }
+        SECTION("desired state actions replay safely")
+        {
+            for (bool suspend : {true, false}) {
+                auto const* name = suspend ? "queue.suspend" : "queue.resume";
+                auto action = Operation::bind(name,
+                                              suspend ? &ControlClient::suspend_queue : &ControlClient::resume_queue,
+                                              jb::jobu::QueueSelector{queue.id});
+                REQUIRE(action);
+                proxy.drop_method = name;
+                proxy.drops       = 1;
+                auto result       = call(action.value());
+                REQUIRE(result);
+                CHECK(proxy.requests[name].size() == 2);
+                CHECK(proxy.requests[name][0] == proxy.requests[name][1]);
+                CHECK(std::get<jb::jobu::Queue>(result.value()).state ==
+                      (suspend ? jb::jobu::QueueState::Suspended : jb::jobu::QueueState::Active));
+            }
+        }
+        SECTION("job creation and Run Now retain explicit and generated keys")
+        {
+            auto payload = jb::core::parse_json(R"({"command":"/bin/true"})");
+            REQUIRE(payload);
+            jb::jobu::CreateJobRequest input{.queue = queue.id,
+                                             .schedule =
+                                                 jb::jobu::OnceSchedule{.planned_at = jb::core::UtcClock::now() + 1h},
+                                             .payload         = payload.value(),
+                                             .idempotency_key = "explicit-job-key"};
+            auto                       create = Operation::bind("job.create", &ControlClient::create_job, input);
+            REQUIRE(create);
+            // Mutating the source after binding must not alter the frozen request.
+            input.name        = "changed-after-binding";
+            proxy.drop_method = "job.create";
+            proxy.drops       = 1;
+            auto result       = call(create.value());
+            REQUIRE(result);
+            auto job = std::get<jb::jobu::JobDefinition>(result.value());
+            CHECK_FALSE(job.name);
+            CHECK(proxy.requests["job.create"].size() == 2);
+            CHECK(proxy.requests["job.create"][0] == proxy.requests["job.create"][1]);
+            CHECK(create.value().key() == "explicit-job-key");
+
+            auto run =
+                Operation::bind("job.run_now", &ControlClient::run_now, jb::jobu::RunNowRequest{.job_id = job.id});
+            REQUIRE(run);
+            proxy.drop_method = "job.run_now";
+            proxy.drops       = 1;
+            auto ran          = call(run.value());
+            REQUIRE(ran);
+            CHECK(proxy.requests["job.run_now"].size() == 2);
+            CHECK(proxy.requests["job.run_now"][0] == proxy.requests["job.run_now"][1]);
+            CHECK(run.value().key()->size() == 72);
+        }
+        SECTION("unsent unsafe mutation can reconnect")
+        {
+            client.typed()->close(); // Deterministic pre-write terminal state.
+            auto save = Operation::bind(
+                "queue.update",
+                &ControlClient::update_queue,
+                jb::jobu::UpdateQueueRequest{.queue = queue.id, .expected_revision = queue.revision, .weight = 9});
+            REQUIRE(save);
+            auto result = call(save.value());
+            REQUIRE(result);
+            CHECK(proxy.requests["queue.update"].size() == 1);
+            CHECK(std::get<jb::jobu::Queue>(result.value()).weight == 9);
+        }
+        SECTION("unresolved keyed commit survives incompatible reconnect")
+        {
+            auto create = Operation::bind("queue.create",
+                                          &ControlClient::create_queue,
+                                          jb::jobu::CreateQueueRequest{.name = "uncertain"});
+            REQUIRE(create);
+            proxy.drop_method = "queue.create";
+            proxy.drops       = 1;
+            proxy.after_drop  = [&] { proxy.incompatible = true; };
+            auto result       = call(create.value());
+            REQUIRE_FALSE(result);
+            CHECK(result.error().outcome_unknown);
+            CHECK(jb::php::failure_metadata(result.error()).code == "jobu.client.unsupported_api");
+            CHECK(client.state() == jb::php::ConnectionState::Unusable);
+            CHECK(proxy.requests["queue.create"].size() == 3); // Baseline pair, then one uncertain commit.
+        }
+        SECTION("reconnect exhaustion uses one budget and makes the client unusable")
+        {
+            proxy.drop_method = "system.info";
+            proxy.drops       = 1;
+            proxy.after_drop  = [&] { proxy.stop_accepting(); };
+            auto read         = Operation::bind("system.info", &ControlClient::get_system_info);
+            auto deadline     = client.deadline(Clock::now(), 30ms);
+            REQUIRE(deadline);
+            auto result = client.call(deadline.value(), read);
+            REQUIRE_FALSE(result);
+            CHECK_FALSE(result.error().outcome_unknown);
+            CHECK(client.state() == jb::php::ConnectionState::Unusable);
+            auto count = proxy.connections;
+            CHECK_FALSE(call(read));
+            CHECK(proxy.connections == count);
+            CHECK(client.timeout() == 2s);
+        }
+        SECTION("read retries and explicit close never reconnects")
+        {
+            auto read         = Operation::bind("system.info", &ControlClient::get_system_info);
+            proxy.drop_method = "system.info";
+            proxy.drops       = 1;
+            REQUIRE(call(read));
+            auto count = proxy.connections;
+            client.close();
+            CHECK_FALSE(call(read));
+            CHECK(proxy.connections == count);
+        }
+    }
+    daemon.stop(host.value()->loop());
+}
+
+TEST_CASE("PHP operation errors preserve identity without exposing submitted data", "[php][recovery]")
+{
+    Runtime runtime;
+    REQUIRE(evaluate(R"PHP((function () {
+        $cases = [
+            ['jobu.queue.not_found', 'not_found', 'NotFoundException'],
+            ['jobu.queue.revision_conflict', 'conflict', 'RevisionConflictException'],
+            ['jobu.job.revision_conflict', 'conflict', 'RevisionConflictException'],
+            ['jobu.history.invalid_cursor', 'invalid_argument', 'InvalidCursorException'],
+            ['jobu.statistics.invalid_cursor', 'invalid_argument', 'InvalidCursorException'],
+            ['jobu.test.timeout', 'timeout', 'TimeoutException'],
+            ['jobu.test.unsupported', 'unsupported', 'UnsupportedFeatureException'],
+            ['jobu.response.too_large', 'resource_exhausted', 'OutcomeUnknownException'],
+            ['jobu.other', 'internal', 'Exception'],
+        ];
+        foreach ($cases as [$code, $category, $class]) {
+            try { JobUTestBridge::failure($code, $category, true); return false; }
+            catch (JobU\Exception $e) {
+                if (get_class($e) !== 'JobU\\' . $class || $e->getErrorCode() !== $code ||
+                    $e->getCategory() !== $category || $e->getCode() !== -32000 ||
+                    str_contains($e->getMessage(), 'PRIVATE')) return false;
+            }
+        }
+        foreach ([false, true] as $remote) {
+            try { JobUTestBridge::failure('test.lost', 'unavailable', $remote, true, 'original-key'); return false; }
+            catch (JobU\OutcomeUnknownException $e) {
+                if ($e->getOperation() !== 'queue.create' || $e->getIdempotencyKey() !== 'original-key' ||
+                    $e->getErrorCode() !== 'test.lost') return false;
+            }
+        }
+        try { JobUTestBridge::failure('rpc.connection_closed', 'unavailable', false); return false; }
+        catch (JobU\ConnectionException $e) {}
+        try { JobUTestBridge::failure('test', 'internal', false, false, null, true); return false; }
+        catch (ValueError $e) { if ($e->getMessage() !== 'original') return false; }
+        return true;
+    })())PHP"));
+}
+
+TEST_CASE("PHP per-call Duration overrides and unknown keys use the production recovery path", "[php][recovery]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(host.value()->loop(), directory.path());
+    {
+        Runtime runtime;
+        auto    anchor = jb::php::current_request()->create_session();
+        REQUIRE(anchor);
+        auto                         endpoint = (directory.path() / "php-proxy.sock").string();
+        jobu_php_test::RecoveryProxy proxy(endpoint, (directory.path() / "daemon.sock").string());
+        zend_register_string_constant("JOBU_TEST_SOCKET",
+                                      sizeof("JOBU_TEST_SOCKET") - 1,
+                                      endpoint.c_str(),
+                                      CONST_CS,
+                                      0);
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['recoveryClient'] = new JobU\Client(JOBU_TEST_SOCKET, JobU\Duration::seconds(1));
+            $client = $GLOBALS['recoveryClient'];
+            foreach ([0, -1, PHP_INT_MAX] as $ms) {
+                try { JobUTestBridge::ping($client, JobU\Duration::milliseconds($ms)); return false; }
+                catch (ValueError $e) {}
+            }
+            return JobUTestBridge::ping($client, JobU\Duration::seconds(2)) && JobUTestBridge::timeout($client) === 1000;
+        })())PHP"));
+        proxy.drop_method = "queue.create";
+        proxy.drops       = 1;
+        proxy.after_drop  = [&] { proxy.incompatible = true; };
+        REQUIRE(evaluate(R"PHP((function () {
+            try { JobUTestBridge::createQueue($GLOBALS['recoveryClient'], 'php-unknown', JobU\Duration::seconds(1)); return false; }
+            catch (JobU\OutcomeUnknownException $e) {
+                return $e->getOperation() === 'queue.create' && strlen($e->getIdempotencyKey()) === 72 &&
+                       $e->getErrorCode() === 'jobu.client.unsupported_api' && !str_contains($e->getMessage(), 'php-unknown');
+            }
+        })())PHP"));
+        CHECK(proxy.requests["queue.create"].size() == 1);
+    }
+    daemon.stop(host.value()->loop());
+}
+
+TEST_CASE("Independent clients survive daemon restart and preserve explicit closure", "[php][recovery]")
+{
+    jb::php::Request request;
+    auto             anchor = request.create_session();
+    REQUIRE(anchor);
+    auto&                        loop = *request.loop();
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       original;
+    original.start(loop, directory.path());
+    auto            endpoint = (directory.path() / "daemon.sock").string();
+    jb::php::Client closed;
+    jb::php::Client surviving;
+    REQUIRE(closed.initialize(request, endpoint, Clock::now() + 2s, 2s));
+    REQUIRE(surviving.initialize(request, endpoint, Clock::now() + 2s, 2s));
+    closed.close();
+    original.stop(loop);
+    Daemon replacement;
+    replacement.start(loop, directory.path());
+    auto read = jb::php::Operation::bind("system.info", &jb::jobu::ControlClient::get_system_info);
+    CHECK_FALSE(closed.call(Clock::now() + 2s, read));
+    CHECK(surviving.call(Clock::now() + 2s, read));
+    replacement.stop(loop);
 }

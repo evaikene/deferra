@@ -61,3 +61,17 @@ check($error->getCode() === 0, 'string code does not replace integer code');
 unset($error, $previous, $caught);
 gc_collect_cycles();
 echo "exceptions ok\n";
+
+class CustomOutcomeError extends JobU\OutcomeUnknownException
+{
+    public string $_operation = 'shadow';
+    public string $_idempotencyKey = 'shadow';
+}
+$outcome = new CustomOutcomeError();
+check($outcome->getOperation() === null && $outcome->getIdempotencyKey() === null, 'absent outcome identity');
+$reflection = new ReflectionClass(JobU\OutcomeUnknownException::class);
+$reflection->getProperty('_operation')->setValue($outcome, 'job.create');
+$reflection->getProperty('_idempotencyKey')->setValue($outcome, 'original-key');
+check($outcome->getOperation() === 'job.create' && $outcome->getIdempotencyKey() === 'original-key', 'outcome identity');
+rejects(fn() => $outcome->getOperation(1), ArgumentCountError::class);
+rejects(fn() => $outcome->getIdempotencyKey(1), ArgumentCountError::class);

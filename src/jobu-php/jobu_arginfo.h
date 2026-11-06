@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 650d4749232609cf428a381808ba830f2be4ffbd */
+ * Stub hash: 12722f41e4cf24cea606ff6ee45720454d239836 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Duration___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -29,6 +29,10 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_JobU_Exception_getCategory arginfo_class_JobU_Exception_getErrorCode
 
+#define arginfo_class_JobU_OutcomeUnknownException_getOperation arginfo_class_JobU_Exception_getErrorCode
+
+#define arginfo_class_JobU_OutcomeUnknownException_getIdempotencyKey arginfo_class_JobU_Exception_getErrorCode
+
 ZEND_METHOD(JobU_Duration, __construct);
 ZEND_METHOD(JobU_Duration, milliseconds);
 ZEND_METHOD(JobU_Duration, seconds);
@@ -39,6 +43,8 @@ ZEND_METHOD(JobU_Client, __construct);
 ZEND_METHOD(JobU_Client, close);
 ZEND_METHOD(JobU_Exception, getErrorCode);
 ZEND_METHOD(JobU_Exception, getCategory);
+ZEND_METHOD(JobU_OutcomeUnknownException, getOperation);
+ZEND_METHOD(JobU_OutcomeUnknownException, getIdempotencyKey);
 
 static const zend_function_entry class_JobU_Duration_methods[] = {
 	ZEND_ME(JobU_Duration, __construct, arginfo_class_JobU_Duration___construct, ZEND_ACC_PRIVATE)
@@ -59,6 +65,12 @@ static const zend_function_entry class_JobU_Client_methods[] = {
 static const zend_function_entry class_JobU_Exception_methods[] = {
 	ZEND_ME(JobU_Exception, getErrorCode, arginfo_class_JobU_Exception_getErrorCode, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Exception, getCategory, arginfo_class_JobU_Exception_getCategory, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_OutcomeUnknownException_methods[] = {
+	ZEND_ME(JobU_OutcomeUnknownException, getOperation, arginfo_class_JobU_OutcomeUnknownException_getOperation, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_OutcomeUnknownException, getIdempotencyKey, arginfo_class_JobU_OutcomeUnknownException_getIdempotencyKey, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -451,13 +463,25 @@ static zend_class_entry *register_class_JobU_OutcomeUnknownException(zend_class_
 {
 	zend_class_entry ce, *class_entry;
 
-	INIT_NS_CLASS_ENTRY(ce, "JobU", "OutcomeUnknownException", NULL);
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "OutcomeUnknownException", class_JobU_OutcomeUnknownException_methods);
 #if (PHP_VERSION_ID >= 80400)
 	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_JobU_Exception, ZEND_ACC_NOT_SERIALIZABLE);
 #else
 	class_entry = zend_register_internal_class_ex(&ce, class_entry_JobU_Exception);
 	class_entry->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
 #endif
+
+	zval property__operation_default_value;
+	ZVAL_NULL(&property__operation_default_value);
+	zend_string *property__operation_name = zend_string_init("_operation", sizeof("_operation") - 1, 1);
+	zend_declare_typed_property(class_entry, property__operation_name, &property__operation_default_value, ZEND_ACC_PRIVATE, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING|MAY_BE_NULL));
+	zend_string_release(property__operation_name);
+
+	zval property__idempotencyKey_default_value;
+	ZVAL_NULL(&property__idempotencyKey_default_value);
+	zend_string *property__idempotencyKey_name = zend_string_init("_idempotencyKey", sizeof("_idempotencyKey") - 1, 1);
+	zend_declare_typed_property(class_entry, property__idempotencyKey_name, &property__idempotencyKey_default_value, ZEND_ACC_PRIVATE, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING|MAY_BE_NULL));
+	zend_string_release(property__idempotencyKey_name);
 
 	return class_entry;
 }
