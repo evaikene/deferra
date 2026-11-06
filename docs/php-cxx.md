@@ -572,3 +572,69 @@ under `.bld-php-cxx-gcc10`, using the invoking user's UID/GID. It compiles the
 helper archive and consumer translation units. It runs no PHP, Embed, or
 functional tests. Functional tests use the normal host compiler and matching
 PHP installation. The existing JobU runtime is outside the GCC 10 check.
+
+## GitHub CI and public PHP versions
+
+The workflow in `.github/workflows/ci.yml` pins Ubuntu 26.04 and Alpine 3.24.
+The two native jobs build and test JobU once per distribution, with PHP disabled.
+Two separate PHP matrices build this standalone helper against the public ZendPHP
+CLI, development, and Embed packages. Each row installs one PHP ABI and runs all
+helper checks, including the relocated consumers. `PHPCXX_REQUIRE_EMBED=ON`
+makes a missing matching Embed installation a configuration failure; the CI
+runner also rejects missing or skipped checks. Ordinary helper consumers retain
+optional Embed discovery.
+
+**Edit only the `&php-versions` list in the `php-ubuntu` job to change the PHP
+matrix.** The `php-alpine` job references that list through `*php-versions`.
+Remove `'8.2'` from that one list when PHP 8.6 is released and ZendPHP withdraws
+public PHP 8.2 access. Package names and tool paths derive from each selected
+minor version; there is no second version list in the scripts. Package access
+failures fail the affected row instead of silently removing coverage. Patch
+updates within each minor version are accepted and the selected version/build
+mode is printed in the job log.
+
+`tools/ci/install-zendphp ubuntu|alpine VERSION` registers the pinned repository
+and its signing key and installs the selected ABI. It is intended for disposable
+root-owned CI environments, not an existing developer PHP installation. In
+particular, Alpine Embed packages share `/usr/lib/libphp.so`: use separate jobs
+or containers, never install several Embed versions into one environment.
+Ubuntu's versioned CLI selects its corresponding `libphpVERSION-zend.so` without
+falling back to another ABI's generic library.
+
+After installing the tools listed in the workflow, reproduce a PHP row with:
+
+```sh
+# Ubuntu 26.04; use /usr/bin/php-config85zend on Alpine 3.24 instead.
+CCACHE_DIR="$PWD/.ccache" tools/ci/php-test 8.5 /usr/bin/php-config8.5-zend .bld/php
+```
+
+This configures only `src/php-cxx`; no JobU target is built in a PHP row. Each
+matrix cache is scoped by distribution release, PHP minor, and compiler version.
+The workflow uploads CTest XML and failure logs for inspection. Local ZTS,
+sanitizer, and GCC 10 validation remain separate from this NTS package matrix.
+
+### Preparing the future JobU module
+
+After each native job passes, `tools/ci/prepare-sdk` installs the existing
+`Development` component, relocates it, builds/runs the independent Client SDK
+consumer, and packages `jobu-sdk.tar.gz`. It recompiles no JobU library. The
+workflow publishes `jobu-sdk-ubuntu-26.04-x64` and `jobu-sdk-alpine-3.24-x64` as
+artifacts of that workflow run; the archives contain the `sdk/` prefix and its
+PIC static libraries, public headers, and CMake exports.
+
+When stage 2.1 adds the real module, its standalone build should use
+`find_package(JobU CONFIG REQUIRED COMPONENTS Client)` and link
+`JobU::jobu-client`, while building `php-cxx` and the module for the selected
+PHP ABI. Add the corresponding native job to `needs`, download its SDK artifact
+**from the same workflow run**, extract it, and pass the relocated `sdk/` prefix
+through `CMAKE_PREFIX_PATH`. Keep the consumer in the matching distribution,
+architecture, compiler, and system-library environment. Do not substitute a
+cached SDK from a different revision, mix glibc and musl artifacts, or configure
+the top-level project in each PHP row.
+
+Add actual module load/Reflection/unit tests alongside that implementation.
+There is no placeholder module or successful no-op module test in this stage.
+Later daemon integration tests can reuse a separately staged native daemon;
+they do not require rebuilding the server for each PHP ABI. The standalone
+helper remains independent of the SDK and can run its CI jobs concurrently with
+the native jobs until the module dependency is introduced.
