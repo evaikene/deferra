@@ -71,3 +71,12 @@ The wrapper intentionally does not add an init process, preserving container
 PID 1 behavior relevant to Linux process tests. Rebuild an image when its
 Dockerfile changes, and recreate that environment's build tree after material
 compiler or system-library changes.
+
+## PHP CI environments
+
+GitHub CI uses the same pinned Ubuntu 26.04 and Alpine 3.24 releases. Its PHP
+jobs install one public ZendPHP ABI per environment and build only the standalone
+helper. See [the PHP CI documentation](../docs/php-cxx.md#github-ci-and-public-php-versions)
+for the shared version list, signed package installation, reproduction command,
+and the SDK artifacts prepared for the future module. The ordinary development
+images above continue to have no PHP dependency.

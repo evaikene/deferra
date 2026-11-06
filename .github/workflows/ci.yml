@@ -16,7 +16,7 @@ env:
 jobs:
   ubuntu:
     name: Ubuntu
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Check out sources
@@ -41,9 +41,9 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-v1-${{ github.job }}-${{ github.sha }}
+          key: ccache-v2-ubuntu-26.04-${{ github.sha }}
           restore-keys: |
-            ccache-v1-${{ github.job }}-
+            ccache-v2-ubuntu-26.04-
 
       - name: Configure
         run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -59,7 +59,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-v1-${{ github.job }}-${{ github.sha }}
+          key: ccache-v2-ubuntu-26.04-${{ github.sha }}
 
       - name: Test
         run: |
@@ -69,10 +69,22 @@ jobs:
             ctest --test-dir .bld/test --output-on-failure
           fi
 
+      - name: Prepare reusable JobU SDK
+        run: tools/ci/prepare-sdk .bld .bld/ci-artifacts
+
+      - name: Upload JobU SDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jobu-sdk-ubuntu-26.04-x64
+          path: .bld/ci-artifacts/jobu-sdk.tar.gz
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
   alpine:
     name: Alpine
-    runs-on: ubuntu-latest
-    container: alpine:latest
+    runs-on: ubuntu-26.04
+    container: alpine:3.24
     env:
       # This disposable root container explicitly exercises unsafe root CLI execution.
       # The fixture also launches a separate daemon without the override to prove denial.
@@ -105,9 +117,9 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-v1-${{ github.job }}-${{ github.sha }}
+          key: ccache-v2-alpine-3.24-${{ github.sha }}
           restore-keys: |
-            ccache-v1-${{ github.job }}-
+            ccache-v2-alpine-3.24-
 
       - name: Configure
         run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -123,7 +135,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-v1-${{ github.job }}-${{ github.sha }}
+          key: ccache-v2-alpine-3.24-${{ github.sha }}
 
       - name: Test
         run: |
@@ -132,3 +144,139 @@ jobs:
           else
             ctest --test-dir .bld/test --output-on-failure
           fi
+
+      - name: Prepare reusable JobU SDK
+        run: tools/ci/prepare-sdk .bld .bld/ci-artifacts
+
+      - name: Upload JobU SDK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jobu-sdk-alpine-3.24-x64
+          path: .bld/ci-artifacts/jobu-sdk.tar.gz
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  php-ubuntu:
+    name: PHP ${{ matrix.php }} / Ubuntu 26.04
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Single source for both distributions. Remove 8.2 here when its public
+        # packages leave the repository; no scripts or second list need editing.
+        php: &php-versions ['8.2', '8.3', '8.4', '8.5', '8.6']
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v5
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            ca-certificates curl gnupg ccache catch2 cmake g++ ninja-build python3
+
+      - name: Install selected ZendPHP
+        env:
+          PHP_VERSION: ${{ matrix.php }}
+        run: sudo tools/ci/install-zendphp ubuntu "$PHP_VERSION"
+
+      - name: Identify compiler
+        id: compiler
+        run: echo "version=$(c++ -dumpfullversion)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v2-php-ubuntu-26.04-${{ matrix.php }}-${{ steps.compiler.outputs.version }}-${{ github.sha }}
+          restore-keys: |
+            ccache-v2-php-ubuntu-26.04-${{ matrix.php }}-${{ steps.compiler.outputs.version }}-
+
+      - name: Build and test PHP helper
+        env:
+          PHP_VERSION: ${{ matrix.php }}
+        run: tools/ci/php-test "$PHP_VERSION" "/usr/bin/php-config${PHP_VERSION}-zend" .bld/php
+
+      - name: Save ccache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v2-php-ubuntu-26.04-${{ matrix.php }}-${{ steps.compiler.outputs.version }}-${{ github.sha }}
+
+      - name: Upload PHP test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-ubuntu-26.04-${{ matrix.php }}-tests
+          path: |
+            .bld/php/test/results.xml
+            .bld/php/test/Testing/Temporary/LastTest.log
+            .bld/php/test/build-contract-fixture/*.log
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
+  php-alpine:
+    name: PHP ${{ matrix.php }} / Alpine 3.24
+    runs-on: ubuntu-26.04
+    container: alpine:3.24
+    strategy:
+      fail-fast: false
+      matrix:
+        php: *php-versions
+
+    steps:
+      - name: Install build tools
+        run: |
+          apk add --no-cache ca-certificates curl ccache catch2-3 cmake g++ \
+            gcompat git samurai python3 tar tzdata
+
+      - name: Check out sources
+        uses: actions/checkout@v5
+
+      - name: Install selected ZendPHP
+        env:
+          PHP_VERSION: ${{ matrix.php }}
+        run: tools/ci/install-zendphp alpine "$PHP_VERSION"
+
+      - name: Identify compiler
+        id: compiler
+        run: echo "version=$(c++ -dumpfullversion)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v2-php-alpine-3.24-${{ matrix.php }}-${{ steps.compiler.outputs.version }}-${{ github.sha }}
+          restore-keys: |
+            ccache-v2-php-alpine-3.24-${{ matrix.php }}-${{ steps.compiler.outputs.version }}-
+
+      - name: Build and test PHP helper
+        env:
+          PHP_VERSION: ${{ matrix.php }}
+        run: |
+          compact=$(printf '%s' "$PHP_VERSION" | tr -d .)
+          tools/ci/php-test "$PHP_VERSION" "/usr/bin/php-config${compact}zend" .bld/php
+
+      - name: Save ccache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v2-php-alpine-3.24-${{ matrix.php }}-${{ steps.compiler.outputs.version }}-${{ github.sha }}
+
+      - name: Upload PHP test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-alpine-3.24-${{ matrix.php }}-tests
+          path: |
+            .bld/php/test/results.xml
+            .bld/php/test/Testing/Temporary/LastTest.log
+            .bld/php/test/build-contract-fixture/*.log
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7

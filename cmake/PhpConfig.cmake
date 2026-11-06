@@ -123,7 +123,16 @@ function(phpcxx_find_php)
     endif()
     unset(PHP_EMBED_LIBRARY)
     unset(PHP_EMBED_LIBRARY CACHE)
-    find_library(PHP_EMBED_LIBRARY NAMES php PATHS "${PHP_PREFIX}/lib" "${PHP_PREFIX}/lib64" NO_DEFAULT_PATH)
+    # ZendPHP on Ubuntu installs several ABIs under /usr, each with a versioned
+    # CLI and Embed library. Never fall back to another installation's libphp.so
+    # when that versioned library is absent. Alpine and source installs use php.
+    get_filename_component(php_binary_name "${PHP_BINARY}" NAME)
+    set(embed_name php)
+    if(php_binary_name MATCHES "^php[0-9]+[.][0-9]+-zend$")
+        set(embed_name "${php_binary_name}")
+    endif()
+    find_library(PHP_EMBED_LIBRARY NAMES "${embed_name}"
+        PATHS "${PHP_PREFIX}/lib" "${PHP_PREFIX}/lib64" NO_DEFAULT_PATH)
     set(PHP_EMBED_FOUND FALSE)
     if(PHP_EMBED_INCLUDE_DIR AND PHP_EMBED_LIBRARY)
         set(PHP_EMBED_FOUND TRUE)

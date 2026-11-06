@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 2 ]; then
+    echo 'Usage: tools/ci/install-zendphp ubuntu|alpine PHP_VERSION' >&2
+    exit 2
+fi
+distribution=$1
+version=$2
+case "$version" in
+    [0-9].[0-9]) ;;
+    *) echo "Invalid PHP minor version: $version" >&2; exit 2 ;;
+esac
+
+# Called as root in disposable CI environments. Install only the selected ABI;
+# Alpine Embed packages share /usr/lib/libphp.so and cannot coexist safely.
+case "$distribution" in
+    ubuntu)
+        curl -fsSL https://repos.zend.com/zend-2025.key | gpg --dearmor --yes -o /usr/share/keyrings/zendphp.gpg
+        printf '%s\n' 'deb [signed-by=/usr/share/keyrings/zendphp.gpg] https://repos.zend.com/zendphp/deb_ubuntu2604 zendphp non-free' \
+            > /etc/apt/sources.list.d/zendphp.list
+        apt-get update
+        apt-get install --yes --no-install-recommends \
+            "php${version}-zend-cli" "php${version}-zend-dev" "libphp${version}-zend-embed"
+        ;;
+    alpine)
+        curl -fsSL https://repos.zend.com/zendphp/apk_alpine324/zendphp-alpine-devel.rsa.pub \
+            -o /etc/apk/keys/zendphp-alpine-devel.rsa.pub
+        printf '%s\n' 'https://repos.zend.com/zendphp/apk_alpine324/' >> /etc/apk/repositories
+        compact=$(printf '%s' "$version" | tr -d .)
+        apk add --no-cache "php${compact}zend" "php${compact}zend-dev" "php${compact}zend-embed"
+        ;;
+    *) echo "Unknown distribution: $distribution" >&2; exit 2 ;;
+esac

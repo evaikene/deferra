@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 2 ]; then
+    echo 'Usage: tools/ci/prepare-sdk BUILD_DIRECTORY ARTIFACT_DIRECTORY' >&2
+    exit 2
+fi
+build=$(realpath "$1")
+mkdir -p "$2"
+artifact=$(realpath "$2")
+# Use a fresh staging directory and relocate the installed SDK. This packages
+# existing native outputs; it never rebuilds JobU for individual PHP versions.
+staging=$(mktemp -d)
+trap 'rm -rf "$staging"' EXIT HUP INT TERM
+cmake --install "$build" --prefix "$staging/original" --component Development
+mv "$staging/original" "$staging/sdk"
+cmake -S test/sdk-consumer -B "$staging/consumer" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Debug -DSDK_CASE=Client \
+    -DSDK_PREFIX="$staging/sdk" -DCMAKE_PREFIX_PATH="$staging/sdk" \
+    "-DSDK_FORBIDDEN_PATHS=$PWD;$build;$staging/original"
+cmake --build "$staging/consumer" --parallel 2
+ctest --test-dir "$staging/consumer" --output-on-failure --no-tests=error
+# Tar preserves paths and permissions through GitHub artifact transport.
+tar -czf "$artifact/jobu-sdk.tar.gz" -C "$staging" sdk

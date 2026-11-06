@@ -7,3 +7,6 @@ if(NOT PHP_FOUND)
 endif()
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/php-metadata.txt"
     "${PHP_MODULE_API};${PHP_DEBUG};${PHP_ZTS};${PHP_ZEND_LONG_SIZE}")
+
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/php-embed.txt"
+    "${PHP_EMBED_FOUND};${PHP_EMBED_LIBRARY}")

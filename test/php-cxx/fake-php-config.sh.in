@@ -5,7 +5,7 @@ case "$1" in
     --vernum) printf '%s\n' '@fake_version_id@' ;;
     --includes) printf '%s\n' '-I"@fake_prefix@/include"' ;;
     --include-dir) printf '%s\n' '@fake_prefix@/include' ;;
-    --php-binary) printf '%s\n' '@fake_prefix@/not-an-executable' ;;
+    --php-binary) printf '%s\n' '@fake_binary@' ;;
     --extension-dir) printf '%s\n' '@fake_prefix@/extensions' ;;
     --php-sapis) printf '%s\n' 'cli' ;;
     --ldflags|--libs) printf '\n' ;;
