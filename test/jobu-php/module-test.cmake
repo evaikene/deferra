@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.20)
+execute_process(COMMAND "${php_binary}" -n "-dextension=${module}" -m
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 10)
+if(NOT "${result}" STREQUAL "0" OR NOT output MATCHES "\njobu\n" OR NOT error STREQUAL "")
+    message(FATAL_ERROR "JobU was not cleanly listed by php -m: ${output}\n${error}")
+endif()
+execute_process(COMMAND "${php_binary}" -n "-dextension=${module}" --ri jobu
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 10)
+if(NOT "${result}" STREQUAL "0" OR NOT error STREQUAL "")
+    message(FATAL_ERROR "JobU module information failed: ${output}\n${error}")
+endif()
+foreach(expected "JobU support => enabled" "JobU extension version => ${version}" "Thread mode => NTS")
+    string(FIND "${output}" "${expected}" position)
+    if(position EQUAL -1)
+        message(FATAL_ERROR "Missing module information '${expected}': ${output}")
+    endif()
+endforeach()

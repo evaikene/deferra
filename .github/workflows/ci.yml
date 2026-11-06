@@ -159,6 +159,7 @@ jobs:
 
   php-ubuntu:
     name: PHP ${{ matrix.php }} / Ubuntu 26.04
+    needs: ubuntu
     runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
@@ -175,7 +176,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            ca-certificates curl gnupg ccache catch2 cmake g++ ninja-build python3
+            ca-certificates curl gnupg ccache catch2 cmake g++ ninja-build python3 libfmt-dev
+
+      - name: Download same-run native SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: jobu-sdk-ubuntu-26.04-x64
+          path: .bld/native-sdk
+
+      - name: Extract native SDK
+        run: tar -xzf .bld/native-sdk/jobu-sdk.tar.gz -C .bld/native-sdk
 
       - name: Install selected ZendPHP
         env:
@@ -194,10 +204,10 @@ jobs:
           restore-keys: |
             ccache-v2-php-ubuntu-26.04-${{ matrix.php }}-${{ steps.compiler.outputs.version }}-
 
-      - name: Build and test PHP helper
+      - name: Build and test PHP helper and JobU module
         env:
           PHP_VERSION: ${{ matrix.php }}
-        run: tools/ci/php-test "$PHP_VERSION" "/usr/bin/php-config${PHP_VERSION}-zend" .bld/php
+        run: tools/ci/php-test "$PHP_VERSION" "/usr/bin/php-config${PHP_VERSION}-zend" .bld/php .bld/native-sdk/sdk
 
       - name: Save ccache
         if: github.event_name == 'push'
@@ -214,13 +224,15 @@ jobs:
           path: |
             .bld/php/test/results.xml
             .bld/php/test/Testing/Temporary/LastTest.log
-            .bld/php/test/build-contract-fixture/*.log
+            .bld/php/test/php-cxx/build-contract-fixture/*.log
+            .bld/php/compile_commands.json
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
 
   php-alpine:
     name: PHP ${{ matrix.php }} / Alpine 3.24
+    needs: alpine
     runs-on: ubuntu-26.04
     container: alpine:3.24
     strategy:
@@ -232,10 +244,19 @@ jobs:
       - name: Install build tools
         run: |
           apk add --no-cache ca-certificates curl ccache catch2-3 cmake g++ \
-            gcompat git samurai python3 tar tzdata
+            gcompat git samurai python3 tar tzdata fmt-dev
 
       - name: Check out sources
         uses: actions/checkout@v5
+
+      - name: Download same-run native SDK
+        uses: actions/download-artifact@v4
+        with:
+          name: jobu-sdk-alpine-3.24-x64
+          path: .bld/native-sdk
+
+      - name: Extract native SDK
+        run: tar -xzf .bld/native-sdk/jobu-sdk.tar.gz -C .bld/native-sdk
 
       - name: Install selected ZendPHP
         env:
@@ -254,12 +275,12 @@ jobs:
           restore-keys: |
             ccache-v2-php-alpine-3.24-${{ matrix.php }}-${{ steps.compiler.outputs.version }}-
 
-      - name: Build and test PHP helper
+      - name: Build and test PHP helper and JobU module
         env:
           PHP_VERSION: ${{ matrix.php }}
         run: |
           compact=$(printf '%s' "$PHP_VERSION" | tr -d .)
-          tools/ci/php-test "$PHP_VERSION" "/usr/bin/php-config${compact}zend" .bld/php
+          tools/ci/php-test "$PHP_VERSION" "/usr/bin/php-config${compact}zend" .bld/php .bld/native-sdk/sdk
 
       - name: Save ccache
         if: github.event_name == 'push'
@@ -276,7 +297,8 @@ jobs:
           path: |
             .bld/php/test/results.xml
             .bld/php/test/Testing/Temporary/LastTest.log
-            .bld/php/test/build-contract-fixture/*.log
+            .bld/php/test/php-cxx/build-contract-fixture/*.log
+            .bld/php/compile_commands.json
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7

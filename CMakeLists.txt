@@ -11,6 +11,7 @@ set(JOBU_RPC_API_VERSION "${JOBU_RPC_API_VERSION_MAJOR}.${JOBU_RPC_API_VERSION_M
 option(JB_BUILD_SQLITE_DRIVER "Build the SQLite database driver" ON)
 option(JB_BUILD_EXAMPLES "Build the JobU client examples" ON)
 option(JB_BUILD_PHP_CPP "Build the reusable PHP/C++ library" OFF)
+option(JB_BUILD_PHP_EXTENSION "Build the JobU PHP extension" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

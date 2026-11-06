@@ -20,6 +20,10 @@ persistence.
 A terminal user interface (TUI) is available separately in
 [JobuTU](https://github.com/rukkirahu/jobutu).
 
+The optional [PHP extension](docs/php.md) currently provides enums and exception
+types; client operations are still under development. Its reusable
+[PHP/C++ helper](docs/php-cxx.md) can also be built independently.
+
 ## Supported platforms
 
 - Arch Linux (rolling release; primary development platform)

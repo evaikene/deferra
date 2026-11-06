@@ -87,7 +87,7 @@ endforeach()
 # The helper has its own install component and package. A complete install also
 # includes it when enabled, while JobU's Development component stays independent.
 set(phpcxxdevelopment_files)
-if("@JB_BUILD_PHP_CPP@")
+if("@JB_BUILD_PHP_CPP@" OR "@JB_BUILD_PHP_EXTENSION@")
     set(phpcxx_sdk_directory "${library_directory}/cmake/PhpCxx")
     set(phpcxxdevelopment_files
         "${include_directory}/phpcxx/build.hpp" "${include_directory}/phpcxx/zend.hpp"
@@ -141,7 +141,7 @@ if("jobud" IN_LIST applications)
 endif()
 
 set(components Runtime Development Documentation)
-if("@JB_BUILD_PHP_CPP@")
+if("@JB_BUILD_PHP_CPP@" OR "@JB_BUILD_PHP_EXTENSION@")
     list(APPEND components PhpCxxDevelopment)
 endif()
 foreach(component IN LISTS components)
