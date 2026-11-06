@@ -73,13 +73,13 @@ jobs:
         run: tools/ci/prepare-sdk .bld .bld/ci-artifacts
 
       - name: Upload JobU SDK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jobu-sdk-ubuntu-26.04-x64
           path: .bld/ci-artifacts/jobu-sdk.tar.gz
           include-hidden-files: true
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
 
   alpine:
     name: Alpine
@@ -149,13 +149,13 @@ jobs:
         run: tools/ci/prepare-sdk .bld .bld/ci-artifacts
 
       - name: Upload JobU SDK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: jobu-sdk-alpine-3.24-x64
           path: .bld/ci-artifacts/jobu-sdk.tar.gz
           include-hidden-files: true
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
 
   php-ubuntu:
     name: PHP ${{ matrix.php }} / Ubuntu 26.04
@@ -180,7 +180,7 @@ jobs:
             libcurl4-openssl-dev libsqlite3-dev libssl-dev
 
       - name: Download same-run native SDK
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: jobu-sdk-ubuntu-26.04-x64
           path: .bld/native-sdk
@@ -219,7 +219,7 @@ jobs:
 
       - name: Upload PHP test evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: php-ubuntu-26.04-${{ matrix.php }}-tests
           path: |
@@ -229,7 +229,7 @@ jobs:
             .bld/php/compile_commands.json
           include-hidden-files: true
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 1
 
   php-alpine:
     name: PHP ${{ matrix.php }} / Alpine 3.24
@@ -251,7 +251,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Download same-run native SDK
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: jobu-sdk-alpine-3.24-x64
           path: .bld/native-sdk
@@ -292,7 +292,7 @@ jobs:
 
       - name: Upload PHP test evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: php-alpine-3.24-${{ matrix.php }}-tests
           path: |
@@ -302,4 +302,4 @@ jobs:
             .bld/php/compile_commands.json
           include-hidden-files: true
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 1
