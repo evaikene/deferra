@@ -377,7 +377,7 @@ TEST_CASE("Destruction from deferred handshake and decoded-result failures is sa
     CHECK(failures == 1);
 }
 
-TEST_CASE("Reply handlers may close or cancel a second queued call once", "[jobu][client]")
+TEST_CASE("Reentrant close preserves a queued response while cancellation ends observation", "[jobu][client]")
 {
     for (auto close_wrapper : {false, true}) {
         Fixture fixture;
@@ -408,8 +408,14 @@ TEST_CASE("Reply handlers may close or cancel a second queued call once", "[jobu
         fixture.device.inject_input(success(3U, empty_run_page()));
         fixture.drain_tasks();
         fixture.drain_tasks();
-        CHECK(replies == std::vector<ControlCallId>{first.value()});
-        CHECK(failures == std::vector<ControlCallId>{second.value()});
+        if (close_wrapper) {
+            CHECK(replies == std::vector<ControlCallId>{first.value(), second.value()});
+            CHECK(failures.empty());
+        }
+        else {
+            CHECK(replies == std::vector<ControlCallId>{first.value()});
+            CHECK(failures == std::vector<ControlCallId>{second.value()});
+        }
     }
 }
 
@@ -575,6 +581,209 @@ TEST_CASE("Synchronous remote errors and cancellation of queued replies complete
     REQUIRE(failures.size() == 2U);
     CHECK(failures.back().kind == ControlFailureKind::Local);
     CHECK(replies == 0);
+}
+
+TEST_CASE("Completed responses survive termination before deferred delivery", "[jobu][client][issue340]")
+{
+    Fixture fixture;
+    fixture.initialize();
+    bool explicit_close = false;
+    bool device_error   = false;
+    SECTION("EOF")
+    {}
+    SECTION("device failure")
+    {
+        device_error = true;
+    }
+    SECTION("explicit close")
+    {
+        explicit_close = true;
+    }
+
+    auto events = std::vector<std::string>{};
+    fixture.typed->failed.connect([&](Error const&) {
+        events.emplace_back("terminal");
+        fixture.typed->close();
+    });
+    fixture.typed->reply_received.connect([&](ControlCallId id, ControlReply const& reply) {
+        CHECK(id == 1U);
+        CHECK(std::holds_alternative<RunPage>(reply));
+        events.emplace_back("reply");
+        fixture.typed->close();
+    });
+    fixture.typed->call_failed.connect([&](ControlCallId id, ControlFailure const& failure) {
+        if (id == 2U) {
+            REQUIRE(failure.kind == ControlFailureKind::Remote);
+            auto const& error = std::get<RpcError>(failure.error);
+            CHECK(error.code == -32000);
+            CHECK(error.message == "Original error");
+            REQUIRE(error.data);
+            CHECK(error.data->as_object().at("code").as_string() == "test.rejected");
+            CHECK_FALSE(failure.outcome_unknown);
+            events.emplace_back("remote");
+        }
+        else {
+            CHECK(failure.kind == ControlFailureKind::Local);
+            CHECK(failure.outcome_unknown == (id == 3U));
+            if (!device_error) {
+                CHECK(std::get<Error>(failure.error).code ==
+                      (explicit_close ? "jobu.client.closed" : "rpc.connection_closed"));
+            }
+            events.push_back("local:" + std::to_string(id));
+        }
+        fixture.typed->close();
+    });
+
+    REQUIRE(fixture.typed->list_runs(RunQuery{}));
+    REQUIRE(fixture.typed->create_job(creation_request()));
+    REQUIRE(fixture.typed->create_job(creation_request()));
+    REQUIRE(fixture.typed->list_runs(RunQuery{}));
+    auto data = parse_json(R"({"code":"test.rejected","category":"invalid_argument"})");
+    REQUIRE(data);
+    // Both frames are decoded before EOF/close, with posted delivery deliberately undrained.
+    fixture.device.inject_input(
+        success(2U, empty_run_page()) +
+        frame(detail::encode_error_response(RequestId{std::uint64_t{3}},
+                                            RpcError{.code = -32000, .message = "Original error", .data = *data})));
+    CHECK(events.empty());
+    if (explicit_close) {
+        fixture.typed->close();
+    }
+    else if (device_error) {
+        fixture.device.fail(IOError::ReadError, "test failure");
+    }
+    else {
+        fixture.device.close();
+        CHECK(events.empty());
+    }
+    fixture.drain_tasks();
+    fixture.drain_tasks();
+    auto expected = std::vector<std::string>{"reply", "remote", "local:3", "local:4"};
+    if (!explicit_close) {
+        expected.insert(expected.begin(), "terminal");
+    }
+    CHECK(events == expected);
+    CHECK_FALSE(fixture.typed->list_runs(RunQuery{}));
+}
+
+TEST_CASE("Retired response delivery stops when a handler destroys the wrapper", "[jobu][client][issue340]")
+{
+    Fixture fixture;
+    fixture.initialize();
+    int destroy_at = 0;
+    SECTION("terminal handler")
+    {
+        destroy_at = 1;
+    }
+    SECTION("success handler")
+    {
+        destroy_at = 2;
+    }
+    SECTION("remote error handler")
+    {
+        destroy_at = 3;
+    }
+    int  delivered = 0;
+    auto observe   = [&] {
+        if (++delivered == destroy_at) {
+            fixture.typed.reset();
+        }
+    };
+    fixture.typed->failed.connect([&](Error const&) { observe(); });
+    fixture.typed->reply_received.connect([&](ControlCallId, ControlReply const&) { observe(); });
+    fixture.typed->call_failed.connect([&](ControlCallId, ControlFailure const&) { observe(); });
+    REQUIRE(fixture.typed->list_runs(RunQuery{}));
+    REQUIRE(fixture.typed->list_runs(RunQuery{}));
+    REQUIRE(fixture.typed->create_job(creation_request()));
+    fixture.device.inject_input(success(2U, empty_run_page()) + remote_error(3U));
+    fixture.device.close();
+    fixture.drain_tasks();
+    fixture.drain_tasks();
+    CHECK(delivered == destroy_at);
+    CHECK_FALSE(fixture.typed);
+}
+
+TEST_CASE("A completed response during write remains deferred across close", "[jobu][client][issue340]")
+{
+    Fixture fixture;
+    fixture.initialize();
+    bool explicit_close = false;
+    bool remote         = false;
+    SECTION("success then EOF")
+    {}
+    SECTION("error then EOF")
+    {
+        remote = true;
+    }
+    SECTION("success then close")
+    {
+        explicit_close = true;
+    }
+    SECTION("error then close")
+    {
+        explicit_close = true;
+        remote         = true;
+    }
+    int replies  = 0;
+    int failures = 0;
+    fixture.typed->reply_received.connect([&](ControlCallId id, ControlReply const&) {
+        CHECK(id == 1U);
+        ++replies;
+    });
+    fixture.typed->call_failed.connect([&](ControlCallId id, ControlFailure const& failure) {
+        CHECK(id == 1U);
+        CHECK(failure.kind == ControlFailureKind::Remote);
+        ++failures;
+    });
+    auto connection = fixture.device.bytes_written.connect(
+        [&](std::size_t) { fixture.device.inject_input(remote ? remote_error(2U) : success(2U, empty_run_page())); });
+    // The raw client drains input after write returns but before the typed call
+    // returns. Close after the wrapper's earlier listener has correlated it.
+    auto close_after_response = [&] {
+        if (explicit_close) {
+            fixture.typed->close();
+        }
+        else {
+            fixture.device.close();
+        }
+    };
+    fixture.rpc->result_received.connect([&](RequestId const&, JsonValue const&) { close_after_response(); });
+    fixture.rpc->error_received.connect([&](RequestId const&, RpcError const&) { close_after_response(); });
+    REQUIRE(fixture.typed->list_runs(RunQuery{}));
+    CHECK(replies == 0);
+    CHECK(failures == 0);
+    fixture.drain_tasks();
+    fixture.drain_tasks();
+    CHECK(replies == (remote ? 0 : 1));
+    CHECK(failures == (remote ? 1 : 0));
+}
+
+TEST_CASE("A queued handshake cannot make a terminated wrapper ready", "[jobu][client][issue340]")
+{
+    Fixture fixture;
+    bool    explicit_close = false;
+    SECTION("EOF")
+    {}
+    SECTION("explicit close")
+    {
+        explicit_close = true;
+    }
+    int ready  = 0;
+    int failed = 0;
+    fixture.typed->ready.connect([&](SystemInfo const&) { ++ready; });
+    fixture.typed->failed.connect([&](Error const&) { ++failed; });
+    REQUIRE(fixture.typed->initialize());
+    fixture.device.inject_input(success(1U, info()));
+    if (explicit_close) {
+        fixture.typed->close();
+    }
+    else {
+        fixture.device.close();
+    }
+    fixture.drain_tasks();
+    CHECK(ready == 0);
+    CHECK(failed == 1);
+    CHECK_FALSE(fixture.typed->list_runs(RunQuery{}));
 }
 
 TEST_CASE("Create replies decode through the shared JobU codec", "[jobu][client]")

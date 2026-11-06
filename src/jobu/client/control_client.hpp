@@ -97,7 +97,7 @@ struct ControlFailure {
 /// A ready, reply_received, failed, or call_failed handler may destroy the wrapper or its parent, stopping subsequent
 /// wrapper outcomes. An emission already in progress retains Signal's connection-snapshot semantics, including any
 /// queued receiver deliveries from that emission. Destruction emits no new outcomes. Handlers may call close() or
-/// cancel_call() reentrantly; close() during terminal failed delivery does not discard its latched per-call failures.
+/// cancel_call() reentrantly; close() during terminal failed delivery does not discard its latched per-call outcomes.
 ///
 /// Local `jobu.client.*` errors have fixed safe text and no backend detail:
 ///
@@ -118,7 +118,10 @@ struct ControlFailure {
 /// @endverbatim
 ///
 /// Raw `rpc.*` errors retain their own stable codes. A raw terminal error ends this wrapper and emits failed before
-/// per-call failures in local-ID order. Represented remote errors retain their RpcError identity and are not terminal.
+/// per-call outcomes in local-ID order. Complete correlated responses survive termination or close() before deferred
+/// delivery; only unanswered calls receive the terminal local error. Represented remote errors retain their RpcError
+/// identity and are not terminal by themselves. A handshake still awaiting ready delivery cannot revive a closed or
+/// failed wrapper.
 class ControlClient final : public jb::core::Object {
 public:
     /// Constructs an uninitialized wrapper without sending a request.
@@ -277,7 +280,8 @@ public:
     /// Unknown and already-completed IDs do nothing; a live call emits one local cancellation failure.
     void cancel_call(ControlCallId id);
 
-    /// Fails outstanding calls and releases local correlations, without closing the borrowed RPC client or device.
+    /// Releases local correlations without closing the borrowed RPC client or device.
+    /// Delivers already-observed responses and fails unanswered calls; destruction suppresses all further delivery.
     void close();
 
     /// Emitted once after a compatible system.info result is decoded. Missing methods remain usable as local errors.
@@ -286,7 +290,7 @@ public:
     jb::core::Signal<ControlCallId, ControlReply>   reply_received;
     /// Emitted once per accepted call that did not deliver a typed result.
     jb::core::Signal<ControlCallId, ControlFailure> call_failed;
-    /// Emitted once on handshake failure or terminal raw-client failure, before affected call_failed emissions.
+    /// Emitted once on handshake failure or terminal raw-client failure, before retired per-call outcomes.
     jb::core::Signal<jb::core::Error>               failed;
 
 private:

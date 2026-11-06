@@ -54,7 +54,7 @@ The example handles the three failure paths separately:
 - `call_failed` with `ControlFailureKind::Local` holds a `core::Error`, such as
   `jobu.client.timeout` or `jobu.client.invalid_response`.
 - `failed` reports a failed handshake or terminal raw-client failure. A
-  terminal failure precedes failures for its affected calls.
+  terminal failure precedes the retired calls' outcomes, delivered in local-ID order.
 
 Every accepted call receives a nonzero local `ControlCallId`. Its successful
 result arrives as a `ControlReply` alternative in `reply_received`. The ID
@@ -71,8 +71,13 @@ on their required event-loop thread. While the wrapper stays alive, each
 accepted call receives exactly one reply or failure. Handlers may call
 `close()` or `cancel_call()` reentrantly. In particular, `close()` during a
 terminal `failed` handler does not discard the already-latched per-call
-failures. A synchronous raw response still produces its typed signal only
-after the accepting call returns.
+outcomes. A complete correlated response survives transport termination or
+explicit `close()` before deferred delivery: successful results use the normal
+typed decoder, and remote errors retain their code, message, data and uncertainty
+semantics. Only unanswered calls receive the terminal local error. Cancellation
+still explicitly ends observation of its call. A synchronous raw response still
+produces its typed signal only after the accepting call returns. A queued
+handshake cannot make a closed or failed wrapper ready.
 
 ## Embedding in an existing host
 
