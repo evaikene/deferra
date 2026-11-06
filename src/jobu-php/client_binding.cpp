@@ -9,8 +9,12 @@
 
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
+
+#include <jb/rpc/protocol.hpp>
 
 namespace jb::php {
 namespace {
@@ -46,35 +50,6 @@ auto class_entry(std::string_view name) -> zend_class_entry*
     return static_cast<zend_class_entry*>(zend_hash_str_find_ptr(EG(class_table), name.data(), name.size()));
 }
 
-auto category_name(core::ErrorCategory category) -> char const*
-{
-    switch (category) {
-        case core::ErrorCategory::InvalidArgument:
-            return "invalid_argument";
-        case core::ErrorCategory::NotFound:
-            return "not_found";
-        case core::ErrorCategory::Conflict:
-            return "conflict";
-        case core::ErrorCategory::PermissionDenied:
-            return "permission_denied";
-        case core::ErrorCategory::Unavailable:
-            return "unavailable";
-        case core::ErrorCategory::ResourceExhausted:
-            return "resource_exhausted";
-        case core::ErrorCategory::Cancelled:
-            return "cancelled";
-        case core::ErrorCategory::Timeout:
-            return "timeout";
-        case core::ErrorCategory::Io:
-            return "io";
-        case core::ErrorCategory::Unsupported:
-            return "unsupported";
-        case core::ErrorCategory::Internal:
-            return "internal";
-    }
-    return "internal";
-}
-
 auto raise_constructor_error(core::Error const& error) -> void
 {
     if (::php::has_exception()) {
@@ -85,8 +60,7 @@ auto raise_constructor_error(core::Error const& error) -> void
         return;
     }
 
-    // Constructor-only translation. Do not forward socket paths, backend detail,
-    // or remote text. Operation/domain/unknown-outcome mapping belongs to 2.4.
+    // Connection diagnostics use fixed text rather than socket paths or peer detail.
     auto        name    = std::string_view{"jobu\\exception"};
     auto const* message = "Unable to initialize the JobU client";
     if (error.category == core::ErrorCategory::Timeout) {
@@ -231,6 +205,102 @@ auto bind_client_classes(zend_class_entry* duration, zend_class_entry* client) -
 auto native_client(zend_object* object) -> ::php::Result<Client*>
 {
     return ClientBinding::get(object);
+}
+
+auto operation_deadline(Client const&           client,
+                        ::php::Arguments const& arguments,
+                        std::uint32_t           position,
+                        core::TimePoint         start) -> ::php::Result<core::TimePoint>
+{
+    std::optional<std::chrono::milliseconds> timeout;
+    auto                                     value = arguments.get(position).dereference();
+    if (value.get() && !value.is_null()) {
+        auto object = arguments.object(position, class_entry("jobu\\duration"));
+        if (!object) {
+            return object.error();
+        }
+        auto duration = DurationBinding::get(Z_OBJ_P(value.get()));
+        if (!duration) {
+            return duration.error();
+        }
+        timeout = duration.value()->milliseconds();
+    }
+    auto deadline = client.deadline(start, timeout);
+    if (!deadline) {
+        return ::php::Error{.kind = ::php::ErrorKind::Value, .message = deadline.error().message, .argument = position};
+    }
+    return deadline.value();
+}
+
+auto raise_operation_failure(Failure const& failure, Operation const& operation) noexcept -> void
+{
+    if (::php::has_exception()) {
+        return;
+    }
+    if (auto const* local = std::get_if<core::Error>(&failure.error);
+        local && !failure.outcome_unknown &&
+        (local->code == "jobu.protocol.invalid_request" || local->code == "php.client.invalid_timeout")) {
+        ::php::raise({.kind = ::php::ErrorKind::Value, .message = "Invalid JobU operation argument"});
+        return;
+    }
+    auto        metadata = failure_metadata(failure);
+    auto        name     = std::string_view{"jobu\\exception"};
+    auto const* message  = "The JobU operation failed";
+    bool const  unknown  = mutation_outcome_unknown(operation, failure);
+    if (unknown) {
+        name    = "jobu\\outcomeunknownexception";
+        message = "The JobU operation may have committed; its outcome is unknown";
+    }
+    else if (metadata.code == "jobu.history.invalid_cursor" || metadata.code == "jobu.statistics.invalid_cursor") {
+        name    = "jobu\\invalidcursorexception";
+        message = "The JobU cursor is invalid or expired";
+    }
+    else if (metadata.code == "jobu.queue.revision_conflict" || metadata.code == "jobu.job.revision_conflict") {
+        name    = "jobu\\revisionconflictexception";
+        message = "The JobU resource revision has changed";
+    }
+    else if (metadata.category == "not_found") {
+        name    = "jobu\\notfoundexception";
+        message = "The JobU resource was not found";
+    }
+    else if (metadata.category == "timeout") {
+        name    = "jobu\\timeoutexception";
+        message = "The JobU operation deadline expired";
+    }
+    else if (metadata.category == "unsupported") {
+        name    = "jobu\\unsupportedfeatureexception";
+        message = "The requested JobU feature is unsupported";
+    }
+    else if (metadata.code == "php.resource.unsaved_changes") {
+        name    = "jobu\\unsavedchangesexception";
+        message = "The JobU resource has unsaved changes";
+    }
+    else if (failure.kind == jobu::ControlFailureKind::Local &&
+             (metadata.category == "unavailable" || metadata.category == "io" ||
+              metadata.code == "rpc.protocol_error" || metadata.code == "jobu.client.invalid_response" ||
+              metadata.code == "php.client.closed")) {
+        name    = "jobu\\connectionexception";
+        message = "The JobU connection is unavailable";
+    }
+
+    // Keep remote numeric codes in Exception::getCode and stable string metadata
+    // in separate properties. Neither peer text nor arbitrary data is displayed.
+    auto const* remote = std::get_if<rpc::RpcError>(&failure.error);
+    zend_throw_exception(class_entry(name), message, remote ? remote->code : 0);
+    auto set =
+        [](zend_class_entry* scope, char const* property, std::size_t length, std::optional<std::string> const& value) {
+            if (value) {
+                zend_update_property_stringl(scope, EG(exception), property, length, value->data(), value->size());
+            }
+        };
+    auto* base = class_entry("jobu\\exception");
+    set(base, "_errorCode", sizeof("_errorCode") - 1, metadata.code);
+    set(base, "_category", sizeof("_category") - 1, metadata.category);
+    if (unknown) {
+        auto* outcome = class_entry("jobu\\outcomeunknownexception");
+        set(outcome, "_operation", sizeof("_operation") - 1, operation.name());
+        set(outcome, "_idempotencyKey", sizeof("_idempotencyKey") - 1, operation.key());
+    }
 }
 
 } // namespace jb::php

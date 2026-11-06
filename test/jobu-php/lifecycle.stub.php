@@ -23,6 +23,8 @@ final class JobUTestHolder
 /** Test-only access to the production bridge; never registered by jobu.so. */
 final class JobUTestBridge
 {
-    public static function ping(JobU\Client $client): bool {}
+    public static function ping(JobU\Client $client, ?JobU\Duration $timeout = null): bool {}
+    public static function createQueue(JobU\Client $client, string $name, ?JobU\Duration $timeout = null, ?string $key = null): string {}
+    public static function failure(string $code, string $category, bool $remote, bool $unknown = false, ?string $key = null, bool $pending = false): void {}
     public static function timeout(JobU\Client $client): int {}
 }

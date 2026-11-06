@@ -144,7 +144,17 @@ class InvalidCursorException extends Exception {}
 class UnsavedChangesException extends Exception {}
 
 /** @not-serializable */
-class OutcomeUnknownException extends Exception {}
+class OutcomeUnknownException extends Exception
+{
+    private ?string $_operation = null;
+    private ?string $_idempotencyKey = null;
+
+    /** Stable operation name, or null for an exception constructed by user code. */
+    public function getOperation(): ?string {}
+
+    /** Original replay key when available; retain it for later reconciliation. */
+    public function getIdempotencyKey(): ?string {}
+}
 
 /** @not-serializable */
 class UnsupportedFeatureException extends Exception {}

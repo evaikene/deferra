@@ -66,6 +66,9 @@ public:
     auto close() noexcept -> void;
     auto is_closed() const noexcept -> bool;
 
+    /// Borrow the owner while registered; null after close or request shutdown.
+    auto request() const noexcept -> Request*;
+
     /// Attach raw/typed clients once the socket is connected. No handshake or I/O
     /// is initiated here. Reject closed, unconnected, or already attached bundles.
     auto attach_clients() -> core::Result<void, core::Error>;

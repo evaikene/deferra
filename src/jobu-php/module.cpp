@@ -155,6 +155,16 @@ ZEND_METHOD(JobU_Exception, getCategory)
     read_metadata(execute_data, return_value, "_category");
 }
 
+ZEND_METHOD(JobU_OutcomeUnknownException, getOperation)
+{
+    read_metadata(execute_data, return_value, "_operation");
+}
+
+ZEND_METHOD(JobU_OutcomeUnknownException, getIdempotencyKey)
+{
+    read_metadata(execute_data, return_value, "_idempotencyKey");
+}
+
 extern "C" ZEND_DLEXPORT auto get_module() -> zend_module_entry*
 {
     return &module;

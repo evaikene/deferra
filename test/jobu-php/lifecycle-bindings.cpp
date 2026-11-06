@@ -263,14 +263,13 @@ ZEND_METHOD(JobUTestBridge, ping)
             return;
         }
         auto* client   = native.value();
-        auto  deadline = jb::php::make_deadline(jb::core::Clock::now(), client->timeout());
+        auto  deadline = jb::php::operation_deadline(*client, php::Arguments(execute_data), 2, jb::core::Clock::now());
         if (!deadline) {
-            ZVAL_FALSE(return_value);
+            php::raise(deadline.error());
             return;
         }
-        auto result = client->call(deadline.value(), [client](jb::jobu::ControlCallOptions options) {
-            return client->typed()->get_system_info(options);
-        });
+        auto result = client->call(deadline.value(),
+                                   jb::php::Operation::bind("system.info", &jb::jobu::ControlClient::get_system_info));
         ZVAL_BOOL(return_value, static_cast<bool>(result));
     }();
 }
@@ -285,5 +284,121 @@ ZEND_METHOD(JobUTestBridge, timeout)
             return;
         }
         ZVAL_LONG(return_value, native.value()->timeout().count());
+    }();
+}
+
+ZEND_METHOD(JobUTestBridge, createQueue)
+{
+    [&]() noexcept {
+        auto           start = jb::core::Clock::now();
+        php::Arguments arguments(execute_data);
+        auto           value  = arguments.get(1).dereference();
+        auto           native = jb::php::native_client(Z_OBJ_P(value.get()));
+        if (!native) {
+            php::raise(native.error());
+            return;
+        }
+        auto deadline = jb::php::operation_deadline(*native.value(), arguments, 3, start);
+        if (!deadline) {
+            php::raise(deadline.error());
+            return;
+        }
+        auto name = arguments.string(2);
+        if (!name) {
+            php::raise(name.error());
+            return;
+        }
+        std::optional<std::string> key;
+        auto                       key_value = arguments.get(4).dereference();
+        if (key_value.get() && !key_value.is_null()) {
+            auto parsed = arguments.string(4);
+            if (!parsed) {
+                php::raise(parsed.error());
+                return;
+            }
+            key = std::string(parsed.value().bytes());
+        }
+        auto operation = jb::php::Operation::bind(
+            "queue.create",
+            &jb::jobu::ControlClient::create_queue,
+            jb::jobu::CreateQueueRequest{.name = std::string(name.value().bytes()), .idempotency_key = key});
+        if (!operation) {
+            php::raise({.kind    = operation.error().category == jb::core::ErrorCategory::InvalidArgument
+                                     ? php::ErrorKind::Value
+                                     : php::ErrorKind::Runtime,
+                        .message = operation.error().message});
+            return;
+        }
+        auto result = native.value()->call(deadline.value(), operation.value());
+        if (!result) {
+            jb::php::raise_operation_failure(result.error(), operation.value());
+            return;
+        }
+        auto id = std::get<jb::jobu::Queue>(result.value()).id.to_string();
+        ZVAL_STRINGL(return_value, id.data(), id.size());
+    }();
+}
+
+ZEND_METHOD(JobUTestBridge, failure)
+{
+    (void)return_value;
+    [&]() noexcept {
+        php::Arguments arguments(execute_data);
+        auto           code     = arguments.string(1);
+        auto           category = arguments.string(2);
+        auto           remote   = arguments.boolean(3);
+        bool           unknown  = arguments.get(4).dereference().is_true();
+        bool           pending  = arguments.get(6).dereference().is_true();
+        if (!code || !category || !remote) {
+            return;
+        }
+        auto                       key_value = arguments.get(5).dereference();
+        std::optional<std::string> key;
+        if (key_value.get() && !key_value.is_null()) {
+            auto parsed = arguments.string(5);
+            if (!parsed) {
+                php::raise(parsed.error());
+                return;
+            }
+            key = std::string(parsed.value().bytes());
+        }
+        auto operation =
+            jb::php::Operation::bind("queue.create",
+                                     &jb::jobu::ControlClient::create_queue,
+                                     jb::jobu::CreateQueueRequest{.name = "fixture", .idempotency_key = key});
+        if (!operation) {
+            return;
+        }
+        jb::php::Failure failure;
+        failure.outcome_unknown = unknown;
+        if (remote.value()) {
+            failure.kind  = jb::jobu::ControlFailureKind::Remote;
+            failure.error = jb::rpc::RpcError{
+                .code    = -32000,
+                .message = "PRIVATE token body arguments",
+                .data    = jb::core::JsonValue{
+                    .data = jb::core::JsonValue::Object{
+                        {"code", jb::core::JsonValue{.data = std::string(code.value().bytes())}},
+                        {"category", jb::core::JsonValue{.data = std::string(category.value().bytes())}}}}};
+        }
+        else {
+            auto native_category = jb::core::ErrorCategory::Internal;
+            for (auto candidate : {jb::core::ErrorCategory::NotFound,
+                                   jb::core::ErrorCategory::Timeout,
+                                   jb::core::ErrorCategory::Unsupported,
+                                   jb::core::ErrorCategory::Unavailable}) {
+                if (category.value().bytes() == jb::php::category_name(candidate)) {
+                    native_category = candidate;
+                }
+            }
+            failure.error = jb::core::Error{.category = native_category,
+                                            .code     = std::string(code.value().bytes()),
+                                            .message  = "PRIVATE",
+                                            .detail   = "SECRET"};
+        }
+        if (pending) {
+            php::raise({.kind = php::ErrorKind::Value, .message = "original"});
+        }
+        jb::php::raise_operation_failure(failure, operation.value());
     }();
 }

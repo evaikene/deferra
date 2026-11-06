@@ -96,6 +96,11 @@ auto Session::is_closed() const noexcept -> bool
     return !_bundle;
 }
 
+auto Session::request() const noexcept -> Request*
+{
+    return _request;
+}
+
 auto Session::attach_clients() -> core::Result<void, core::Error>
 {
     if (!_bundle || _bundle->raw || _bundle->socket.state() != net::LocalSocketState::Connected) {
