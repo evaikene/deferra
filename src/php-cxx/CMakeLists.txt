@@ -48,7 +48,7 @@ install(TARGETS php-cxx EXPORT PhpCxxTargets
 install(FILES include/phpcxx/build.hpp include/phpcxx/zend.hpp
     include/phpcxx/views.hpp include/phpcxx/string.hpp include/phpcxx/array.hpp include/phpcxx/value.hpp
     include/phpcxx/error.hpp include/phpcxx/result.hpp include/phpcxx/arguments.hpp
-    include/phpcxx/conversion.hpp include/phpcxx/exception.hpp
+    include/phpcxx/conversion.hpp include/phpcxx/exception.hpp include/phpcxx/object_binding.hpp
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/phpcxx" COMPONENT PhpCxxDevelopment)
 install(EXPORT PhpCxxTargets NAMESPACE PhpCxx::
     DESTINATION "${PHPCXX_INSTALL_CMAKEDIR}" COMPONENT PhpCxxDevelopment)

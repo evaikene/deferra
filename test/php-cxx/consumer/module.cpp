@@ -1,4 +1,5 @@
 #include "functions.hpp"
+#include "objects.hpp"
 
 #include <phpcxx/array.hpp>
 #include <phpcxx/build.hpp>
@@ -18,7 +19,7 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
     if (info.module_api != ZEND_MODULE_API_NO || info.debug != (ZEND_DEBUG != 0) || info.zts != (USING_ZTS != 0)) {
         return FAILURE;
     }
-    return SUCCESS;
+    return phpcxx_test::register_classes();
 }
 
 auto start_request([[maybe_unused]] int type, [[maybe_unused]] int module_number) noexcept -> zend_result
