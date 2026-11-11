@@ -364,7 +364,13 @@ TEST_CASE("HTTP payload header entries are closed bounded and JobU owned", "[job
 
     auto duplicate = http_payload();
     set_member(duplicate, "headers", json_array({header("X-Test", "one"), header("x-test", "two")}));
-    check_issue(duplicate, JobPayloadIssue::InvalidHeaders);
+    auto decoded_duplicate = decode_http_job_payload(duplicate);
+    REQUIRE(decoded_duplicate);
+    REQUIRE(decoded_duplicate->headers.size() == 2U);
+    CHECK(decoded_duplicate->headers[0].name == "X-Test");
+    CHECK(decoded_duplicate->headers[0].value == "one");
+    CHECK(decoded_duplicate->headers[1].name == "x-test");
+    CHECK(decoded_duplicate->headers[1].value == "two");
 
     auto invalid_value = http_payload();
     set_member(invalid_value, "headers", json_array({header("X-Test", "line\nbreak")}));

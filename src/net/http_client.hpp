@@ -51,7 +51,7 @@ struct HttpRequest {
     std::string                         method{"GET"};
     /// Final-wire-form absolute HTTP or HTTPS URL, without user information or a fragment.
     std::string                         url;
-    /// Ordered request fields. Names must be unique under ASCII case-insensitive comparison.
+    /// Ordered request fields. Repeated names retain their order and per-entry sensitivity.
     std::vector<HttpHeader>             headers;
     /// Optional raw request body. Absence remains distinct from a present empty buffer.
     std::optional<jb::core::ByteBuffer> body;

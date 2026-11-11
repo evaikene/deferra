@@ -215,8 +215,8 @@ auto validate_headers(std::span<HttpHeaderFields const> headers) -> std::string_
     }
 
     std::size_t total_bytes{0};
-    for (std::size_t index = 0; index < headers.size(); ++index) {
-        auto const& header = headers[index];
+    // Repeated names remain independent ordered fields, including their size accounting.
+    for (auto const& header : headers) {
         if (!is_token(header.name)) {
             return "headers.invalid_name";
         }
@@ -226,11 +226,6 @@ auto validate_headers(std::span<HttpHeaderFields const> headers) -> std::string_
         if (std::ranges::any_of(kReservedHeaders,
                                 [&header](std::string_view reserved) { return ascii_equal(header.name, reserved); })) {
             return "headers.reserved_name";
-        }
-        for (std::size_t previous = 0; previous < index; ++previous) {
-            if (ascii_equal(header.name, headers[previous].name)) {
-                return "headers.duplicate_name";
-            }
         }
         if (header.name.size() > kMaximumHeaderBytes - total_bytes) {
             return "headers.too_large";

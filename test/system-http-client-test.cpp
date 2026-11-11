@@ -1081,6 +1081,66 @@ TEST_CASE("system HTTP client strips credentials permanently across redirect ori
     }
 }
 
+TEST_CASE("system HTTP duplicates preserve order and per-entry redirect protection", "[net][http]")
+{
+    auto app     = jb::core::Application{0, nullptr};
+    auto origin  = jb::test::HttpTestServer{};
+    auto other   = jb::test::HttpTestServer{};
+    auto created = SystemHttpClient::create(*app.event_loop());
+    REQUIRE(created);
+    auto client = std::move(created).value();
+
+    // First retain every field on the same origin, then strip credentials on
+    // crossing origins. Returning must not restore any stripped occurrence.
+    origin.enqueue_response(redirect_response(307U, "/same"));
+    origin.enqueue_response(redirect_response(307U, other.url("/cross")));
+    origin.enqueue_response({});
+    other.enqueue_response(redirect_response(307U, origin.url("/return")));
+    origin.release_responses();
+    other.release_responses();
+
+    auto request             = minimal_request(origin.url("/initial"));
+    request.follow_redirects = true;
+    request.headers          = {
+        {.name = "X-Repeat", .value = "first"},
+        {.name = "x-repeat", .value = "secret", .sensitive = true},
+        {.name = "Authorization", .value = "first-credential"},
+        {.name = "authorization", .value = "second-credential"},
+        {.name = "Cookie", .value = "first-cookie"},
+        {.name = "cookie", .value = "second-cookie"},
+        {.name = "Proxy-Authorization", .value = "first-proxy"},
+        {.name = "proxy-authorization", .value = "second-proxy"},
+        {.name = "X-Repeat", .value = "last"},
+    };
+    auto const original  = request.headers;
+    auto       completed = complete_request(app, *client, std::move(request));
+    REQUIRE(completed);
+    CHECK(completed->redirect_count == 3U);
+
+    auto const local  = origin.requests();
+    auto const remote = other.requests();
+    REQUIRE(local.size() == 3U);
+    REQUIRE(remote.size() == 1U);
+    for (auto const* observed : {local.data(), &local[1], remote.data(), &local[2]}) {
+        bool const               crossed = observed == remote.data() || observed == &local[2];
+        std::vector<std::string> actual;
+        std::vector<std::string> expected;
+        for (auto const& field : observed->headers) {
+            // Ignore backend-injected fields, but retain every occurrence and
+            // exact spelling of fields supplied by this request.
+            if (std::ranges::any_of(original, [&](auto const& sent) { return sent.name == field.name; })) {
+                actual.push_back(field.name + ": " + field.value);
+            }
+        }
+        for (auto const& field : original) {
+            if (!crossed || (!field.sensitive && field.name == "X-Repeat")) {
+                expected.push_back(field.name + ": " + field.value);
+            }
+        }
+        CHECK(actual == expected);
+    }
+}
+
 TEST_CASE("system HTTP client returns safe redirect policy failures", "[net][http]")
 {
     struct Case {

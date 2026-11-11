@@ -125,17 +125,23 @@ TEST_CASE("HTTP preparation forces reference sensitivity and caches a name share
     provider.values["token"] = bytes("private-sentinel");
     auto original            = json(R"({"url":"https://example.test/","method":"POST",
         "headers":[{"name":"X-Private","value":{"secret":"token"},"sensitive":false},
-                   {"name":"X-Other","value":{"secret":"token"}}],"body":{"secret":"token"}})");
+                   {"name":"x-private","value":{"secret":"token"}},
+                   {"name":"X-Private","value":"public"}],"body":{"secret":"token"}})");
     auto snapshot            = original;
     auto prepared            = prepare_payload_template(JobType::Http, original, provider);
     REQUIRE(prepared);
     auto decoded = decode_http_job_payload(*prepared);
     REQUIRE(decoded);
-    REQUIRE(decoded->headers.size() == 2);
-    for (auto const& header : decoded->headers) {
-        CHECK(header.value == "private-sentinel");
-        CHECK(header.sensitive);
+    REQUIRE(decoded->headers.size() == 3);
+    CHECK(decoded->headers[0].name == "X-Private");
+    CHECK(decoded->headers[1].name == "x-private");
+    for (std::size_t index = 0; index < 2; ++index) {
+        CHECK(decoded->headers[index].value == "private-sentinel");
+        CHECK(decoded->headers[index].sensitive);
     }
+    CHECK(decoded->headers[2].name == "X-Private");
+    CHECK(decoded->headers[2].value == "public");
+    CHECK_FALSE(decoded->headers[2].sensitive);
     REQUIRE(decoded->body);
     CHECK(*decoded->body == provider.values.at("token"));
     CHECK(provider.calls.at("token") == 1);

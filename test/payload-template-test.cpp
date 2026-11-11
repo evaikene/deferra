@@ -170,6 +170,24 @@ TEST_CASE("Templates retain literal CLI checks and known prepared-size accountin
     CHECK(oversized.error() == JobPayloadIssue::PreparedRequestTooLarge);
 }
 
+TEST_CASE("HTTP templates retain repeated names and positional secret references", "[jobu][template]")
+{
+    auto payload    = json(R"({"url":"https://host/","headers":[
+        {"name":"X","value":{"secret":"a"}},
+        {"name":"x","value":"literal"},
+        {"name":"X","value":{"secret":"b"}}]})");
+    auto references = validate_payload_template(JobType::Http, payload);
+    REQUIRE(references);
+    CHECK(*references == std::vector<SecretReference>{
+                             {.secret_name = "a", .field_path = "/headers/0/value"},
+                             {.secret_name = "b", .field_path = "/headers/2/value"}
+    });
+
+    auto stored = validate_and_serialize_job_payload(JobType::Http, payload);
+    REQUIRE(stored);
+    CHECK(json(stored->serialized()) == payload);
+}
+
 TEST_CASE("HTTP templates retain literal and structural header and body checks", "[jobu][template]")
 {
     for (
@@ -182,7 +200,6 @@ TEST_CASE("HTTP templates retain literal and structural header and body checks",
          R"({"url":"https://host/","headers":[{"name":"Bad Name","value":{"secret":"a"}}]})",
          R"({"url":"https://host/","headers":[{"name":"X","value":{"secret":"a"},"sensitive":"no"}]})",
          R"({"url":"https://host/","headers":[{"name":"X","value":{"secret":"a"},"extra":1}]})",
-         R"({"url":"https://host/","headers":[{"name":"X","value":{"secret":"a"}},{"name":"x","value":"b"}]})",
          R"({"url":"https://host/","headers":[{"name":"X","value":{"secret":"a"}},{"name":"Y","value":"bad\n"}]})",
          R"({"url":"https://host/","body":{"secret":"a"},"expected_statuses":["600"]})",
          R"({"url":"https://host/","headers":[{"name":"X","value":{"secret":"a"}}],"body":{"encoding":"base64","data":"TR=="}})",
