@@ -1,3 +1,4 @@
+#include "attribute_binding.hpp"
 #include "client_binding.hpp"
 #include "request.hpp"
 #include "value_binding.hpp"
@@ -73,6 +74,13 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
     if (!jb::php::bind_value_classes(register_class_JobU_SecretReference(),
                                      register_class_JobU_OnceSchedule(schedule),
                                      register_class_JobU_CronSchedule(schedule))) {
+        return FAILURE;
+    }
+    auto* attributes = register_class_JobU_JobAttributes();
+    if (!jb::php::bind_attribute_classes(attributes,
+                                         register_class_JobU_CliJobAttributes(attributes),
+                                         register_class_JobU_HttpJobAttributes(attributes),
+                                         register_class_JobU_QueueDefaults())) {
         return FAILURE;
     }
     return SUCCESS;

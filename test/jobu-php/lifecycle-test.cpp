@@ -1,3 +1,4 @@
+#include "attribute_binding.hpp"
 #include "client.hpp"
 #include "lifecycle-bindings.hpp"
 #include "operation.hpp"
@@ -870,5 +871,125 @@ TEST_CASE("Value adapters preserve native schedule and identifier contracts", "[
         CHECK_FALSE(jb::php::schedule_to_php(jb::jobu::CronSchedule{.expression = "@daily", .timezone = "UTC"}));
         CHECK(EG(exception) == original);
         zend_clear_exception();
+    }
+}
+
+TEST_CASE("Configuration copies preserve attachment and submission boundaries", "[php][lifecycle][attributes]")
+{
+    Runtime runtime;
+    auto    value = [](std::string_view expression) {
+        zval slot{};
+        auto status = zend_eval_stringl(expression.data(), expression.size(), &slot, "attribute adapter test");
+        auto owner  = php::Value::adopt(slot);
+        REQUIRE(status == SUCCESS);
+        REQUIRE_FALSE(php::has_exception());
+        return owner;
+    };
+
+    SECTION("Merge includes unchanged source keys and rejects incompatible candidates atomically")
+    {
+        auto target = value("$GLOBALS['target'] = new JobU\\CliJobAttributes");
+        auto source = value("$GLOBALS['source'] = new JobU\\JobAttributes");
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['target']->setStdoutLimit(11);
+            $GLOBALS['target']->setRetryMaxAttempts(1);
+            $GLOBALS['source']->setRetryMaxAttempts(2);
+            return true;
+        })())PHP"));
+        REQUIRE(jb::php::merge_attributes(Z_OBJ_P(target.get()), source.view()));
+        REQUIRE(jb::php::merge_attributes(Z_OBJ_P(target.get()), source.view()));
+        CHECK(
+            evaluate("$GLOBALS['target']->getStdoutLimit() === 11 && $GLOBALS['target']->getRetryMaxAttempts() === 2"));
+
+        REQUIRE(evaluate("(function () { $GLOBALS['source']->set('http.tls_verify', false); return true; })()"));
+        CHECK_FALSE(jb::php::merge_attributes(Z_OBJ_P(target.get()), source.view()));
+        CHECK(evaluate("$GLOBALS['target']->getRetryMaxAttempts() === 2"));
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['target']->setRetryInitialDelay(JobU\Duration::seconds(10));
+            $GLOBALS['target']->setRetryMaxDelay(JobU\Duration::seconds(1));
+            return true;
+        })())PHP"));
+        CHECK_FALSE(jb::php::attributes_from_php(target.view()));
+        REQUIRE(evaluate(
+            "(function () { $GLOBALS['target']->setRetryMaxDelay(JobU\\Duration::seconds(20)); return true; })()"));
+        CHECK(jb::php::attributes_from_php(target.view()));
+    }
+
+    SECTION("Replacement preserves views and attached clones drop owners")
+    {
+        auto changes = std::make_shared<int>(0);
+        auto target  = value("$GLOBALS['defaults'] = new JobU\\QueueDefaults");
+        auto owner   = value("$GLOBALS['owner'] = new stdClass");
+        REQUIRE(jb::php::attach_attributes(Z_OBJ_P(target.get()), owner.view(), [changes] { ++*changes; }));
+        CHECK_FALSE(jb::php::attach_attributes(Z_OBJ_P(target.get()), owner.view(), {}));
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['owner']->defaults = $GLOBALS['defaults'];
+            $GLOBALS['weakOwner'] = WeakReference::create($GLOBALS['owner']);
+            $GLOBALS['cliView'] = $GLOBALS['defaults']->cli();
+            $GLOBALS['httpView'] = $GLOBALS['defaults']->http();
+            $GLOBALS['cliView']->setStdoutLimit(10);
+            $GLOBALS['cliView']->setStdoutLimit(10);
+            return true;
+        })())PHP"));
+        CHECK(*changes == 1);
+        auto source = value("$GLOBALS['replacement'] = new JobU\\QueueDefaults");
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['replacement']->http()->setHttpBodyLimit(20);
+            $GLOBALS['replacement']->cli()->setTimeout(JobU\Duration::seconds(3));
+            return true;
+        })())PHP"));
+        REQUIRE(jb::php::replace_defaults(Z_OBJ_P(target.get()), source.view()));
+        REQUIRE(jb::php::replace_defaults(Z_OBJ_P(target.get()), source.view()));
+        CHECK(*changes == 2);
+        CHECK(evaluate(R"PHP($GLOBALS['defaults']->cli() === $GLOBALS['cliView'] &&
+            $GLOBALS['defaults']->http() === $GLOBALS['httpView'] &&
+            $GLOBALS['cliView']->getStdoutLimit() === null &&
+            $GLOBALS['httpView']->getTimeout()->getMilliseconds() === 3000 &&
+            $GLOBALS['httpView']->getHttpBodyLimit() === 20)PHP"));
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['detached'] = clone $GLOBALS['defaults'];
+            $GLOBALS['viewCopy'] = clone $GLOBALS['cliView'];
+            $GLOBALS['detached']->clear('job.timeout');
+            $GLOBALS['viewCopy']->setStdoutLimit(99);
+            return true;
+        })())PHP"));
+        CHECK(*changes == 2);
+
+        // A failed full-layer validation leaves the old layer and notifications intact.
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['replacement']->http()->setFollowRedirects(true);
+            $GLOBALS['replacement']->http()->setMaxRedirects(0);
+            return true;
+        })())PHP"));
+        CHECK_FALSE(jb::php::replace_defaults(Z_OBJ_P(target.get()), source.view()));
+        CHECK(*changes == 2);
+        CHECK(evaluate("$GLOBALS['httpView']->getMaxRedirects() === null"));
+
+        target = {};
+        owner  = {};
+        REQUIRE(evaluate(R"PHP((function () {
+            unset($GLOBALS['owner'], $GLOBALS['defaults']);
+            gc_collect_cycles();
+            return $GLOBALS['weakOwner']->get() !== null;
+        })())PHP"));
+        REQUIRE(evaluate(R"PHP((function () {
+            unset($GLOBALS['cliView'], $GLOBALS['httpView']);
+            gc_collect_cycles();
+            return $GLOBALS['weakOwner']->get() === null &&
+                $GLOBALS['viewCopy']->getStdoutLimit() === 99;
+        })())PHP"));
+    }
+
+    SECTION("Configuration cycles are released at repeated request shutdown")
+    {
+        for (int iteration = 0; iteration != 3; ++iteration) {
+            REQUIRE(evaluate(R"PHP((function () {
+                $GLOBALS['defaults'] = new JobU\QueueDefaults;
+                $GLOBALS['defaults']->cli()->setStdoutLimit(5);
+                $GLOBALS['defaults']->http()->setHttpBodyLimit(6);
+                return true;
+            })())PHP"));
+            runtime.restart(nullptr);
+        }
     }
 }

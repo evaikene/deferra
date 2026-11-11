@@ -4,12 +4,19 @@
 
 #include <phpcxx/arguments.hpp>
 #include <phpcxx/result.hpp>
+#include <phpcxx/value.hpp>
 #include <phpcxx/zend.hpp>
 
 namespace jb::php {
 
 /// Bind generated classes during MINIT. No class entry survives module shutdown.
 auto bind_client_classes(zend_class_entry* duration, zend_class_entry* client) -> bool;
+
+/// Read the existing immutable Duration without calling PHP methods.
+auto duration_milliseconds(::php::ValueView value) -> ::php::Result<std::chrono::milliseconds>;
+
+/// Create the existing immutable Duration with exact millisecond storage.
+auto duration_to_php(std::chrono::milliseconds value) -> ::php::Result<::php::Value>;
 
 /// Borrow initialized native Client state within the owning PHP request.
 /// Used by future typed methods and test-only bindings; never retains the object.

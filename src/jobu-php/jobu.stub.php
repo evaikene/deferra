@@ -53,6 +53,105 @@ final class CronSchedule extends Schedule
     public function getTimezone(): ?\DateTimeZone {}
 }
 
+/** Partial job attributes; getters are local, and absent values return null. @not-serializable */
+class JobAttributes
+{
+    public function __construct() {}
+    public function get(string $name): mixed {}
+    public function has(string $name): bool {}
+    /** Validate one value; cross-field validation occurs at submission. */
+    public function set(string $name, mixed $value): void {}
+    /** Supplied job.timeout, or null when absent. */
+    public function getTimeout(): ?Duration {}
+    public function setTimeout(Duration $value): void {}
+    /** Supplied output.capture, or null when absent. */
+    public function getOutputCapture(): ?string {}
+    public function setOutputCapture(string $value): void {}
+    /** Supplied retry.initial_delay, or null when absent. */
+    public function getRetryInitialDelay(): ?Duration {}
+    public function setRetryInitialDelay(Duration $value): void {}
+    /** Supplied retry.max_delay, or null when absent. */
+    public function getRetryMaxDelay(): ?Duration {}
+    public function setRetryMaxDelay(Duration $value): void {}
+    /** Supplied retry.max_attempts, or null when absent. */
+    public function getRetryMaxAttempts(): ?int {}
+    public function setRetryMaxAttempts(int $value): void {}
+    /** Supplied retry.jitter, or null when absent. */
+    public function getRetryJitter(): ?float {}
+    public function setRetryJitter(float $value): void {}
+    /** Supplied retry.multiplier, or null when absent. */
+    public function getRetryMultiplier(): ?float {}
+    public function setRetryMultiplier(float $value): void {}
+    /** Supplied retry.mode, or null when absent. */
+    public function getRetryMode(): ?RetryMode {}
+    public function setRetryMode(RetryMode $value): void {}
+    /** Supplied retry.strategy, or null when absent. */
+    public function getRetryStrategy(): ?string {}
+    public function setRetryStrategy(string $value): void {}
+}
+
+/** Runner-specific partial attributes or a shared queue-default view. @not-serializable */
+final class CliJobAttributes extends JobAttributes
+{
+    /** Supplied cli.retry_exit_codes, or null when absent. @return list<string>|null */
+    public function getRetryExitCodes(): ?array {}
+    /** @param list<string> $value */
+    public function setRetryExitCodes(array $value): void {}
+    /** Supplied cli.termination_grace, or null when absent. */
+    public function getTerminationGrace(): ?Duration {}
+    public function setTerminationGrace(Duration $value): void {}
+    /** Supplied output.stdout_limit, or null when absent. */
+    public function getStdoutLimit(): ?int {}
+    public function setStdoutLimit(int $value): void {}
+    /** Supplied output.stderr_limit, or null when absent. */
+    public function getStderrLimit(): ?int {}
+    public function setStderrLimit(int $value): void {}
+}
+
+/** Runner-specific partial attributes or a shared queue-default view. @not-serializable */
+final class HttpJobAttributes extends JobAttributes
+{
+    /** Supplied http.follow_redirects, or null when absent. */
+    public function getFollowRedirects(): ?bool {}
+    public function setFollowRedirects(bool $value): void {}
+    /** Supplied http.idempotency_key, or null when absent. */
+    public function getIdempotencyKey(): ?bool {}
+    public function setIdempotencyKey(bool $value): void {}
+    /** Supplied http.tls_verify, or null when absent. */
+    public function getTlsVerify(): ?bool {}
+    public function setTlsVerify(bool $value): void {}
+    /** Supplied http.max_redirects, or null when absent. */
+    public function getMaxRedirects(): ?int {}
+    public function setMaxRedirects(int $value): void {}
+    /** Supplied output.http_body_limit, or null when absent. */
+    public function getHttpBodyLimit(): ?int {}
+    public function setHttpBodyLimit(int $value): void {}
+    /** Supplied output.http_headers_limit, or null when absent. */
+    public function getHttpHeadersLimit(): ?int {}
+    public function setHttpHeadersLimit(int $value): void {}
+    /** Supplied http.retry_errors, or null when absent. @return list<string>|null */
+    public function getRetryErrors(): ?array {}
+    /** @param list<string> $value */
+    public function setRetryErrors(array $value): void {}
+    /** Supplied http.retry_statuses, or null when absent. @return list<string>|null */
+    public function getRetryStatuses(): ?array {}
+    /** @param list<string> $value */
+    public function setRetryStatuses(array $value): void {}
+}
+
+/** Partial multi-runner defaults; typed views share this layer. Clones are detached. @not-serializable */
+final class QueueDefaults
+{
+    public function __construct() {}
+    public function get(string $name): mixed {}
+    public function has(string $name): bool {}
+    public function set(string $name, mixed $value): void {}
+    /** Remove one override; clearing an absent known name does nothing. */
+    public function clear(string $name): void {}
+    public function cli(): CliJobAttributes {}
+    public function http(): HttpJobAttributes {}
+}
+
 /** Request-scoped synchronous Unix-socket client. @not-serializable */
 final class Client
 {
