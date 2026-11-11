@@ -2,7 +2,7 @@
 
 The optional `jobu` extension provides native string-backed enums, an exception
 hierarchy, immutable durations, secret references and schedules, mutable attributes
-and queue defaults, and request-scoped `Client` connections.
+and queue defaults, mutable CLI payloads, and request-scoped `Client` connections.
 The constructor eagerly connects and handshakes; public resource and management
 methods remain deferred. A private synchronous bridge is exercised by tests.
 It supports PHP 8.1+ with 64-bit integers in NTS mode
@@ -396,3 +396,66 @@ uses visible attribute names and values in canonical name order, independent of
 insertion order or attachment; `===` still tests identity. All four classes reject
 serialization and repeated initialization. Internal classes disallow dynamic
 properties. References stay within the owning PHP request and are traced for GC.
+
+## CLI payloads
+
+`CliPayload` is a local mutable template. Construction and setters perform no
+RPC, execute no commands, and never look up secret values:
+
+```php
+$payload = new JobU\CliPayload(
+    '"/opt/My Tools/worker" --verbose',
+    arguments: ['--token', new JobU\SecretReference('service.token')]
+);
+$payload->setWorkingDirectory('/app');
+$payload->setExpectedExitCodes([0, 2]);
+$payload->setEnvironment('TOKEN', new JobU\SecretReference('service.token'));
+$payload->unsetEnvironment('HOME'); // explicit null/removal at execution
+$payload->clearEnvironment('HOME'); // remove the payload override
+```
+
+The constructor and `setCommand(string $command, array $arguments = [])`
+reuse JobU's shell-like tokenizer, preserving quoted executable paths and
+appending the supplied argument list verbatim. There is no variable expansion,
+globbing, pipe/redirection interpretation, shell execution, or inherited PATH.
+Executable names containing spaces must be quoted or escaped within the command
+string. `setExecutable(string $executable)` instead accepts a literal executable
+and preserves arguments. `setArguments(array $arguments)` replaces only argv;
+`addArgument(string|SecretReference $argument)` appends one value.
+`getExecutable()` and `getArguments()` return lossless independent values;
+there is no `getCommand()`.
+
+`setCommand()` replaces executable and argv atomically while preserving the
+working directory, environment and expected exit codes. Each setter updates only
+its own fields after validation; a failed setter applies none of its own changes.
+Independent edits made by PHP code during argument coercion remain in effect.
+Local field checks reject malformed UTF-8, NUL bytes,
+invalid paths, invalid environment names and collection limits. Executables must
+be absolute paths or bare names; working directories must be absolute. Each path
+is limited to 4096 bytes. Argument lists contain at most 1024 values, each an exact
+string or `SecretReference`. Array keys must form a list starting at zero.
+
+`getWorkingDirectory()` defaults to `/`. `setExpectedExitCodes(array $codes)`
+accepts distinct integers 0–255, including an empty list to accept no exit code;
+`getExpectedExitCodes()` returns ascending codes and defaults to `[0]`.
+`getEnvironment()` returns an independent map with strings, symbolic references,
+and explicit null removals. Missing keys differ from present nulls. Set one entry
+with `setEnvironment(string $name, string|SecretReference $value)`, record null
+with `unsetEnvironment(string $name)`, or remove it with
+`clearEnvironment(string $name)`. At most 256 entries are allowed. Names follow
+`[A-Za-z_][A-Za-z0-9_]*`; injected `JOBU_JOB_ID`, `JOBU_RUN_ID`, and `JOBU_ATTEMPT`
+are reserved. `PATH` and all `JOBU_*` entries cannot hold secret references.
+
+A bare executable may be edited before its PATH is supplied. Complete native
+export requires an explicit literal PATH of at most 256 absolute nonempty
+directories, bounded candidate paths, and the protocol's 256 KiB serialized and
+prepared-request limits. No process environment fills missing values. The daemon
+remains authoritative and rechecks secret-dependent bytes after resolution.
+Public job submission methods are still deferred.
+
+Cloning deep-copies the payload and detaches it from any owner. Equality compares
+native values, ignoring environment insertion order and exit-code input order;
+argument order matters. Strict identity remains PHP object identity. Getters and
+clones retain no mutable caller arrays or references. Serialization, dynamic
+properties and repeated construction are rejected. Error messages and native
+object debugging do not expose submitted argument/environment values.

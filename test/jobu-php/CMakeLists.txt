@@ -14,7 +14,7 @@ add_test(NAME jobu-php-module-test COMMAND ${CMAKE_COMMAND}
     "-Dphp_binary=${php_binary}" "-Dmodule=$<TARGET_FILE:jobu-php>"
     "-Dversion=${PROJECT_VERSION}" "-Dsystem=${CMAKE_SYSTEM_NAME}" "-Dnm=${CMAKE_NM}"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/module-test.cmake")
-foreach(scenario reflection exceptions client values attributes)
+foreach(scenario reflection exceptions client values attributes cli-payload)
     add_test(NAME jobu-php-${scenario}-test COMMAND "${php_binary}" -n
         "-dextension=$<TARGET_FILE:jobu-php>" "${CMAKE_CURRENT_SOURCE_DIR}/${scenario}.php")
 endforeach()
@@ -22,7 +22,7 @@ add_test(NAME jobu-php-restart-test COMMAND ${CMAKE_COMMAND}
     "-Dphp_binary=${php_binary}" "-Dmodule=$<TARGET_FILE:jobu-php>"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/restart-test.cmake")
 set_tests_properties(jobu-php-module-test jobu-php-reflection-test
-    jobu-php-exceptions-test jobu-php-client-test jobu-php-values-test jobu-php-attributes-test jobu-php-restart-test PROPERTIES
+    jobu-php-exceptions-test jobu-php-client-test jobu-php-values-test jobu-php-attributes-test jobu-php-cli-payload-test jobu-php-restart-test PROPERTIES
     TIMEOUT 30 FAIL_REGULAR_EXPRESSION "Warning:;Fatal error:;memory leaks detected")
 
 # The test executable embeds the real module hooks plus fixture-only classes.
@@ -40,7 +40,7 @@ if(php_embed_found AND jobu_php_test_daemon)
     find_package(Catch2 CONFIG REQUIRED)
     add_executable(jobu-php-lifecycle-test lifecycle-test.cpp lifecycle-bindings.cpp bridge-test.cpp
         "${jobu_php_source}/module.cpp" "${jobu_php_source}/request.cpp"
-        "${jobu_php_source}/value_binding.cpp" "${jobu_php_source}/attribute_binding.cpp"
+        "${jobu_php_source}/value_binding.cpp" "${jobu_php_source}/attribute_binding.cpp" "${jobu_php_source}/cli_payload_binding.cpp"
         "${jobu_php_source}/client.cpp" "${jobu_php_source}/client_binding.cpp" "${jobu_php_source}/operation.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../support/temporary_directory.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../support/memory_io_device.cpp")

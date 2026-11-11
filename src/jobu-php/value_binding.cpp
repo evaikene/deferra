@@ -336,6 +336,21 @@ auto secret_name_from_php(::php::ValueView value) -> ::php::Result<std::string>
     return native.value()->name;
 }
 
+auto secret_name_to_php(std::string const& name) -> ::php::Result<::php::Value>
+{
+    if (::php::has_exception()) {
+        return ::php::pending_exception();
+    }
+    zval slot{};
+    object_init_ex(&slot, class_entry("jobu\\secretreference"));
+    auto owner  = ::php::Value::adopt(slot);
+    auto native = SecretBinding::construct(Z_OBJ_P(owner.get()), std::string(name));
+    if (!native) {
+        return native.error();
+    }
+    return owner;
+}
+
 auto creation_schedule_from_php(::php::ValueView value) -> ::php::Result<jobu::JobCreationSchedule>
 {
     auto native = native_schedule(value);

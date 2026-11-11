@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: dcebc3e3f91cc4bf2a22218fb8cd67f43400610a */
+ * Stub hash: beab348998e7cbd34dd3136203651adb8a1ce3ec */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Duration___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -24,6 +24,58 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_SecretReference___construct, 0, 0, 1)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_SecretReference_getName, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_CliPayload___construct, 0, 0, 1)
+	ZEND_ARG_TYPE_INFO(0, command, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, arguments, IS_ARRAY, 0, "[]")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_CliPayload_setCommand, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, command, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, arguments, IS_ARRAY, 0, "[]")
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_CliPayload_getExecutable arginfo_class_JobU_SecretReference_getName
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_CliPayload_setExecutable, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, executable, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_CliPayload_getArguments, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_CliPayload_setArguments, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, arguments, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_CliPayload_addArgument, 0, 1, IS_VOID, 0)
+	ZEND_ARG_OBJ_TYPE_MASK(0, argument, JobU\\SecretReference, MAY_BE_STRING, NULL)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_CliPayload_getEnvironment arginfo_class_JobU_CliPayload_getArguments
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_CliPayload_setEnvironment, 0, 2, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+	ZEND_ARG_OBJ_TYPE_MASK(0, value, JobU\\SecretReference, MAY_BE_STRING, NULL)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_CliPayload_unsetEnvironment, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_CliPayload_clearEnvironment arginfo_class_JobU_CliPayload_unsetEnvironment
+
+#define arginfo_class_JobU_CliPayload_getWorkingDirectory arginfo_class_JobU_SecretReference_getName
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_CliPayload_setWorkingDirectory, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, directory, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_CliPayload_getExpectedExitCodes arginfo_class_JobU_CliPayload_getArguments
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_CliPayload_setExpectedExitCodes, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, codes, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_OnceSchedule___construct, 0, 0, 1)
@@ -177,9 +229,7 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_JobU_QueueDefaults_set arginfo_class_JobU_JobAttributes_set
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_QueueDefaults_clear, 0, 1, IS_VOID, 0)
-	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
-ZEND_END_ARG_INFO()
+#define arginfo_class_JobU_QueueDefaults_clear arginfo_class_JobU_CliPayload_unsetEnvironment
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_QueueDefaults_cli, 0, 0, JobU\\CliJobAttributes, 0)
 ZEND_END_ARG_INFO()
@@ -212,6 +262,21 @@ ZEND_METHOD(JobU_Duration, hours);
 ZEND_METHOD(JobU_Duration, days);
 ZEND_METHOD(JobU_SecretReference, __construct);
 ZEND_METHOD(JobU_SecretReference, getName);
+ZEND_METHOD(JobU_CliPayload, __construct);
+ZEND_METHOD(JobU_CliPayload, setCommand);
+ZEND_METHOD(JobU_CliPayload, getExecutable);
+ZEND_METHOD(JobU_CliPayload, setExecutable);
+ZEND_METHOD(JobU_CliPayload, getArguments);
+ZEND_METHOD(JobU_CliPayload, setArguments);
+ZEND_METHOD(JobU_CliPayload, addArgument);
+ZEND_METHOD(JobU_CliPayload, getEnvironment);
+ZEND_METHOD(JobU_CliPayload, setEnvironment);
+ZEND_METHOD(JobU_CliPayload, unsetEnvironment);
+ZEND_METHOD(JobU_CliPayload, clearEnvironment);
+ZEND_METHOD(JobU_CliPayload, getWorkingDirectory);
+ZEND_METHOD(JobU_CliPayload, setWorkingDirectory);
+ZEND_METHOD(JobU_CliPayload, getExpectedExitCodes);
+ZEND_METHOD(JobU_CliPayload, setExpectedExitCodes);
 ZEND_METHOD(JobU_OnceSchedule, __construct);
 ZEND_METHOD(JobU_OnceSchedule, now);
 ZEND_METHOD(JobU_OnceSchedule, isNow);
@@ -293,6 +358,25 @@ static const zend_function_entry class_JobU_Duration_methods[] = {
 static const zend_function_entry class_JobU_SecretReference_methods[] = {
 	ZEND_ME(JobU_SecretReference, __construct, arginfo_class_JobU_SecretReference___construct, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_SecretReference, getName, arginfo_class_JobU_SecretReference_getName, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_CliPayload_methods[] = {
+	ZEND_ME(JobU_CliPayload, __construct, arginfo_class_JobU_CliPayload___construct, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, setCommand, arginfo_class_JobU_CliPayload_setCommand, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, getExecutable, arginfo_class_JobU_CliPayload_getExecutable, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, setExecutable, arginfo_class_JobU_CliPayload_setExecutable, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, getArguments, arginfo_class_JobU_CliPayload_getArguments, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, setArguments, arginfo_class_JobU_CliPayload_setArguments, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, addArgument, arginfo_class_JobU_CliPayload_addArgument, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, getEnvironment, arginfo_class_JobU_CliPayload_getEnvironment, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, setEnvironment, arginfo_class_JobU_CliPayload_setEnvironment, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, unsetEnvironment, arginfo_class_JobU_CliPayload_unsetEnvironment, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, clearEnvironment, arginfo_class_JobU_CliPayload_clearEnvironment, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, getWorkingDirectory, arginfo_class_JobU_CliPayload_getWorkingDirectory, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, setWorkingDirectory, arginfo_class_JobU_CliPayload_setWorkingDirectory, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, getExpectedExitCodes, arginfo_class_JobU_CliPayload_getExpectedExitCodes, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliPayload, setExpectedExitCodes, arginfo_class_JobU_CliPayload_setExpectedExitCodes, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -418,6 +502,21 @@ static zend_class_entry *register_class_JobU_SecretReference(void)
 	zend_class_entry ce, *class_entry;
 
 	INIT_NS_CLASS_ENTRY(ce, "JobU", "SecretReference", class_JobU_SecretReference_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_CliPayload(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "CliPayload", class_JobU_CliPayload_methods);
 #if (PHP_VERSION_ID >= 80400)
 	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
 #else

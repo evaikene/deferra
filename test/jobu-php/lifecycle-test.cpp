@@ -1,4 +1,5 @@
 #include "attribute_binding.hpp"
+#include "cli_payload_binding.hpp"
 #include "client.hpp"
 #include "lifecycle-bindings.hpp"
 #include "operation.hpp"
@@ -15,6 +16,8 @@
 #include <jb/core/process.hpp>
 #include <jb/core/scoped_event_loop.hpp>
 #include <jb/core/signal.hpp>
+#include <jb/jobu/attribute_registry.hpp>
+#include <jb/jobu/management_json.hpp>
 #include <jb/net/local_server.hpp>
 #include <jb/net/local_socket.hpp>
 #include <jb/rpc/protocol.hpp>
@@ -989,6 +992,243 @@ TEST_CASE("Configuration copies preserve attachment and submission boundaries", 
                 $GLOBALS['defaults']->http()->setHttpBodyLimit(6);
                 return true;
             })())PHP"));
+            runtime.restart(nullptr);
+        }
+    }
+}
+
+TEST_CASE("CLI templates preserve wire values and request-local ownership", "[php][lifecycle][cli-payload]")
+{
+    Runtime runtime;
+    auto    value = [](std::string_view expression) {
+        zval slot{};
+        auto status = zend_eval_stringl(expression.data(), expression.size(), &slot, "CLI payload adapter test");
+        auto owner  = php::Value::adopt(slot);
+        REQUIRE(status == SUCCESS);
+        REQUIRE_FALSE(php::has_exception());
+        return owner;
+    };
+
+    SECTION("Export emits the separated template without resolving secrets")
+    {
+        auto payload = value(R"PHP($GLOBALS['payload'] = new JobU\CliPayload('"/opt/My Tools/worker" --verbose',
+            ['two words', new JobU\SecretReference('service.token')]))PHP");
+        REQUIRE(evaluate(R"PHP((function () {
+            $p = $GLOBALS['payload'];
+            $p->setEnvironment('TOKEN', new JobU\SecretReference('service.token'));
+            $p->unsetEnvironment('HOME');
+            $p->setWorkingDirectory('/tmp');
+            $p->setExpectedExitCodes([7, 0]);
+            return true;
+        })())PHP"));
+        auto exported = jb::php::cli_payload_from_php(payload.view());
+        REQUIRE(exported);
+        auto expected = jb::core::parse_json(R"JSON({"command":"/opt/My Tools/worker",
+            "arguments":["--verbose","two words",{"secret":"service.token"}],
+            "environment":{"HOME":null,"TOKEN":{"secret":"service.token"}},
+            "working_directory":"/tmp","expected_exit_codes":[0,7]})JSON");
+        REQUIRE(expected);
+        CHECK(exported.value() == expected.value());
+
+        // The existing typed request codec preserves this template unchanged.
+        jb::jobu::CreateJobRequest request;
+        request.queue    = std::string("payload-test");
+        request.type     = jb::jobu::JobType::Cli;
+        request.schedule = jb::jobu::ImmediateSchedule{};
+        request.payload  = exported.value();
+        auto wire        = jb::jobu::create_job_request_to_json(request, jb::jobu::StandardAttributeRegistry{});
+        REQUIRE(wire);
+        CHECK(wire->as_object().at("payload") == expected.value());
+    }
+
+    SECTION("Complete validation rejects missing PATH and bounded routing or payload overflow")
+    {
+        auto payload = value("$GLOBALS['payload'] = new JobU\\CliPayload('worker')");
+        CHECK_FALSE(jb::php::cli_payload_from_php(payload.view()));
+        REQUIRE(
+            evaluate("(function () { $GLOBALS['payload']->setEnvironment('PATH', '/bin:/usr/bin'); return true; })()"));
+        REQUIRE(jb::php::cli_payload_from_php(payload.view()));
+        for (auto const* path : {"", ":/bin", "/bin:", ".:/bin", "relative"}) {
+            INFO(path);
+            REQUIRE(evaluate(
+                fmt::format("(function () {{ $GLOBALS['payload']->setEnvironment('PATH', '{}'); return true; }})()",
+                            path)));
+            CHECK_FALSE(jb::php::cli_payload_from_php(payload.view()));
+        }
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['payload']->setEnvironment('PATH', implode(':', array_fill(0, 257, '/bin')));
+            return true;
+        })())PHP"));
+        CHECK_FALSE(jb::php::cli_payload_from_php(payload.view()));
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['payload']->setEnvironment('PATH', '/' . str_repeat('x', 262144));
+            return true;
+        })())PHP"));
+        CHECK_FALSE(jb::php::cli_payload_from_php(payload.view()));
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['payload']->setExecutable('/bin/echo');
+            $GLOBALS['payload']->clearEnvironment('PATH');
+            $GLOBALS['payload']->setArguments([str_repeat('x', 262144)]);
+            return true;
+        })())PHP"));
+        CHECK_FALSE(jb::php::cli_payload_from_php(payload.view()));
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['payload']->setArguments([str_repeat("\n", 131072)]);
+            return true;
+        })())PHP"));
+        CHECK_FALSE(jb::php::cli_payload_from_php(payload.view()));
+    }
+
+    SECTION("Replacement keeps identity, notification tracks changes, and GC sees the retained owner")
+    {
+        auto changes = std::make_shared<int>(0);
+        auto target  = value("$GLOBALS['payload'] = new JobU\\CliPayload('/bin/echo old')");
+        auto owner   = value("$GLOBALS['owner'] = new stdClass");
+        REQUIRE(jb::php::attach_cli_payload(Z_OBJ_P(target.get()), owner.view(), [changes] { ++*changes; }));
+        CHECK_FALSE(jb::php::attach_cli_payload(Z_OBJ_P(target.get()), owner.view(), {}));
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['alias'] = $GLOBALS['payload'];
+            $GLOBALS['owner']->payload = $GLOBALS['payload'];
+            $GLOBALS['weakOwner'] = WeakReference::create($GLOBALS['owner']);
+            $GLOBALS['payload']->setWorkingDirectory('/tmp');
+            $GLOBALS['payload']->setWorkingDirectory('/tmp');
+            try { $GLOBALS['payload']->setCommand('/bin/echo "'); } catch (ValueError $e) {}
+            return true;
+        })())PHP"));
+        CHECK(*changes == 1);
+        auto source = value("new JobU\\CliPayload('/bin/printf new')");
+        REQUIRE(jb::php::replace_cli_payload(Z_OBJ_P(target.get()), source.view()));
+        REQUIRE(jb::php::replace_cli_payload(Z_OBJ_P(target.get()), source.view()));
+        CHECK(*changes == 2);
+        CHECK(evaluate(R"PHP($GLOBALS['alias'] === $GLOBALS['payload'] &&
+            $GLOBALS['alias']->getExecutable() === '/bin/printf' &&
+            $GLOBALS['alias']->getArguments() === ['new'] &&
+            $GLOBALS['alias']->getWorkingDirectory() === '/')PHP"));
+        auto invalid = value("new JobU\\CliPayload('missing-path')");
+        CHECK_FALSE(jb::php::replace_cli_payload(Z_OBJ_P(target.get()), invalid.view()));
+        CHECK(*changes == 2);
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['clone'] = clone $GLOBALS['payload'];
+            $GLOBALS['clone']->addArgument('detached');
+            return true;
+        })())PHP"));
+        CHECK(*changes == 2);
+
+        target = {};
+        owner  = {};
+        REQUIRE(evaluate(R"PHP((function () {
+            unset($GLOBALS['owner'], $GLOBALS['payload']);
+            gc_collect_cycles();
+            return $GLOBALS['weakOwner']->get() !== null;
+        })())PHP"));
+        REQUIRE(evaluate(R"PHP((function () {
+            unset($GLOBALS['alias']);
+            gc_collect_cycles();
+            return $GLOBALS['weakOwner']->get() === null &&
+                $GLOBALS['clone']->getArguments() === ['new', 'detached'];
+        })())PHP"));
+    }
+
+    SECTION("Setters notify once for their own changes after nested coercion edits")
+    {
+        auto                             target = value("$GLOBALS['payload'] = new JobU\\CliPayload('/bin/echo old')");
+        auto                             owner  = value("new stdClass");
+        std::vector<jb::core::JsonValue> notifications;
+        auto*                            object = Z_OBJ_P(target.get());
+        REQUIRE(jb::php::attach_cli_payload(object, owner.view(), [&] {
+            // Native export executes no PHP. Snapshotting here verifies that
+            // observers never see only half of setCommand's executable/argv pair.
+            auto snapshot = jb::php::cli_payload_from_php(target.view());
+            REQUIRE(snapshot);
+            notifications.push_back(std::move(snapshot).value());
+        }));
+        REQUIRE(evaluate(R"PHP((function () {
+            $p = $GLOBALS['payload'];
+            $p->setCommand(new class($p) {
+                public function __construct(private $p) {}
+                public function __toString(): string {
+                    $this->p->setEnvironment('KEEP', 'nested');
+                    return '/bin/printf new';
+                }
+            });
+            return true;
+        })())PHP"));
+        REQUIRE(notifications.size() == 2);
+        CHECK(notifications[0].as_object().at("command").as_string() == "/bin/echo");
+        CHECK(notifications[0].as_object().at("arguments").as_array().front().as_string() == "old");
+        CHECK(notifications[1].as_object().at("command").as_string() == "/bin/printf");
+        CHECK(notifications[1].as_object().at("arguments").as_array().front().as_string() == "new");
+        CHECK(notifications[1].as_object().at("environment").as_object().at("KEEP").as_string() == "nested");
+
+        // The nested setter already installs the outer command. Compare against
+        // current fields so the outer call neither erases KEEP nor notifies twice.
+        REQUIRE(evaluate(R"PHP((function () {
+            $p = $GLOBALS['payload'];
+            $p->setCommand(new class($p) {
+                public function __construct(private $p) {}
+                public function __toString(): string {
+                    $this->p->setCommand('/bin/echo latest');
+                    return '/bin/echo latest';
+                }
+            });
+            return $p->getEnvironment() === ['KEEP' => 'nested'];
+        })())PHP"));
+        CHECK(notifications.size() == 3);
+
+        REQUIRE(evaluate(R"PHP((function () {
+            $p = $GLOBALS['payload'];
+            try {
+                $p->setCommand(new class($p) {
+                    public function __construct(private $p) {}
+                    public function __toString(): string {
+                        $this->p->setWorkingDirectory('/tmp');
+                        return '/bin/printf rejected';
+                    }
+                }, [123]);
+                return false;
+            } catch (TypeError $e) {}
+            return $p->getExecutable() === '/bin/echo' && $p->getArguments() === ['latest'] &&
+                $p->getWorkingDirectory() === '/tmp';
+        })())PHP"));
+        CHECK(notifications.size() == 4);
+
+        // Exercise every setter's no-op rule. An append always changes argv;
+        // assigning an existing explicit null is a no-op, unlike adding that null.
+        REQUIRE(evaluate(R"PHP((function () {
+            $p = $GLOBALS['payload'];
+            $p->setCommand('/bin/echo latest');
+            $p->setExecutable('/bin/echo');
+            $p->setArguments(['latest']);
+            $p->setWorkingDirectory('/tmp');
+            $p->setExpectedExitCodes([0]);
+            $p->setEnvironment('KEEP', 'nested');
+            $p->clearEnvironment('ABSENT');
+            return true;
+        })())PHP"));
+        CHECK(notifications.size() == 4);
+        REQUIRE(evaluate(R"PHP((function () {
+            $p = $GLOBALS['payload'];
+            $p->addArgument('appended');
+            $p->setExpectedExitCodes([7, 0]);
+            $p->setExpectedExitCodes([0, 7]);
+            $p->unsetEnvironment('HOME');
+            $p->unsetEnvironment('HOME');
+            $p->clearEnvironment('HOME');
+            $p->clearEnvironment('HOME');
+            return true;
+        })())PHP"));
+        CHECK(notifications.size() == 8);
+    }
+
+    SECTION("Attached cycles die at repeated request shutdown")
+    {
+        for (int iteration = 0; iteration != 3; ++iteration) {
+            {
+                auto payload = value("$GLOBALS['payload'] = new JobU\\CliPayload('/bin/echo')");
+                auto owner   = value("$GLOBALS['owner'] = new stdClass");
+                REQUIRE(jb::php::attach_cli_payload(Z_OBJ_P(payload.get()), owner.view(), {}));
+                REQUIRE(evaluate("(function () { $GLOBALS['owner']->payload = $GLOBALS['payload']; return true; })()"));
+            }
             runtime.restart(nullptr);
         }
     }
