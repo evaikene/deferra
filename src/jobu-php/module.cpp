@@ -1,5 +1,6 @@
 #include "client_binding.hpp"
 #include "request.hpp"
+#include "value_binding.hpp"
 
 #include <phpcxx/arguments.hpp>
 #include <phpcxx/build.hpp>
@@ -65,6 +66,13 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
     register_class_JobU_OutcomeUnknownException(exception);
     register_class_JobU_UnsupportedFeatureException(exception);
     if (!jb::php::bind_client_classes(register_class_JobU_Duration(), register_class_JobU_Client())) {
+        return FAILURE;
+    }
+    auto* schedule      = register_class_JobU_Schedule();
+    schedule->ce_flags |= ZEND_ACC_NOT_SERIALIZABLE;
+    if (!jb::php::bind_value_classes(register_class_JobU_SecretReference(),
+                                     register_class_JobU_OnceSchedule(schedule),
+                                     register_class_JobU_CronSchedule(schedule))) {
         return FAILURE;
     }
     return SUCCESS;

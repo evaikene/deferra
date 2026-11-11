@@ -11,12 +11,46 @@ namespace JobU;
 final class Duration
 {
     private function __construct() {}
+    /** Return the exact signed millisecond count. */
+    public function getMilliseconds(): int {}
     public static function milliseconds(int $value): Duration {}
     public static function seconds(int $value): Duration {}
     public static function minutes(int $value): Duration {}
     public static function hours(int $value): Duration {}
     /** One day is exactly 24 hours, independent of calendar/timezone changes. */
     public static function days(int $value): Duration {}
+}
+
+/** Immutable symbolic secret name; never resolves a secret. @not-serializable */
+final class SecretReference
+{
+    public function __construct(string $name) {}
+    public function getName(): string {}
+}
+
+/** Immutable schedule value. @not-serializable */
+abstract class Schedule {}
+
+/** Absolute instant or a creation-only symbolic now marker. @not-serializable */
+final class OnceSchedule extends Schedule
+{
+    /** Copy the instant, preserving microseconds within the native clock range. */
+    public function __construct(\DateTimeInterface $at) {}
+    /** The daemon resolves now when creating the job, never when constructing this value. */
+    public static function now(): OnceSchedule {}
+    public function isNow(): bool {}
+    /** A fresh UTC value, or null for symbolic now. */
+    public function getAt(): ?\DateTimeImmutable {}
+}
+
+/** Cron input; grammar is validated by the daemon. @not-serializable */
+final class CronSchedule extends Schedule
+{
+    /** Null preserves the daemon default; explicit named timezones remain explicit. */
+    public function __construct(string $expression, ?\DateTimeZone $timezone = null) {}
+    public function getExpression(): string {}
+    /** A fresh timezone value, or null while the daemon default is unresolved. */
+    public function getTimezone(): ?\DateTimeZone {}
 }
 
 /** Request-scoped synchronous Unix-socket client. @not-serializable */

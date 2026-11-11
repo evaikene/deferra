@@ -4,6 +4,7 @@
 #include "recovery-proxy.hpp"
 #include "request.hpp"
 #include "support/temporary_directory.hpp"
+#include "value_binding.hpp"
 
 #include <jb/core/byte_buffer.hpp>
 #include <jb/core/event_loop.hpp>
@@ -19,6 +20,8 @@
 #include <jb/rpc/server.hpp>
 
 #include <Zend/zend_exceptions.h>
+#include <phpcxx/conversion.hpp>
+#include <phpcxx/error.hpp>
 #include <phpcxx/exception.hpp>
 #include <phpcxx/value.hpp>
 #include <sapi/embed/php_embed.h>
@@ -28,15 +31,18 @@
 
 #include <chrono> // IWYU pragma: keep duration literals
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unistd.h>
 #include <utility>
+#include <variant>
 #include <vector>
 
 extern "C" auto get_module() -> zend_module_entry*;
@@ -746,4 +752,123 @@ TEST_CASE("Independent clients survive daemon restart and preserve explicit clos
     CHECK_FALSE(closed.call(Clock::now() + 2s, read));
     CHECK(surviving.call(Clock::now() + 2s, read));
     replacement.stop(loop);
+}
+
+TEST_CASE("Value adapters preserve native schedule and identifier contracts", "[php][lifecycle]")
+{
+    Runtime runtime;
+    auto    value = [](std::string_view expression) {
+        zval slot{};
+        auto status = zend_eval_stringl(expression.data(), expression.size(), &slot, "value adapter test");
+        auto owner  = php::Value::adopt(slot);
+        REQUIRE(status == SUCCESS);
+        REQUIRE_FALSE(php::has_exception());
+        return owner;
+    };
+
+    SECTION("UUID spelling is stricter than the shared native parser")
+    {
+        for (auto const* text : {"00000000-0000-0000-0000-000000000000", "019a1234-abcd-7abc-8def-0123456789ab"}) {
+            auto input  = value(fmt::format("'{}'", text));
+            auto parsed = jb::php::uuid_from_php(input.view());
+            REQUIRE(parsed);
+            CHECK(parsed.value().to_string() == text);
+        }
+        for (auto const* text : {"019A1234-ABCD-7ABC-8DEF-0123456789AB",
+                                 "bad",
+                                 " 019a1234-abcd-7abc-8def-0123456789ab",
+                                 "{019a1234-abcd-7abc-8def-0123456789ab}",
+                                 ""}) {
+            auto input  = value(fmt::format("'{}'", text));
+            auto parsed = jb::php::uuid_from_php(input.view());
+            REQUIRE_FALSE(parsed);
+            CHECK(parsed.error().kind == php::ErrorKind::Value);
+        }
+        auto wrong = value("123");
+        CHECK(jb::php::uuid_from_php(wrong.view()).error().kind == php::ErrorKind::Type);
+        auto binary = value(R"("019a1234-abcd-7abc-8def-0123456789ab\0")");
+        CHECK_FALSE(jb::php::uuid_from_php(binary.view()));
+        CHECK(jb::core::Uuid::parse("019A1234-ABCD-7ABC-8DEF-0123456789AB"));
+    }
+
+    SECTION("Creation now cannot become an update or an absolute timestamp")
+    {
+        auto now      = value("JobU\\OnceSchedule::now()");
+        auto creation = jb::php::creation_schedule_from_php(now.view());
+        REQUIRE(creation);
+        CHECK(std::holds_alternative<jb::jobu::ImmediateSchedule>(creation.value()));
+        auto update = jb::php::update_schedule_from_php(now.view());
+        REQUIRE_FALSE(update);
+        CHECK(update.error().kind == php::ErrorKind::Value);
+        auto fake = value("new class extends JobU\\Schedule {}");
+        CHECK_FALSE(jb::php::creation_schedule_from_php(fake.view()));
+    }
+
+    SECTION("Cron omission survives input conversion and loaded zones remain explicit")
+    {
+        auto input    = value("new JobU\\CronSchedule('@daily')");
+        auto creation = jb::php::creation_schedule_from_php(input.view());
+        auto update   = jb::php::update_schedule_from_php(input.view());
+        REQUIRE(creation);
+        REQUIRE(update);
+        CHECK_FALSE(std::get<jb::jobu::CronScheduleInput>(creation.value()).timezone);
+        CHECK_FALSE(std::get<jb::jobu::CronScheduleInput>(update.value()).timezone);
+        for (auto const* zone : {"UTC", "Europe/Tallinn"}) {
+            auto loaded = jb::php::schedule_to_php(jb::jobu::CronSchedule{.expression = "@daily", .timezone = zone});
+            REQUIRE(loaded);
+            auto roundtrip = jb::php::update_schedule_from_php(loaded.value().view());
+            REQUIRE(roundtrip);
+            CHECK(std::get<jb::jobu::CronScheduleInput>(roundtrip.value()).timezone == zone);
+        }
+    }
+
+    SECTION("Native clock bounds and negative microseconds roundtrip exactly")
+    {
+        using Clock  = jb::core::UtcClock;
+        using Micros = std::chrono::microseconds;
+        auto lower   = std::chrono::duration_cast<Micros>(Clock::duration::min()).count();
+        auto upper   = std::chrono::duration_cast<Micros>(Clock::duration::max()).count();
+        for (std::int64_t us :
+             {lower, std::int64_t{-1000001}, std::int64_t{-1}, std::int64_t{0}, std::int64_t{1}, upper}) {
+            auto date = php::datetime_immutable(php::timestamp_from_microseconds(us));
+            REQUIRE(date);
+            auto native = jb::php::time_from_php(date.value().view());
+            REQUIRE(native);
+            CHECK(native.value().time_since_epoch() == Micros{us});
+            auto loaded = jb::php::schedule_to_php(jb::jobu::OnceSchedule{native.value()});
+            REQUIRE(loaded);
+            auto roundtrip = jb::php::update_schedule_from_php(loaded.value().view());
+            REQUIRE(roundtrip);
+            CHECK(std::get<jb::jobu::OnceSchedule>(roundtrip.value()).planned_at == native.value());
+        }
+        if (lower > std::numeric_limits<std::int64_t>::min() && upper < std::numeric_limits<std::int64_t>::max()) {
+            for (auto us : {lower - 1,
+                            upper + 1,
+                            std::numeric_limits<std::int64_t>::min(),
+                            std::numeric_limits<std::int64_t>::max()}) {
+                auto date = php::datetime_immutable(php::timestamp_from_microseconds(us));
+                REQUIRE(date);
+                CHECK_FALSE(jb::php::time_from_php(date.value().view()));
+            }
+        }
+        if constexpr (Clock::period::den > Micros::period::den) {
+            CHECK_FALSE(jb::php::time_to_php(Clock::time_point{Clock::duration{1}}));
+        }
+    }
+
+    SECTION("Pending PHP exception identity survives date and schedule conversions")
+    {
+        auto date = value("new DateTimeImmutable('2000-01-01T00:00:00Z')");
+        // Install an owned exception directly, as in the helper lifecycle fixture;
+        // raising one without an active PHP call frame would be a fatal error.
+        zval exception{};
+        object_init_ex(&exception, zend_ce_exception);
+        EG(exception)  = Z_OBJ(exception);
+        auto* original = EG(exception);
+        CHECK_FALSE(jb::php::time_from_php(date.view()));
+        CHECK_FALSE(jb::php::time_to_php(jb::core::UtcTimePoint{}));
+        CHECK_FALSE(jb::php::schedule_to_php(jb::jobu::CronSchedule{.expression = "@daily", .timezone = "UTC"}));
+        CHECK(EG(exception) == original);
+        zend_clear_exception();
+    }
 }

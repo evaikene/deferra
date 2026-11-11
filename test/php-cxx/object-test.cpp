@@ -136,3 +136,41 @@ TEST_CASE("Bound objects obey PHP construction, cloning, ownership and GC contra
     CHECK(result.view().is_true());
     CHECK(phpcxx_test::counts().live == 3);
 }
+
+TEST_CASE("Native comparison guards binding identity and construction state", "[php-cxx][object]")
+{
+    auto  left         = allocate("PhpCxxNode");
+    auto  right        = allocate("PhpCxxNode");
+    auto  foreign      = allocate("PhpCxxLocked");
+    auto  compare      = Z_OBJ_P(left.get())->handlers->compare;
+    auto* left_slot    = const_cast<zval*>(left.get());
+    auto* right_slot   = const_cast<zval*>(right.get());
+    auto* foreign_slot = const_cast<zval*>(foreign.get());
+
+    // Neither operand is constructed yet. In particular, a same-class pair
+    // must not reach the native policy just because its Zend properties match.
+    CHECK(compare(left_slot, left_slot) == 0);
+    CHECK(compare(left_slot, right_slot) == ZEND_UNCOMPARABLE);
+    CHECK(compare(right_slot, left_slot) == ZEND_UNCOMPARABLE);
+    REQUIRE(phpcxx_test::Binding::construct(Z_OBJ_P(left.get()), 10, php::Value::null()));
+    CHECK(compare(left_slot, right_slot) == ZEND_UNCOMPARABLE);
+    CHECK(compare(right_slot, left_slot) == ZEND_UNCOMPARABLE);
+    CHECK(compare(left_slot, foreign_slot) == ZEND_UNCOMPARABLE);
+    CHECK(compare(foreign_slot, left_slot) == ZEND_UNCOMPARABLE);
+    REQUIRE(phpcxx_test::Binding::construct(Z_OBJ_P(right.get()), 20, php::Value::null()));
+    CHECK(compare(left_slot, right_slot) == -1);
+    CHECK(compare(right_slot, left_slot) == 1);
+
+    // An unrelated default-policy binding keeps its standard handler unchanged.
+    CHECK(Z_OBJ_P(foreign.get())->handlers->compare == zend_std_compare_objects);
+
+    // As in the lifecycle fixture, install an exception without raising through
+    // a nonexistent PHP call frame. Comparison must not execute PHP or replace it.
+    zval exception{};
+    object_init_ex(&exception, zend_ce_exception);
+    EG(exception)  = Z_OBJ(exception);
+    auto* original = EG(exception);
+    CHECK(compare(left_slot, right_slot) == ZEND_UNCOMPARABLE);
+    CHECK(EG(exception) == original);
+    zend_clear_exception();
+}

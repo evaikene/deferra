@@ -1,7 +1,7 @@
 # JobU PHP extension
 
 The optional `jobu` extension provides native string-backed enums, an exception
-hierarchy, immutable fixed durations, and request-scoped `Client` connections.
+hierarchy, immutable durations, secret references and schedules, and request-scoped `Client` connections.
 The constructor eagerly connects and handshakes; public resource and management
 methods remain deferred. A private synchronous bridge is exercised by tests.
 It supports PHP 8.1+ with 64-bit integers in NTS mode
@@ -245,3 +245,65 @@ CCACHE_DIR="$PWD/.ccache" tools/ci/php-test 8.5 \
 
 On Alpine use `/usr/bin/php-config85zend`. Omitting the SDK argument retains
 helper-only validation. Both modes reject missing or skipped required checks.
+
+## Immutable value primitives
+
+`Duration::milliseconds/seconds/minutes/hours/days(int)` stores an exact signed
+64-bit millisecond count; `getMilliseconds(): int` returns that count. Multiplication
+overflow raises `ValueError`. A day is exactly 24 hours; zero and negative durations
+are values, although client timeouts must be positive.
+
+`new SecretReference(name: 'service.token')` stores only the symbolic name.
+`getName(): string` returns it without looking up any secret. Names are at most 128
+bytes, with lowercase dot-separated segments beginning with a letter and continuing
+with lowercase letters, digits or underscores. Invalid names are rejected without
+normalization. Secret administration and payload APIs remain deferred.
+
+`Schedule` is abstract. Its implemented subclasses are final:
+
+```php
+$once = new JobU\OnceSchedule(new DateTimeImmutable('2030-01-01T12:00:00.123456+02:00'));
+$utc = $once->getAt(); // fresh UTC DateTimeImmutable, preserving .123456
+$now = JobU\OnceSchedule::now(); // isNow() is true; getAt() is null
+$defaultZone = new JobU\CronSchedule('@daily');
+$utcCron = new JobU\CronSchedule(expression: '@daily', timezone: new DateTimeZone('UTC'));
+```
+
+Absolute once schedules copy a `DateTimeInterface` instant. Date getters return
+fresh UTC `DateTimeImmutable` values with exact microsecond precision. Values outside
+the native system clock range raise `ValueError` instead of overflowing; this range
+can be narrower than PHP's date range. Symbolic `now` remains unresolved until daemon
+job creation and is rejected by the replacement-schedule adapter.
+
+`CronSchedule::getExpression(): string` preserves the expression. `getTimezone():
+?DateTimeZone` returns a fresh timezone object, or null for an unresolved daemon
+default. Omission and explicit null have the same meaning; explicit UTC stays
+explicit. Named PHP timezones are accepted; offset and abbreviation forms and
+uninitialized timezone objects are rejected. Mutating a supplied or returned date
+or timezone cannot modify a schedule. Cron grammar and occurrence calculation remain
+the daemon's responsibility; constructors perform no RPC. Loaded schedules carry
+the resolved timezone.
+
+Duration, SecretReference, and the concrete schedules reject cloning, serialization,
+dynamic properties, and repeated initialization. Ordinary invalid arguments use
+native PHP `TypeError`/`ValueError`; pending PHP exceptions are preserved. UUIDs remain
+canonical lowercase strings, validated by a private adapter for future resource
+methods. There is no public UUID wrapper or validation function.
+
+### Value comparison
+
+For values of the same concrete class, `==`, `!=`, ordering operators, and `<=>`
+compare native contents. This also makes non-strict `in_array()` and `array_search()`
+compare contents. `===` and strict array searches still compare object identity.
+
+- Duration compares signed milliseconds, so `seconds(1)` equals `milliseconds(1000)`.
+- SecretReference compares names lexically.
+- OnceSchedule compares absolute instants chronologically, including microseconds.
+  Two symbolic `now` values are equal; symbolic now sorts before every absolute
+  instant without resolving the current time.
+- CronSchedule compares expression text first, then timezone names lexically.
+  Omitted timezone sorts before an explicit timezone and is distinct from explicit
+  UTC. Equivalent cron expressions or timezone aliases are not normalized.
+
+Different concrete classes are unequal and have no defined relative ordering.
+Standard PHP comparisons with scalars retain PHP's coercion rules.

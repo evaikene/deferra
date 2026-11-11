@@ -1,4 +1,8 @@
 <?php
+if (!(include __DIR__ . '/values.php')) {
+    throw new RuntimeException('value lifecycle scenario failed');
+}
+
 function check(bool $condition, string $message): void
 {
     if (!$condition) {

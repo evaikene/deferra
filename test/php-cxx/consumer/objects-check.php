@@ -32,6 +32,24 @@ $check($node->number() === 7, 'reinitialization preserves original native state'
 $node->setNumber(11);
 $check($node->number() === 11, 'native mutation');
 
+// The opt-in policy orders native numbers before comparing ordinary PHP properties.
+$a = new PhpCxxNode(PHP_INT_MIN);
+$b = new PhpCxxNode(PHP_INT_MAX);
+$check($a < $b && $b > $a && ($a <=> $b) === -1 && ($b <=> $a) === 1, 'native comparison avoids overflow');
+$b->setNumber(PHP_INT_MIN);
+$check($a == $b && $a !== $b, 'equal native values preserve strict identity');
+$a->property = 1;
+$b->property = 2;
+$check($a < $b && $a != $b, 'standard properties participate after native equality');
+$b->setNumber(PHP_INT_MIN + 1);
+$a->property = 100;
+$check($a < $b, 'native order takes precedence over property order');
+$check($a != $locked && $locked != $a && $a != new stdClass(), 'incompatible bindings are unequal');
+$check($a == true && $a != null && $a != 'text' && 'text' != $a, 'ordinary object/scalar rules remain intact');
+$reference =& $a;
+$check($reference == $a && $reference !== $b, 'PHP references compare their referents');
+unset($a, $b, $reference);
+
 // A PHP child that skips its parent constructor still owns a valid empty Zend object.
 class PhpCxxUninitialized extends PhpCxxNode {
     public function __construct() {}
@@ -40,7 +58,10 @@ $empty = new PhpCxxUninitialized();
 $check(!PhpCxxNode::accepts($empty), 'uninitialized native storage rejected');
 $fails(static fn() => $empty->number(), Exception::class);
 $fails(static fn() => clone $empty, Exception::class);
-unset($empty);
+$otherEmpty = new PhpCxxUninitialized();
+$check($empty == $empty && $empty != $otherEmpty && $otherEmpty != $empty,
+    'identity works but distinct uninitialized values are incomparable');
+unset($empty, $otherEmpty);
 
 $before = PhpCxxNode::counts();
 $fails(static fn() => new PhpCxxNode(-2), ValueError::class);
@@ -57,6 +78,13 @@ class PhpCxxChild extends PhpCxxNode {
 }
 $child = new PhpCxxChild(20, $node);
 $child->property = ['a' => 1];
+$peer = new PhpCxxChild(20, $node);
+$peer->property = ['a' => 1];
+$check($child == $peer, 'equal subclass values');
+$peer->extra = 'different';
+$check($child != $peer, 'subclass properties participate in comparison');
+$check($child != new PhpCxxNode(20, $node), 'same binding with different PHP class is unequal');
+unset($peer);
 $copy = clone $child;
 $check($copy instanceof PhpCxxChild && $copy->extra === 'child', 'subclass layout and clone type');
 $check($copy->number() === 21 && $child->number() === 20, '__clone sees independent initialized native state');
