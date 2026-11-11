@@ -529,3 +529,106 @@ serialization, dynamic properties and repeated construction. Type mismatches use
 Private attachment/replacement adapters preserve attached identity, trace the
 owner for GC, and notify only for actual local changes. Public Job resources,
 revision tracking and saving remain later-stage work.
+
+### Queries, metadata and execution results
+
+`TimeRange`, `RunQuery` and `StatisticsQuery` are immutable, detached inputs.
+Construct them with named arguments; all getters are local. They own copies of
+input dates and lists. Like the other immutable values, they reject cloning,
+serialization, dynamic properties and repeated construction. `==` compares
+stored content; `===` compares identity. List order is significant for value
+comparison, even when a query's selection semantics are order-independent.
+
+```php
+$window = new JobU\TimeRange(
+    from: new DateTimeImmutable('2030-01-01T00:00:00Z'),
+    to: new DateTimeImmutable('2030-01-02T00:00:00Z'),
+);
+$query = new JobU\RunQuery(
+    states: [JobU\RunState::Failed, JobU\RunState::Interrupted],
+    planned: $window,
+    limit: 50,
+);
+$statistics = new JobU\StatisticsQuery(
+    planned: $window,
+    groupBy: JobU\StatisticsGroupBy::Queue,
+);
+```
+
+A `TimeRange` includes `from` and excludes `to`. Both bounds are optional; when
+both exist, `from` must precede `to`. Date getters return fresh UTC
+`DateTimeImmutable` values preserving microseconds within the native clock's
+range. Null query ranges normalize to unbounded ranges; the range getters
+always return `TimeRange` objects.
+
+`RunQuery` accepts `queueId`, `jobId`, `state`, `states`, `origin`, `type`,
+`planned`, `started`, `completed`, and `limit`. Each has a matching `getX()`
+method. IDs must be canonical lowercase non-nil UUIDs. State and states are
+mutually exclusive; states is either null or a list of 1–7 distinct `RunState`
+cases. `RunOrigin` has `Scheduled` and `Manual`; `JobType` selects CLI or HTTP.
+Limits are 1–200, defaulting to 100. No cursor is exposed by these input values.
+
+`StatisticsQuery` accepts `queueId`, `jobId`, `type`, `origin`, `planned`,
+`groupBy` and `limit`, with matching getters. `StatisticsGroupBy` has `None`,
+`Queue`, `Job`, `Type`, `Origin` and `State`; the default is `None`. A fully
+specified window cannot exceed 31 days. Omitted bounds remain unresolved:
+the daemon will choose its current UTC time for the upper bound and 24 hours
+before that for the lower bound. Construction never reads the server or
+substitutes the PHP clock.
+
+The following final result classes have private constructors. Native adapters
+create detached snapshots; public Client/resource methods that return them
+are implemented in later stages. No result getter performs RPC.
+
+| Class | Getters |
+| --- | --- |
+| `SystemInfo` | `getDaemonVersion(): string`, `getApiMajor(): int`, `getApiMinor(): int`, `getCapabilities(): array`, `hasCapability(string): bool` |
+| `SecretMetadata` | `getName(): string`, `getCreatedAt(): DateTimeImmutable`, `getUpdatedAt(): DateTimeImmutable` |
+| `CliExecutionResult` | `getExitCode(): ?int`, `getSignal(): ?int`, `getCaptureLost(): ?bool`, plus shared result methods |
+| `HttpExecutionResult` | `getStatus(): ?int`, `getDuration(): ?Duration`, `getRedirects(): ?int`, `getTlsVerified(): ?bool`, `getErrorCategory(): ?string`, `getRetryAfterAccepted(): ?bool`, `getRetryAfterClamped(): ?bool`, plus shared result methods |
+
+Capabilities are independent sorted unique string lists. Secret metadata never
+contains secret bytes, length, digest or preview. Dates are fresh UTC values.
+All these snapshots use the same immutable clone/serialization/comparison
+policy as the query values.
+
+The abstract `ExecutionResult` base provides `getType(): JobType`,
+`getOutcome(): ?string`, `getReason(): ?string`, `getErrorCode(): ?string` and
+`getOutcomeUnknown(): ?bool`. Type comes from trusted run context, independently
+of the optional result discriminator. Runner outcome strings are distinct
+from `AttemptOutcome`; future outcome tokens remain readable. A missing result
+is null, while an empty result object is a valid snapshot.
+
+Both subclasses also expose `getCapturedBytes(OutputChannel): ?int`,
+`getTotalBytes(OutputChannel): ?int` and `isTruncated(OutputChannel): ?bool`.
+CLI accepts Stdout/Stderr and HTTP accepts Body/Headers; incompatible channels
+raise `ValueError`. These are capture metadata, not output bytes. HTTP duration
+maps exact integer `duration_ms` to the existing `Duration` type.
+
+Typed projections return null for absent, null or malformed optional fields;
+valid zero and false values remain distinct. Exit codes must be 0–255, signals
+1–INT32_MAX, HTTP statuses 100–599, redirects 0–UINT32_MAX, and durations/counts
+nonnegative signed 64-bit integers. `has(string $field): bool` and
+`get(string $field): mixed` preserve all fields of the daemon's safe result
+object, including unrecognized fields and malformed typed projections.
+`has()` distinguishes an absent field from explicit null. Generic getters
+return copied scalars, lists for JSON arrays and fresh `stdClass` objects for
+JSON objects. Unsigned integers above PHP_INT_MAX become exact decimal strings;
+no integer is rounded to a float. Conversion is bounded to 64 container levels
+and 256 KiB of serialized result JSON. Errors do not echo result contents.
+This is access to the safe terminal metadata object, not application JSON
+interpretation or a raw RPC facility.
+
+`OutputChunk` exposes `getRunId(): string`, `getAttemptNumber(): int`,
+`getChannel(): OutputChannel`, `getStatus(): OutputStatus`, `getOffset(): int`,
+`getBytesReturned(): int`, `getNextOffset(): ?int`, `getRetainedBytes(): int`,
+`getTotalBytes(): ?int`, `getOmittedBytes(): ?int`, `isTruncated(): bool`,
+`isCaptureLost(): bool` and `getData(): string`.
+
+`getData()` returns raw bytes, including NUL; UTF-8/base64 wire encoding is
+internal. Offsets address retained bytes, excluding omitted content.
+`OutputStatus` distinguishes Available, Pending, NotCaptured and Lost. Empty
+bytes do not establish availability, and Lost may still contain retained bytes.
+Null observation counts remain unknown; null next offset means EOF/no further
+slice. Metadata beyond PHP's signed integer range is rejected rather than
+rounded. Actual output RPCs and convenience tail selection remain later work.
