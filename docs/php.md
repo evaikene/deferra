@@ -1,7 +1,8 @@
 # JobU PHP extension
 
 The optional `jobu` extension provides native string-backed enums, an exception
-hierarchy, immutable durations, secret references and schedules, and request-scoped `Client` connections.
+hierarchy, immutable durations, secret references and schedules, mutable attributes
+and queue defaults, and request-scoped `Client` connections.
 The constructor eagerly connects and handshakes; public resource and management
 methods remain deferred. A private synchronous bridge is exercised by tests.
 It supports PHP 8.1+ with 64-bit integers in NTS mode
@@ -307,3 +308,91 @@ compare contents. `===` and strict array searches still compare object identity.
 
 Different concrete classes are unequal and have no defined relative ordering.
 Standard PHP comparisons with scalars retain PHP's coercion rules.
+
+## Mutable attributes and queue defaults
+
+`new JobU\JobAttributes()`, `new JobU\CliJobAttributes()`,
+`new JobU\HttpJobAttributes()` and `new JobU\QueueDefaults()` create empty,
+partial configuration layers. They do not connect to a daemon or insert built-in
+defaults. All four provide `get(string $name): mixed`, `has(string $name): bool`
+and `set(string $name, mixed $value): void`. A known, applicable but absent value
+returns `null`; null itself cannot be stored. Unknown names, wrong runner families
+and invalid ranges raise `ValueError`; incompatible PHP types raise `TypeError`.
+Generic setters accept the registry's scalar types, Duration objects and lists of
+strings. Lists are copied in both directions, including referenced input elements.
+
+`JobAttributes` accepts both runner families. Its final CLI/HTTP subclasses limit
+access to common and matching-runner attributes. Jobs have no generic removal
+method. `QueueDefaults::clear(string $name): void` removes one override and does
+nothing for an already absent known attribute. Queue defaults accept both families.
+
+```php
+$defaults = new JobU\QueueDefaults();
+$cli = $defaults->cli();
+$http = $defaults->http();
+$cli->setTimeout(JobU\Duration::seconds(30));
+$http->getTimeout()->getMilliseconds(); // 30000: common values share backing
+$cli->setTerminationGrace(JobU\Duration::seconds(5));
+$http->setTlsVerify(true);
+
+$copy = clone $defaults;
+$copy->clear('job.timeout'); // original defaults and views are unchanged
+```
+
+`cli(): CliJobAttributes` and `http(): HttpJobAttributes` return cached mutable
+views: repeated calls return the same PHP object. A retained view keeps its parent
+alive. Replacing a defaults layer through the private resource adapter updates
+existing views in place. Public Queue/Job resource operations remain deferred.
+
+Every suffix below supplies `getSuffix(): ?Type` and
+`setSuffix(Type $value): void`. Getters return null when the value is absent.
+Typed scalar setters follow PHP's normal weak/strict argument rules; generic
+mixed setters use definition-directed type checks. Numbers allow integer widening.
+
+| Available on | Suffix | Type | Registry name |
+| --- | --- | --- | --- |
+| All JobAttributes | Timeout | Duration | job.timeout |
+| All JobAttributes | OutputCapture | string | output.capture |
+| All JobAttributes | RetryInitialDelay | Duration | retry.initial_delay |
+| All JobAttributes | RetryMaxDelay | Duration | retry.max_delay |
+| All JobAttributes | RetryMaxAttempts | int | retry.max_attempts |
+| All JobAttributes | RetryJitter | float | retry.jitter |
+| All JobAttributes | RetryMultiplier | float | retry.multiplier |
+| All JobAttributes | RetryMode | RetryMode | retry.mode |
+| All JobAttributes | RetryStrategy | string | retry.strategy |
+| CLI | RetryExitCodes | list<string> | cli.retry_exit_codes |
+| CLI | TerminationGrace | Duration | cli.termination_grace |
+| CLI | StdoutLimit | int | output.stdout_limit |
+| CLI | StderrLimit | int | output.stderr_limit |
+| HTTP | FollowRedirects | bool | http.follow_redirects |
+| HTTP | IdempotencyKey | bool | http.idempotency_key |
+| HTTP | TlsVerify | bool | http.tls_verify |
+| HTTP | MaxRedirects | int | http.max_redirects |
+| HTTP | HttpBodyLimit | int | output.http_body_limit |
+| HTTP | HttpHeadersLimit | int | output.http_headers_limit |
+| HTTP | RetryErrors | list<string> | http.retry_errors |
+| HTTP | RetryStatuses | list<string> | http.retry_statuses |
+
+`OutputCapture` accepts `none`, `on_error` or `always`; `RetryStrategy` accepts
+`fixed` or `exponential`. Generic `get/set('retry.mode', ...)` uses `blocking` or
+`reschedule` strings; typed methods use the existing `RetryMode` enum.
+`IdempotencyKey` is the HTTP execution policy boolean, not a management RPC key.
+The standard registry remains authoritative for numeric bounds and retry selectors.
+
+A setter validates its individual value before changing anything. Partial local
+edits may temporarily violate cross-field relationships, such as initial retry
+delay exceeding maximum delay. The private submission/export and merge/replacement
+adapters check those relationships before accepting the complete supplied layer.
+They never materialize defaults; effective configuration validation remains the
+daemon's responsibility. Failed edits or failed adapter validation preserve the
+previous layer. Merge copies every supplied attribute key, while defaults
+replacement copies the entire supplied layer, preserving attached object identity.
+
+Cloning any configuration creates independent native backing and drops attachment
+and mutation notification. A cloned typed view contains only its applicable
+attributes; a cloned QueueDefaults contains both families and creates its own
+cached views. Returned arrays cannot mutate the original configuration. Comparison
+uses visible attribute names and values in canonical name order, independent of
+insertion order or attachment; `===` still tests identity. All four classes reject
+serialization and repeated initialization. Internal classes disallow dynamic
+properties. References stay within the owning PHP request and are traced for GC.

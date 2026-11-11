@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 7d642bfd6227b5bd06c81593cb907bf4bda63b5c */
+ * Stub hash: dcebc3e3f91cc4bf2a22218fb8cd67f43400610a */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Duration___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -49,6 +49,144 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_CronSchedule_getTimezone, 0, 0, DateTimeZone, 1)
 ZEND_END_ARG_INFO()
 
+#define arginfo_class_JobU_JobAttributes___construct arginfo_class_JobU_Duration___construct
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_JobAttributes_get, 0, 1, IS_MIXED, 0)
+	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_JobAttributes_has, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_JobAttributes_set, 0, 2, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, value, IS_MIXED, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_JobAttributes_getTimeout, 0, 0, JobU\\Duration, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_JobAttributes_setTimeout, 0, 1, IS_VOID, 0)
+	ZEND_ARG_OBJ_INFO(0, value, JobU\\Duration, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_JobAttributes_getOutputCapture, 0, 0, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_JobAttributes_setOutputCapture, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, value, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_JobAttributes_getRetryInitialDelay arginfo_class_JobU_JobAttributes_getTimeout
+
+#define arginfo_class_JobU_JobAttributes_setRetryInitialDelay arginfo_class_JobU_JobAttributes_setTimeout
+
+#define arginfo_class_JobU_JobAttributes_getRetryMaxDelay arginfo_class_JobU_JobAttributes_getTimeout
+
+#define arginfo_class_JobU_JobAttributes_setRetryMaxDelay arginfo_class_JobU_JobAttributes_setTimeout
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_JobAttributes_getRetryMaxAttempts, 0, 0, IS_LONG, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_JobAttributes_setRetryMaxAttempts, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, value, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_JobAttributes_getRetryJitter, 0, 0, IS_DOUBLE, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_JobAttributes_setRetryJitter, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, value, IS_DOUBLE, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_JobAttributes_getRetryMultiplier arginfo_class_JobU_JobAttributes_getRetryJitter
+
+#define arginfo_class_JobU_JobAttributes_setRetryMultiplier arginfo_class_JobU_JobAttributes_setRetryJitter
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_JobAttributes_getRetryMode, 0, 0, JobU\\RetryMode, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_JobAttributes_setRetryMode, 0, 1, IS_VOID, 0)
+	ZEND_ARG_OBJ_INFO(0, value, JobU\\RetryMode, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_JobAttributes_getRetryStrategy arginfo_class_JobU_JobAttributes_getOutputCapture
+
+#define arginfo_class_JobU_JobAttributes_setRetryStrategy arginfo_class_JobU_JobAttributes_setOutputCapture
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_CliJobAttributes_getRetryExitCodes, 0, 0, IS_ARRAY, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_CliJobAttributes_setRetryExitCodes, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, value, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_CliJobAttributes_getTerminationGrace arginfo_class_JobU_JobAttributes_getTimeout
+
+#define arginfo_class_JobU_CliJobAttributes_setTerminationGrace arginfo_class_JobU_JobAttributes_setTimeout
+
+#define arginfo_class_JobU_CliJobAttributes_getStdoutLimit arginfo_class_JobU_JobAttributes_getRetryMaxAttempts
+
+#define arginfo_class_JobU_CliJobAttributes_setStdoutLimit arginfo_class_JobU_JobAttributes_setRetryMaxAttempts
+
+#define arginfo_class_JobU_CliJobAttributes_getStderrLimit arginfo_class_JobU_JobAttributes_getRetryMaxAttempts
+
+#define arginfo_class_JobU_CliJobAttributes_setStderrLimit arginfo_class_JobU_JobAttributes_setRetryMaxAttempts
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_HttpJobAttributes_getFollowRedirects, 0, 0, _IS_BOOL, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_HttpJobAttributes_setFollowRedirects, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, value, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_HttpJobAttributes_getIdempotencyKey arginfo_class_JobU_HttpJobAttributes_getFollowRedirects
+
+#define arginfo_class_JobU_HttpJobAttributes_setIdempotencyKey arginfo_class_JobU_HttpJobAttributes_setFollowRedirects
+
+#define arginfo_class_JobU_HttpJobAttributes_getTlsVerify arginfo_class_JobU_HttpJobAttributes_getFollowRedirects
+
+#define arginfo_class_JobU_HttpJobAttributes_setTlsVerify arginfo_class_JobU_HttpJobAttributes_setFollowRedirects
+
+#define arginfo_class_JobU_HttpJobAttributes_getMaxRedirects arginfo_class_JobU_JobAttributes_getRetryMaxAttempts
+
+#define arginfo_class_JobU_HttpJobAttributes_setMaxRedirects arginfo_class_JobU_JobAttributes_setRetryMaxAttempts
+
+#define arginfo_class_JobU_HttpJobAttributes_getHttpBodyLimit arginfo_class_JobU_JobAttributes_getRetryMaxAttempts
+
+#define arginfo_class_JobU_HttpJobAttributes_setHttpBodyLimit arginfo_class_JobU_JobAttributes_setRetryMaxAttempts
+
+#define arginfo_class_JobU_HttpJobAttributes_getHttpHeadersLimit arginfo_class_JobU_JobAttributes_getRetryMaxAttempts
+
+#define arginfo_class_JobU_HttpJobAttributes_setHttpHeadersLimit arginfo_class_JobU_JobAttributes_setRetryMaxAttempts
+
+#define arginfo_class_JobU_HttpJobAttributes_getRetryErrors arginfo_class_JobU_CliJobAttributes_getRetryExitCodes
+
+#define arginfo_class_JobU_HttpJobAttributes_setRetryErrors arginfo_class_JobU_CliJobAttributes_setRetryExitCodes
+
+#define arginfo_class_JobU_HttpJobAttributes_getRetryStatuses arginfo_class_JobU_CliJobAttributes_getRetryExitCodes
+
+#define arginfo_class_JobU_HttpJobAttributes_setRetryStatuses arginfo_class_JobU_CliJobAttributes_setRetryExitCodes
+
+#define arginfo_class_JobU_QueueDefaults___construct arginfo_class_JobU_Duration___construct
+
+#define arginfo_class_JobU_QueueDefaults_get arginfo_class_JobU_JobAttributes_get
+
+#define arginfo_class_JobU_QueueDefaults_has arginfo_class_JobU_JobAttributes_has
+
+#define arginfo_class_JobU_QueueDefaults_set arginfo_class_JobU_JobAttributes_set
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_QueueDefaults_clear, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_QueueDefaults_cli, 0, 0, JobU\\CliJobAttributes, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_QueueDefaults_http, 0, 0, JobU\\HttpJobAttributes, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Client___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, socketPath, IS_STRING, 0)
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
@@ -57,14 +195,13 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Client_close, 0, 0, IS_VOID, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Exception_getErrorCode, 0, 0, IS_STRING, 1)
-ZEND_END_ARG_INFO()
+#define arginfo_class_JobU_Exception_getErrorCode arginfo_class_JobU_JobAttributes_getOutputCapture
 
-#define arginfo_class_JobU_Exception_getCategory arginfo_class_JobU_Exception_getErrorCode
+#define arginfo_class_JobU_Exception_getCategory arginfo_class_JobU_JobAttributes_getOutputCapture
 
-#define arginfo_class_JobU_OutcomeUnknownException_getOperation arginfo_class_JobU_Exception_getErrorCode
+#define arginfo_class_JobU_OutcomeUnknownException_getOperation arginfo_class_JobU_JobAttributes_getOutputCapture
 
-#define arginfo_class_JobU_OutcomeUnknownException_getIdempotencyKey arginfo_class_JobU_Exception_getErrorCode
+#define arginfo_class_JobU_OutcomeUnknownException_getIdempotencyKey arginfo_class_JobU_JobAttributes_getOutputCapture
 
 ZEND_METHOD(JobU_Duration, __construct);
 ZEND_METHOD(JobU_Duration, getMilliseconds);
@@ -82,6 +219,59 @@ ZEND_METHOD(JobU_OnceSchedule, getAt);
 ZEND_METHOD(JobU_CronSchedule, __construct);
 ZEND_METHOD(JobU_CronSchedule, getExpression);
 ZEND_METHOD(JobU_CronSchedule, getTimezone);
+ZEND_METHOD(JobU_JobAttributes, __construct);
+ZEND_METHOD(JobU_JobAttributes, get);
+ZEND_METHOD(JobU_JobAttributes, has);
+ZEND_METHOD(JobU_JobAttributes, set);
+ZEND_METHOD(JobU_JobAttributes, getTimeout);
+ZEND_METHOD(JobU_JobAttributes, setTimeout);
+ZEND_METHOD(JobU_JobAttributes, getOutputCapture);
+ZEND_METHOD(JobU_JobAttributes, setOutputCapture);
+ZEND_METHOD(JobU_JobAttributes, getRetryInitialDelay);
+ZEND_METHOD(JobU_JobAttributes, setRetryInitialDelay);
+ZEND_METHOD(JobU_JobAttributes, getRetryMaxDelay);
+ZEND_METHOD(JobU_JobAttributes, setRetryMaxDelay);
+ZEND_METHOD(JobU_JobAttributes, getRetryMaxAttempts);
+ZEND_METHOD(JobU_JobAttributes, setRetryMaxAttempts);
+ZEND_METHOD(JobU_JobAttributes, getRetryJitter);
+ZEND_METHOD(JobU_JobAttributes, setRetryJitter);
+ZEND_METHOD(JobU_JobAttributes, getRetryMultiplier);
+ZEND_METHOD(JobU_JobAttributes, setRetryMultiplier);
+ZEND_METHOD(JobU_JobAttributes, getRetryMode);
+ZEND_METHOD(JobU_JobAttributes, setRetryMode);
+ZEND_METHOD(JobU_JobAttributes, getRetryStrategy);
+ZEND_METHOD(JobU_JobAttributes, setRetryStrategy);
+ZEND_METHOD(JobU_CliJobAttributes, getRetryExitCodes);
+ZEND_METHOD(JobU_CliJobAttributes, setRetryExitCodes);
+ZEND_METHOD(JobU_CliJobAttributes, getTerminationGrace);
+ZEND_METHOD(JobU_CliJobAttributes, setTerminationGrace);
+ZEND_METHOD(JobU_CliJobAttributes, getStdoutLimit);
+ZEND_METHOD(JobU_CliJobAttributes, setStdoutLimit);
+ZEND_METHOD(JobU_CliJobAttributes, getStderrLimit);
+ZEND_METHOD(JobU_CliJobAttributes, setStderrLimit);
+ZEND_METHOD(JobU_HttpJobAttributes, getFollowRedirects);
+ZEND_METHOD(JobU_HttpJobAttributes, setFollowRedirects);
+ZEND_METHOD(JobU_HttpJobAttributes, getIdempotencyKey);
+ZEND_METHOD(JobU_HttpJobAttributes, setIdempotencyKey);
+ZEND_METHOD(JobU_HttpJobAttributes, getTlsVerify);
+ZEND_METHOD(JobU_HttpJobAttributes, setTlsVerify);
+ZEND_METHOD(JobU_HttpJobAttributes, getMaxRedirects);
+ZEND_METHOD(JobU_HttpJobAttributes, setMaxRedirects);
+ZEND_METHOD(JobU_HttpJobAttributes, getHttpBodyLimit);
+ZEND_METHOD(JobU_HttpJobAttributes, setHttpBodyLimit);
+ZEND_METHOD(JobU_HttpJobAttributes, getHttpHeadersLimit);
+ZEND_METHOD(JobU_HttpJobAttributes, setHttpHeadersLimit);
+ZEND_METHOD(JobU_HttpJobAttributes, getRetryErrors);
+ZEND_METHOD(JobU_HttpJobAttributes, setRetryErrors);
+ZEND_METHOD(JobU_HttpJobAttributes, getRetryStatuses);
+ZEND_METHOD(JobU_HttpJobAttributes, setRetryStatuses);
+ZEND_METHOD(JobU_QueueDefaults, __construct);
+ZEND_METHOD(JobU_QueueDefaults, get);
+ZEND_METHOD(JobU_QueueDefaults, has);
+ZEND_METHOD(JobU_QueueDefaults, set);
+ZEND_METHOD(JobU_QueueDefaults, clear);
+ZEND_METHOD(JobU_QueueDefaults, cli);
+ZEND_METHOD(JobU_QueueDefaults, http);
 ZEND_METHOD(JobU_Client, __construct);
 ZEND_METHOD(JobU_Client, close);
 ZEND_METHOD(JobU_Exception, getErrorCode);
@@ -118,6 +308,75 @@ static const zend_function_entry class_JobU_CronSchedule_methods[] = {
 	ZEND_ME(JobU_CronSchedule, __construct, arginfo_class_JobU_CronSchedule___construct, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_CronSchedule, getExpression, arginfo_class_JobU_CronSchedule_getExpression, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_CronSchedule, getTimezone, arginfo_class_JobU_CronSchedule_getTimezone, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_JobAttributes_methods[] = {
+	ZEND_ME(JobU_JobAttributes, __construct, arginfo_class_JobU_JobAttributes___construct, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, get, arginfo_class_JobU_JobAttributes_get, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, has, arginfo_class_JobU_JobAttributes_has, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, set, arginfo_class_JobU_JobAttributes_set, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, getTimeout, arginfo_class_JobU_JobAttributes_getTimeout, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, setTimeout, arginfo_class_JobU_JobAttributes_setTimeout, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, getOutputCapture, arginfo_class_JobU_JobAttributes_getOutputCapture, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, setOutputCapture, arginfo_class_JobU_JobAttributes_setOutputCapture, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, getRetryInitialDelay, arginfo_class_JobU_JobAttributes_getRetryInitialDelay, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, setRetryInitialDelay, arginfo_class_JobU_JobAttributes_setRetryInitialDelay, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, getRetryMaxDelay, arginfo_class_JobU_JobAttributes_getRetryMaxDelay, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, setRetryMaxDelay, arginfo_class_JobU_JobAttributes_setRetryMaxDelay, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, getRetryMaxAttempts, arginfo_class_JobU_JobAttributes_getRetryMaxAttempts, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, setRetryMaxAttempts, arginfo_class_JobU_JobAttributes_setRetryMaxAttempts, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, getRetryJitter, arginfo_class_JobU_JobAttributes_getRetryJitter, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, setRetryJitter, arginfo_class_JobU_JobAttributes_setRetryJitter, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, getRetryMultiplier, arginfo_class_JobU_JobAttributes_getRetryMultiplier, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, setRetryMultiplier, arginfo_class_JobU_JobAttributes_setRetryMultiplier, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, getRetryMode, arginfo_class_JobU_JobAttributes_getRetryMode, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, setRetryMode, arginfo_class_JobU_JobAttributes_setRetryMode, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, getRetryStrategy, arginfo_class_JobU_JobAttributes_getRetryStrategy, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_JobAttributes, setRetryStrategy, arginfo_class_JobU_JobAttributes_setRetryStrategy, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_CliJobAttributes_methods[] = {
+	ZEND_ME(JobU_CliJobAttributes, getRetryExitCodes, arginfo_class_JobU_CliJobAttributes_getRetryExitCodes, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliJobAttributes, setRetryExitCodes, arginfo_class_JobU_CliJobAttributes_setRetryExitCodes, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliJobAttributes, getTerminationGrace, arginfo_class_JobU_CliJobAttributes_getTerminationGrace, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliJobAttributes, setTerminationGrace, arginfo_class_JobU_CliJobAttributes_setTerminationGrace, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliJobAttributes, getStdoutLimit, arginfo_class_JobU_CliJobAttributes_getStdoutLimit, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliJobAttributes, setStdoutLimit, arginfo_class_JobU_CliJobAttributes_setStdoutLimit, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliJobAttributes, getStderrLimit, arginfo_class_JobU_CliJobAttributes_getStderrLimit, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CliJobAttributes, setStderrLimit, arginfo_class_JobU_CliJobAttributes_setStderrLimit, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_HttpJobAttributes_methods[] = {
+	ZEND_ME(JobU_HttpJobAttributes, getFollowRedirects, arginfo_class_JobU_HttpJobAttributes_getFollowRedirects, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, setFollowRedirects, arginfo_class_JobU_HttpJobAttributes_setFollowRedirects, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, getIdempotencyKey, arginfo_class_JobU_HttpJobAttributes_getIdempotencyKey, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, setIdempotencyKey, arginfo_class_JobU_HttpJobAttributes_setIdempotencyKey, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, getTlsVerify, arginfo_class_JobU_HttpJobAttributes_getTlsVerify, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, setTlsVerify, arginfo_class_JobU_HttpJobAttributes_setTlsVerify, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, getMaxRedirects, arginfo_class_JobU_HttpJobAttributes_getMaxRedirects, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, setMaxRedirects, arginfo_class_JobU_HttpJobAttributes_setMaxRedirects, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, getHttpBodyLimit, arginfo_class_JobU_HttpJobAttributes_getHttpBodyLimit, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, setHttpBodyLimit, arginfo_class_JobU_HttpJobAttributes_setHttpBodyLimit, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, getHttpHeadersLimit, arginfo_class_JobU_HttpJobAttributes_getHttpHeadersLimit, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, setHttpHeadersLimit, arginfo_class_JobU_HttpJobAttributes_setHttpHeadersLimit, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, getRetryErrors, arginfo_class_JobU_HttpJobAttributes_getRetryErrors, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, setRetryErrors, arginfo_class_JobU_HttpJobAttributes_setRetryErrors, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, getRetryStatuses, arginfo_class_JobU_HttpJobAttributes_getRetryStatuses, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpJobAttributes, setRetryStatuses, arginfo_class_JobU_HttpJobAttributes_setRetryStatuses, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_QueueDefaults_methods[] = {
+	ZEND_ME(JobU_QueueDefaults, __construct, arginfo_class_JobU_QueueDefaults___construct, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_QueueDefaults, get, arginfo_class_JobU_QueueDefaults_get, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_QueueDefaults, has, arginfo_class_JobU_QueueDefaults_has, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_QueueDefaults, set, arginfo_class_JobU_QueueDefaults_set, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_QueueDefaults, clear, arginfo_class_JobU_QueueDefaults_clear, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_QueueDefaults, cli, arginfo_class_JobU_QueueDefaults_cli, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_QueueDefaults, http, arginfo_class_JobU_QueueDefaults_http, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -208,6 +467,65 @@ static zend_class_entry *register_class_JobU_CronSchedule(zend_class_entry *clas
 	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_JobU_Schedule, ZEND_ACC_FINAL);
 #else
 	class_entry = zend_register_internal_class_ex(&ce, class_entry_JobU_Schedule);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_JobAttributes(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "JobAttributes", class_JobU_JobAttributes_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, 0);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_CliJobAttributes(zend_class_entry *class_entry_JobU_JobAttributes)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "CliJobAttributes", class_JobU_CliJobAttributes_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_JobU_JobAttributes, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, class_entry_JobU_JobAttributes);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_HttpJobAttributes(zend_class_entry *class_entry_JobU_JobAttributes)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "HttpJobAttributes", class_JobU_HttpJobAttributes_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_JobU_JobAttributes, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, class_entry_JobU_JobAttributes);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_QueueDefaults(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "QueueDefaults", class_JobU_QueueDefaults_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
 	class_entry->ce_flags |= ZEND_ACC_FINAL;
 #endif
 

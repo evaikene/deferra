@@ -1,6 +1,7 @@
 #include "client_binding.hpp"
 
 #include <phpcxx/arguments.hpp>
+#include <phpcxx/conversion.hpp>
 #include <phpcxx/error.hpp>
 #include <phpcxx/exception.hpp>
 #include <phpcxx/object_binding.hpp>
@@ -212,6 +213,34 @@ auto bind_client_classes(zend_class_entry* duration, zend_class_entry* client) -
 {
     duration->ce_flags |= ZEND_ACC_NO_DYNAMIC_PROPERTIES;
     return DurationBinding::bind(duration) && ClientBinding::bind(client);
+}
+
+auto duration_milliseconds(::php::ValueView value) -> ::php::Result<std::chrono::milliseconds>
+{
+    auto object = ::php::as_object(value, class_entry("jobu\\duration"));
+    if (!object) {
+        return object.error();
+    }
+    auto native = DurationBinding::get(const_cast<zend_object*>(object.value()));
+    if (!native) {
+        return native.error();
+    }
+    return native.value()->milliseconds();
+}
+
+auto duration_to_php(std::chrono::milliseconds value) -> ::php::Result<::php::Value>
+{
+    if (::php::has_exception()) {
+        return ::php::pending_exception();
+    }
+    zval slot{};
+    object_init_ex(&slot, class_entry("jobu\\duration"));
+    auto owner  = ::php::Value::adopt(slot);
+    auto native = DurationBinding::construct(Z_OBJ_P(owner.get()), value.count());
+    if (!native) {
+        return native.error();
+    }
+    return owner;
 }
 
 auto native_client(zend_object* object) -> ::php::Result<Client*>
