@@ -2,7 +2,7 @@
 
 The optional `jobu` extension provides native string-backed enums, an exception
 hierarchy, immutable durations, secret references and schedules, mutable attributes
-and queue defaults, mutable CLI payloads, and request-scoped `Client` connections.
+and queue defaults, mutable CLI/HTTP payloads, and request-scoped `Client` connections.
 The constructor eagerly connects and handshakes; public resource and management
 methods remain deferred. A private synchronous bridge is exercised by tests.
 It supports PHP 8.1+ with 64-bit integers in NTS mode
@@ -459,3 +459,73 @@ argument order matters. Strict identity remains PHP object identity. Getters and
 clones retain no mutable caller arrays or references. Serialization, dynamic
 properties and repeated construction are rejected. Error messages and native
 object debugging do not expose submitted argument/environment values.
+
+
+## HTTP payload configuration
+
+`HttpPayload` is a local mutable request template. It performs no RPC and never
+resolves a `SecretReference`. The native duplicate-header prerequisite preserves
+ordered, repeated header names through admission and execution.
+
+```php
+$payload = new JobU\HttpPayload('https://example.test/events', method: 'POST');
+$payload->addHeader('Authorization', new JobU\SecretReference('service.token'));
+$payload->addHeader('X-Tag', 'first');
+$payload->addHeader('x-tag', 'second');
+$payload->setJsonBody(['event' => 'ready']);
+$payload->clearHeader('X-TAG'); // Removes both entries; other headers keep their order.
+```
+
+| Methods | Behavior |
+| --- | --- |
+| `__construct(string $url, string $method = 'GET')` | HTTP(S) final-wire URL and one supported method. |
+| `getUrl(): string`, `setUrl(string $url): void` | Literal URL; no userinfo, fragment, whitespace, raw non-ASCII or malformed percent escapes. |
+| `getMethod(): string`, `setMethod(string $method): void` | GET, POST, PUT, PATCH, DELETE or HEAD; ASCII case-insensitive input becomes uppercase, without trimming. |
+| `addHeader(string $name, string\|SecretReference $value, bool $sensitive = false): void` | Append one entry; preserve spelling and duplicates. |
+| `getHeaders(): array` | Fresh immutable `HttpHeader` snapshots in insertion order. |
+| `clearHeader(string $name): void` | Remove every case-insensitive match. |
+| `setBody(string\|SecretReference $body): void`, `getBody(): string\|SecretReference\|null`, `clearBody(): void` | Arbitrary bytes or a symbolic reference; null means absent, distinct from empty bytes. |
+| `setJsonBody(mixed $value): void` | Native PHP JSON encoding followed by an atomic body/Content-Type update. |
+| `getExpectedStatuses(): array`, `setExpectedStatuses(array $statuses): void` | Ordered list of 1–64 string selectors, each 100–599 or an inclusive range such as `200-299`. Defaults to `['200-299']`; duplicates remain explicit. |
+
+`HttpHeader` exposes `getName(): string`, `getValue(): string|SecretReference`
+and `isSensitive(): bool`. It has no public constructor or setters and cannot be
+cloned. References always mark their header sensitive. Authorization, Cookie,
+and Proxy-Authorization are sensitive regardless of the supplied flag. Sensitivity
+controls redirect forwarding; literal values remain available through explicit
+getters, while secret references return only symbolic names. Native debug output
+and validation errors do not dump submitted credentials or body bytes.
+
+Header names use token syntax; transport-owned and JobU metadata names remain
+reserved. Literal header values must be valid UTF-8 without CR, LF or NUL. Body
+strings preserve all bytes, including NUL and invalid UTF-8; UTF-8/base64 wire
+encoding is internal. HEAD rejects every present body, including empty strings
+and references. Changing a payload with a body to HEAD requires clearing the
+body first. Other supported methods, including GET, allow bodies.
+
+`setJsonBody()` is equivalent to `json_encode($value, JSON_THROW_ON_ERROR, 512)`
+for encoding and errors. It supports `JsonSerializable`, preserves callback
+exceptions, and throws `JsonException` for encoding failures. It appends
+`Content-Type: application/json` only when no case-insensitive match exists,
+preserving all existing Content-Type entries. It does not interpret HTTP responses.
+
+Setters validate before changing their owned fields. Invalid edits do not partly
+change the payload. PHP string coercion and JSON callbacks may independently edit
+the payload; those nested edits survive even if the outer operation fails. The
+outer operation validates current state after callbacks and does not overwrite
+unrelated nested edits. JSON body and optional header insertion commit together.
+Known header counts/bytes and body bounds are checked locally; complete serialized
+payload size is checked by the private submission/replacement adapter. The daemon
+remains authoritative for resolved secret bytes and effective execution limits.
+
+Cloning `HttpPayload` makes a detached deep copy, including all headers. Comparison
+uses URL, canonical method, ordered header names/values/effective sensitivity,
+body presence/bytes/reference, and ordered status selectors; attachment does not
+affect equality. Strict comparison remains PHP object identity. Returned arrays,
+headers and references do not alias mutable input state. Both classes reject
+serialization, dynamic properties and repeated construction. Type mismatches use
+`TypeError`, invalid values use `ValueError`, and JSON errors retain PHP semantics.
+
+Private attachment/replacement adapters preserve attached identity, trace the
+owner for GC, and notify only for actual local changes. Public Job resources,
+revision tracking and saving remain later-stage work.

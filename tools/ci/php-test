@@ -60,7 +60,7 @@ if sys.argv[2] == '1':
         'jobu-php-configure-test',
         'jobu-php-module-test', 'jobu-php-reflection-test',
         'jobu-php-exceptions-test', 'jobu-php-restart-test', 'jobu-php-lifecycle-test',
-        'jobu-php-client-test', 'jobu-php-bridge-test', 'jobu-php-values-test', 'jobu-php-attributes-test', 'jobu-php-cli-payload-test',
+        'jobu-php-client-test', 'jobu-php-bridge-test', 'jobu-php-values-test', 'jobu-php-attributes-test', 'jobu-php-cli-payload-test', 'jobu-php-http-payload-test',
     })
 missing = required - {case.get('name') for case in cases}
 skipped = [case.get('name') for case in cases if case.find('skipped') is not None]

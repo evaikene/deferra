@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: beab348998e7cbd34dd3136203651adb8a1ce3ec */
+ * Stub hash: a86314e5638a7012b34537a1e6871c547aab092f */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Duration___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -78,6 +78,63 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_CliPayload_setExpecte
 	ZEND_ARG_TYPE_INFO(0, codes, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_HttpPayload___construct, 0, 0, 1)
+	ZEND_ARG_TYPE_INFO(0, url, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, method, IS_STRING, 0, "\'GET\'")
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_HttpPayload_getUrl arginfo_class_JobU_SecretReference_getName
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_HttpPayload_setUrl, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, url, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_HttpPayload_getMethod arginfo_class_JobU_SecretReference_getName
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_HttpPayload_setMethod, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, method, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_HttpPayload_addHeader, 0, 2, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+	ZEND_ARG_OBJ_TYPE_MASK(0, value, JobU\\SecretReference, MAY_BE_STRING, NULL)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, sensitive, _IS_BOOL, 0, "false")
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_HttpPayload_getHeaders arginfo_class_JobU_CliPayload_getArguments
+
+#define arginfo_class_JobU_HttpPayload_clearHeader arginfo_class_JobU_CliPayload_unsetEnvironment
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_HttpPayload_setBody, 0, 1, IS_VOID, 0)
+	ZEND_ARG_OBJ_TYPE_MASK(0, body, JobU\\SecretReference, MAY_BE_STRING, NULL)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_TYPE_MASK_EX(arginfo_class_JobU_HttpPayload_getBody, 0, 0, JobU\\SecretReference, MAY_BE_STRING|MAY_BE_NULL)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_HttpPayload_clearBody, 0, 0, IS_VOID, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_HttpPayload_setJsonBody, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, value, IS_MIXED, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_HttpPayload_getExpectedStatuses arginfo_class_JobU_CliPayload_getArguments
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_HttpPayload_setExpectedStatuses, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, statuses, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_HttpHeader___construct arginfo_class_JobU_Duration___construct
+
+#define arginfo_class_JobU_HttpHeader_getName arginfo_class_JobU_SecretReference_getName
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_TYPE_MASK_EX(arginfo_class_JobU_HttpHeader_getValue, 0, 0, JobU\\SecretReference, MAY_BE_STRING)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_HttpHeader_isSensitive, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_OnceSchedule___construct, 0, 0, 1)
 	ZEND_ARG_OBJ_INFO(0, at, DateTimeInterface, 0)
 ZEND_END_ARG_INFO()
@@ -85,8 +142,7 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_OnceSchedule_now, 0, 0, JobU\\OnceSchedule, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_OnceSchedule_isNow, 0, 0, _IS_BOOL, 0)
-ZEND_END_ARG_INFO()
+#define arginfo_class_JobU_OnceSchedule_isNow arginfo_class_JobU_HttpHeader_isSensitive
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_OnceSchedule_getAt, 0, 0, DateTimeImmutable, 1)
 ZEND_END_ARG_INFO()
@@ -242,8 +298,7 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Client___construct, 0, 0, 1)
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Client_close, 0, 0, IS_VOID, 0)
-ZEND_END_ARG_INFO()
+#define arginfo_class_JobU_Client_close arginfo_class_JobU_HttpPayload_clearBody
 
 #define arginfo_class_JobU_Exception_getErrorCode arginfo_class_JobU_JobAttributes_getOutputCapture
 
@@ -277,6 +332,24 @@ ZEND_METHOD(JobU_CliPayload, getWorkingDirectory);
 ZEND_METHOD(JobU_CliPayload, setWorkingDirectory);
 ZEND_METHOD(JobU_CliPayload, getExpectedExitCodes);
 ZEND_METHOD(JobU_CliPayload, setExpectedExitCodes);
+ZEND_METHOD(JobU_HttpPayload, __construct);
+ZEND_METHOD(JobU_HttpPayload, getUrl);
+ZEND_METHOD(JobU_HttpPayload, setUrl);
+ZEND_METHOD(JobU_HttpPayload, getMethod);
+ZEND_METHOD(JobU_HttpPayload, setMethod);
+ZEND_METHOD(JobU_HttpPayload, addHeader);
+ZEND_METHOD(JobU_HttpPayload, getHeaders);
+ZEND_METHOD(JobU_HttpPayload, clearHeader);
+ZEND_METHOD(JobU_HttpPayload, setBody);
+ZEND_METHOD(JobU_HttpPayload, getBody);
+ZEND_METHOD(JobU_HttpPayload, clearBody);
+ZEND_METHOD(JobU_HttpPayload, setJsonBody);
+ZEND_METHOD(JobU_HttpPayload, getExpectedStatuses);
+ZEND_METHOD(JobU_HttpPayload, setExpectedStatuses);
+ZEND_METHOD(JobU_HttpHeader, __construct);
+ZEND_METHOD(JobU_HttpHeader, getName);
+ZEND_METHOD(JobU_HttpHeader, getValue);
+ZEND_METHOD(JobU_HttpHeader, isSensitive);
 ZEND_METHOD(JobU_OnceSchedule, __construct);
 ZEND_METHOD(JobU_OnceSchedule, now);
 ZEND_METHOD(JobU_OnceSchedule, isNow);
@@ -377,6 +450,32 @@ static const zend_function_entry class_JobU_CliPayload_methods[] = {
 	ZEND_ME(JobU_CliPayload, setWorkingDirectory, arginfo_class_JobU_CliPayload_setWorkingDirectory, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_CliPayload, getExpectedExitCodes, arginfo_class_JobU_CliPayload_getExpectedExitCodes, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_CliPayload, setExpectedExitCodes, arginfo_class_JobU_CliPayload_setExpectedExitCodes, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_HttpPayload_methods[] = {
+	ZEND_ME(JobU_HttpPayload, __construct, arginfo_class_JobU_HttpPayload___construct, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpPayload, getUrl, arginfo_class_JobU_HttpPayload_getUrl, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpPayload, setUrl, arginfo_class_JobU_HttpPayload_setUrl, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpPayload, getMethod, arginfo_class_JobU_HttpPayload_getMethod, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpPayload, setMethod, arginfo_class_JobU_HttpPayload_setMethod, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpPayload, addHeader, arginfo_class_JobU_HttpPayload_addHeader, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpPayload, getHeaders, arginfo_class_JobU_HttpPayload_getHeaders, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpPayload, clearHeader, arginfo_class_JobU_HttpPayload_clearHeader, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpPayload, setBody, arginfo_class_JobU_HttpPayload_setBody, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpPayload, getBody, arginfo_class_JobU_HttpPayload_getBody, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpPayload, clearBody, arginfo_class_JobU_HttpPayload_clearBody, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpPayload, setJsonBody, arginfo_class_JobU_HttpPayload_setJsonBody, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpPayload, getExpectedStatuses, arginfo_class_JobU_HttpPayload_getExpectedStatuses, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpPayload, setExpectedStatuses, arginfo_class_JobU_HttpPayload_setExpectedStatuses, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_HttpHeader_methods[] = {
+	ZEND_ME(JobU_HttpHeader, __construct, arginfo_class_JobU_HttpHeader___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(JobU_HttpHeader, getName, arginfo_class_JobU_HttpHeader_getName, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpHeader, getValue, arginfo_class_JobU_HttpHeader_getValue, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_HttpHeader, isSensitive, arginfo_class_JobU_HttpHeader_isSensitive, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -517,6 +616,36 @@ static zend_class_entry *register_class_JobU_CliPayload(void)
 	zend_class_entry ce, *class_entry;
 
 	INIT_NS_CLASS_ENTRY(ce, "JobU", "CliPayload", class_JobU_CliPayload_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_HttpPayload(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "HttpPayload", class_JobU_HttpPayload_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_HttpHeader(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "HttpHeader", class_JobU_HttpHeader_methods);
 #if (PHP_VERSION_ID >= 80400)
 	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
 #else
