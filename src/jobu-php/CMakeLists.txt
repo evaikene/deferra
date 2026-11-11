@@ -27,7 +27,7 @@ else()
     set(jobu_php_client jobu-client)
 endif()
 
-add_library(jobu-php MODULE module.cpp request.cpp client.cpp client_binding.cpp operation.cpp value_binding.cpp attribute_binding.cpp cli_payload_binding.cpp http_payload_binding.cpp)
+add_library(jobu-php MODULE module.cpp request.cpp client.cpp client_binding.cpp operation.cpp value_binding.cpp attribute_binding.cpp cli_payload_binding.cpp http_payload_binding.cpp query_binding.cpp result_binding.cpp value_snapshot.cpp)
 target_compile_features(jobu-php PRIVATE cxx_std_20)
 target_link_libraries(jobu-php PRIVATE PhpCxx::PhpCxx ${jobu_php_client})
 target_compile_definitions(jobu-php PRIVATE JOBU_PHP_VERSION="${PROJECT_VERSION}")

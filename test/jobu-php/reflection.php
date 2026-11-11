@@ -23,6 +23,9 @@ $enums = [
     'RetryMode' => ['Blocking' => 'blocking', 'Reschedule' => 'reschedule'],
     'RecoveryPolicy' => ['FailInterrupted' => 'fail_interrupted', 'RetryInterrupted' => 'retry_interrupted'],
     'JobType' => ['Cli' => 'cli', 'Http' => 'http'],
+    'RunOrigin' => ['Scheduled' => 'scheduled', 'Manual' => 'manual'],
+    'StatisticsGroupBy' => ['None' => 'none', 'Queue' => 'queue', 'Job' => 'job', 'Type' => 'type', 'Origin' => 'origin', 'State' => 'state'],
+    'OutputStatus' => ['Available' => 'available', 'Pending' => 'pending', 'NotCaptured' => 'not_captured', 'Lost' => 'lost'],
     'OutputChannel' => ['Stdout' => 'stdout', 'Stderr' => 'stderr', 'Body' => 'body', 'Headers' => 'headers'],
 ];
 
@@ -63,7 +66,7 @@ foreach ($exceptions as $name) {
     }
 }
 
-$expectedClasses = array_map(fn(string $name): string => 'JobU\\' . $name, [...array_keys($enums), ...$exceptions, 'Duration', 'Client', 'SecretReference', 'Schedule', 'OnceSchedule', 'CronSchedule', 'JobAttributes', 'CliJobAttributes', 'HttpJobAttributes', 'QueueDefaults', 'CliPayload', 'HttpPayload', 'HttpHeader']);
+$expectedClasses = array_map(fn(string $name): string => 'JobU\\' . $name, [...array_keys($enums), ...$exceptions, 'Duration', 'Client', 'SecretReference', 'Schedule', 'OnceSchedule', 'CronSchedule', 'JobAttributes', 'CliJobAttributes', 'HttpJobAttributes', 'QueueDefaults', 'CliPayload', 'HttpPayload', 'HttpHeader', 'TimeRange', 'RunQuery', 'StatisticsQuery', 'SystemInfo', 'SecretMetadata', 'ExecutionResult', 'CliExecutionResult', 'HttpExecutionResult', 'OutputChunk']);
 $actualClasses = $extension->getClassNames();
 sort($expectedClasses);
 sort($actualClasses);

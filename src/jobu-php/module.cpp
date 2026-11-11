@@ -2,7 +2,9 @@
 #include "cli_payload_binding.hpp"
 #include "client_binding.hpp"
 #include "http_payload_binding.hpp"
+#include "query_binding.hpp"
 #include "request.hpp"
+#include "result_binding.hpp"
 #include "value_binding.hpp"
 
 #include <phpcxx/arguments.hpp>
@@ -56,6 +58,9 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
     register_class_JobU_RecoveryPolicy();
     register_class_JobU_JobType();
     register_class_JobU_OutputChannel();
+    register_class_JobU_RunOrigin();
+    register_class_JobU_StatisticsGroupBy();
+    register_class_JobU_OutputStatus();
 
     // Zend owns these persistent class entries. Do not cache them across a full
     // runtime shutdown/restart or register persistent classes during RINIT.
@@ -89,6 +94,20 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
         return FAILURE;
     }
     if (!jb::php::bind_http_payload_classes(register_class_JobU_HttpPayload(), register_class_JobU_HttpHeader())) {
+        return FAILURE;
+    }
+    if (!jb::php::bind_query_classes(register_class_JobU_TimeRange(),
+                                     register_class_JobU_RunQuery(),
+                                     register_class_JobU_StatisticsQuery())) {
+        return FAILURE;
+    }
+    auto* result = register_class_JobU_ExecutionResult();
+    if (!jb::php::bind_result_classes(register_class_JobU_SystemInfo(),
+                                      register_class_JobU_SecretMetadata(),
+                                      result,
+                                      register_class_JobU_CliExecutionResult(result),
+                                      register_class_JobU_HttpExecutionResult(result),
+                                      register_class_JobU_OutputChunk())) {
         return FAILURE;
     }
     return SUCCESS;

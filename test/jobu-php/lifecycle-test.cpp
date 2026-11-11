@@ -4,8 +4,10 @@
 #include "http_payload_binding.hpp"
 #include "lifecycle-bindings.hpp"
 #include "operation.hpp"
+#include "query_binding.hpp"
 #include "recovery-proxy.hpp"
 #include "request.hpp"
+#include "result_binding.hpp"
 #include "support/temporary_directory.hpp"
 #include "value_binding.hpp"
 
@@ -18,7 +20,11 @@
 #include <jb/core/scoped_event_loop.hpp>
 #include <jb/core/signal.hpp>
 #include <jb/jobu/attribute_registry.hpp>
+#include <jb/jobu/history_json.hpp>
 #include <jb/jobu/management_json.hpp>
+#include <jb/jobu/secret_json.hpp>
+#include <jb/jobu/statistics_json.hpp>
+#include <jb/jobu/utc_timestamp.hpp>
 #include <jb/net/local_server.hpp>
 #include <jb/net/local_socket.hpp>
 #include <jb/rpc/protocol.hpp>
@@ -1432,4 +1438,239 @@ TEST_CASE("HTTP PHP templates are admitted unchanged by the real daemon", "[php]
         CHECK(std::get<jb::jobu::JobDefinition>(result.value()).payload == exported.value());
     }
     daemon.stop(host.value()->loop());
+}
+
+TEST_CASE("PHP query adapters preserve initial wire filters and unresolved bounds", "[php][lifecycle][queries]")
+{
+    Runtime runtime;
+    REQUIRE(evaluate(R"PHP((function () {
+        $GLOBALS['runs'] = new JobU\RunQuery(
+            queueId: '019c0000-0000-7000-8000-000000000001',
+            states: [JobU\RunState::Failed, JobU\RunState::Running],
+            origin: JobU\RunOrigin::Manual, type: JobU\JobType::Http,
+            planned: new JobU\TimeRange(new DateTimeImmutable('2030-01-01T00:00:00.123456Z')), limit: 17);
+        $GLOBALS['statistics'] = new JobU\StatisticsQuery(groupBy: JobU\StatisticsGroupBy::Queue);
+        return true;
+    })())PHP"));
+    auto* runs  = zend_hash_str_find(&EG(symbol_table), "runs", 4);
+    auto  query = jb::php::run_query_from_php(php::ValueView(runs));
+    REQUIRE(query);
+    CHECK(query.value().limit == 17);
+    REQUIRE(query.value().filters.states);
+    CHECK(query.value().filters.states->size() == 2);
+    CHECK(query.value().filters.states->front() == jb::jobu::RunState::Failed);
+    auto wire = jb::jobu::run_list_request_to_json(query.value());
+    REQUIRE(wire);
+    auto decoded = jb::jobu::run_list_request_from_json(wire.value());
+    REQUIRE(decoded);
+    CHECK(std::get<jb::jobu::RunQuery>(decoded.value()).filters.planned.from == query.value().filters.planned.from);
+    CHECK_FALSE(query.value().filters.planned.to);
+
+    auto* stats      = zend_hash_str_find(&EG(symbol_table), "statistics", 10);
+    auto  statistics = jb::php::statistics_query_from_php(php::ValueView(stats));
+    REQUIRE(statistics);
+    CHECK_FALSE(statistics.value().planned.from);
+    CHECK_FALSE(statistics.value().planned.to);
+    CHECK(statistics.value().group_by == jb::jobu::StatisticsGroupBy::Queue);
+    auto stats_wire = jb::jobu::system_statistics_request_to_json(statistics.value());
+    REQUIRE(stats_wire);
+    CHECK(jb::jobu::system_statistics_request_from_json(stats_wire.value()));
+    CHECK_FALSE(jb::php::run_query_from_php(php::ValueView(stats)));
+}
+
+TEST_CASE("PHP metadata and result snapshots preserve codec data without client ownership", "[php][lifecycle][results]")
+{
+    Runtime runtime;
+    auto    publish = [](std::string_view name, php::Result<php::Value> result) {
+        REQUIRE(result);
+        auto slot = result.value().release();
+        zend_hash_str_update(&EG(symbol_table), name.data(), name.size(), &slot);
+    };
+    auto parse = [](std::string_view json) {
+        auto parsed = jb::core::parse_json(json);
+        REQUIRE(parsed);
+        return std::move(parsed).value();
+    };
+
+    SECTION("Metadata uses existing codecs and returns independent values")
+    {
+        auto info = jb::jobu::system_info_from_json(parse(
+            R"({"daemon_version":"test","api_version":{"major":1,"minor":7},"capabilities":["z","a","a"],"future":true})"));
+        REQUIRE(info);
+        publish("info", jb::php::system_info_to_php(info.value()));
+        auto metadata = jb::jobu::secret_metadata_from_json(parse(
+            R"({"name":"test.token","created_at":"2030-01-01T00:00:00.123456Z","updated_at":"2030-01-02T00:00:00Z","value":"PRIVATE"})"));
+        REQUIRE(metadata);
+        publish("secret", jb::php::secret_metadata_to_php(metadata.value()));
+        REQUIRE(evaluate(R"PHP((function () {
+            $i = $GLOBALS['info']; $s = $GLOBALS['secret'];
+            $caps = $i->getCapabilities(); $caps[] = 'changed';
+            return $i->getDaemonVersion() === 'test' && $i->getApiMajor() === 1 && $i->getApiMinor() === 7 &&
+                $i->getCapabilities() === ['a','z'] && $i->hasCapability('a') && !$i->hasCapability('changed') &&
+                $s->getName() === 'test.token' && $s->getCreatedAt()->format('u') === '123456' &&
+                $s->getUpdatedAt()->format('Y-m-d e') === '2030-01-02 UTC' && !method_exists($s, 'getValue');
+        })())PHP"));
+        metadata->created_at += jb::core::UtcClock::duration(1);
+        if (std::chrono::duration_cast<std::chrono::microseconds>(jb::core::UtcClock::duration(1)) !=
+            jb::core::UtcClock::duration(1)) {
+            CHECK_FALSE(jb::php::secret_metadata_to_php(metadata.value()));
+        }
+    }
+
+    SECTION("Safe terminal JSON survives the history codec and PHP copy boundaries")
+    {
+        auto wire = parse(
+            R"({"run_id":"019c0000-0000-7000-8000-000000000001","attempt_number":1,"due_at":"2030-01-01T00:00:00Z","started_at":null,"completed_at":null,"state":"pending","outcome":null,"result":{"type":"http","outcome":"success","exit_code":0,"signal":15,"capture_lost":false,"stdout":{"captured_bytes":0,"total_bytes":2,"truncated":true},"future":{"empty":{},"list":[],"null":null,"uint":18446744073709551615,"zero":0,"false":false,"text":"a\u0000b"},"null":null}})");
+        auto details = jb::jobu::attempt_details_from_json(wire);
+        REQUIRE(details);
+        auto round_trip = jb::jobu::attempt_details_to_json(details.value());
+        REQUIRE(round_trip);
+        CHECK(round_trip->as_object().at("result") == wire.as_object().at("result"));
+        publish("cli", jb::php::execution_result_to_php(jb::jobu::JobType::Cli, details->result));
+        publish("equal", jb::php::execution_result_to_php(jb::jobu::JobType::Cli, details->result));
+        REQUIRE(evaluate(R"PHP((function () {
+            $r = $GLOBALS['cli']; $future = $r->get('future'); $future->empty->changed = true;
+            try { clone $r; return false; } catch (Error) {}
+            try { serialize($r); return false; } catch (Exception) {}
+            try { $r->extra = 1; return false; } catch (Error) {}
+            return $r instanceof JobU\CliExecutionResult && $r->getType() === JobU\JobType::Cli &&
+                $r->get('type') === 'http' && $r->getExitCode() === 0 && $r->getSignal() === 15 &&
+                $r->getOutcome() === 'success' && $r->getCaptureLost() === false &&
+                $r->getCapturedBytes(JobU\OutputChannel::Stdout) === 0 &&
+                $r->getTotalBytes(JobU\OutputChannel::Stdout) === 2 && $r->isTruncated(JobU\OutputChannel::Stdout) === true &&
+                $r->getCapturedBytes(JobU\OutputChannel::Stderr) === null &&
+                $r->has('null') && $r->get('null') === null && !$r->has('absent') && $r->get('absent') === null &&
+                $r->get('future')->empty == new stdClass && $future->list === [] && $future->null === null &&
+                $future->uint === '18446744073709551615' && $future->zero === 0 && $future->false === false &&
+                $future->text === "a\0b" && $r == $GLOBALS['equal'] && $r !== $GLOBALS['equal'];
+        })())PHP"));
+        auto absent = jb::php::execution_result_to_php(jb::jobu::JobType::Cli, std::nullopt);
+        REQUIRE(absent);
+        CHECK(absent.value().view().is_null());
+        publish("empty", jb::php::execution_result_to_php(jb::jobu::JobType::Cli, parse("{}")));
+        publish("recovery",
+                jb::php::execution_result_to_php(
+                    jb::jobu::JobType::Cli,
+                    parse(R"({"reason":"daemon_interrupted","outcome_unknown":true,"exit_code":999,"signal":-1})")));
+        REQUIRE(
+            evaluate("$GLOBALS['empty'] instanceof JobU\\ExecutionResult && $GLOBALS['recovery']->getReason() === "
+                     "'daemon_interrupted' && $GLOBALS['recovery']->getOutcomeUnknown() === true && "
+                     "$GLOBALS['recovery']->getExitCode() === null && $GLOBALS['recovery']->get('exit_code') === 999 "
+                     "&& $GLOBALS['recovery']->getSignal() === null && $GLOBALS['empty'] != $GLOBALS['recovery']"));
+    }
+
+    SECTION("HTTP optional observations retain false and zero")
+    {
+        publish(
+            "http",
+            jb::php::execution_result_to_php(
+                jb::jobu::JobType::Http,
+                parse(
+                    R"({"status":503,"duration_ms":0,"redirects":0,"tls_verified":false,"error_code":"http.failure","error_category":"connect","outcome":"transport_error","retry_after":{"accepted":true,"clamped":false},"body":{"captured_bytes":0,"total_bytes":0,"truncated":false}})")));
+        REQUIRE(evaluate(R"PHP((function () {
+            $r = $GLOBALS['http'];
+            try { $r->getCapturedBytes(JobU\OutputChannel::Stdout); return false; } catch (ValueError) {}
+            return $r->getStatus() === 503 && $r->getDuration()->getMilliseconds() === 0 && $r->getRedirects() === 0 &&
+                $r->getTlsVerified() === false && $r->getErrorCode() === 'http.failure' && $r->getErrorCategory() === 'connect' &&
+                $r->getOutcome() === 'transport_error' && $r->getRetryAfterAccepted() === true && $r->getRetryAfterClamped() === false &&
+                $r->getCapturedBytes(JobU\OutputChannel::Body) === 0 && $r->getTotalBytes(JobU\OutputChannel::Body) === 0 &&
+                $r->isTruncated(JobU\OutputChannel::Body) === false;
+        })())PHP"));
+        publish("http",
+                jb::php::execution_result_to_php(
+                    jb::jobu::JobType::Http,
+                    parse(R"({"duration_ms":-1,"status":"200","redirects":4294967296,"tls_verified":1})")));
+        REQUIRE(evaluate("$GLOBALS['http']->getStatus() === null && $GLOBALS['http']->getDuration() === null && "
+                         "$GLOBALS['http']->getRedirects() === null && $GLOBALS['http']->getTlsVerified() === null"));
+    }
+
+    SECTION("Bounds reject malformed native trees without echoing their contents")
+    {
+        CHECK_FALSE(jb::php::execution_result_to_php(jb::jobu::JobType::Cli, parse("[]")));
+        auto large = parse("{}");
+        std::get<jb::core::JsonValue::Object>(large.data)
+            .emplace("PRIVATE", jb::core::JsonValue{.data = std::string(std::size_t{256} * 1024U, 'x')});
+        auto rejected = jb::php::execution_result_to_php(jb::jobu::JobType::Cli, large);
+        REQUIRE_FALSE(rejected);
+        CHECK(rejected.error().message.find("PRIVATE") == std::string::npos);
+        auto nested = parse("{}");
+        for (int i = 0; i < 64; ++i) {
+            nested = {.data = jb::core::JsonValue::Object{{"nested", std::move(nested)}}};
+        }
+        CHECK_FALSE(jb::php::execution_result_to_php(jb::jobu::JobType::Cli, nested));
+    }
+}
+
+TEST_CASE("PHP output snapshots preserve raw bytes and every availability distinction", "[php][lifecycle][results]")
+{
+    Runtime runtime;
+    auto    publish = [](jb::jobu::AttemptOutputChunk const& chunk) {
+        auto result = jb::php::output_chunk_to_php(chunk);
+        REQUIRE(result);
+        auto slot = result.value().release();
+        zend_hash_str_update(&EG(symbol_table), "chunk", 5, &slot);
+    };
+    auto id = jb::core::Uuid::parse("019c0000-0000-7000-8000-000000000001");
+    REQUIRE(id);
+    jb::jobu::AttemptOutputChunk chunk{
+        .attempt        = {.run_id = id.value(), .attempt_number = 1},
+        .channel        = jb::jobu::OutputChannel::Stdout,
+        .status         = jb::jobu::OutputStatus::Lost,
+        .bytes_returned = 3,
+        .retained_bytes = 3,
+        .truncated      = true,
+        .capture_lost   = true,
+        .encoding       = jb::jobu::OutputEncoding::Base64,
+        .data           = {std::byte{0xff}, std::byte{0}, std::byte{0xc3}}
+    };
+    auto wire = jb::jobu::attempt_output_chunk_to_json(chunk);
+    REQUIRE(wire);
+    auto decoded = jb::jobu::attempt_output_chunk_from_json(wire.value());
+    REQUIRE(decoded);
+    publish(decoded.value());
+    REQUIRE(evaluate(R"PHP((function () {
+        $c = $GLOBALS['chunk'];
+        try { clone $c; return false; } catch (Error) {}
+        try { serialize($c); return false; } catch (Exception) {}
+        return $c->getData() === "\xff\0\xc3" && $c->getRunId() === '019c0000-0000-7000-8000-000000000001' &&
+            $c->getAttemptNumber() === 1 && $c->getChannel() === JobU\OutputChannel::Stdout &&
+            $c->getStatus() === JobU\OutputStatus::Lost && $c->getOffset() === 0 && $c->getBytesReturned() === 3 &&
+            $c->getNextOffset() === null && $c->getRetainedBytes() === 3 && $c->getTotalBytes() === null &&
+            $c->getOmittedBytes() === null && $c->isTruncated() && $c->isCaptureLost();
+    })())PHP"));
+    chunk.status         = jb::jobu::OutputStatus::Available;
+    chunk.retained_bytes = 10;
+    chunk.next_offset    = 3;
+    chunk.total_bytes    = 20;
+    chunk.omitted_bytes  = 10;
+    chunk.capture_lost   = false;
+    publish(chunk);
+    REQUIRE(evaluate("$GLOBALS['chunk']->getNextOffset() === 3 && $GLOBALS['chunk']->getTotalBytes() === 20 && "
+                     "$GLOBALS['chunk']->getOmittedBytes() === 10 && $GLOBALS['chunk']->getRetainedBytes() === 10 && "
+                     "$GLOBALS['chunk']->getStatus() === JobU\\OutputStatus::Available"));
+    chunk.next_offset.reset();
+    chunk.total_bytes.reset();
+    chunk.omitted_bytes.reset();
+
+    chunk.data.clear();
+    chunk.bytes_returned = 0;
+    chunk.retained_bytes = 0;
+    chunk.truncated      = false;
+    chunk.capture_lost   = false;
+    chunk.encoding       = jb::jobu::OutputEncoding::Utf8;
+    for (auto status :
+         {jb::jobu::OutputStatus::Available, jb::jobu::OutputStatus::Pending, jb::jobu::OutputStatus::NotCaptured}) {
+        chunk.status = status;
+        publish(chunk);
+        REQUIRE(evaluate("$GLOBALS['chunk']->getData() === '' && !$GLOBALS['chunk']->isCaptureLost()"));
+    }
+    chunk.total_bytes = std::numeric_limits<std::uint64_t>::max();
+    CHECK_FALSE(jb::php::output_chunk_to_php(chunk));
+
+    // Zend globals own these native-only snapshots through repeated request teardown.
+    for (int i = 0; i < 3; ++i) {
+        chunk.total_bytes.reset();
+        publish(chunk);
+        runtime.restart(nullptr);
+    }
 }

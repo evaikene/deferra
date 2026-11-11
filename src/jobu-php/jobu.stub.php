@@ -367,3 +367,159 @@ class OutcomeUnknownException extends Exception
 
 /** @not-serializable */
 class UnsupportedFeatureException extends Exception {}
+
+/** Immutable half-open UTC interval; omitted bounds remain unresolved. @not-serializable */
+final class TimeRange
+{
+    /** Copy input instants; require from < to when both are supplied. */
+    public function __construct(?\DateTimeInterface $from = null, ?\DateTimeInterface $to = null) {}
+    public function getFrom(): ?\DateTimeImmutable {}
+    public function getTo(): ?\DateTimeImmutable {}
+}
+
+/** Immutable initial run-list filters; all filters combine with AND. @not-serializable */
+final class RunQuery
+{
+    /** Nonempty distinct states, mutually exclusive with state.
+     * @param null|list<RunState> $states
+     */
+    public function __construct(?string $queueId = null, ?string $jobId = null,
+        ?RunState $state = null, ?array $states = null, ?RunOrigin $origin = null,
+        ?JobType $type = null, ?TimeRange $planned = null, ?TimeRange $started = null,
+        ?TimeRange $completed = null, int $limit = 100) {}
+    public function getQueueId(): ?string {}
+    public function getJobId(): ?string {}
+    public function getState(): ?RunState {}
+    /** @return null|list<RunState> */
+    public function getStates(): ?array {}
+    public function getOrigin(): ?RunOrigin {}
+    public function getType(): ?JobType {}
+    public function getPlanned(): TimeRange {}
+    public function getStarted(): TimeRange {}
+    public function getCompleted(): TimeRange {}
+    public function getLimit(): int {}
+}
+
+/** Immutable statistics filters. The daemon resolves omitted window bounds. @not-serializable */
+final class StatisticsQuery
+{
+    public function __construct(?string $queueId = null, ?string $jobId = null,
+        ?JobType $type = null, ?RunOrigin $origin = null, ?TimeRange $planned = null,
+        StatisticsGroupBy $groupBy = StatisticsGroupBy::None, int $limit = 100) {}
+    public function getQueueId(): ?string {}
+    public function getJobId(): ?string {}
+    public function getType(): ?JobType {}
+    public function getOrigin(): ?RunOrigin {}
+    public function getPlanned(): TimeRange {}
+    public function getGroupBy(): StatisticsGroupBy {}
+    public function getLimit(): int {}
+}
+
+/** Detached daemon metadata; getters never perform RPC. @not-serializable */
+final class SystemInfo
+{
+    private function __construct() {}
+    public function getDaemonVersion(): string {}
+    public function getApiMajor(): int {}
+    public function getApiMinor(): int {}
+    /** @return list<string> Sorted unique capabilities. */
+    public function getCapabilities(): array {}
+    public function hasCapability(string $name): bool {}
+}
+
+/** Detached metadata only; never contains a secret value. @not-serializable */
+final class SecretMetadata
+{
+    private function __construct() {}
+    public function getName(): string {}
+    public function getCreatedAt(): \DateTimeImmutable {}
+    public function getUpdatedAt(): \DateTimeImmutable {}
+}
+
+/** Immutable safe daemon result, distinct from application output. @not-serializable */
+abstract class ExecutionResult
+{
+    final private function __construct() {}
+    /** Trusted run type; an unrecognized result discriminator cannot override it. */
+    public function getType(): JobType {}
+    /** Runner vocabulary, not AttemptOutcome; absent or invalid projections return null. */
+    public function getOutcome(): ?string {}
+    public function getReason(): ?string {}
+    public function getErrorCode(): ?string {}
+    public function getOutcomeUnknown(): ?bool {}
+    /** Presence test distinguishes explicit null from absence. */
+    public function has(string $field): bool {}
+    /** Independent JSON values: objects become stdClass, arrays become lists.
+     * Unsigned integers above PHP_INT_MAX become exact decimal strings. Absent fields return null.
+     */
+    public function get(string $field): mixed {}
+    public function getCapturedBytes(OutputChannel $channel): ?int {}
+    public function getTotalBytes(OutputChannel $channel): ?int {}
+    public function isTruncated(OutputChannel $channel): ?bool {}
+}
+
+/** Optional CLI observations; a result need not contain an exit code. @not-serializable */
+final class CliExecutionResult extends ExecutionResult
+{
+    public function getExitCode(): ?int {}
+    public function getSignal(): ?int {}
+    public function getCaptureLost(): ?bool {}
+}
+
+/** Optional HTTP observations; transport failures need not contain a status. @not-serializable */
+final class HttpExecutionResult extends ExecutionResult
+{
+    public function getStatus(): ?int {}
+    public function getDuration(): ?Duration {}
+    public function getRedirects(): ?int {}
+    public function getTlsVerified(): ?bool {}
+    public function getErrorCategory(): ?string {}
+    public function getRetryAfterAccepted(): ?bool {}
+    public function getRetryAfterClamped(): ?bool {}
+}
+
+/** Immutable retained-output slice; status and loss evidence remain independent of bytes. @not-serializable */
+final class OutputChunk
+{
+    private function __construct() {}
+    public function getRunId(): string {}
+    public function getAttemptNumber(): int {}
+    public function getChannel(): OutputChannel {}
+    public function getStatus(): OutputStatus {}
+    /** Offsets address retained bytes, excluding any omitted middle. */
+    public function getOffset(): int {}
+    public function getBytesReturned(): int {}
+    public function getNextOffset(): ?int {}
+    public function getRetainedBytes(): int {}
+    public function getTotalBytes(): ?int {}
+    public function getOmittedBytes(): ?int {}
+    public function isTruncated(): bool {}
+    public function isCaptureLost(): bool {}
+    /** Raw bytes, including NUL; empty bytes do not by themselves establish availability. */
+    public function getData(): string {}
+}
+
+/** Supported public run origins; submitted remains reserved. */
+enum RunOrigin: string
+{
+    case Scheduled = 'scheduled';
+    case Manual = 'manual';
+}
+
+enum StatisticsGroupBy: string
+{
+    case None = 'none';
+    case Queue = 'queue';
+    case Job = 'job';
+    case Type = 'type';
+    case Origin = 'origin';
+    case State = 'state';
+}
+
+enum OutputStatus: string
+{
+    case Available = 'available';
+    case Pending = 'pending';
+    case NotCaptured = 'not_captured';
+    case Lost = 'lost';
+}
