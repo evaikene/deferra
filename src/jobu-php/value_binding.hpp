@@ -29,6 +29,9 @@ auto time_to_php(core::UtcTimePoint value) -> ::php::Result<::php::Value>;
 /// Copy a symbolic secret name; never resolves or retains secret bytes.
 auto secret_name_from_php(::php::ValueView value) -> ::php::Result<std::string>;
 
+/// Create an immutable symbolic reference from a previously validated native name.
+auto secret_name_to_php(std::string const& name) -> ::php::Result<::php::Value>;
+
 /// Copy a schedule for creation. Symbolic now remains unresolved for the daemon.
 auto creation_schedule_from_php(::php::ValueView value) -> ::php::Result<jobu::JobCreationSchedule>;
 

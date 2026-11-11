@@ -28,6 +28,41 @@ final class SecretReference
     public function getName(): string {}
 }
 
+/** Mutable CLI template. Local edits never execute a command or resolve secrets. @not-serializable */
+final class CliPayload
+{
+    /** Tokenize command without shell evaluation, then append the supplied list verbatim.
+     * @param list<string|SecretReference> $arguments
+     */
+    public function __construct(string $command, array $arguments = []) {}
+    /** Atomically replace executable and arguments, preserving all other fields.
+     * @param list<string|SecretReference> $arguments
+     */
+    public function setCommand(string $command, array $arguments = []): void {}
+    public function getExecutable(): string {}
+    /** Set a literal executable, preserving arguments; bare names require PATH at submission. */
+    public function setExecutable(string $executable): void {}
+    /** @return list<string|SecretReference> Independent values in argv order. */
+    public function getArguments(): array {}
+    /** @param list<string|SecretReference> $arguments */
+    public function setArguments(array $arguments): void {}
+    public function addArgument(string|SecretReference $argument): void {}
+    /** @return array<string,string|SecretReference|null> Missing keys have no override; null means explicit unset. */
+    public function getEnvironment(): array {}
+    public function setEnvironment(string $name, string|SecretReference $value): void {}
+    /** Record explicit removal at execution. */
+    public function unsetEnvironment(string $name): void {}
+    /** Remove this payload override. */
+    public function clearEnvironment(string $name): void {}
+    /** Absolute directory; defaults to /. */
+    public function getWorkingDirectory(): string {}
+    public function setWorkingDirectory(string $directory): void {}
+    /** @return list<int> Ascending distinct exit codes; defaults to [0]. */
+    public function getExpectedExitCodes(): array {}
+    /** @param list<int> $codes Distinct integers 0–255; an empty list accepts no exit code. */
+    public function setExpectedExitCodes(array $codes): void {}
+}
+
 /** Immutable schedule value. @not-serializable */
 abstract class Schedule {}
 
