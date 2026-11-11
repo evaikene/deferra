@@ -1,6 +1,7 @@
 #include "attribute_binding.hpp"
 #include "cli_payload_binding.hpp"
 #include "client_binding.hpp"
+#include "http_payload_binding.hpp"
 #include "request.hpp"
 #include "value_binding.hpp"
 
@@ -85,6 +86,9 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
         return FAILURE;
     }
     if (!jb::php::bind_cli_payload_class(register_class_JobU_CliPayload())) {
+        return FAILURE;
+    }
+    if (!jb::php::bind_http_payload_classes(register_class_JobU_HttpPayload(), register_class_JobU_HttpHeader())) {
         return FAILURE;
     }
     return SUCCESS;

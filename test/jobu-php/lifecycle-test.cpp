@@ -1,6 +1,7 @@
 #include "attribute_binding.hpp"
 #include "cli_payload_binding.hpp"
 #include "client.hpp"
+#include "http_payload_binding.hpp"
 #include "lifecycle-bindings.hpp"
 #include "operation.hpp"
 #include "recovery-proxy.hpp"
@@ -1232,4 +1233,203 @@ TEST_CASE("CLI templates preserve wire values and request-local ownership", "[ph
             runtime.restart(nullptr);
         }
     }
+}
+
+TEST_CASE("HTTP templates preserve wire values ownership and callback atomicity", "[php][lifecycle][http-payload]")
+{
+    Runtime runtime;
+    auto    value = [](std::string_view expression) {
+        zval slot{};
+        auto status = zend_eval_stringl(expression.data(), expression.size(), &slot, "HTTP payload adapter test");
+        auto owner  = php::Value::adopt(slot);
+        REQUIRE(status == SUCCESS);
+        REQUIRE_FALSE(php::has_exception());
+        return owner;
+    };
+
+    SECTION("Wire conversion preserves duplicates binary and symbolic references")
+    {
+        auto payload = value("$GLOBALS['payload'] = new JobU\\HttpPayload('https://example.test/', 'post')");
+        REQUIRE(evaluate(R"PHP((function () {
+            $p = $GLOBALS['payload'];
+            $p->addHeader('X-Test', 'literal');
+            $p->addHeader('x-test', new JobU\SecretReference('service.token'));
+            $p->setBody("\x00\xff\xfe");
+            return true;
+        })())PHP"));
+        auto exported = jb::php::http_payload_from_php(payload.view());
+        REQUIRE(exported);
+        auto expected = jb::core::parse_json(R"JSON({"url":"https://example.test/","method":"POST",
+            "headers":[{"name":"X-Test","value":"literal","sensitive":false},
+                       {"name":"x-test","value":{"secret":"service.token"},"sensitive":true}],
+            "body":{"encoding":"base64","data":"AP/+"},"expected_statuses":["200-299"]})JSON");
+        REQUIRE(expected);
+        CHECK(exported.value() == expected.value());
+        jb::jobu::CreateJobRequest request;
+        request.queue    = std::string("payload-test");
+        request.type     = jb::jobu::JobType::Http;
+        request.schedule = jb::jobu::ImmediateSchedule{};
+        request.payload  = exported.value();
+        auto wire        = jb::jobu::create_job_request_to_json(request, jb::jobu::StandardAttributeRegistry{});
+        REQUIRE(wire);
+        CHECK(wire->as_object().at("payload") == expected.value());
+
+        REQUIRE(evaluate(
+            "(function () { $GLOBALS['payload']->setBody(new JobU\\SecretReference('body.bytes')); return true; })()"));
+        exported = jb::php::http_payload_from_php(payload.view());
+        REQUIRE(exported);
+        CHECK(exported.value().as_object().at("body").as_object().at("secret").as_string() == "body.bytes");
+        REQUIRE(evaluate("(function () { $GLOBALS['payload']->setBody(\"nul\\0text\"); return true; })()"));
+        exported = jb::php::http_payload_from_php(payload.view());
+        REQUIRE(exported);
+        auto const& body = exported.value().as_object().at("body").as_object();
+        CHECK(body.at("encoding").as_string() == "utf8");
+        CHECK(body.at("data").as_string() == std::string("nul\0text", 8));
+    }
+
+    SECTION("Notifications observe complete edits and clones drop attachments")
+    {
+        auto target = value("$GLOBALS['payload'] = new JobU\\HttpPayload('https://example.test/')");
+        auto owner  = value("$GLOBALS['owner'] = new stdClass");
+        std::vector<jb::core::JsonValue> notifications;
+        REQUIRE(jb::php::attach_http_payload(Z_OBJ_P(target.get()), owner.view(), [&] {
+            auto snapshot = jb::php::http_payload_from_php(target.view());
+            REQUIRE(snapshot);
+            notifications.push_back(std::move(snapshot).value());
+        }));
+        CHECK_FALSE(jb::php::attach_http_payload(Z_OBJ_P(target.get()), owner.view(), {}));
+        REQUIRE(evaluate(R"PHP((function () {
+            $p = $GLOBALS['payload'];
+            $GLOBALS['alias'] = $p;
+            $GLOBALS['weakOwner'] = WeakReference::create($GLOBALS['owner']);
+            $GLOBALS['owner']->payload = $p;
+            $p->setJsonBody(['x' => 1]);
+            $p->setJsonBody(['x' => 1]);
+            $p->clearHeader('missing');
+            try { $p->setMethod('HEAD'); } catch (ValueError $error) {}
+            return true;
+        })())PHP"));
+        REQUIRE(notifications.size() == 1);
+        CHECK(notifications[0].as_object().at("headers").as_array().size() == 1);
+        CHECK(notifications[0].as_object().at("body").as_object().at("data").as_string() == "{\"x\":1}");
+        REQUIRE(evaluate(R"PHP((function () {
+            $p = $GLOBALS['payload'];
+            $p->setJsonBody(new class($p) implements JsonSerializable {
+                public function __construct(private JobU\HttpPayload $p) {}
+                public function jsonSerialize(): mixed {
+                    $this->p->setUrl('https://nested.test/');
+                    return ['y' => 2];
+                }
+            });
+            try {
+                $p->setJsonBody(new class($p) implements JsonSerializable {
+                    public function __construct(private JobU\HttpPayload $p) {}
+                    public function jsonSerialize(): mixed {
+                        $this->p->setUrl('https://failed.test/');
+                        throw new LogicException('nested');
+                    }
+                });
+            } catch (LogicException $error) {}
+            return true;
+        })())PHP"));
+        CHECK(notifications.size() == 4); // nested URL, outer JSON, then failed callback's URL only.
+
+        auto source = value("new JobU\\HttpPayload('https://replacement.test/', 'HEAD')");
+        REQUIRE(jb::php::replace_http_payload(Z_OBJ_P(target.get()), source.view()));
+        REQUIRE(jb::php::replace_http_payload(Z_OBJ_P(target.get()), source.view()));
+        CHECK(notifications.size() == 5);
+        REQUIRE(evaluate(R"PHP((function () {
+            $GLOBALS['clone'] = clone $GLOBALS['payload'];
+            $GLOBALS['clone']->setUrl('https://detached.test/');
+            return $GLOBALS['alias'] === $GLOBALS['payload'] && $GLOBALS['payload']->getBody() === null &&
+                $GLOBALS['payload']->getHeaders() === [] && $GLOBALS['payload']->getMethod() === 'HEAD';
+        })())PHP"));
+        CHECK(notifications.size() == 5);
+
+        target = {};
+        owner  = {};
+        REQUIRE(evaluate(R"PHP((function () {
+            unset($GLOBALS['owner'], $GLOBALS['payload']);
+            gc_collect_cycles();
+            return $GLOBALS['weakOwner']->get() !== null;
+        })())PHP"));
+        REQUIRE(evaluate(R"PHP((function () {
+            unset($GLOBALS['alias']);
+            gc_collect_cycles();
+            return $GLOBALS['weakOwner']->get() === null &&
+                $GLOBALS['clone']->getUrl() === 'https://detached.test/';
+        })())PHP"));
+    }
+
+    SECTION("Oversized complete templates reject export and replacement atomically")
+    {
+        auto source = value("$GLOBALS['source'] = new JobU\\HttpPayload('https://example.test/')");
+        auto target = value("new JobU\\HttpPayload('https://target.test/')");
+        auto before = jb::php::http_payload_from_php(target.view());
+        REQUIRE(before);
+        REQUIRE(evaluate("(function () { $GLOBALS['source']->setBody(str_repeat(\"\\0\", 100000)); return true; })()"));
+        CHECK_FALSE(jb::php::http_payload_from_php(source.view()));
+        CHECK_FALSE(jb::php::replace_http_payload(Z_OBJ_P(target.get()), source.view()));
+        auto after = jb::php::http_payload_from_php(target.view());
+        REQUIRE(after);
+        CHECK(after.value() == before.value());
+    }
+
+    SECTION("Attached cycles release at repeated request shutdown")
+    {
+        for (int i = 0; i != 3; ++i) {
+            {
+                auto target = value("$GLOBALS['payload'] = new JobU\\HttpPayload('https://example.test/')");
+                auto owner  = value("$GLOBALS['owner'] = new stdClass");
+                REQUIRE(jb::php::attach_http_payload(Z_OBJ_P(target.get()), owner.view(), {}));
+                REQUIRE(evaluate("(function () { $GLOBALS['owner']->payload = $GLOBALS['payload']; return true; })()"));
+            }
+            runtime.restart(nullptr);
+        }
+    }
+}
+
+TEST_CASE("HTTP PHP templates are admitted unchanged by the real daemon", "[php][lifecycle][http-payload]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(host.value()->loop(), directory.path());
+    {
+        Runtime runtime;
+        REQUIRE(evaluate(R"PHP((function () {
+            $p = new JobU\HttpPayload('https://example.test/', 'POST');
+            $p->addHeader('X-Test', 'one');
+            $p->addHeader('x-test', 'two');
+            $p->setBody("\xff\0");
+            $GLOBALS['payload'] = $p;
+            return true;
+        })())PHP"));
+        auto* slot = zend_hash_str_find(&EG(symbol_table), "payload", 7);
+        REQUIRE(slot != nullptr);
+        auto exported = jb::php::http_payload_from_php(php::ValueView(slot));
+        REQUIRE(exported);
+        jb::php::Client client;
+        REQUIRE(client.initialize(*jb::php::current_request(),
+                                  (directory.path() / "daemon.sock").string(),
+                                  Clock::now() + 2s,
+                                  2s));
+        auto queue = jb::php::Operation::bind("queue.create",
+                                              &jb::jobu::ControlClient::create_queue,
+                                              jb::jobu::CreateQueueRequest{.name = "http-payload"});
+        REQUIRE(queue);
+        REQUIRE(client.call(Clock::now() + 2s, queue.value()));
+        jb::jobu::CreateJobRequest input{.queue = std::string("http-payload"),
+                                         .type  = jb::jobu::JobType::Http,
+                                         .schedule =
+                                             jb::jobu::OnceSchedule{.planned_at = jb::core::UtcClock::now() + 1h},
+                                         .payload = exported.value()};
+        auto create = jb::php::Operation::bind("job.create", &jb::jobu::ControlClient::create_job, input);
+        REQUIRE(create);
+        auto result = client.call(Clock::now() + 2s, create.value());
+        REQUIRE(result);
+        CHECK(std::get<jb::jobu::JobDefinition>(result.value()).payload == exported.value());
+    }
+    daemon.stop(host.value()->loop());
 }

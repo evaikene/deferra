@@ -63,6 +63,47 @@ final class CliPayload
     public function setExpectedExitCodes(array $codes): void {}
 }
 
+/** Mutable HTTP template; setters are local and never resolve secrets. @not-serializable */
+final class HttpPayload
+{
+    /** Accept an HTTP(S) URL and GET, POST, PUT, PATCH, DELETE or HEAD (case-insensitive). */
+    public function __construct(string $url, string $method = 'GET') {}
+    public function getUrl(): string {}
+    public function setUrl(string $url): void {}
+    public function getMethod(): string {}
+    /** Canonicalize uppercase; HEAD rejects any present body, including empty bytes. */
+    public function setMethod(string $method): void {}
+    /** Append without merging duplicate names. References and credential headers are always sensitive. */
+    public function addHeader(string $name, string|SecretReference $value, bool $sensitive = false): void {}
+    /** @return list<HttpHeader> Independent immutable snapshots in insertion order. */
+    public function getHeaders(): array {}
+    /** Remove every case-insensitive match, preserving other entries and their order. */
+    public function clearHeader(string $name): void {}
+    /** Accept arbitrary bytes or a symbolic reference; reject bodies for HEAD. */
+    public function setBody(string|SecretReference $body): void {}
+    /** Null means absent, distinct from an empty string. */
+    public function getBody(): string|SecretReference|null {}
+    public function clearBody(): void {}
+    /** Encode using json_encode(value, JSON_THROW_ON_ERROR, 512), then atomically set the body
+     * and append Content-Type: application/json only when no Content-Type exists.
+     * @throws \JsonException On JSON encoding errors; callback exceptions propagate unchanged.
+     */
+    public function setJsonBody(mixed $value): void {}
+    /** @return list<string> Ordered status selectors; defaults to ['200-299']. */
+    public function getExpectedStatuses(): array {}
+    /** @param list<string> $statuses Between 1 and 64 selectors (100–599 or inclusive ranges). */
+    public function setExpectedStatuses(array $statuses): void {}
+}
+
+/** Immutable detached header snapshot; obtained through HttpPayload. @not-serializable */
+final class HttpHeader
+{
+    private function __construct() {}
+    public function getName(): string {}
+    public function getValue(): string|SecretReference {}
+    public function isSensitive(): bool {}
+}
+
 /** Immutable schedule value. @not-serializable */
 abstract class Schedule {}
 
