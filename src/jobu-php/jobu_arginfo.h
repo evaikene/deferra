@@ -1,7 +1,10 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 12722f41e4cf24cea606ff6ee45720454d239836 */
+ * Stub hash: 7d642bfd6227b5bd06c81593cb907bf4bda63b5c */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Duration___construct, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Duration_getMilliseconds, 0, 0, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Duration_milliseconds, 0, 1, JobU\\Duration, 0)
@@ -15,6 +18,36 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_JobU_Duration_hours arginfo_class_JobU_Duration_milliseconds
 
 #define arginfo_class_JobU_Duration_days arginfo_class_JobU_Duration_milliseconds
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_SecretReference___construct, 0, 0, 1)
+	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_SecretReference_getName, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_OnceSchedule___construct, 0, 0, 1)
+	ZEND_ARG_OBJ_INFO(0, at, DateTimeInterface, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_OnceSchedule_now, 0, 0, JobU\\OnceSchedule, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_OnceSchedule_isNow, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_OnceSchedule_getAt, 0, 0, DateTimeImmutable, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_CronSchedule___construct, 0, 0, 1)
+	ZEND_ARG_TYPE_INFO(0, expression, IS_STRING, 0)
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timezone, DateTimeZone, 1, "null")
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_CronSchedule_getExpression arginfo_class_JobU_SecretReference_getName
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_CronSchedule_getTimezone, 0, 0, DateTimeZone, 1)
+ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Client___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, socketPath, IS_STRING, 0)
@@ -34,11 +67,21 @@ ZEND_END_ARG_INFO()
 #define arginfo_class_JobU_OutcomeUnknownException_getIdempotencyKey arginfo_class_JobU_Exception_getErrorCode
 
 ZEND_METHOD(JobU_Duration, __construct);
+ZEND_METHOD(JobU_Duration, getMilliseconds);
 ZEND_METHOD(JobU_Duration, milliseconds);
 ZEND_METHOD(JobU_Duration, seconds);
 ZEND_METHOD(JobU_Duration, minutes);
 ZEND_METHOD(JobU_Duration, hours);
 ZEND_METHOD(JobU_Duration, days);
+ZEND_METHOD(JobU_SecretReference, __construct);
+ZEND_METHOD(JobU_SecretReference, getName);
+ZEND_METHOD(JobU_OnceSchedule, __construct);
+ZEND_METHOD(JobU_OnceSchedule, now);
+ZEND_METHOD(JobU_OnceSchedule, isNow);
+ZEND_METHOD(JobU_OnceSchedule, getAt);
+ZEND_METHOD(JobU_CronSchedule, __construct);
+ZEND_METHOD(JobU_CronSchedule, getExpression);
+ZEND_METHOD(JobU_CronSchedule, getTimezone);
 ZEND_METHOD(JobU_Client, __construct);
 ZEND_METHOD(JobU_Client, close);
 ZEND_METHOD(JobU_Exception, getErrorCode);
@@ -48,11 +91,33 @@ ZEND_METHOD(JobU_OutcomeUnknownException, getIdempotencyKey);
 
 static const zend_function_entry class_JobU_Duration_methods[] = {
 	ZEND_ME(JobU_Duration, __construct, arginfo_class_JobU_Duration___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(JobU_Duration, getMilliseconds, arginfo_class_JobU_Duration_getMilliseconds, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Duration, milliseconds, arginfo_class_JobU_Duration_milliseconds, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
 	ZEND_ME(JobU_Duration, seconds, arginfo_class_JobU_Duration_seconds, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
 	ZEND_ME(JobU_Duration, minutes, arginfo_class_JobU_Duration_minutes, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
 	ZEND_ME(JobU_Duration, hours, arginfo_class_JobU_Duration_hours, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
 	ZEND_ME(JobU_Duration, days, arginfo_class_JobU_Duration_days, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_SecretReference_methods[] = {
+	ZEND_ME(JobU_SecretReference, __construct, arginfo_class_JobU_SecretReference___construct, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_SecretReference, getName, arginfo_class_JobU_SecretReference_getName, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_OnceSchedule_methods[] = {
+	ZEND_ME(JobU_OnceSchedule, __construct, arginfo_class_JobU_OnceSchedule___construct, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_OnceSchedule, now, arginfo_class_JobU_OnceSchedule_now, ZEND_ACC_PUBLIC|ZEND_ACC_STATIC)
+	ZEND_ME(JobU_OnceSchedule, isNow, arginfo_class_JobU_OnceSchedule_isNow, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_OnceSchedule, getAt, arginfo_class_JobU_OnceSchedule_getAt, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_CronSchedule_methods[] = {
+	ZEND_ME(JobU_CronSchedule, __construct, arginfo_class_JobU_CronSchedule___construct, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CronSchedule, getExpression, arginfo_class_JobU_CronSchedule_getExpression, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_CronSchedule, getTimezone, arginfo_class_JobU_CronSchedule_getTimezone, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -83,6 +148,66 @@ static zend_class_entry *register_class_JobU_Duration(void)
 	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
 #else
 	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_SecretReference(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "SecretReference", class_JobU_SecretReference_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_Schedule(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "Schedule", NULL);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_ABSTRACT);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_ABSTRACT;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_OnceSchedule(zend_class_entry *class_entry_JobU_Schedule)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "OnceSchedule", class_JobU_OnceSchedule_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_JobU_Schedule, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, class_entry_JobU_Schedule);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_CronSchedule(zend_class_entry *class_entry_JobU_Schedule)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "CronSchedule", class_JobU_CronSchedule_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_JobU_Schedule, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, class_entry_JobU_Schedule);
 	class_entry->ce_flags |= ZEND_ACC_FINAL;
 #endif
 

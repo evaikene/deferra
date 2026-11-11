@@ -44,6 +44,16 @@ private:
 struct ClonePolicy : php::ObjectBindingPolicy<Native> {
     static constexpr bool cloneable = true;
     static auto           clone(Native const& source) noexcept -> php::Result<Native>;
+
+    // This fixture defines native value comparison by number, ignoring its
+    // lifetime-testing reference. Zend properties still participate on equality.
+    static auto compare(Native const& left, Native const& right) noexcept -> int
+    {
+        if (left.number() < right.number()) {
+            return -1;
+        }
+        return left.number() > right.number() ? 1 : 0;
+    }
 };
 
 using Binding       = php::ObjectBinding<Native, ClonePolicy>;

@@ -48,6 +48,10 @@ private:
 /// static trace(T const&, GcVisitor&) noexcept and constexpr bool cloneable.
 /// A cloneable policy also supplies clone(T const&) noexcept -> Result<T> and a
 /// nothrow-movable T. That policy defines native copy/deep-copy semantics explicitly.
+/// Optionally supply compare(T const&, T const&) noexcept -> int to order native
+/// values (negative/zero/positive). It must not mutate state, execute PHP, or invoke
+/// GC. Equal native values then use Zend's ordinary property comparison. Without
+/// this hook, comparison retains Zend's property-only behavior.
 template <typename T>
 struct ObjectBindingPolicy {
     static constexpr bool cloneable = false;
@@ -150,6 +154,15 @@ public:
     }
 
 private:
+    // Detect the optional hook without requiring existing custom policies to add
+    // a member, and without concepts so independent consumers still support GCC 10.
+    template <typename P, typename = void>
+    struct HasCompare : std::false_type {};
+
+    template <typename P>
+    struct HasCompare<P, std::void_t<decltype(P::compare(std::declval<T const&>(), std::declval<T const&>()))>>
+        : std::true_type {};
+
     enum class State : unsigned char {
         Empty,
         Constructing,
@@ -178,6 +191,9 @@ private:
             result.free_obj  = free_object;
             result.get_gc    = get_gc;
             result.clone_obj = nullptr;
+            if constexpr (HasCompare<Policy>::value) {
+                result.compare = compare_objects;
+            }
             if constexpr (Policy::cloneable) {
                 result.clone_obj = clone_object;
             }
@@ -203,6 +219,49 @@ private:
     static auto native_of(Storage* storage) noexcept -> T*
     {
         return std::launder(reinterpret_cast<T*>(storage->_native));
+    }
+
+    static auto compare_objects(zval* left, zval* right) noexcept -> int
+    {
+        static_assert(noexcept(Policy::compare(std::declval<T const&>(), std::declval<T const&>())),
+                      "Native comparison must be noexcept");
+        static_assert(
+            std::is_same_v<decltype(Policy::compare(std::declval<T const&>(), std::declval<T const&>())), int>,
+            "Native comparison must return int");
+
+        if (has_exception()) {
+            return ZEND_UNCOMPARABLE;
+        }
+        if (Z_TYPE_P(left) != IS_OBJECT || Z_TYPE_P(right) != IS_OBJECT) {
+            // Preserve PHP's object/scalar conversion rules. Native storage is
+            // only meaningful when both operands have this exact binding.
+            return zend_std_compare_objects(left, right);
+        }
+
+        auto* left_object  = Z_OBJ_P(left);
+        auto* right_object = Z_OBJ_P(right);
+        if (!matches(left_object) || !matches(right_object) || left_object->ce != right_object->ce) {
+            return ZEND_UNCOMPARABLE;
+        }
+        if (left_object == right_object) {
+            return 0;
+        }
+
+        // A skipped/failed constructor still leaves a valid Zend object, but
+        // there is no native value to compare. Never read its uninitialized bytes.
+        auto* left_storage  = storage_of(left_object);
+        auto* right_storage = storage_of(right_object);
+        if (left_storage->_state != State::Ready || right_storage->_state != State::Ready) {
+            return ZEND_UNCOMPARABLE;
+        }
+        auto const order = Policy::compare(*native_of(left_storage), *native_of(right_storage));
+        if (order != 0) {
+            return order < 0 ? -1 : 1;
+        }
+
+        // Subclasses may add properties. Native equality alone must not hide
+        // differences there; Zend also supplies the normal recursion protection.
+        return zend_std_compare_objects(left, right);
     }
 
     static auto create_object(zend_class_entry* entry) noexcept -> zend_object*

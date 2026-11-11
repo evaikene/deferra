@@ -33,6 +33,17 @@ private:
     std::int64_t _milliseconds;
 };
 
+struct DurationPolicy : ::php::ObjectBindingPolicy<Duration> {
+    static auto compare(Duration const& left, Duration const& right) noexcept -> int
+    {
+        // Relational comparison avoids overflow at the signed duration limits.
+        if (left.milliseconds() < right.milliseconds()) {
+            return -1;
+        }
+        return left.milliseconds() > right.milliseconds() ? 1 : 0;
+    }
+};
+
 struct ClientPolicy : ::php::ObjectBindingPolicy<Client> {
 
     static auto trace([[maybe_unused]] Client const& client, [[maybe_unused]] ::php::GcVisitor& visitor) noexcept
@@ -40,7 +51,7 @@ struct ClientPolicy : ::php::ObjectBindingPolicy<Client> {
     {}
 };
 
-using DurationBinding = ::php::ObjectBinding<Duration>;
+using DurationBinding = ::php::ObjectBinding<Duration, DurationPolicy>;
 using ClientBinding   = ::php::ObjectBinding<Client, ClientPolicy>;
 
 auto class_entry(std::string_view name) -> zend_class_entry*
@@ -199,6 +210,7 @@ auto close_client(zend_execute_data* execute_data) noexcept -> void
 
 auto bind_client_classes(zend_class_entry* duration, zend_class_entry* client) -> bool
 {
+    duration->ce_flags |= ZEND_ACC_NO_DYNAMIC_PROPERTIES;
     return DurationBinding::bind(duration) && ClientBinding::bind(client);
 }
 
@@ -348,4 +360,21 @@ ZEND_METHOD(JobU_Client, close)
 {
     (void)return_value;
     jb::php::close_client(execute_data);
+}
+
+ZEND_METHOD(JobU_Duration, getMilliseconds)
+{
+    [&]() noexcept {
+        auto count = php::Arguments(execute_data).count(0, 0);
+        if (!count) {
+            php::raise(count.error());
+            return;
+        }
+        auto native = jb::php::DurationBinding::get(Z_OBJ(execute_data->This));
+        if (!native) {
+            php::raise(native.error());
+            return;
+        }
+        ZVAL_LONG(return_value, native.value()->milliseconds().count());
+    }();
 }

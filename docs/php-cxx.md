@@ -270,6 +270,18 @@ method only when the native value owns no PHP references. A custom policy can
 adapt an existing type with `static trace(T const&, GcVisitor&) noexcept` and
 `static constexpr bool cloneable`.
 
+A policy may opt into native comparison with
+`static compare(T const&, T const&) noexcept -> int`, returning a negative, zero,
+or positive value. The hook must not mutate state, execute PHP, invoke GC, or
+retain its arguments. It runs only for initialized objects of the same concrete
+PHP class and binding. Native ordering takes precedence; when native values are
+equal, Zend compares ordinary properties (including subclass properties).
+Distinct uninitialized objects and incompatible classes/bindings are incomparable;
+object identity still compares equal. A pending PHP exception is preserved without
+calling the policy. Standard PHP object/scalar coercion and strict `===` identity
+are unchanged. Without this optional hook, Zend's property-only comparison remains
+in effect and does **not** inspect native state.
+
 Call `Binding::bind(class_entry)` during module startup, after the authoritative
 stub-generated registration function returns the internal class entry. Check its
 `Result<void>`; nonordinary classes, custom allocators from another binding, and
