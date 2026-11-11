@@ -214,11 +214,13 @@ TEST_CASE("HTTP validation enforces header syntax ownership and bounds", "[net][
         {.name = "X-Name", .value = "one"},
         {.name = "x-name", .value = "two"}
     };
-    check_invalid(duplicate, "headers.duplicate_name");
+    check_valid(duplicate);
+    duplicate.headers.back().value = "bad\nvalue";
+    check_invalid(duplicate, "headers.invalid_value");
 
     auto maximum_count = request_for();
     for (std::size_t index = 0; index < 128U; ++index) {
-        maximum_count.headers.push_back({.name = "X-" + std::to_string(index), .value = ""});
+        maximum_count.headers.push_back({.name = "X-Repeated", .value = ""});
     }
     check_valid(maximum_count);
 
@@ -228,14 +230,13 @@ TEST_CASE("HTTP validation enforces header syntax ownership and bounds", "[net][
 
     auto exact_bytes    = request_for();
     exact_bytes.headers = {
-        {.name = "X", .value = std::string(kMaximumHeaderBytes - 1U, 'a')}
+        {.name = "X", .value = std::string((kMaximumHeaderBytes / 2U) - 1U, 'a')},
+        {.name = "x", .value = std::string((kMaximumHeaderBytes / 2U) - 1U, 'b')}
     };
     check_valid(exact_bytes);
 
-    auto too_large    = request_for();
-    too_large.headers = {
-        {.name = "X", .value = std::string(kMaximumHeaderBytes, 'a')}
-    };
+    auto too_large                  = exact_bytes;
+    too_large.headers.back().value += 'b';
     check_invalid(too_large, "headers.too_large");
 }
 

@@ -406,7 +406,7 @@ secret resolution. The prepared argv/environment request is limited to
 | --- | --- | --- | --- | --- | --- |
 | `url` | string | Yes | — | 1.1 | Request URL |
 | `method` | string | No | `GET` | 1.1 | New input: GET, POST, PUT, PATCH, DELETE, HEAD; ASCII case-insensitive, stored uppercase |
-| `headers` | array of header objects | No | `[]` | 1.1 | Ordered request headers |
+| `headers` | array of header objects | No | `[]` | 1.1 | Ordered request headers; repeated names are preserved |
 | `body` | encoded body or reference | No | Absent | 1.1; reference 1.2 | Request-body bytes |
 | `expected_statuses` | string array | No | `["200-299"]` | 1.1 | Successful HTTP status selectors |
 
