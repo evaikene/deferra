@@ -6,7 +6,8 @@ and queue defaults, mutable CLI/HTTP payloads, and request-scoped `Client` conne
 The constructor eagerly connects and handshakes. Queue lookup, creation, local
 edits and lifecycle operations are available through the synchronous bridge.
 Job creation, active Job resources and cached Run Now snapshots are also available.
-List/statistics pages and full Run/Attempt management remain later stages.
+Queue/job definition lists return prefetched pages. Statistics and full Run/Attempt
+management remain later stages.
 It supports PHP 8.1+ with 64-bit integers in NTS mode
 on Linux/macOS. Runtime validation covers PHP 8.2–8.6 NTS; PHP 8.1 retains the
 minimum build/API contract but is not in the test matrix. macOS runtime coverage
@@ -704,7 +705,7 @@ Stage 4.2 exercises `queue.stats` through the native typed bridge, including
 cursor-only continuation and historical UUIDs. The public
 `Queue::statistics(?StatisticsQuery $query = null, ?Duration $timeout = null): Page`
 remains stage 5.4 after Page in stage 4.4; no placeholder or temporary result
-shape is exposed. Queue job creation and lists also remain later stages.
+shape is exposed. Queue job creation and definition lists are available.
 
 ## Private resource-state foundation
 
@@ -802,13 +803,70 @@ cloned or serialized. Closing the Client preserves cached reads and local edits;
 subsequent RPC operations fail locally.
 
 
-## Page foundation
+## Definition lists and pages
 
 `JobU\Page` represents a mutable position in a paged result. Its private factory
 performs the first request eagerly; the returned Page starts **before** that
-prefetched page. Stage 4.4 supplies the Page foundation and private typed adapters.
-Public queue/job listing entry points arrive in stage 4.5, with history, secrets
-and statistics entry points in their respective later stages.
+prefetched page. The public definition-list entry points are:
+
+```php
+$client->listQueues(
+    state: null, includeDeleted: false, limit: 100, timeout: null
+);
+$client->listJobs(
+    queueName: null, queueId: null, state: null, type: null,
+    includeDeleted: false, limit: 100, timeout: null
+);
+$queue->listJobs(
+    state: null, type: null, includeDeleted: false, limit: 100, timeout: null
+);
+```
+
+Queue state is `?QueueState`; job state and runner are `?JobState` and `?JobType`.
+Limits are integers from 1 through 200. Timeout is `?Duration`, using the Client's
+configured default when null. Each initial call and later fetching `next()` has
+one deadline covering its complete synchronous operation.
+
+Client job listing accepts at most one `queueName` or `queueId`; both null selects
+all queues. A name is exact literal UTF-8 under the same rules as `getQueue()`,
+even if it looks like a UUID or begins with `id:`/`name:`. IDs are canonical
+lowercase UUIDs. There is no preliminary lookup. Names are resolved on every
+page, so rename or name reuse can change a later page's selection; use `queueId`
+or `Queue::listJobs()` when queue identity must stay stable. Missing queues and
+ambiguous retained names propagate the normal daemon errors.
+
+Filters combine with AND. With no state filter, all nondeleted states are
+included, including suspended and terminal jobs. Both runner families are included
+by default. `includeDeleted: true` permits soft-deleted definitions and selection
+of a retained deleted queue; a Deleted state filter alone does not enable that
+visibility. These methods list current retained definitions, not run or attempt
+history. Full history, secrets and statistics entry points remain later stages.
+
+`Queue::listJobs()` uses its stable UUID and originating Client, including after
+rename. It permits dirty queues and leaves their edits and cached fields untouched.
+For a locally deleted or historically loaded Queue, pass `includeDeleted: true`;
+otherwise native admission returns not-found. Purged queues also return not-found.
+
+Queue pages contain full `Queue` objects; job pages contain full `Job` objects
+with the usual typed configuration, revision, attached objects and deletion guards.
+No item getter fetches details. Each Page and resource retains the originating
+Client. Separate listings create independent resource instances.
+
+```php
+$page = $queue->listJobs(type: JobU\JobType::Cli, limit: 50);
+while ($page->hasNext()) {
+    $page->next();
+    foreach ($page->items() as $job) {
+        echo $job->getId(), "\n";
+    }
+}
+```
+
+All phase-4 Queue/Job lookup, creation, editing, lifecycle and definition-list
+entry points are available. The cached Run returned by `runNow()` is available;
+`Job::listRuns()` and full Run/Attempt APIs remain stage 5.1, output stage 5.2,
+secret/schedule management stage 5.3, and `Queue::statistics()`/system statistics
+stage 5.4.
 
 - `hasNext(): bool` checks only local state. An empty first result returns false.
 - `next(?Duration $timeout = null): void` publishes the prefetched first page

@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 083e7a771fba6bc1c8ed90248528b8ceca07a4ef */
+ * Stub hash: 1c135b8509e1c94a11ef37e2fab0b3181575439b */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Duration___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -300,6 +300,23 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_JobU_Client_close arginfo_class_JobU_HttpPayload_clearBody
 
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Client_listQueues, 0, 0, JobU\\Page, 0)
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, state, JobU\\QueueState, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, includeDeleted, _IS_BOOL, 0, "false")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, limit, IS_LONG, 0, "100")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Client_listJobs, 0, 0, JobU\\Page, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, queueName, IS_STRING, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, queueId, IS_STRING, 1, "null")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, state, JobU\\JobState, 1, "null")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, type, JobU\\JobType, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, includeDeleted, _IS_BOOL, 0, "false")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, limit, IS_LONG, 0, "100")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Client_getJob, 0, 1, JobU\\Job, 0)
 	ZEND_ARG_TYPE_INFO(0, id, IS_STRING, 0)
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
@@ -326,6 +343,14 @@ ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Client_createQueue, 0,
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, historyRetention, JobU\\Duration, 1, "null")
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, runnableWaitWarning, JobU\\Duration, 1, "null")
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, idempotencyKey, IS_STRING, 1, "null")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Queue_listJobs, 0, 0, JobU\\Page, 0)
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, state, JobU\\JobState, 1, "null")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, type, JobU\\JobType, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, includeDeleted, _IS_BOOL, 0, "false")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, limit, IS_LONG, 0, "100")
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
 ZEND_END_ARG_INFO()
 
@@ -842,10 +867,13 @@ ZEND_METHOD(JobU_QueueDefaults, cli);
 ZEND_METHOD(JobU_QueueDefaults, http);
 ZEND_METHOD(JobU_Client, __construct);
 ZEND_METHOD(JobU_Client, close);
+ZEND_METHOD(JobU_Client, listQueues);
+ZEND_METHOD(JobU_Client, listJobs);
 ZEND_METHOD(JobU_Client, getJob);
 ZEND_METHOD(JobU_Client, getQueue);
 ZEND_METHOD(JobU_Client, getQueueById);
 ZEND_METHOD(JobU_Client, createQueue);
+ZEND_METHOD(JobU_Queue, listJobs);
 ZEND_METHOD(JobU_Queue, createCliJob);
 ZEND_METHOD(JobU_Queue, createHttpJob);
 ZEND_METHOD(JobU_Queue, __construct);
@@ -1151,6 +1179,8 @@ static const zend_function_entry class_JobU_QueueDefaults_methods[] = {
 static const zend_function_entry class_JobU_Client_methods[] = {
 	ZEND_ME(JobU_Client, __construct, arginfo_class_JobU_Client___construct, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Client, close, arginfo_class_JobU_Client_close, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Client, listQueues, arginfo_class_JobU_Client_listQueues, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Client, listJobs, arginfo_class_JobU_Client_listJobs, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Client, getJob, arginfo_class_JobU_Client_getJob, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Client, getQueue, arginfo_class_JobU_Client_getQueue, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Client, getQueueById, arginfo_class_JobU_Client_getQueueById, ZEND_ACC_PUBLIC)
@@ -1159,6 +1189,7 @@ static const zend_function_entry class_JobU_Client_methods[] = {
 };
 
 static const zend_function_entry class_JobU_Queue_methods[] = {
+	ZEND_ME(JobU_Queue, listJobs, arginfo_class_JobU_Queue_listJobs, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Queue, createCliJob, arginfo_class_JobU_Queue_createCliJob, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Queue, createHttpJob, arginfo_class_JobU_Queue_createHttpJob, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Queue, __construct, arginfo_class_JobU_Queue___construct, ZEND_ACC_PRIVATE)
