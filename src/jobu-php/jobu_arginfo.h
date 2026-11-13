@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: ba8adf731e90a33cfdf9748c042668b26d14e27c */
+ * Stub hash: 1c2eaaafd725fa4fd3e9fe0d094f54951b0c1cf5 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Duration___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -291,6 +291,34 @@ ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_QueueDefaults_cli, 0, 
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_QueueDefaults_http, 0, 0, JobU\\HttpJobAttributes, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Client_setSecret, 0, 2, JobU\\SecretMetadata, 0)
+	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, value, IS_STRING, 0)
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Client_listSecrets, 0, 0, JobU\\Page, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, limit, IS_LONG, 0, "100")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Client_deleteSecret, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Client_validateSchedule, 0, 1, IS_VOID, 0)
+	ZEND_ARG_OBJ_INFO(0, schedule, JobU\\CronSchedule, 0)
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Client_nextScheduleOccurrences, 0, 2, IS_ARRAY, 0)
+	ZEND_ARG_OBJ_INFO(0, schedule, JobU\\CronSchedule, 0)
+	ZEND_ARG_OBJ_INFO(0, after, DateTimeInterface, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, count, IS_LONG, 0, "5")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Client___construct, 0, 0, 1)
@@ -748,10 +776,7 @@ ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Run_cancel, 0, 0, JobU
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Run_listAttempts, 0, 0, JobU\\Page, 0)
-	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, limit, IS_LONG, 0, "100")
-	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
-ZEND_END_ARG_INFO()
+#define arginfo_class_JobU_Run_listAttempts arginfo_class_JobU_Client_listSecrets
 
 #define arginfo_class_JobU_Run___construct arginfo_class_JobU_Duration___construct
 
@@ -983,6 +1008,11 @@ ZEND_METHOD(JobU_QueueDefaults, set);
 ZEND_METHOD(JobU_QueueDefaults, clear);
 ZEND_METHOD(JobU_QueueDefaults, cli);
 ZEND_METHOD(JobU_QueueDefaults, http);
+ZEND_METHOD(JobU_Client, setSecret);
+ZEND_METHOD(JobU_Client, listSecrets);
+ZEND_METHOD(JobU_Client, deleteSecret);
+ZEND_METHOD(JobU_Client, validateSchedule);
+ZEND_METHOD(JobU_Client, nextScheduleOccurrences);
 ZEND_METHOD(JobU_Client, __construct);
 ZEND_METHOD(JobU_Client, close);
 ZEND_METHOD(JobU_Client, listQueues);
@@ -1340,6 +1370,11 @@ static const zend_function_entry class_JobU_QueueDefaults_methods[] = {
 };
 
 static const zend_function_entry class_JobU_Client_methods[] = {
+	ZEND_ME(JobU_Client, setSecret, arginfo_class_JobU_Client_setSecret, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Client, listSecrets, arginfo_class_JobU_Client_listSecrets, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Client, deleteSecret, arginfo_class_JobU_Client_deleteSecret, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Client, validateSchedule, arginfo_class_JobU_Client_validateSchedule, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Client, nextScheduleOccurrences, arginfo_class_JobU_Client_nextScheduleOccurrences, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Client, __construct, arginfo_class_JobU_Client___construct, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Client, close, arginfo_class_JobU_Client_close, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Client, listQueues, arginfo_class_JobU_Client_listQueues, ZEND_ACC_PUBLIC)
@@ -1814,6 +1849,11 @@ static zend_class_entry *register_class_JobU_Client(void)
 	class_entry = zend_register_internal_class_ex(&ce, NULL);
 	class_entry->ce_flags |= ZEND_ACC_FINAL;
 #endif
+
+
+	zend_string *attribute_name_SensitiveParameter_func_setsecret_arg1_0 = zend_string_init_interned("SensitiveParameter", sizeof("SensitiveParameter") - 1, 1);
+	zend_add_parameter_attribute(zend_hash_str_find_ptr(&class_entry->function_table, "setsecret", sizeof("setsecret") - 1), 1, attribute_name_SensitiveParameter_func_setsecret_arg1_0, 0);
+	zend_string_release(attribute_name_SensitiveParameter_func_setsecret_arg1_0);
 
 	return class_entry;
 }

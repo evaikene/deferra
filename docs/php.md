@@ -8,7 +8,7 @@ edits and lifecycle operations are available through the synchronous bridge.
 Job creation, active Job resources and cached Run Now snapshots are also available.
 Queue/job definition lists and retained Run/Attempt history return prefetched pages.
 Run cancellation, explicit history loading, typed execution results and bounded output reads are available.
-Secret/schedule management and statistics remain later stages.
+Secret administration and cron helpers are implemented; statistics remains a later stage.
 It supports PHP 8.1+ with 64-bit integers in NTS mode
 on Linux/macOS. Runtime validation covers PHP 8.2–8.6 NTS; PHP 8.1 retains the
 minimum build/API contract but is not in the test matrix. macOS runtime coverage
@@ -263,7 +263,7 @@ are values, although client timeouts must be positive.
 `getName(): string` returns it without looking up any secret. Names are at most 128
 bytes, with lowercase dot-separated segments beginning with a letter and continuing
 with lowercase letters, digits or underscores. Invalid names are rejected without
-normalization. Secret administration and payload APIs remain deferred.
+normalization. Secret administration is available through Client; payloads retain symbolic references.
 
 `Schedule` is abstract. Its implemented subclasses are final:
 
@@ -845,7 +845,7 @@ included, including suspended and terminal jobs. Both runner families are includ
 by default. `includeDeleted: true` permits soft-deleted definitions and selection
 of a retained deleted queue; a Deleted state filter alone does not enable that
 visibility. These methods list current retained definitions, not run or attempt
-history. Run/Attempt history is described below; secrets and statistics remain later stages.
+history. Run/Attempt history and secret administration are described below; statistics remains a later stage.
 
 `Queue::listJobs()` uses its stable UUID and originating Client, including after
 rename. It permits dirty queues and leaves their edits and cached fields untouched.
@@ -870,7 +870,7 @@ while ($page->hasNext()) {
 All phase-4 Queue/Job lookup, creation, editing, lifecycle and definition-list
 entry points are available. The cached Run returned by `runNow()` is available;
 `Job::listRuns()` and full Run/Attempt APIs, including output, are available.
-Secret/schedule management remains stage 5.3, and `Queue::statistics()`/system
+`Queue::statistics()`/system
 statistics remains stage 5.4.
 
 - `hasNext(): bool` checks only local state. An empty first result returns false.
@@ -1042,3 +1042,87 @@ output remains readable after owner deletion while its history still exists.
 Explicit Client closure prevents further output RPCs; already returned strings
 and detached OutputChunk values remain usable. Summaries and Client have no
 output methods.
+
+
+## Secrets and cron helpers
+
+These global operations belong to `Client`. Every operation accepts a nullable
+`Duration` timeout override; omission uses the Client default (10 seconds unless
+configured at construction). One monotonic deadline covers argument conversion,
+connection, handshake, request and any safe reconnect/replay.
+
+```php
+$metadata = $client->setSecret(name: 'service.token', value: $token);
+$page = $client->listSecrets(limit: 100);
+while ($page->hasNext()) {
+    $page->next();
+    foreach ($page->items() as $secret) {
+        echo $secret->getName(), "\n";
+    }
+}
+$client->deleteSecret('service.unused');
+
+$cron = new JobU\CronSchedule('@daily', new DateTimeZone('Europe/Tallinn'));
+$client->validateSchedule($cron);
+$times = $client->nextScheduleOccurrences(
+    schedule: $cron,
+    after: new DateTimeImmutable('2030-01-01T00:00:00Z'),
+    count: 5
+);
+```
+
+`setSecret(string $name, string $value, ?Duration $timeout = null): SecretMetadata`
+sets or rotates 0–65,536 raw bytes, including empty strings, NUL and non-UTF-8
+bytes. Encoding is handled internally by the SDK. Names have at most 128 bytes
+and consist of lowercase dot-separated segments; each segment starts with a
+letter and continues with lowercase letters, digits or underscores. Names are
+validated without normalization. Rotation preserves the creation timestamp and
+updates the modification timestamp. Returned metadata is an immutable detached
+snapshot with only name and UTC timestamps. No read method, value length, digest
+or preview is exposed. References in CLI arguments/environment and HTTP
+headers/body remain symbolic names and are never resolved by PHP getters.
+
+`listSecrets(int $limit = 100, ?Duration $timeout = null): Page` accepts 1–200
+items per page and returns `SecretMetadata` items. It uses the same eager,
+before-first Page contract as other listings. `hasNext()` and the first `next()`
+perform no RPC. Later pages use the original limit and an exclusive ascending
+name boundary; that secret need not still exist. This is a live view: concurrent
+sets/deletes may change later pages. A failed continuation preserves the current
+items and boundary. The Page retains its Client, while metadata does not.
+
+`deleteSecret(string $name, ?Duration $timeout = null): void` propagates missing
+and in-use errors, including protections for job definitions and nonterminal run
+snapshots. There is no force flag. Set/delete are not replayed after possible
+transmission: a lost reply produces `OutcomeUnknownException` promptly. A later,
+independent list can inspect metadata before the application decides what to do.
+Listing and cron helpers retain the existing safe-read reconnect policy.
+
+Generated error messages and native debug views omit submitted secret bytes and
+backend diagnostics. The value parameter is marked `SensitiveParameter`, which
+PHP 8.2+ redacts in the extension call's exception-trace frame. This does not
+redact values deliberately logged by application code or passed to its own
+unmarked wrapper parameters. PHP 8.1 does not implement this trace-redaction
+attribute; use `zend.exception_ignore_args=1` when collecting exception traces
+there. Secret use by executed commands and captured output follows the daemon's
+[named-secret exposure contract](secrets.md).
+
+`validateSchedule(CronSchedule $schedule, ?Duration $timeout = null): void`
+returns normally on success and throws on daemon validation failure; it never
+returns false. `nextScheduleOccurrences(CronSchedule $schedule,
+DateTimeInterface $after, int $count = 5, ?Duration $timeout = null): array`
+accepts 1–200 occurrences. Results are strictly increasing UTC
+`DateTimeImmutable` values strictly later than `after`. Input instants use exact,
+checked microsecond conversion; the caller's date and schedule are unchanged.
+Only CronSchedule is accepted. Local invalid types/ranges produce TypeError or
+ValueError before submission; cron grammar and timezone availability are checked
+by the daemon, with stable JobU error codes preserved.
+
+An omitted timezone remains omitted and uses `schedule.default_timezone` on the
+daemon. Explicit UTC remains UTC. The PHP default timezone does not override
+these semantics. The daemon handles aliases, its 512-byte expression limit and
+DST: nonexistent local times shift forward by the gap, and repeated local times
+use the earlier UTC instant once. Validation can succeed for an impossible date;
+preview reports `jobu.schedule.no_future_occurrence` or
+`jobu.schedule.out_of_range` when no representable occurrence can be found.
+See [cron semantics](cron.md) for the complete grammar. Helpers never create jobs
+or evaluate cron locally.

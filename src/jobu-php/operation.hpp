@@ -64,6 +64,11 @@ public:
     /// Bind a parameterless typed operation, such as system.info.
     static auto bind(std::string name, Accepted (jobu::ControlClient::*method)(jobu::ControlCallOptions)) -> Operation;
 
+    /// Own the text while invoking an SDK method that borrows a view on each attempt.
+    static auto bind(std::string name,
+                     Accepted (jobu::ControlClient::*method)(std::string_view, jobu::ControlCallOptions),
+                     std::string request) -> Operation;
+
     auto name() const noexcept -> std::string const&;
     auto key() const noexcept -> std::optional<std::string> const&;
     auto policy() const noexcept -> ReplayPolicy;
