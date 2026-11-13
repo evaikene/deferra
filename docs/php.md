@@ -5,7 +5,8 @@ hierarchy, immutable durations, secret references and schedules, mutable attribu
 and queue defaults, mutable CLI/HTTP payloads, and request-scoped `Client` connections.
 The constructor eagerly connects and handshakes. Queue lookup, creation, local
 edits and lifecycle operations are available through the synchronous bridge.
-Job resources and list/statistics pages remain later stages.
+Job creation, active Job resources and cached Run Now snapshots are also available.
+List/statistics pages and full Run/Attempt management remain later stages.
 It supports PHP 8.1+ with 64-bit integers in NTS mode
 on Linux/macOS. Runtime validation covers PHP 8.2–8.6 NTS; PHP 8.1 retains the
 minimum build/API contract but is not in the test matrix. macOS runtime coverage
@@ -140,7 +141,7 @@ replace its subsequent per-call outcome. Timeout or stopped-wait cleanup retires
 local observation only; it does not cancel remote work or prove rollback. A
 terminal failure already queued but not delivered at expiry is conservatively
 uncertain. The bridge implements reconnect/retry and operational exception
-translation; public `getSystemInfo()` and resources remain later-stage work. There is no public raw
+translation; public `getSystemInfo()` remains later-stage work. There is no public raw
 RPC entry point. Test-only bindings exercise calls without adding placeholder APIs.
 No C++ exception may unwind into Zend. Allocation failure remains fatal, and
 PHP bailout does not guarantee C++ stack cleanup.
@@ -749,3 +750,53 @@ PHP. Clones detach both the owner and its guard/notification. Local deletion
 retains cached getters and the last received revision; a null delete reply does
 not fabricate a new token. Explicit historical refresh can use the shared cache
 path where the concrete resource API supports it.
+
+### Jobs and manual runs
+
+Create definitions through a clean, nondeleted Queue with `createCliJob()` or
+`createHttpJob()`. Both accept named `payload`, `schedule`, `name`, `priority`,
+`attributes`, `idempotencyKey` and `timeout` arguments. Inputs are copied; the
+daemon materializes applicable defaults and commits the initial scheduled run.
+Suspended queues admit creation but prevent dispatch. Save or discard local queue
+changes before creating jobs, so unsaved defaults cannot be mistaken for persisted
+configuration. `Client::getJob($id)` accepts a canonical lowercase UUID.
+
+Jobs expose cached identity, queue UUID, revision, nullable name, runner type,
+state, priority, schedule and timestamps. Getters never perform RPC. All returned
+instants are UTC `DateTimeImmutable` values. Runner type is fixed at creation.
+
+`attributes()` and `payload()` return attached mutable objects. Their identities
+survive save, refresh, discard and configuration replacement. `getAttributes()`
+and `getPayload()` return detached deep copies, including local edits.
+`setAttributes()` merges every supplied key, preserving omitted target values;
+`setPayload()` replaces the complete payload and requires the matching runner.
+Schedules are immutable: `getSchedule()` returns the local schedule value and
+`setSchedule()` replaces it. Symbolic `OnceSchedule::now()` is creation-only;
+an omitted cron timezone stays unresolved until the daemon accepts the save.
+
+`save()` sends net changed fields with the last accepted revision. Conflicts and
+uncertain outcomes preserve edits and the cached revision. No-op save and
+`discardChanges()` are local. `refresh()`, `suspend()`, `resume()`, `move()`,
+`delete()` and `runNow()` reject dirty Jobs. `move($queue)` requires a clean,
+nondeleted destination from the same Client and submits its stable UUID with the
+Job revision. Server lifecycle constraints remain authoritative. Deletion marks
+the local object nonmutable, including retained children, without inventing a
+revision or timestamp from the null reply. Locally deleted Jobs reject refresh;
+cached getters remain available. Detached copies remain editable.
+
+`runNow(?string $idempotencyKey = null, ?Duration $timeout = null): Run` creates a
+separate manual run and returns after management completion. It never waits for
+execution or replaces the future scheduled occurrence. Creation and Run Now
+freeze a generated or explicit key and request across reconnects; retained keys
+replay their original snapshots, which may be stale. Retention is resource-bound,
+not permanent. Each operation has one total deadline. Existing unsafe-mutation
+recovery rules also apply to Job save, move and delete.
+
+The Run returned here is a complete cached snapshot retaining its Client. It
+exposes IDs, captured job revision, origin, runner/state, schedule ownership,
+priority, planned/runnable/optional start/completion timestamps, detached typed
+attributes/payload and nullable typed execution result. These getters do not
+fetch details or resolve secrets. Run refresh/cancel, lookup/list APIs, attempts
+and output remain later implementation stages. Job and Run resources cannot be
+cloned or serialized. Closing the Client preserves cached reads and local edits;
+subsequent RPC operations fail locally.

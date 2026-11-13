@@ -1,5 +1,6 @@
 #include "cli_payload_binding.hpp"
 #include "value_binding.hpp"
+#include "value_snapshot.hpp"
 
 #include <jb/core/command_argv.hpp>
 #include <jb/core/text_validation.hpp>
@@ -316,6 +317,18 @@ auto native(::php::ValueView input) -> ::php::Result<Configuration*>
     return Binding::get(Z_OBJ_P(value.get()));
 }
 
+auto loaded_text(core::JsonValue const& value) -> ::php::Result<Text>
+{
+    if (value.is_string()) {
+        return Text{.value = value.as_string()};
+    }
+    auto const* secret = snapshot::field(value, "secret");
+    if (!secret || !secret->is_string()) {
+        return invalid("Invalid payload text in server reply");
+    }
+    return Text{.value = secret->as_string(), .secret = true};
+}
+
 auto php_text(Text const& text) -> ::php::Result<::php::Value>
 {
     if (text.secret) {
@@ -575,6 +588,81 @@ auto bind_cli_payload_class(zend_class_entry* entry) -> bool
 {
     entry->ce_flags |= ZEND_ACC_NO_DYNAMIC_PROPERTIES;
     return static_cast<bool>(Binding::bind(entry));
+}
+
+auto equal_cli_payload(::php::ValueView left, ::php::ValueView right) -> bool
+{
+    return native(left).value()->value == native(right).value()->value;
+}
+
+auto cli_payload_to_php(core::JsonValue const& value) -> ::php::Result<::php::Value>
+{
+    // Read templates directly: tokenization and secret resolution would change
+    // the server snapshot. Optional fields retain their protocol defaults.
+    Payload     payload;
+    auto const* command = snapshot::field(value, "command");
+    if (!command || !command->is_string() || !valid_executable(command->as_string())) {
+        return invalid("Invalid CLI executable in server reply");
+    }
+    payload.executable = command->as_string();
+    if (auto const* arguments = snapshot::field(value, "arguments")) {
+        if (!arguments->is_array()) {
+            return invalid("Invalid CLI arguments in server reply");
+        }
+        for (auto const& item : arguments->as_array()) {
+            auto text = loaded_text(item);
+            if (!text) {
+                return text.error();
+            }
+            payload.arguments.push_back(std::move(text).value());
+        }
+    }
+    if (auto const* environment = snapshot::field(value, "environment")) {
+        if (!environment->is_object()) {
+            return invalid("Invalid CLI environment in server reply");
+        }
+        for (auto const& [name, item] : environment->as_object()) {
+            if (item.is_null()) {
+                payload.environment.emplace(name, std::nullopt);
+                continue;
+            }
+            auto text = loaded_text(item);
+            if (!text) {
+                return text.error();
+            }
+            payload.environment.emplace(name, std::move(text).value());
+        }
+    }
+    if (auto const* directory = snapshot::field(value, "working_directory")) {
+        if (!directory->is_string()) {
+            return invalid("Invalid CLI directory in server reply");
+        }
+        payload.directory = directory->as_string();
+    }
+    if (auto const* exits = snapshot::field(value, "expected_exit_codes")) {
+        auto converted = snapshot::to_php(*exits);
+        if (!converted) {
+            return converted.error();
+        }
+        auto codes = read_exits(converted.value().view());
+        if (!codes) {
+            return codes.error();
+        }
+        payload.exits = std::move(codes).value();
+    }
+    auto checked = export_payload(payload);
+    if (!checked) {
+        return checked.error();
+    }
+
+    zval slot{};
+    object_init_ex(&slot, snapshot::entry("jobu\\clipayload"));
+    auto owner       = ::php::Value::adopt(slot);
+    auto constructed = Binding::construct(Z_OBJ_P(owner.get()), std::move(payload));
+    if (!constructed) {
+        return constructed.error();
+    }
+    return owner;
 }
 
 auto cli_payload_from_php(::php::ValueView value) -> ::php::Result<core::JsonValue>

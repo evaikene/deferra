@@ -2,10 +2,12 @@
 #include "cli_payload_binding.hpp"
 #include "client_binding.hpp"
 #include "http_payload_binding.hpp"
+#include "job_binding.hpp"
 #include "query_binding.hpp"
 #include "queue_binding.hpp"
 #include "request.hpp"
 #include "result_binding.hpp"
+#include "run_binding.hpp"
 #include "value_binding.hpp"
 
 #include <phpcxx/arguments.hpp>
@@ -78,6 +80,9 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
         return FAILURE;
     }
     if (!jb::php::bind_queue_class(register_class_JobU_Queue())) {
+        return FAILURE;
+    }
+    if (!jb::php::bind_job_class(register_class_JobU_Job()) || !jb::php::bind_run_class(register_class_JobU_Run())) {
         return FAILURE;
     }
     auto* schedule      = register_class_JobU_Schedule();
