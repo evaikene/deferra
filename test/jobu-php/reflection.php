@@ -80,7 +80,7 @@ check(array_map(fn($p) => $p->getName(), $creation->getParameters()) ===
 check((string)$creation->getReturnType() === JobU\Queue::class, 'queue creation return');
 check((string)$queue->getMethod('getHistoryRetention')->getReturnType() === '?JobU\\Duration', 'nullable retention');
 check((string)$queue->getMethod('getDeletedAt')->getReturnType() === '?DateTimeImmutable', 'nullable deletion date');
-check(!$queue->hasMethod('statistics') && !$queue->hasMethod('listJobs'), 'stage boundary');
+check(!$queue->hasMethod('statistics') && $queue->hasMethod('listJobs'), 'stage boundary');
 $page = new ReflectionClass(JobU\Page::class);
 check($page->isFinal() && $page->getConstructor()->isPrivate(), 'Page construction');
 check(array_map(fn($m) => $m->getName(), $page->getMethods()) === ['__construct', 'hasNext', 'next', 'items'], 'Page methods');
@@ -92,5 +92,18 @@ check($next->getNumberOfRequiredParameters() === 0 && $next->getNumberOfParamete
 $timeout = $next->getParameters()[0];
 check($timeout->getName() === 'timeout' && (string)$timeout->getType() === '?JobU\\Duration' && $timeout->getDefaultValue() === null, 'Page timeout');
 check(!class_exists('JobUTestPages', false), 'fixture factories excluded');
-check(!(new ReflectionClass(JobU\Client::class))->hasMethod('listQueues'), 'public list APIs remain later work');
+check((new ReflectionClass(JobU\Client::class))->hasMethod('listQueues'), 'public definition lists');
+
+foreach ([
+    [JobU\Client::class, 'listQueues', ['state', 'includeDeleted', 'limit', 'timeout'], ['?JobU\QueueState', 'bool', 'int', '?JobU\Duration'], [null, false, 100, null]],
+    [JobU\Client::class, 'listJobs', ['queueName', 'queueId', 'state', 'type', 'includeDeleted', 'limit', 'timeout'], ['?string', '?string', '?JobU\JobState', '?JobU\JobType', 'bool', 'int', '?JobU\Duration'], [null, null, null, null, false, 100, null]],
+    [JobU\Queue::class, 'listJobs', ['state', 'type', 'includeDeleted', 'limit', 'timeout'], ['?JobU\JobState', '?JobU\JobType', 'bool', 'int', '?JobU\Duration'], [null, null, false, 100, null]],
+] as [$class, $name, $names, $types, $defaults]) {
+    $method = new ReflectionMethod($class, $name);
+    check((string)$method->getReturnType() === JobU\Page::class, "$class::$name return type");
+    check(array_map(fn($p) => $p->getName(), $method->getParameters()) === $names, "$class::$name parameter names");
+    check(array_map(fn($p) => (string)$p->getType(), $method->getParameters()) === $types, "$class::$name parameter types");
+    check(array_map(fn($p) => $p->getDefaultValue(), $method->getParameters()) === $defaults, "$class::$name parameter defaults");
+}
+
 echo "reflection ok\n";

@@ -235,6 +235,29 @@ final class Client
     public function __construct(string $socketPath, ?Duration $timeout = null) {}
     /** Idempotently close this session. Further operations fail locally. */
     public function close(): void {}
+    /** Eagerly fetch definitions; null state includes every state permitted by includeDeleted.
+     * Limit is 1–200. @return Page<Queue>
+     */
+    public function listQueues(
+        ?QueueState $state = null,
+        bool $includeDeleted = false,
+        int $limit = 100,
+        ?Duration $timeout = null
+    ): Page {}
+    /** Eagerly fetch full definitions. Select at most one literal queueName or canonical queueId.
+     * Both null selects all queues. Names are resolved on each page; IDs keep queue identity stable.
+     * Filters combine with AND; Deleted state still requires includeDeleted. Limit is 1–200.
+     * @return Page<Job>
+     */
+    public function listJobs(
+        ?string $queueName = null,
+        ?string $queueId = null,
+        ?JobState $state = null,
+        ?JobType $type = null,
+        bool $includeDeleted = false,
+        int $limit = 100,
+        ?Duration $timeout = null
+    ): Page {}
     /** Load a job by canonical UUID. */
     public function getJob(string $id, ?Duration $timeout = null): Job {}
     /** Look up an exact literal name, including names that look like UUIDs. */
@@ -261,6 +284,16 @@ final class Client
 /** Cached request-local resource. Getters and setters perform no RPC. @not-serializable */
 final class Queue
 {
+    /** Eagerly list persisted definitions by stable queue UUID, preserving any local edits.
+     * Retained deleted queues require includeDeleted. Limit is 1–200. @return Page<Job>
+     */
+    public function listJobs(
+        ?JobState $state = null,
+        ?JobType $type = null,
+        bool $includeDeleted = false,
+        int $limit = 100,
+        ?Duration $timeout = null
+    ): Page {}
     /** Copy inputs and create a job and initial scheduled run. Reject dirty/deleted queues. */
     public function createCliJob(
         CliPayload $payload,
