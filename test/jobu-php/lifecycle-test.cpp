@@ -147,7 +147,7 @@ auto evaluate(std::string_view expression) -> bool
 // Its Process owner reaps the child even if a test assertion interrupts the case.
 class Daemon {
 public:
-    auto start(EventLoop& loop, std::filesystem::path const& directory) -> void
+    auto start(EventLoop& loop, std::filesystem::path const& directory, bool execute_cli = false) -> void
     {
         _process.standard_error.connect(&_receiver, [this](jb::core::ByteBuffer const& bytes) {
             _log.append(jb::core::as_string_view(bytes));
@@ -160,6 +160,14 @@ public:
                                            (directory / "daemon.sock").string()};
         if (::geteuid() == 0) {
             arguments.emplace_back("--allow-root-daemon");
+            if (execute_cli) {
+                // Root daemon startup does not authorize child execution. Only
+                // explicitly opted-in, disposable test environments may do both.
+                auto const* enabled = std::getenv("JOBU_TEST_ALLOW_ROOT_CLI");
+                INFO("Root CLI execution requires JOBU_TEST_ALLOW_ROOT_CLI=1 in an isolated test environment");
+                REQUIRE((enabled && std::string_view{enabled} == "1"));
+                arguments.emplace_back("--allow-root-cli");
+            }
         }
         REQUIRE(_process.start({.executable = JOBUD_EXECUTABLE, .arguments = std::move(arguments)}));
         REQUIRE(loop.run_until(Clock::now() + 8s,
@@ -1801,7 +1809,7 @@ TEST_CASE("Public history preserves snapshots, typed results and ownership", "[p
     auto*                        previous = &host.value()->loop();
     jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     Daemon                       daemon;
-    daemon.start(*previous, directory.path());
+    daemon.start(*previous, directory.path(), /*execute_cli=*/true);
     {
         Runtime runtime;
         for (int request = 0; request != 2; ++request) {
@@ -1820,7 +1828,7 @@ TEST_CASE("Production CLI module reads typed history", "[php][history-cli]")
     auto&                        loop = host.value()->loop();
     jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
     Daemon                       daemon;
-    daemon.start(loop, directory.path());
+    daemon.start(loop, directory.path(), /*execute_cli=*/true);
 
     jb::core::Process                    process;
     jb::core::Object                     receiver;

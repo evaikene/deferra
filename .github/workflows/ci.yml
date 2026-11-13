@@ -236,6 +236,9 @@ jobs:
     needs: alpine
     runs-on: ubuntu-26.04
     container: alpine:3.24
+    env:
+      # History fixtures execute CLI jobs in this disposable root container.
+      JOBU_TEST_ALLOW_ROOT_CLI: "1"
     strategy:
       fail-fast: false
       matrix:
