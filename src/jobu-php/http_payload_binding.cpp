@@ -60,9 +60,10 @@ struct Configuration {
 
     auto trace(::php::GcVisitor& visitor) const noexcept -> void { visitor.add(owner.view()); }
 
-    Payload               value;
-    ::php::Value          owner;
-    std::function<void()> changed;
+    Payload                value;
+    ::php::Value           owner;
+    std::function<void()>  changed;
+    ConfigurationEditCheck editable;
 };
 
 struct HeaderValue {
@@ -449,7 +450,8 @@ enum class Edit : std::uint8_t {
     Statuses
 };
 
-auto edit(::php::Arguments const& args, Edit action, Payload& target) -> ::php::Result<bool>
+auto edit(::php::Arguments const& args, Edit action, Payload& target, ConfigurationEditCheck const& editable)
+    -> ::php::Result<bool>
 {
     // Conversion may invoke PHP. Never snapshot the payload before conversion
     // or replace unrelated fields afterward; nested edits are independent.
@@ -457,6 +459,10 @@ auto edit(::php::Arguments const& args, Edit action, Payload& target) -> ::php::
         auto text = read_string(args, 1);
         if (!text) {
             return text.error();
+        }
+        auto allowed = check_configuration_edit(editable);
+        if (!allowed) {
+            return allowed.error();
         }
         if (action == Edit::Url) {
             if (!valid_url(text.value())) {
@@ -485,6 +491,10 @@ auto edit(::php::Arguments const& args, Edit action, Payload& target) -> ::php::
         if (!header) {
             return header.error();
         }
+        auto allowed = check_configuration_edit(editable);
+        if (!allowed) {
+            return allowed.error();
+        }
         auto checked = check_headers(target.headers, &header.value());
         if (!checked) {
             return checked.error();
@@ -506,6 +516,10 @@ auto edit(::php::Arguments const& args, Edit action, Payload& target) -> ::php::
     auto body = action == Edit::JsonBody ? encode_json(args.get(1)) : read_text(args.get(1));
     if (!body) {
         return body.error();
+    }
+    auto allowed = check_configuration_edit(editable);
+    if (!allowed) {
+        return allowed.error();
     }
     // JsonSerializable can change method or headers. Check current state only
     // after it returns, and commit body plus an optional Content-Type together.
@@ -583,7 +597,12 @@ auto mutate(zend_execute_data* frame, Edit action) noexcept -> void
         ::php::raise(target.error());
         return;
     }
-    auto changed = edit(args, action, target.value()->value);
+    auto allowed = check_configuration_edit(target.value()->editable);
+    if (!allowed) {
+        ::php::raise(allowed.error());
+        return;
+    }
+    auto changed = edit(args, action, target.value()->value, target.value()->editable);
     if (!changed) {
         ::php::raise(changed.error());
         return;
@@ -707,14 +726,39 @@ auto replace_http_payload(zend_object* target, ::php::ValueView source) -> ::php
     if (!checked) {
         return checked.error();
     }
+    auto allowed = check_configuration_edit(destination.value()->editable);
+    if (!allowed) {
+        return allowed.error();
+    }
     if (update(destination.value()->value, supplied.value()->value) && destination.value()->changed) {
         destination.value()->changed();
     }
     return {};
 }
 
-auto attach_http_payload(zend_object* target, ::php::ValueView owner, std::function<void()> changed)
-    -> ::php::Result<void>
+auto prepare_http_payload_restore(zend_object* target, ::php::ValueView source) -> ::php::Result<ConfigurationRestore>
+{
+    auto destination = Binding::get(target);
+    if (!destination) {
+        return destination.error();
+    }
+    auto supplied = native(source);
+    if (!supplied) {
+        return supplied.error();
+    }
+    auto checked = export_payload(supplied.value()->value);
+    if (!checked) {
+        return checked.error();
+    }
+    return ConfigurationRestore([target = destination.value(), value = supplied.value()->value]() mutable {
+        target->value = std::move(value);
+    });
+}
+
+auto attach_http_payload(zend_object*           target,
+                         ::php::ValueView       owner,
+                         std::function<void()>  changed,
+                         ConfigurationEditCheck editable) -> ::php::Result<void>
 {
     auto config = Binding::get(target);
     if (!config) {
@@ -723,8 +767,9 @@ auto attach_http_payload(zend_object* target, ::php::ValueView owner, std::funct
     if (!owner.dereference().is_object() || config.value()->owner.view().is_initialized()) {
         return invalid("Payload requires an object owner and may only be attached once");
     }
-    config.value()->owner   = ::php::Value::retain(owner.dereference());
-    config.value()->changed = std::move(changed);
+    config.value()->owner    = ::php::Value::retain(owner.dereference());
+    config.value()->changed  = std::move(changed);
+    config.value()->editable = std::move(editable);
     return {};
 }
 

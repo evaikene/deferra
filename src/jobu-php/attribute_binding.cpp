@@ -42,8 +42,9 @@ auto invalid(std::string message = "Invalid attribute value") -> ::php::Error
 // edges: a view retains its parent, and a root retains its attached resource.
 // Thus native shared ownership never hides PHP cycles from Zend's collector.
 struct Layer {
-    jobu::AttributeSet    values;
-    std::function<void()> changed;
+    jobu::AttributeSet     values;
+    std::function<void()>  changed;
+    ConfigurationEditCheck editable;
 };
 
 struct Configuration {
@@ -323,6 +324,10 @@ auto write(Configuration& config, std::string_view name, ::php::ValueView input)
         return invalid(checked.error().message);
     }
 
+    auto allowed = check_configuration_edit(config.layer->editable);
+    if (!allowed) {
+        return allowed.error();
+    }
     auto found = config.layer->values.find(name);
     if (found != config.layer->values.end() && compare_value(found->second, value.value()) == 0) {
         return {};
@@ -486,6 +491,11 @@ auto access(zend_execute_data* frame,
     }
     auto found = config.layer->values.find(name);
     if (action == Access::Clear) {
+        auto allowed = check_configuration_edit(config.layer->editable);
+        if (!allowed) {
+            ::php::raise(allowed.error());
+            return;
+        }
         if (found != config.layer->values.end()) {
             config.layer->values.erase(found);
             notify(config);
@@ -603,6 +613,10 @@ auto merge_attributes(zend_object* target, ::php::ValueView source) -> ::php::Re
         return valid.error();
     }
 
+    auto allowed = check_configuration_edit(config.value()->layer->editable);
+    if (!allowed) {
+        return allowed.error();
+    }
     bool changed = false;
     // Commit only supplied keys, preserving the other runner in a queue view.
     for (auto& [name, value] : supplied.value()) {
@@ -639,6 +653,10 @@ auto replace_defaults(zend_object* target, ::php::ValueView source) -> ::php::Re
     if (!source_config) {
         return source_config.error();
     }
+    auto allowed = check_configuration_edit(config.value()->layer->editable);
+    if (!allowed) {
+        return allowed.error();
+    }
     if (compare_configuration(*config.value(), *source_config.value()) == 0) {
         return {};
     }
@@ -647,8 +665,69 @@ auto replace_defaults(zend_object* target, ::php::ValueView source) -> ::php::Re
     return {};
 }
 
-auto attach_attributes(zend_object* target, ::php::ValueView owner, std::function<void()> changed)
-    -> ::php::Result<void>
+auto attribute_snapshot(::php::ValueView value) -> ::php::Result<jobu::AttributeSet>
+{
+    auto config = configuration(value);
+    if (!config) {
+        return config.error();
+    }
+    return visible_values(*config.value());
+}
+
+auto equal_attributes(jobu::AttributeSet const& left, jobu::AttributeSet const& right) -> bool
+{
+    if (left.size() != right.size()) {
+        return false;
+    }
+    auto other = right.begin();
+    for (auto const& [name, value] : left) {
+        if (name != other->first || compare_value(value, other->second) != 0) {
+            return false;
+        }
+        ++other;
+    }
+    return true;
+}
+
+auto changed_attributes(jobu::AttributeSet const& baseline, jobu::AttributeSet const& current)
+    -> ::php::Result<jobu::AttributeSet>
+{
+    for (auto const& [name, value] : baseline) {
+        if (!current.contains(name)) {
+            return invalid("Job attributes cannot be removed");
+        }
+    }
+    jobu::AttributeSet changes;
+    for (auto const& [name, value] : current) {
+        auto found = baseline.find(name);
+        if (found == baseline.end() || compare_value(found->second, value) != 0) {
+            changes.emplace(name, value);
+        }
+    }
+    return changes;
+}
+
+auto prepare_attributes_restore(zend_object* target, jobu::AttributeSet values) -> ::php::Result<ConfigurationRestore>
+{
+    auto config = Binding::get(target);
+    if (!config) {
+        return config.error();
+    }
+    if (config.value()->scope == jobu::AttributeScope::QueueDefault && config.value()->runner) {
+        return invalid("Restore the QueueDefaults root, not a typed view");
+    }
+    auto valid = validate_layer(*config.value(), values);
+    if (!valid) {
+        return valid.error();
+    }
+    return ConfigurationRestore(
+        [target = config.value(), values = std::move(values)]() mutable { target->layer->values = std::move(values); });
+}
+
+auto attach_attributes(zend_object*           target,
+                       ::php::ValueView       owner,
+                       std::function<void()>  changed,
+                       ConfigurationEditCheck editable) -> ::php::Result<void>
 {
     auto config = Binding::get(target);
     if (!config) {
@@ -661,8 +740,9 @@ auto attach_attributes(zend_object* target, ::php::ValueView owner, std::functio
         config.value()->http.view().is_initialized()) {
         return invalid("Configuration is already attached or published");
     }
-    config.value()->owner          = ::php::Value::retain(owner.dereference());
-    config.value()->layer->changed = std::move(changed);
+    config.value()->owner           = ::php::Value::retain(owner.dereference());
+    config.value()->layer->changed  = std::move(changed);
+    config.value()->layer->editable = std::move(editable);
     return {};
 }
 

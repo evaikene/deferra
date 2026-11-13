@@ -49,9 +49,10 @@ struct Configuration {
 
     auto trace(::php::GcVisitor& visitor) const noexcept -> void { visitor.add(owner.view()); }
 
-    Payload               value;
-    ::php::Value          owner;
-    std::function<void()> changed;
+    Payload                value;
+    ::php::Value           owner;
+    std::function<void()>  changed;
+    ConfigurationEditCheck editable;
 };
 
 struct Policy : ::php::ObjectBindingPolicy<Configuration> {
@@ -356,12 +357,17 @@ auto update_field(T& target, T value) -> bool
     return true;
 }
 
-auto edit(::php::Arguments const& args, Edit action, Payload& target) -> ::php::Result<bool>
+auto edit(::php::Arguments const& args, Edit action, Payload& target, ConfigurationEditCheck const& editable)
+    -> ::php::Result<bool>
 {
     if (action == Edit::Command) {
         auto parsed = read_command(args);
         if (!parsed) {
             return parsed.error();
+        }
+        auto allowed = check_configuration_edit(editable);
+        if (!allowed) {
+            return allowed.error();
         }
         auto& command = parsed.value();
         if (target.executable == command.executable && target.arguments == command.arguments) {
@@ -403,6 +409,10 @@ auto edit(::php::Arguments const& args, Edit action, Payload& target) -> ::php::
     auto input = args.string(1);
     if (!input) {
         return input.error();
+    }
+    auto allowed = check_configuration_edit(editable);
+    if (!allowed) {
+        return allowed.error();
     }
     auto text = input.value().bytes();
     if (action == Edit::Executable) {
@@ -489,7 +499,12 @@ auto mutate(zend_execute_data* frame, Edit action) noexcept -> void
     // Each edit validates into temporaries before touching its owned fields.
     // Successful nested edits during coercion remain independent, even if the
     // outer edit fails. Notify only for this edit's actual committed change.
-    auto changed = edit(args, action, target.value()->value);
+    auto allowed = check_configuration_edit(target.value()->editable);
+    if (!allowed) {
+        ::php::raise(allowed.error());
+        return;
+    }
+    auto changed = edit(args, action, target.value()->value, target.value()->editable);
     if (!changed) {
         ::php::raise(changed.error());
         return;
@@ -585,12 +600,37 @@ auto replace_cli_payload(zend_object* target, ::php::ValueView source) -> ::php:
     if (!checked) {
         return checked.error();
     }
+    auto allowed = check_configuration_edit(destination.value()->editable);
+    if (!allowed) {
+        return allowed.error();
+    }
     commit(*destination.value(), supplied.value()->value);
     return {};
 }
 
-auto attach_cli_payload(zend_object* target, ::php::ValueView owner, std::function<void()> changed)
-    -> ::php::Result<void>
+auto prepare_cli_payload_restore(zend_object* target, ::php::ValueView source) -> ::php::Result<ConfigurationRestore>
+{
+    auto destination = Binding::get(target);
+    if (!destination) {
+        return destination.error();
+    }
+    auto supplied = native(source);
+    if (!supplied) {
+        return supplied.error();
+    }
+    auto checked = export_payload(supplied.value()->value);
+    if (!checked) {
+        return checked.error();
+    }
+    return ConfigurationRestore([target = destination.value(), value = supplied.value()->value]() mutable {
+        target->value = std::move(value);
+    });
+}
+
+auto attach_cli_payload(zend_object*           target,
+                        ::php::ValueView       owner,
+                        std::function<void()>  changed,
+                        ConfigurationEditCheck editable) -> ::php::Result<void>
 {
     auto config = Binding::get(target);
     if (!config) {
@@ -599,8 +639,9 @@ auto attach_cli_payload(zend_object* target, ::php::ValueView owner, std::functi
     if (!owner.dereference().is_object() || config.value()->owner.view().is_initialized()) {
         return invalid("Payload requires an object owner and may only be attached once");
     }
-    config.value()->owner   = ::php::Value::retain(owner.dereference());
-    config.value()->changed = std::move(changed);
+    config.value()->owner    = ::php::Value::retain(owner.dereference());
+    config.value()->changed  = std::move(changed);
+    config.value()->editable = std::move(editable);
     return {};
 }
 
