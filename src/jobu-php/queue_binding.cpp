@@ -563,6 +563,15 @@ auto rpc(zend_execute_data* frame, Rpc kind) -> ::php::Result<void>
 
 } // namespace
 
+auto queue_state(zend_object* object) -> ::php::Result<ResourceState<jobu::Queue>*>
+{
+    auto native = Binding::get(object);
+    if (!native) {
+        return native.error();
+    }
+    return &native.value()->state();
+}
+
 auto bind_queue_class(zend_class_entry* queue) -> bool
 {
     return static_cast<bool>(Binding::bind(queue));

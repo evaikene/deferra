@@ -250,5 +250,76 @@ auto test_queues(std::string const& endpoint, std::string const& proxy_endpoint)
         queueCheck($GLOBALS['weakQueue']->get() === null && $GLOBALS['weakClient']->get() === null, 'cycles collected');
         return true;
     )PHP");
+    run("return require '" JOBU_PHP_JOB_SCRIPT "';");
+    run(R"PHP(
+        $c = new JobU\Client(QUEUE_SOCKET);
+        $q = $c->createQueue(QUEUE_PREFIX . 'job-faults'); $q->suspend();
+        $GLOBALS['faultQueue'] = $q; $GLOBALS['faultClient'] = $c;
+        return true;
+    )PHP");
+    proxy.drop_method = "job.create";
+    proxy.drops       = 1;
+    before            = proxy.requests["job.create"].size();
+    run(R"PHP(
+        $q = $GLOBALS['faultQueue'];
+        $j = $q->createCliJob(new JobU\CliPayload('/bin/true'), new JobU\OnceSchedule(new DateTimeImmutable('+1 day')));
+        $GLOBALS['faultJob'] = $j; $GLOBALS['faultJobId'] = $j->getId();
+        return true;
+    )PHP");
+    REQUIRE(proxy.requests["job.create"].size() == before + 2);
+    CHECK(proxy.requests["job.create"][before] == proxy.requests["job.create"][before + 1]);
+
+    // Creation commits exactly one schedule-owned occurrence, even after a lost
+    // reply. Inspect through the native SDK; public pagination belongs to 4.4.
+    auto job_id = jb::php::uuid_from_php(global("faultJobId"));
+    REQUIRE(job_id);
+    auto job_client = jb::php::native_client(Z_OBJ_P(global("faultClient").get()));
+    REQUIRE(job_client);
+    auto job_deadline = job_client.value()->deadline(jb::core::Clock::now());
+    REQUIRE(job_deadline);
+    auto runs =
+        jb::php::Operation::bind("run.list",
+                                 &jb::jobu::ControlClient::list_runs,
+                                 jb::jobu::RunListRequest{jb::jobu::RunQuery{.filters = {.job_id = job_id.value()}}});
+    REQUIRE(runs);
+    auto listed = jb::php::resource_call(global("faultClient"), job_deadline.value(), runs.value());
+    REQUIRE(listed);
+    auto const* page = std::get_if<jb::jobu::RunPage>(&listed.value());
+    REQUIRE(page);
+    REQUIRE(page->items.size() == 1);
+    CHECK(page->items.front().schedule_owned);
+
+    proxy.drop_method = "job.update";
+    proxy.drops       = 1;
+    before            = proxy.requests["job.update"].size();
+    run(R"PHP(
+        $j = $GLOBALS['faultJob']; $revision = $j->getRevision();
+        $j->setPriority(7); $j->attributes()->setTimeout(JobU\Duration::seconds(19));
+        queueThrows(JobU\OutcomeUnknownException::class, fn() => $j->save());
+        queueCheck($j->isDirty() && $j->getRevision() === $revision, 'uncertain job preserves baseline');
+        $j->discardChanges(); $j->refresh();
+        queueCheck($j->getPriority() === 7, 'job explicit reconciliation');
+        return true;
+    )PHP");
+    CHECK(proxy.requests["job.update"].size() == before + 1);
+    auto const& patch = proxy.requests["job.update"][before].as_object();
+    CHECK(patch.contains("priority"));
+    CHECK(patch.contains("attributes"));
+    CHECK_FALSE(patch.contains("payload"));
+    CHECK_FALSE(patch.contains("schedule"));
+    CHECK_FALSE(patch.contains("type"));
+    CHECK(patch.at("attributes").as_object().size() == 1);
+
+    proxy.drop_method = "job.run_now";
+    proxy.drops       = 1;
+    before            = proxy.requests["job.run_now"].size();
+    run(R"PHP(
+        $j = $GLOBALS['faultJob'];
+        $r = $j->runNow();
+        queueCheck($r->getJobId() === $j->getId(), 'lost Run Now reply');
+        return true;
+    )PHP");
+    REQUIRE(proxy.requests["job.run_now"].size() == before + 2);
+    CHECK(proxy.requests["job.run_now"][before] == proxy.requests["job.run_now"][before + 1]);
 }
 } // namespace jobu_php_test

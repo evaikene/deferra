@@ -20,6 +20,9 @@ auto bind_attribute_classes(zend_class_entry* attributes,
 /// Does not add defaults, call PHP, or perform RPC.
 auto attributes_from_php(::php::ValueView value) -> ::php::Result<jobu::AttributeSet>;
 
+/// Construct detached runner-specific attributes from a validated native reply.
+auto job_attributes_to_php(jobu::JobType runner, jobu::AttributeSet values) -> ::php::Result<::php::Value>;
+
 /// Construct a detached defaults object from a validated native reply without calling PHP.
 auto defaults_to_php(jobu::AttributeSet values) -> ::php::Result<::php::Value>;
 

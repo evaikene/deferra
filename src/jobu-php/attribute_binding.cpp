@@ -632,6 +632,24 @@ auto merge_attributes(zend_object* target, ::php::ValueView source) -> ::php::Re
     return {};
 }
 
+auto job_attributes_to_php(jobu::JobType runner, jobu::AttributeSet values) -> ::php::Result<::php::Value>
+{
+    zval        slot{};
+    auto const* name = runner == jobu::JobType::Cli ? "jobu\\clijobattributes" : "jobu\\httpjobattributes";
+    object_init_ex(&slot, class_entry(name));
+    auto owner  = ::php::Value::adopt(slot);
+    auto native = Binding::construct(Z_OBJ_P(owner.get()), jobu::AttributeScope::Job, std::optional{runner});
+    if (!native) {
+        return native.error();
+    }
+    auto replacement = prepare_attributes_restore(Z_OBJ_P(owner.get()), std::move(values));
+    if (!replacement) {
+        return replacement.error();
+    }
+    std::move(replacement).value().commit();
+    return owner;
+}
+
 auto defaults_to_php(jobu::AttributeSet values) -> ::php::Result<::php::Value>
 {
     zval slot{};

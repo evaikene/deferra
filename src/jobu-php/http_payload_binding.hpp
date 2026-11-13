@@ -13,6 +13,12 @@ namespace jb::php {
 /// Install the mutable HTTP payload and immutable header bindings during MINIT.
 auto bind_http_payload_classes(zend_class_entry* payload, zend_class_entry* header) -> bool;
 
+/// Compare initialized configurations without validation, PHP callbacks or allocation.
+auto equal_http_payload(::php::ValueView left, ::php::ValueView right) -> bool;
+
+/// Copy a decoded server template without invoking PHP constructors or resolving secrets.
+auto http_payload_to_php(core::JsonValue const& value) -> ::php::Result<::php::Value>;
+
 /// Copy a validated HTTP template for native create/update, without resolving secrets or running PHP/RPC.
 auto http_payload_from_php(::php::ValueView value) -> ::php::Result<core::JsonValue>;
 

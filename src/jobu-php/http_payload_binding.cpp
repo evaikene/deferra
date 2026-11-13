@@ -1,5 +1,6 @@
 #include "http_payload_binding.hpp"
 #include "value_binding.hpp"
+#include "value_snapshot.hpp"
 
 #include <jb/core/text_validation.hpp>
 #include <phpcxx/arguments.hpp>
@@ -406,6 +407,18 @@ auto native(::php::ValueView input) -> ::php::Result<Configuration*>
     return Binding::get(Z_OBJ_P(value.get()));
 }
 
+auto loaded_text(core::JsonValue const& value) -> ::php::Result<Text>
+{
+    if (value.is_string()) {
+        return Text{.value = value.as_string()};
+    }
+    auto const* secret = snapshot::field(value, "secret");
+    if (!secret || !secret->is_string()) {
+        return invalid("Invalid payload text in server reply");
+    }
+    return Text{.value = secret->as_string(), .secret = true};
+}
+
 auto php_text(Text const& text) -> ::php::Result<::php::Value>
 {
     if (text.secret) {
@@ -701,6 +714,102 @@ auto bind_http_payload_classes(zend_class_entry* payload, zend_class_entry* head
     payload->ce_flags |= ZEND_ACC_NO_DYNAMIC_PROPERTIES;
     header->ce_flags  |= ZEND_ACC_NO_DYNAMIC_PROPERTIES;
     return static_cast<bool>(Binding::bind(payload)) && static_cast<bool>(HeaderBinding::bind(header));
+}
+
+auto equal_http_payload(::php::ValueView left, ::php::ValueView right) -> bool
+{
+    return native(left).value()->value == native(right).value()->value;
+}
+
+auto http_payload_to_php(core::JsonValue const& value) -> ::php::Result<::php::Value>
+{
+    Payload     payload;
+    auto const* url = snapshot::field(value, "url");
+    if (!url || !url->is_string()) {
+        return invalid("Invalid HTTP URL in server reply");
+    }
+    payload.url = url->as_string();
+    if (auto const* method = snapshot::field(value, "method")) {
+        if (!method->is_string()) {
+            return invalid("Invalid HTTP method in server reply");
+        }
+        // Historical templates retain their exact method spelling. Admission
+        // validation applies when explicitly replacing a payload, not reading it.
+        payload.method = method->as_string();
+    }
+    if (auto const* headers = snapshot::field(value, "headers")) {
+        if (!headers->is_array()) {
+            return invalid("Invalid HTTP headers in server reply");
+        }
+        for (auto const& item : headers->as_array()) {
+            auto const* name      = snapshot::field(item, "name");
+            auto const* text      = snapshot::field(item, "value");
+            auto const* sensitive = snapshot::field(item, "sensitive");
+            if (!name || !name->is_string() || !text || (sensitive && !sensitive->is_bool())) {
+                return invalid("Invalid HTTP header in server reply");
+            }
+            auto parsed = loaded_text(*text);
+            if (!parsed) {
+                return parsed.error();
+            }
+            bool protected_header = (sensitive != nullptr && sensitive->as_bool()) || parsed.value().secret ||
+                                    equal_name(name->as_string(), "Authorization") ||
+                                    equal_name(name->as_string(), "Cookie") ||
+                                    equal_name(name->as_string(), "Proxy-Authorization");
+            payload.headers.push_back(
+                {.name = name->as_string(), .value = std::move(parsed).value(), .sensitive = protected_header});
+        }
+    }
+    if (auto const* body = snapshot::field(value, "body")) {
+        if (snapshot::field(*body, "secret")) {
+            auto text = loaded_text(*body);
+            if (!text) {
+                return text.error();
+            }
+            payload.body = std::move(text).value();
+        }
+        else {
+            auto const* encoding = snapshot::field(*body, "encoding");
+            auto const* data     = snapshot::field(*body, "data");
+            if (!encoding || !encoding->is_string() || !data || !data->is_string()) {
+                return invalid("Invalid HTTP body in server reply");
+            }
+            std::string bytes = data->as_string();
+            if (encoding->as_string() == "base64") {
+                auto* decoded =
+                    php_base64_decode_ex(reinterpret_cast<unsigned char const*>(bytes.data()), bytes.size(), true);
+                if (!decoded) {
+                    return invalid("Invalid HTTP body encoding in server reply");
+                }
+                auto owner = ::php::String::adopt(decoded);
+                bytes      = owner.view().bytes();
+            }
+            else if (encoding->as_string() != "utf8") {
+                return invalid("Invalid HTTP body encoding in server reply");
+            }
+            payload.body = Text{.value = std::move(bytes)};
+        }
+    }
+    if (auto const* statuses = snapshot::field(value, "expected_statuses")) {
+        auto converted = snapshot::to_php(*statuses);
+        if (!converted) {
+            return converted.error();
+        }
+        auto parsed = read_statuses(converted.value().view());
+        if (!parsed) {
+            return parsed.error();
+        }
+        payload.statuses = std::move(parsed).value();
+    }
+
+    zval slot{};
+    object_init_ex(&slot, snapshot::entry("jobu\\httppayload"));
+    auto owner       = ::php::Value::adopt(slot);
+    auto constructed = Binding::construct(Z_OBJ_P(owner.get()), std::move(payload));
+    if (!constructed) {
+        return constructed.error();
+    }
+    return owner;
 }
 
 auto http_payload_from_php(::php::ValueView value) -> ::php::Result<core::JsonValue>

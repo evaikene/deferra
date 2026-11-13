@@ -235,6 +235,8 @@ final class Client
     public function __construct(string $socketPath, ?Duration $timeout = null) {}
     /** Idempotently close this session. Further operations fail locally. */
     public function close(): void {}
+    /** Load a job by canonical UUID. */
+    public function getJob(string $id, ?Duration $timeout = null): Job {}
     /** Look up an exact literal name, including names that look like UUIDs. */
     public function getQueue(string $name, bool $includeDeleted = false, ?Duration $timeout = null): Queue {}
     /** Look up a canonical lowercase UUID. */
@@ -259,6 +261,26 @@ final class Client
 /** Cached request-local resource. Getters and setters perform no RPC. @not-serializable */
 final class Queue
 {
+    /** Copy inputs and create a job and initial scheduled run. Reject dirty/deleted queues. */
+    public function createCliJob(
+        CliPayload $payload,
+        Schedule $schedule,
+        ?string $name = null,
+        int $priority = 0,
+        ?JobAttributes $attributes = null,
+        ?string $idempotencyKey = null,
+        ?Duration $timeout = null
+    ): Job {}
+    /** Copy inputs and create a job and initial scheduled run. Reject dirty/deleted queues. */
+    public function createHttpJob(
+        HttpPayload $payload,
+        Schedule $schedule,
+        ?string $name = null,
+        int $priority = 0,
+        ?JobAttributes $attributes = null,
+        ?string $idempotencyKey = null,
+        ?Duration $timeout = null
+    ): Job {}
     private function __construct() {}
     public function getId(): string {}
     public function getRevision(): int {}
@@ -590,4 +612,78 @@ enum OutputStatus: string
     case Pending = 'pending';
     case NotCaptured = 'not_captured';
     case Lost = 'lost';
+}
+
+/** Cached job definition. Local edits require save; lifecycle calls reject dirty state. @not-serializable */
+final class Job
+{
+    private function __construct() {}
+    public function getId(): string {}
+    public function getQueueId(): string {}
+    public function getRevision(): int {}
+    public function getName(): ?string {}
+    public function getPriority(): int {}
+    public function getState(): JobState {}
+    public function getType(): JobType {}
+    public function getCreatedAt(): \DateTimeImmutable {}
+    public function getUpdatedAt(): \DateTimeImmutable {}
+    public function getDeletedAt(): ?\DateTimeImmutable {}
+    public function getSchedule(): Schedule {}
+    /** Detached deep copy, including local edits. */
+    public function getAttributes(): JobAttributes {}
+    /** Attached typed configuration; identity is stable across save/refresh/discard. */
+    public function attributes(): JobAttributes {}
+    /** Detached deep copy of the original template; secrets remain symbolic. */
+    public function getPayload(): CliPayload|HttpPayload {}
+    /** Attached mutable payload retaining this Job and its Client. */
+    public function payload(): CliPayload|HttpPayload {}
+    public function isDirty(): bool {}
+    public function isDeleted(): bool {}
+    public function setName(?string $name): void {}
+    public function setPriority(int $priority): void {}
+    /** Replace locally; symbolic now is creation-only and omitted timezone stays unresolved until save. */
+    public function setSchedule(Schedule $schedule): void {}
+    /** Merge all supplied keys; omitted values remain unchanged. */
+    public function setAttributes(JobAttributes $attributes): void {}
+    /** Replace all fields in place; the runner must match this Job. */
+    public function setPayload(CliPayload|HttpPayload $payload): void {}
+    /** Submit net edits with the accepted revision; conflict/uncertainty preserves edits. */
+    public function save(?Duration $timeout = null): void {}
+    /** Fetch explicitly; reject dirty or locally deleted state. */
+    public function refresh(?Duration $timeout = null): void {}
+    /** Restore the last accepted snapshot in place without RPC. */
+    public function discardChanges(): void {}
+    public function suspend(?Duration $timeout = null): void {}
+    public function resume(?Duration $timeout = null): void {}
+    /** Move by UUID/revision to a clean, nondeleted Queue from the same Client. */
+    public function move(Queue $queue, ?Duration $timeout = null): void {}
+    /** Mark locally deleted after success, retaining cached fields and revision. */
+    public function delete(?Duration $timeout = null): void {}
+    /** Create a keyed manual run without waiting for execution or refreshing the Job. */
+    public function runNow(?string $idempotencyKey = null, ?Duration $timeout = null): Run {}
+}
+
+/** Complete cached run snapshot. Getters never fetch or wait for execution. @not-serializable */
+final class Run
+{
+    private function __construct() {}
+    public function getId(): string {}
+    public function getJobId(): string {}
+    public function getQueueId(): string {}
+    public function getJobRevision(): int {}
+    public function getPriority(): int {}
+    public function getOrigin(): RunOrigin {}
+    public function getType(): JobType {}
+    public function getState(): RunState {}
+    public function isScheduleOwned(): bool {}
+    public function getPlannedAt(): \DateTimeImmutable {}
+    public function getRunnableAt(): \DateTimeImmutable {}
+    public function getStartedAt(): ?\DateTimeImmutable {}
+    public function getCompletedAt(): ?\DateTimeImmutable {}
+    /** Detached deep copy, including local edits. */
+    public function getAttributes(): JobAttributes {}
+    /** Detached deep copy of the original template; secrets remain symbolic. */
+    public function getPayload(): CliPayload|HttpPayload {}
+    /** Cached safe execution summary, or null while unavailable. No hidden fetch. */
+    public function getResult(): ?ExecutionResult {}
 }

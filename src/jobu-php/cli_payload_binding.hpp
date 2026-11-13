@@ -13,6 +13,12 @@ namespace jb::php {
 /// Install the mutable CLI payload binding during MINIT.
 auto bind_cli_payload_class(zend_class_entry* entry) -> bool;
 
+/// Compare initialized configurations without validation, PHP callbacks or allocation.
+auto equal_cli_payload(::php::ValueView left, ::php::ValueView right) -> bool;
+
+/// Copy a decoded server template without invoking PHP constructors or resolving secrets.
+auto cli_payload_to_php(core::JsonValue const& value) -> ::php::Result<::php::Value>;
+
 /// Copy and validate a complete CLI template for native create/update requests.
 /// Does not resolve secrets, inherit environment, execute PHP, or perform RPC.
 auto cli_payload_from_php(::php::ValueView value) -> ::php::Result<core::JsonValue>;

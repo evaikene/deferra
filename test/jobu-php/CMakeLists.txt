@@ -41,7 +41,7 @@ if(php_embed_found AND jobu_php_test_daemon)
     add_executable(jobu-php-lifecycle-test lifecycle-test.cpp lifecycle-bindings.cpp bridge-test.cpp resource-bindings.cpp resource-state-test.cpp queue-test.cpp
         "${jobu_php_source}/module.cpp" "${jobu_php_source}/request.cpp"
         "${jobu_php_source}/value_binding.cpp" "${jobu_php_source}/attribute_binding.cpp" "${jobu_php_source}/cli_payload_binding.cpp" "${jobu_php_source}/http_payload_binding.cpp"
-        "${jobu_php_source}/query_binding.cpp" "${jobu_php_source}/result_binding.cpp" "${jobu_php_source}/value_snapshot.cpp" "${jobu_php_source}/resource_state.cpp" "${jobu_php_source}/queue_binding.cpp"
+        "${jobu_php_source}/query_binding.cpp" "${jobu_php_source}/result_binding.cpp" "${jobu_php_source}/value_snapshot.cpp" "${jobu_php_source}/resource_state.cpp" "${jobu_php_source}/queue_binding.cpp" "${jobu_php_source}/job_binding.cpp" "${jobu_php_source}/run_binding.cpp"
         "${jobu_php_source}/client.cpp" "${jobu_php_source}/client_binding.cpp" "${jobu_php_source}/operation.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../support/temporary_directory.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../support/memory_io_device.cpp")
@@ -54,6 +54,7 @@ if(php_embed_found AND jobu_php_test_daemon)
         JOBUD_EXECUTABLE="${jobu_php_test_daemon}"
         JOBU_PHP_BINARY="${php_binary}"
         JOBU_PHP_MODULE="$<TARGET_FILE:jobu-php>"
+        JOBU_PHP_JOB_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/job.php"
         JOBU_PHP_QUEUE_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/queue.php"
         JOBU_PHP_CLIENT_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/client.php"
         JOBU_PHP_LIFECYCLE_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/lifecycle.php")
