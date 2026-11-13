@@ -256,6 +256,13 @@ final class Client
     public function __construct(string $socketPath, ?Duration $timeout = null) {}
     /** Idempotently close this session. Further operations fail locally. */
     public function close(): void {}
+    /** Fetch current daemon metadata explicitly; the returned snapshot is detached. */
+    public function getSystemInfo(?Duration $timeout = null): SystemInfo {}
+    /** Retained statistics across queues. Omitted window bounds are resolved by the daemon.
+     * @return Page<StatisticsGroup>
+     */
+    public function systemStatistics(?StatisticsQuery $query = null, ?Duration $timeout = null): Page {}
+
     /** Eagerly fetch definitions; null state includes every state permitted by includeDeleted.
      * Limit is 1–200. @return Page<Queue>
      */
@@ -305,6 +312,12 @@ final class Client
 /** Cached request-local resource. Getters and setters perform no RPC. @not-serializable */
 final class Queue
 {
+    /** Retained statistics for this stable queue ID, including dirty or deleted owners.
+     * A supplied query queueId must match. This read preserves local edits and cached state.
+     * @return Page<StatisticsGroup>
+     */
+    public function statistics(?StatisticsQuery $query = null, ?Duration $timeout = null): Page {}
+
     /** Load a nondeleted job belonging to this queue; a missing or out-of-scope ID raises NotFoundException.
      * Preserves local edits. Use listJobs(includeDeleted: true) for retained deleted definitions.
      */
@@ -864,4 +877,101 @@ final class Page
      * @return list<T>
      */
     public function items(): array {}
+    /** Metadata for the buffered/current statistics page, including empty results.
+     * Available before the first next(); null for other page sources. Never performs RPC.
+     * Failed continuation preserves this snapshot together with the items and position.
+     */
+    public function getStatisticsMetadata(): ?StatisticsMetadata {}
+}
+
+/** Detached immutable statistics group. All counts describe retained history. @not-serializable */
+final class StatisticsGroup
+{
+    private function __construct() {}
+    /** Null for None, canonical UUID for Queue/Job, or the grouping's backed enum. */
+    public function getKey(): string|JobType|RunOrigin|RunState|null {}
+    public function getRuns(): StatisticsRunCounts {}
+    public function getAttempts(): StatisticsAttemptCounts {}
+    public function getCapture(): StatisticsCaptureCounts {}
+    /** First start minus planned time, once per run; wall-clock derived. */
+    public function getScheduleLateness(): StatisticsDuration {}
+    /** Completed attempt start/end differences; wall-clock derived. */
+    public function getExecutionWallDuration(): StatisticsDuration {}
+    /** Complete terminal runs only, once per run; null when measurement is unavailable. */
+    public function getRunnableWait(): ?StatisticsDuration {}
+    public function getRunnableWaitCoverage(): StatisticsRunnableWaitCoverage {}
+}
+
+/** Immutable retained run counts, including every fixed state/type/origin. @not-serializable */
+final class StatisticsRunCounts
+{
+    private function __construct() {}
+    public function getTotal(): int {}
+    public function getStateCount(RunState $state): int {}
+    public function getTypeCount(JobType $type): int {}
+    public function getOriginCount(RunOrigin $origin): int {}
+}
+
+/** Immutable counts of all retained attempts of selected runs, including retries outside the window. @not-serializable */
+final class StatisticsAttemptCounts
+{
+    private function __construct() {}
+    public function getTotal(): int {}
+    public function getStateCount(AttemptState $state): int {}
+    public function getOutcomeCount(AttemptOutcome $outcome): int {}
+    public function getRetries(): int {}
+}
+
+/** Immutable persisted capture events. An absent output row proves neither event. @not-serializable */
+final class StatisticsCaptureCounts
+{
+    private function __construct() {}
+    public function getTruncatedAttempts(): int {}
+    public function getLostAttempts(): int {}
+}
+
+/** Immutable sampled duration; fractional milliseconds are preserved. @not-serializable */
+final class StatisticsDuration
+{
+    private function __construct() {}
+    public function getSamples(): int {}
+    /** Null for zero samples; a measured zero is 0.0. */
+    public function getAverageMilliseconds(): ?float {}
+    public function getMaximumMilliseconds(): ?float {}
+}
+
+/** Immutable mutually exclusive run coverage, summing to the run total.
+ * Partial lower bounds and unmeasured/unfinished runs supply no duration samples. @not-serializable
+ */
+final class StatisticsRunnableWaitCoverage
+{
+    private function __construct() {}
+    public function getComplete(): int {}
+    public function getPartial(): int {}
+    public function getUnmeasured(): int {}
+    public function getUnfinished(): int {}
+}
+
+/** Immutable page context; its resolved window stays fixed for the cursor lifetime.
+ * Pages read live retained data, not a database snapshot. @not-serializable
+ */
+final class StatisticsMetadata
+{
+    private function __construct() {}
+    /** Both bounds are resolved, returned as fresh UTC DateTimeImmutable values. */
+    public function getWindow(): TimeRange {}
+    public function getGroupBy(): StatisticsGroupBy {}
+    public function getMeasurement(): StatisticsMeasurement {}
+}
+
+/** Immutable measurement provenance; it does not imply full cohort coverage. @not-serializable */
+final class StatisticsMeasurement
+{
+    private function __construct() {}
+    /** Currently wall_clock_derived. */
+    public function getTiming(): string {}
+    /** Currently monotonic_observed or unavailable. */
+    public function getRunnableWait(): string {}
+    /** Currently persisted_output_flags. */
+    public function getCapture(): string {}
 }

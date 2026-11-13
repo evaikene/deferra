@@ -46,6 +46,8 @@ public:
     /// Separate delays prove reconnect and administration share one deadline.
     std::chrono::milliseconds                                     handshake_reply_delay{0};
     std::chrono::milliseconds                                     administration_reply_delay{0};
+    /// Delay statistics reads independently from reconnect handshakes.
+    std::chrono::milliseconds                                     statistics_reply_delay{0};
     std::string                                                   drop_method;
     int                                                           drops{0};
     int                                                           connections{0};
@@ -169,6 +171,9 @@ private:
                 }
                 else if (_method == "attempt.output" || _method == "attempt.list") {
                     delay = _proxy.output_reply_delay;
+                }
+                else if (_method == "system.stats" || _method == "queue.stats") {
+                    delay = _proxy.statistics_reply_delay;
                 }
                 else if (_method == "system.info") {
                     delay = _proxy.handshake_reply_delay;

@@ -6,6 +6,7 @@
 #include "queue_binding.hpp"
 #include "resource_state.hpp"
 #include "result_binding.hpp"
+#include "statistics_binding.hpp"
 #include "value_snapshot.hpp"
 
 #include <ext/spl/spl_exceptions.h>
@@ -109,8 +110,16 @@ auto source(std::string name,
         if (!items.value().view().is_array()) {
             return invalid("Page projection must return an array");
         }
-        auto next = items.value().view().get_array().empty() ? PageContinuation{} : boundary(*page);
-        return PageBatch{std::move(items).value(), std::move(next)};
+        auto next     = items.value().view().get_array().empty() ? PageContinuation{} : boundary(*page);
+        auto metadata = ::php::Value::null();
+        if constexpr (std::is_same_v<Page, jobu::StatisticsPage>) {
+            auto converted = statistics_metadata_to_php(*page);
+            if (!converted) {
+                return converted.error();
+            }
+            metadata = std::move(converted).value();
+        }
+        return PageBatch{std::move(items).value(), std::move(next), std::move(metadata)};
     };
 }
 
@@ -283,4 +292,19 @@ ZEND_METHOD(JobU_Page, items)
 ZEND_METHOD(JobU_Page, next)
 {
     jb::php::snapshot::return_value(jb::php::advance(execute_data), return_value);
+}
+
+ZEND_METHOD(JobU_Page, getStatisticsMetadata)
+{
+    auto count = php::Arguments(execute_data).count(0, 0);
+    if (!count) {
+        php::raise(count.error());
+        return;
+    }
+    auto page = php::ObjectBinding<jb::php::PageState>::get(Z_OBJ(execute_data->This));
+    if (!page) {
+        php::raise(page.error());
+        return;
+    }
+    *return_value = page.value()->statistics_metadata().release();
 }

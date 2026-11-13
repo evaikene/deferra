@@ -11,6 +11,7 @@
 #include "result_binding.hpp"
 #include "run_binding.hpp"
 #include "value_binding.hpp"
+#include "value_snapshot.hpp"
 
 #include <phpcxx/arguments.hpp>
 #include <phpcxx/build.hpp>
@@ -129,6 +130,18 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
                                      register_class_JobU_RunQuery(),
                                      register_class_JobU_StatisticsQuery())) {
         return FAILURE;
+    }
+    for (auto* entry : {register_class_JobU_StatisticsGroup(),
+                        register_class_JobU_StatisticsRunCounts(),
+                        register_class_JobU_StatisticsAttemptCounts(),
+                        register_class_JobU_StatisticsCaptureCounts(),
+                        register_class_JobU_StatisticsDuration(),
+                        register_class_JobU_StatisticsRunnableWaitCoverage(),
+                        register_class_JobU_StatisticsMetadata(),
+                        register_class_JobU_StatisticsMeasurement()}) {
+        if (!jb::php::snapshot::bind(entry)) {
+            return FAILURE;
+        }
     }
     auto* result = register_class_JobU_ExecutionResult();
     if (!jb::php::bind_result_classes(register_class_JobU_SystemInfo(),

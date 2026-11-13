@@ -13,6 +13,7 @@ auto PageState::trace(::php::GcVisitor& visitor) const noexcept -> void
 {
     visitor.add(_client.view());
     visitor.add(_page.items.view());
+    visitor.add(_page.statistics_metadata.view());
 }
 
 auto PageState::client() const noexcept -> ::php::ValueView
@@ -36,6 +37,11 @@ auto PageState::items() const -> ::php::Value
         return ::php::Value::adopt(empty);
     }
     return ::php::Value::retain(_page.items.view());
+}
+
+auto PageState::statistics_metadata() const -> ::php::Value
+{
+    return ::php::Value::retain(_page.statistics_metadata.view());
 }
 
 auto PageState::next(core::TimePoint deadline) -> ::php::Result<void>

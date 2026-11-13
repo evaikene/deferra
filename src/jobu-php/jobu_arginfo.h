@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 1c2eaaafd725fa4fd3e9fe0d094f54951b0c1cf5 */
+ * Stub hash: 2ac59183388076eb99d5b6366173b45e63f13add */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Duration___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -328,6 +328,15 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_JobU_Client_close arginfo_class_JobU_HttpPayload_clearBody
 
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Client_getSystemInfo, 0, 0, JobU\\SystemInfo, 0)
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Client_systemStatistics, 0, 0, JobU\\Page, 0)
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, query, JobU\\StatisticsQuery, 1, "null")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Client_listQueues, 0, 0, JobU\\Page, 0)
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, state, JobU\\QueueState, 1, "null")
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, includeDeleted, _IS_BOOL, 0, "false")
@@ -373,6 +382,8 @@ ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Client_createQueue, 0,
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, idempotencyKey, IS_STRING, 1, "null")
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
 ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_Queue_statistics arginfo_class_JobU_Client_systemStatistics
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Queue_getJob, 0, 1, JobU\\Job, 0)
 	ZEND_ARG_TYPE_INFO(0, id, IS_STRING, 0)
@@ -906,6 +917,105 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_JobU_Page_items arginfo_class_JobU_CliPayload_getArguments
 
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Page_getStatisticsMetadata, 0, 0, JobU\\StatisticsMetadata, 1)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_StatisticsGroup___construct arginfo_class_JobU_Duration___construct
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_TYPE_MASK_EX(arginfo_class_JobU_StatisticsGroup_getKey, 0, 0, JobU\\JobType|JobU\\RunOrigin|JobU\\RunState, MAY_BE_STRING|MAY_BE_NULL)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_StatisticsGroup_getRuns, 0, 0, JobU\\StatisticsRunCounts, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_StatisticsGroup_getAttempts, 0, 0, JobU\\StatisticsAttemptCounts, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_StatisticsGroup_getCapture, 0, 0, JobU\\StatisticsCaptureCounts, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_StatisticsGroup_getScheduleLateness, 0, 0, JobU\\StatisticsDuration, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_StatisticsGroup_getExecutionWallDuration arginfo_class_JobU_StatisticsGroup_getScheduleLateness
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_StatisticsGroup_getRunnableWait, 0, 0, JobU\\StatisticsDuration, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_StatisticsGroup_getRunnableWaitCoverage, 0, 0, JobU\\StatisticsRunnableWaitCoverage, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_StatisticsRunCounts___construct arginfo_class_JobU_Duration___construct
+
+#define arginfo_class_JobU_StatisticsRunCounts_getTotal arginfo_class_JobU_Duration_getMilliseconds
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_StatisticsRunCounts_getStateCount, 0, 1, IS_LONG, 0)
+	ZEND_ARG_OBJ_INFO(0, state, JobU\\RunState, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_StatisticsRunCounts_getTypeCount, 0, 1, IS_LONG, 0)
+	ZEND_ARG_OBJ_INFO(0, type, JobU\\JobType, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_StatisticsRunCounts_getOriginCount, 0, 1, IS_LONG, 0)
+	ZEND_ARG_OBJ_INFO(0, origin, JobU\\RunOrigin, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_StatisticsAttemptCounts___construct arginfo_class_JobU_Duration___construct
+
+#define arginfo_class_JobU_StatisticsAttemptCounts_getTotal arginfo_class_JobU_Duration_getMilliseconds
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_StatisticsAttemptCounts_getStateCount, 0, 1, IS_LONG, 0)
+	ZEND_ARG_OBJ_INFO(0, state, JobU\\AttemptState, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_StatisticsAttemptCounts_getOutcomeCount, 0, 1, IS_LONG, 0)
+	ZEND_ARG_OBJ_INFO(0, outcome, JobU\\AttemptOutcome, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_StatisticsAttemptCounts_getRetries arginfo_class_JobU_Duration_getMilliseconds
+
+#define arginfo_class_JobU_StatisticsCaptureCounts___construct arginfo_class_JobU_Duration___construct
+
+#define arginfo_class_JobU_StatisticsCaptureCounts_getTruncatedAttempts arginfo_class_JobU_Duration_getMilliseconds
+
+#define arginfo_class_JobU_StatisticsCaptureCounts_getLostAttempts arginfo_class_JobU_Duration_getMilliseconds
+
+#define arginfo_class_JobU_StatisticsDuration___construct arginfo_class_JobU_Duration___construct
+
+#define arginfo_class_JobU_StatisticsDuration_getSamples arginfo_class_JobU_Duration_getMilliseconds
+
+#define arginfo_class_JobU_StatisticsDuration_getAverageMilliseconds arginfo_class_JobU_JobAttributes_getRetryJitter
+
+#define arginfo_class_JobU_StatisticsDuration_getMaximumMilliseconds arginfo_class_JobU_JobAttributes_getRetryJitter
+
+#define arginfo_class_JobU_StatisticsRunnableWaitCoverage___construct arginfo_class_JobU_Duration___construct
+
+#define arginfo_class_JobU_StatisticsRunnableWaitCoverage_getComplete arginfo_class_JobU_Duration_getMilliseconds
+
+#define arginfo_class_JobU_StatisticsRunnableWaitCoverage_getPartial arginfo_class_JobU_Duration_getMilliseconds
+
+#define arginfo_class_JobU_StatisticsRunnableWaitCoverage_getUnmeasured arginfo_class_JobU_Duration_getMilliseconds
+
+#define arginfo_class_JobU_StatisticsRunnableWaitCoverage_getUnfinished arginfo_class_JobU_Duration_getMilliseconds
+
+#define arginfo_class_JobU_StatisticsMetadata___construct arginfo_class_JobU_Duration___construct
+
+#define arginfo_class_JobU_StatisticsMetadata_getWindow arginfo_class_JobU_RunQuery_getPlanned
+
+#define arginfo_class_JobU_StatisticsMetadata_getGroupBy arginfo_class_JobU_StatisticsQuery_getGroupBy
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_StatisticsMetadata_getMeasurement, 0, 0, JobU\\StatisticsMeasurement, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_StatisticsMeasurement___construct arginfo_class_JobU_Duration___construct
+
+#define arginfo_class_JobU_StatisticsMeasurement_getTiming arginfo_class_JobU_SecretReference_getName
+
+#define arginfo_class_JobU_StatisticsMeasurement_getRunnableWait arginfo_class_JobU_SecretReference_getName
+
+#define arginfo_class_JobU_StatisticsMeasurement_getCapture arginfo_class_JobU_SecretReference_getName
+
 ZEND_METHOD(JobU_Duration, __construct);
 ZEND_METHOD(JobU_Duration, getMilliseconds);
 ZEND_METHOD(JobU_Duration, milliseconds);
@@ -1015,12 +1125,15 @@ ZEND_METHOD(JobU_Client, validateSchedule);
 ZEND_METHOD(JobU_Client, nextScheduleOccurrences);
 ZEND_METHOD(JobU_Client, __construct);
 ZEND_METHOD(JobU_Client, close);
+ZEND_METHOD(JobU_Client, getSystemInfo);
+ZEND_METHOD(JobU_Client, systemStatistics);
 ZEND_METHOD(JobU_Client, listQueues);
 ZEND_METHOD(JobU_Client, listJobs);
 ZEND_METHOD(JobU_Client, listRuns);
 ZEND_METHOD(JobU_Client, getQueue);
 ZEND_METHOD(JobU_Client, getQueueById);
 ZEND_METHOD(JobU_Client, createQueue);
+ZEND_METHOD(JobU_Queue, statistics);
 ZEND_METHOD(JobU_Queue, getJob);
 ZEND_METHOD(JobU_Queue, listRuns);
 ZEND_METHOD(JobU_Queue, listJobs);
@@ -1222,6 +1335,46 @@ ZEND_METHOD(JobU_Page, __construct);
 ZEND_METHOD(JobU_Page, hasNext);
 ZEND_METHOD(JobU_Page, next);
 ZEND_METHOD(JobU_Page, items);
+ZEND_METHOD(JobU_Page, getStatisticsMetadata);
+ZEND_METHOD(JobU_StatisticsGroup, __construct);
+ZEND_METHOD(JobU_StatisticsGroup, getKey);
+ZEND_METHOD(JobU_StatisticsGroup, getRuns);
+ZEND_METHOD(JobU_StatisticsGroup, getAttempts);
+ZEND_METHOD(JobU_StatisticsGroup, getCapture);
+ZEND_METHOD(JobU_StatisticsGroup, getScheduleLateness);
+ZEND_METHOD(JobU_StatisticsGroup, getExecutionWallDuration);
+ZEND_METHOD(JobU_StatisticsGroup, getRunnableWait);
+ZEND_METHOD(JobU_StatisticsGroup, getRunnableWaitCoverage);
+ZEND_METHOD(JobU_StatisticsRunCounts, __construct);
+ZEND_METHOD(JobU_StatisticsRunCounts, getTotal);
+ZEND_METHOD(JobU_StatisticsRunCounts, getStateCount);
+ZEND_METHOD(JobU_StatisticsRunCounts, getTypeCount);
+ZEND_METHOD(JobU_StatisticsRunCounts, getOriginCount);
+ZEND_METHOD(JobU_StatisticsAttemptCounts, __construct);
+ZEND_METHOD(JobU_StatisticsAttemptCounts, getTotal);
+ZEND_METHOD(JobU_StatisticsAttemptCounts, getStateCount);
+ZEND_METHOD(JobU_StatisticsAttemptCounts, getOutcomeCount);
+ZEND_METHOD(JobU_StatisticsAttemptCounts, getRetries);
+ZEND_METHOD(JobU_StatisticsCaptureCounts, __construct);
+ZEND_METHOD(JobU_StatisticsCaptureCounts, getTruncatedAttempts);
+ZEND_METHOD(JobU_StatisticsCaptureCounts, getLostAttempts);
+ZEND_METHOD(JobU_StatisticsDuration, __construct);
+ZEND_METHOD(JobU_StatisticsDuration, getSamples);
+ZEND_METHOD(JobU_StatisticsDuration, getAverageMilliseconds);
+ZEND_METHOD(JobU_StatisticsDuration, getMaximumMilliseconds);
+ZEND_METHOD(JobU_StatisticsRunnableWaitCoverage, __construct);
+ZEND_METHOD(JobU_StatisticsRunnableWaitCoverage, getComplete);
+ZEND_METHOD(JobU_StatisticsRunnableWaitCoverage, getPartial);
+ZEND_METHOD(JobU_StatisticsRunnableWaitCoverage, getUnmeasured);
+ZEND_METHOD(JobU_StatisticsRunnableWaitCoverage, getUnfinished);
+ZEND_METHOD(JobU_StatisticsMetadata, __construct);
+ZEND_METHOD(JobU_StatisticsMetadata, getWindow);
+ZEND_METHOD(JobU_StatisticsMetadata, getGroupBy);
+ZEND_METHOD(JobU_StatisticsMetadata, getMeasurement);
+ZEND_METHOD(JobU_StatisticsMeasurement, __construct);
+ZEND_METHOD(JobU_StatisticsMeasurement, getTiming);
+ZEND_METHOD(JobU_StatisticsMeasurement, getRunnableWait);
+ZEND_METHOD(JobU_StatisticsMeasurement, getCapture);
 
 static const zend_function_entry class_JobU_Duration_methods[] = {
 	ZEND_ME(JobU_Duration, __construct, arginfo_class_JobU_Duration___construct, ZEND_ACC_PRIVATE)
@@ -1377,6 +1530,8 @@ static const zend_function_entry class_JobU_Client_methods[] = {
 	ZEND_ME(JobU_Client, nextScheduleOccurrences, arginfo_class_JobU_Client_nextScheduleOccurrences, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Client, __construct, arginfo_class_JobU_Client___construct, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Client, close, arginfo_class_JobU_Client_close, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Client, getSystemInfo, arginfo_class_JobU_Client_getSystemInfo, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Client, systemStatistics, arginfo_class_JobU_Client_systemStatistics, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Client, listQueues, arginfo_class_JobU_Client_listQueues, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Client, listJobs, arginfo_class_JobU_Client_listJobs, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Client, listRuns, arginfo_class_JobU_Client_listRuns, ZEND_ACC_PUBLIC)
@@ -1387,6 +1542,7 @@ static const zend_function_entry class_JobU_Client_methods[] = {
 };
 
 static const zend_function_entry class_JobU_Queue_methods[] = {
+	ZEND_ME(JobU_Queue, statistics, arginfo_class_JobU_Queue_statistics, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Queue, getJob, arginfo_class_JobU_Queue_getJob, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Queue, listRuns, arginfo_class_JobU_Queue_listRuns, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Queue, listJobs, arginfo_class_JobU_Queue_listJobs, ZEND_ACC_PUBLIC)
@@ -1656,6 +1812,78 @@ static const zend_function_entry class_JobU_Page_methods[] = {
 	ZEND_ME(JobU_Page, hasNext, arginfo_class_JobU_Page_hasNext, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Page, next, arginfo_class_JobU_Page_next, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Page, items, arginfo_class_JobU_Page_items, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Page, getStatisticsMetadata, arginfo_class_JobU_Page_getStatisticsMetadata, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_StatisticsGroup_methods[] = {
+	ZEND_ME(JobU_StatisticsGroup, __construct, arginfo_class_JobU_StatisticsGroup___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(JobU_StatisticsGroup, getKey, arginfo_class_JobU_StatisticsGroup_getKey, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsGroup, getRuns, arginfo_class_JobU_StatisticsGroup_getRuns, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsGroup, getAttempts, arginfo_class_JobU_StatisticsGroup_getAttempts, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsGroup, getCapture, arginfo_class_JobU_StatisticsGroup_getCapture, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsGroup, getScheduleLateness, arginfo_class_JobU_StatisticsGroup_getScheduleLateness, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsGroup, getExecutionWallDuration, arginfo_class_JobU_StatisticsGroup_getExecutionWallDuration, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsGroup, getRunnableWait, arginfo_class_JobU_StatisticsGroup_getRunnableWait, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsGroup, getRunnableWaitCoverage, arginfo_class_JobU_StatisticsGroup_getRunnableWaitCoverage, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_StatisticsRunCounts_methods[] = {
+	ZEND_ME(JobU_StatisticsRunCounts, __construct, arginfo_class_JobU_StatisticsRunCounts___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(JobU_StatisticsRunCounts, getTotal, arginfo_class_JobU_StatisticsRunCounts_getTotal, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsRunCounts, getStateCount, arginfo_class_JobU_StatisticsRunCounts_getStateCount, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsRunCounts, getTypeCount, arginfo_class_JobU_StatisticsRunCounts_getTypeCount, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsRunCounts, getOriginCount, arginfo_class_JobU_StatisticsRunCounts_getOriginCount, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_StatisticsAttemptCounts_methods[] = {
+	ZEND_ME(JobU_StatisticsAttemptCounts, __construct, arginfo_class_JobU_StatisticsAttemptCounts___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(JobU_StatisticsAttemptCounts, getTotal, arginfo_class_JobU_StatisticsAttemptCounts_getTotal, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsAttemptCounts, getStateCount, arginfo_class_JobU_StatisticsAttemptCounts_getStateCount, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsAttemptCounts, getOutcomeCount, arginfo_class_JobU_StatisticsAttemptCounts_getOutcomeCount, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsAttemptCounts, getRetries, arginfo_class_JobU_StatisticsAttemptCounts_getRetries, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_StatisticsCaptureCounts_methods[] = {
+	ZEND_ME(JobU_StatisticsCaptureCounts, __construct, arginfo_class_JobU_StatisticsCaptureCounts___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(JobU_StatisticsCaptureCounts, getTruncatedAttempts, arginfo_class_JobU_StatisticsCaptureCounts_getTruncatedAttempts, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsCaptureCounts, getLostAttempts, arginfo_class_JobU_StatisticsCaptureCounts_getLostAttempts, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_StatisticsDuration_methods[] = {
+	ZEND_ME(JobU_StatisticsDuration, __construct, arginfo_class_JobU_StatisticsDuration___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(JobU_StatisticsDuration, getSamples, arginfo_class_JobU_StatisticsDuration_getSamples, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsDuration, getAverageMilliseconds, arginfo_class_JobU_StatisticsDuration_getAverageMilliseconds, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsDuration, getMaximumMilliseconds, arginfo_class_JobU_StatisticsDuration_getMaximumMilliseconds, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_StatisticsRunnableWaitCoverage_methods[] = {
+	ZEND_ME(JobU_StatisticsRunnableWaitCoverage, __construct, arginfo_class_JobU_StatisticsRunnableWaitCoverage___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(JobU_StatisticsRunnableWaitCoverage, getComplete, arginfo_class_JobU_StatisticsRunnableWaitCoverage_getComplete, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsRunnableWaitCoverage, getPartial, arginfo_class_JobU_StatisticsRunnableWaitCoverage_getPartial, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsRunnableWaitCoverage, getUnmeasured, arginfo_class_JobU_StatisticsRunnableWaitCoverage_getUnmeasured, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsRunnableWaitCoverage, getUnfinished, arginfo_class_JobU_StatisticsRunnableWaitCoverage_getUnfinished, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_StatisticsMetadata_methods[] = {
+	ZEND_ME(JobU_StatisticsMetadata, __construct, arginfo_class_JobU_StatisticsMetadata___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(JobU_StatisticsMetadata, getWindow, arginfo_class_JobU_StatisticsMetadata_getWindow, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsMetadata, getGroupBy, arginfo_class_JobU_StatisticsMetadata_getGroupBy, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsMetadata, getMeasurement, arginfo_class_JobU_StatisticsMetadata_getMeasurement, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_StatisticsMeasurement_methods[] = {
+	ZEND_ME(JobU_StatisticsMeasurement, __construct, arginfo_class_JobU_StatisticsMeasurement___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(JobU_StatisticsMeasurement, getTiming, arginfo_class_JobU_StatisticsMeasurement_getTiming, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsMeasurement, getRunnableWait, arginfo_class_JobU_StatisticsMeasurement_getRunnableWait, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_StatisticsMeasurement, getCapture, arginfo_class_JobU_StatisticsMeasurement_getCapture, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -2583,6 +2811,126 @@ static zend_class_entry *register_class_JobU_Page(void)
 	zend_class_entry ce, *class_entry;
 
 	INIT_NS_CLASS_ENTRY(ce, "JobU", "Page", class_JobU_Page_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_StatisticsGroup(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "StatisticsGroup", class_JobU_StatisticsGroup_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_StatisticsRunCounts(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "StatisticsRunCounts", class_JobU_StatisticsRunCounts_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_StatisticsAttemptCounts(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "StatisticsAttemptCounts", class_JobU_StatisticsAttemptCounts_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_StatisticsCaptureCounts(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "StatisticsCaptureCounts", class_JobU_StatisticsCaptureCounts_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_StatisticsDuration(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "StatisticsDuration", class_JobU_StatisticsDuration_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_StatisticsRunnableWaitCoverage(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "StatisticsRunnableWaitCoverage", class_JobU_StatisticsRunnableWaitCoverage_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_StatisticsMetadata(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "StatisticsMetadata", class_JobU_StatisticsMetadata_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_StatisticsMeasurement(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "StatisticsMeasurement", class_JobU_StatisticsMeasurement_methods);
 #if (PHP_VERSION_ID >= 80400)
 	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
 #else

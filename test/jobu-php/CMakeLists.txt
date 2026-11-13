@@ -38,10 +38,10 @@ endif()
 
 if(php_embed_found AND jobu_php_test_daemon)
     find_package(Catch2 CONFIG REQUIRED)
-    add_executable(jobu-php-lifecycle-test lifecycle-test.cpp lifecycle-bindings.cpp bridge-test.cpp resource-bindings.cpp resource-state-test.cpp queue-test.cpp page-bindings.cpp page-test.cpp list-test.cpp history-test.cpp output-test.cpp secrets-schedules-test.cpp
+    add_executable(jobu-php-lifecycle-test lifecycle-test.cpp lifecycle-bindings.cpp bridge-test.cpp resource-bindings.cpp resource-state-test.cpp queue-test.cpp page-bindings.cpp page-test.cpp list-test.cpp history-test.cpp output-test.cpp secrets-schedules-test.cpp statistics-test.cpp
         "${jobu_php_source}/module.cpp" "${jobu_php_source}/request.cpp"
         "${jobu_php_source}/value_binding.cpp" "${jobu_php_source}/attribute_binding.cpp" "${jobu_php_source}/cli_payload_binding.cpp" "${jobu_php_source}/http_payload_binding.cpp"
-        "${jobu_php_source}/query_binding.cpp" "${jobu_php_source}/result_binding.cpp" "${jobu_php_source}/value_snapshot.cpp" "${jobu_php_source}/resource_state.cpp" "${jobu_php_source}/queue_binding.cpp" "${jobu_php_source}/job_binding.cpp" "${jobu_php_source}/run_binding.cpp" "${jobu_php_source}/attempt_binding.cpp" "${jobu_php_source}/history_binding.cpp" "${jobu_php_source}/output_binding.cpp" "${jobu_php_source}/page_state.cpp" "${jobu_php_source}/page_binding.cpp" "${jobu_php_source}/list_binding.cpp" "${jobu_php_source}/secret_binding.cpp" "${jobu_php_source}/schedule_binding.cpp"
+        "${jobu_php_source}/query_binding.cpp" "${jobu_php_source}/result_binding.cpp" "${jobu_php_source}/value_snapshot.cpp" "${jobu_php_source}/resource_state.cpp" "${jobu_php_source}/queue_binding.cpp" "${jobu_php_source}/job_binding.cpp" "${jobu_php_source}/run_binding.cpp" "${jobu_php_source}/attempt_binding.cpp" "${jobu_php_source}/history_binding.cpp" "${jobu_php_source}/output_binding.cpp" "${jobu_php_source}/page_state.cpp" "${jobu_php_source}/page_binding.cpp" "${jobu_php_source}/list_binding.cpp" "${jobu_php_source}/secret_binding.cpp" "${jobu_php_source}/schedule_binding.cpp" "${jobu_php_source}/statistics_binding.cpp"
         "${jobu_php_source}/client.cpp" "${jobu_php_source}/client_binding.cpp" "${jobu_php_source}/operation.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../support/temporary_directory.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../support/memory_io_device.cpp")
@@ -55,6 +55,7 @@ if(php_embed_found AND jobu_php_test_daemon)
         JOBU_PHP_BINARY="${php_binary}"
         JOBU_PHP_MODULE="$<TARGET_FILE:jobu-php>"
         JOBU_PHP_JOB_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/job.php"
+        JOBU_PHP_STATISTICS_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/statistics.php"
         JOBU_PHP_ADMIN_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/secrets-schedules.php"
         JOBU_PHP_OUTPUT_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/output.php"
         JOBU_PHP_HISTORY_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/history.php"
@@ -123,4 +124,13 @@ else()
     add_test(NAME jobu-php-secrets-schedules-test COMMAND ${CMAKE_COMMAND} -E echo
         "SKIP: PHP secret/schedule tests require matching Embed and JOBU_PHP_TEST_DAEMON (or the jobud target)")
     set_tests_properties(jobu-php-secrets-schedules-test PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: PHP secret/schedule")
+endif()
+
+if(TARGET jobu-php-lifecycle-test)
+    add_test(NAME jobu-php-statistics-test COMMAND jobu-php-lifecycle-test "[statistics],[statistics-cli]")
+    set_tests_properties(jobu-php-statistics-test PROPERTIES TIMEOUT 120 FAIL_REGULAR_EXPRESSION "memory leaks detected;Warning:;Fatal error:")
+else()
+    add_test(NAME jobu-php-statistics-test COMMAND ${CMAKE_COMMAND} -E echo
+        "SKIP: PHP statistics tests require matching Embed and JOBU_PHP_TEST_DAEMON (or the jobud target)")
+    set_tests_properties(jobu-php-statistics-test PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: PHP statistics")
 endif()

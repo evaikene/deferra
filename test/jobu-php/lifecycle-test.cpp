@@ -15,6 +15,7 @@
 #include "resource-bindings.hpp"
 #include "result_binding.hpp"
 #include "secrets-schedules-test.hpp"
+#include "statistics-test.hpp"
 #include "support/temporary_directory.hpp"
 #include "value_binding.hpp"
 
@@ -1964,4 +1965,80 @@ TEST_CASE("Production CLI module manages secrets and previews schedules", "[php]
     CHECK(exit->kind == jb::core::ProcessExitKind::Exited);
     CHECK(exit->exit_code == 0);
     daemon.stop(loop);
+}
+
+TEST_CASE("Public statistics preserve metadata, scoped pages and recovery", "[php][statistics]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    auto*                        previous = &host.value()->loop();
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(*previous, directory.path());
+    {
+        Runtime runtime;
+        for (int request = 0; request != 2; ++request) {
+            jobu_php_test::test_statistics((directory.path() / "daemon.sock").string(),
+                                           (directory.path() / "statistics-proxy.sock").string());
+            runtime.restart(previous);
+        }
+    }
+    daemon.stop(*previous);
+}
+
+TEST_CASE("Production CLI module reads typed statistics", "[php][statistics-cli]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    auto&                        loop = host.value()->loop();
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(loop, directory.path(), /*execute_cli=*/false, /*cron_default=*/true);
+
+    jb::core::Process                    process;
+    jb::core::Object                     receiver;
+    std::optional<jb::core::ProcessExit> exit;
+    std::string                          errors;
+    process.standard_error.connect(&receiver, [&](jb::core::ByteBuffer const& bytes) {
+        errors.append(jb::core::as_string_view(bytes));
+    });
+    process.finished.connect(&receiver, [&](jb::core::ProcessExit const& value) { exit = value; });
+    REQUIRE(process.start({
+        .executable = JOBU_PHP_BINARY,
+        .arguments  = {"-n",
+                       "-dextension=" JOBU_PHP_MODULE,
+                       JOBU_PHP_STATISTICS_SCRIPT, (directory.path() / "daemon.sock").string()}
+    }));
+    REQUIRE(loop.run_until(Clock::now() + 10s, [&] { return exit.has_value(); }));
+    INFO(errors);
+    CHECK(errors.empty());
+    CHECK(exit->kind == jb::core::ProcessExitKind::Exited);
+    CHECK(exit->exit_code == 0);
+    daemon.stop(loop);
+}
+
+TEST_CASE("Statistics cursors remain invalid after daemon restart", "[php][statistics]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Runtime                      runtime;
+    {
+        // Both daemon Process owners belong to the active request loop, so the
+        // restart can reap and launch children while the PHP Page remains alive.
+        auto anchor = jb::php::current_request()->create_session();
+        REQUIRE(anchor);
+        auto&  loop = *jb::php::current_request()->loop();
+        Daemon original;
+        Daemon replacement;
+        original.start(loop, directory.path());
+        jobu_php_test::test_statistics_restart((directory.path() / "daemon.sock").string(),
+                                               (directory.path() / "page-proxy.sock").string(),
+                                               [&] {
+                                                   original.stop(loop);
+                                                   replacement.start(loop, directory.path());
+                                               });
+        replacement.stop(loop);
+    }
+    runtime.restart(&host.value()->loop());
 }
