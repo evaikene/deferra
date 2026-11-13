@@ -20,6 +20,9 @@ auto bind_attribute_classes(zend_class_entry* attributes,
 /// Does not add defaults, call PHP, or perform RPC.
 auto attributes_from_php(::php::ValueView value) -> ::php::Result<jobu::AttributeSet>;
 
+/// Construct a detached defaults object from a validated native reply without calling PHP.
+auto defaults_to_php(jobu::AttributeSet values) -> ::php::Result<::php::Value>;
+
 /// Merge every supplied source key, validating before changing the target in place.
 /// Source and target must be JobAttributes; target runner applicability is enforced.
 auto merge_attributes(zend_object* target, ::php::ValueView source) -> ::php::Result<void>;

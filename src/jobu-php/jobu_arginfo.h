@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: ba04d42274b6eef94b0b184bce2294066ade1482 */
+ * Stub hash: 9e5fb6811758ee2355f4f1d2d0e8f64493e58673 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Duration___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -300,6 +300,112 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_JobU_Client_close arginfo_class_JobU_HttpPayload_clearBody
 
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Client_getQueue, 0, 1, JobU\\Queue, 0)
+	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, includeDeleted, _IS_BOOL, 0, "false")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Client_getQueueById, 0, 1, JobU\\Queue, 0)
+	ZEND_ARG_TYPE_INFO(0, id, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, includeDeleted, _IS_BOOL, 0, "false")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Client_createQueue, 0, 1, JobU\\Queue, 0)
+	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, weight, IS_LONG, 0, "1")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, concurrencyLimit, IS_LONG, 0, "1")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, recoveryPolicy, JobU\\RecoveryPolicy, 0, "JobU\\RecoveryPolicy::FailInterrupted")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, defaults, JobU\\QueueDefaults, 1, "null")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, historyRetention, JobU\\Duration, 1, "null")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, runnableWaitWarning, JobU\\Duration, 1, "null")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, idempotencyKey, IS_STRING, 1, "null")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_Queue___construct arginfo_class_JobU_Duration___construct
+
+#define arginfo_class_JobU_Queue_getId arginfo_class_JobU_SecretReference_getName
+
+#define arginfo_class_JobU_Queue_getRevision arginfo_class_JobU_Duration_getMilliseconds
+
+#define arginfo_class_JobU_Queue_getName arginfo_class_JobU_SecretReference_getName
+
+#define arginfo_class_JobU_Queue_setName arginfo_class_JobU_CliPayload_unsetEnvironment
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Queue_getState, 0, 0, JobU\\QueueState, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_Queue_getWeight arginfo_class_JobU_Duration_getMilliseconds
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Queue_setWeight, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, weight, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_Queue_getConcurrencyLimit arginfo_class_JobU_Duration_getMilliseconds
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Queue_setConcurrencyLimit, 0, 1, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO(0, concurrencyLimit, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Queue_getRecoveryPolicy, 0, 0, JobU\\RecoveryPolicy, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Queue_setRecoveryPolicy, 0, 1, IS_VOID, 0)
+	ZEND_ARG_OBJ_INFO(0, recoveryPolicy, JobU\\RecoveryPolicy, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_Queue_getHistoryRetention arginfo_class_JobU_JobAttributes_getTimeout
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Queue_setHistoryRetention, 0, 1, IS_VOID, 0)
+	ZEND_ARG_OBJ_INFO(0, historyRetention, JobU\\Duration, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Queue_getRunnableWaitWarning, 0, 0, JobU\\Duration, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Queue_setRunnableWaitWarning, 0, 1, IS_VOID, 0)
+	ZEND_ARG_OBJ_INFO(0, runnableWaitWarning, JobU\\Duration, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Queue_getCreatedAt, 0, 0, DateTimeImmutable, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_Queue_getUpdatedAt arginfo_class_JobU_Queue_getCreatedAt
+
+#define arginfo_class_JobU_Queue_getDeletedAt arginfo_class_JobU_OnceSchedule_getAt
+
+#define arginfo_class_JobU_Queue_isDirty arginfo_class_JobU_HttpHeader_isSensitive
+
+#define arginfo_class_JobU_Queue_isDeleted arginfo_class_JobU_HttpHeader_isSensitive
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Queue_getDefaults, 0, 0, JobU\\QueueDefaults, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_Queue_defaults arginfo_class_JobU_Queue_getDefaults
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Queue_setDefaults, 0, 1, IS_VOID, 0)
+	ZEND_ARG_OBJ_INFO(0, defaults, JobU\\QueueDefaults, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Queue_save, 0, 0, IS_VOID, 0)
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Queue_refresh, 0, 0, IS_VOID, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, includeDeleted, _IS_BOOL, 0, "false")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_Queue_discardChanges arginfo_class_JobU_HttpPayload_clearBody
+
+#define arginfo_class_JobU_Queue_suspend arginfo_class_JobU_Queue_save
+
+#define arginfo_class_JobU_Queue_resume arginfo_class_JobU_Queue_save
+
+#define arginfo_class_JobU_Queue_delete arginfo_class_JobU_Queue_save
+
 #define arginfo_class_JobU_Exception_getErrorCode arginfo_class_JobU_JobAttributes_getOutputCapture
 
 #define arginfo_class_JobU_Exception_getCategory arginfo_class_JobU_JobAttributes_getOutputCapture
@@ -395,10 +501,9 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_JobU_SecretMetadata_getName arginfo_class_JobU_SecretReference_getName
 
-ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_SecretMetadata_getCreatedAt, 0, 0, DateTimeImmutable, 0)
-ZEND_END_ARG_INFO()
+#define arginfo_class_JobU_SecretMetadata_getCreatedAt arginfo_class_JobU_Queue_getCreatedAt
 
-#define arginfo_class_JobU_SecretMetadata_getUpdatedAt arginfo_class_JobU_SecretMetadata_getCreatedAt
+#define arginfo_class_JobU_SecretMetadata_getUpdatedAt arginfo_class_JobU_Queue_getCreatedAt
 
 #define arginfo_class_JobU_ExecutionResult___construct arginfo_class_JobU_Duration___construct
 
@@ -585,6 +690,39 @@ ZEND_METHOD(JobU_QueueDefaults, cli);
 ZEND_METHOD(JobU_QueueDefaults, http);
 ZEND_METHOD(JobU_Client, __construct);
 ZEND_METHOD(JobU_Client, close);
+ZEND_METHOD(JobU_Client, getQueue);
+ZEND_METHOD(JobU_Client, getQueueById);
+ZEND_METHOD(JobU_Client, createQueue);
+ZEND_METHOD(JobU_Queue, __construct);
+ZEND_METHOD(JobU_Queue, getId);
+ZEND_METHOD(JobU_Queue, getRevision);
+ZEND_METHOD(JobU_Queue, getName);
+ZEND_METHOD(JobU_Queue, setName);
+ZEND_METHOD(JobU_Queue, getState);
+ZEND_METHOD(JobU_Queue, getWeight);
+ZEND_METHOD(JobU_Queue, setWeight);
+ZEND_METHOD(JobU_Queue, getConcurrencyLimit);
+ZEND_METHOD(JobU_Queue, setConcurrencyLimit);
+ZEND_METHOD(JobU_Queue, getRecoveryPolicy);
+ZEND_METHOD(JobU_Queue, setRecoveryPolicy);
+ZEND_METHOD(JobU_Queue, getHistoryRetention);
+ZEND_METHOD(JobU_Queue, setHistoryRetention);
+ZEND_METHOD(JobU_Queue, getRunnableWaitWarning);
+ZEND_METHOD(JobU_Queue, setRunnableWaitWarning);
+ZEND_METHOD(JobU_Queue, getCreatedAt);
+ZEND_METHOD(JobU_Queue, getUpdatedAt);
+ZEND_METHOD(JobU_Queue, getDeletedAt);
+ZEND_METHOD(JobU_Queue, isDirty);
+ZEND_METHOD(JobU_Queue, isDeleted);
+ZEND_METHOD(JobU_Queue, getDefaults);
+ZEND_METHOD(JobU_Queue, defaults);
+ZEND_METHOD(JobU_Queue, setDefaults);
+ZEND_METHOD(JobU_Queue, save);
+ZEND_METHOD(JobU_Queue, refresh);
+ZEND_METHOD(JobU_Queue, discardChanges);
+ZEND_METHOD(JobU_Queue, suspend);
+ZEND_METHOD(JobU_Queue, resume);
+ZEND_METHOD(JobU_Queue, delete);
 ZEND_METHOD(JobU_Exception, getErrorCode);
 ZEND_METHOD(JobU_Exception, getCategory);
 ZEND_METHOD(JobU_OutcomeUnknownException, getOperation);
@@ -806,6 +944,43 @@ static const zend_function_entry class_JobU_QueueDefaults_methods[] = {
 static const zend_function_entry class_JobU_Client_methods[] = {
 	ZEND_ME(JobU_Client, __construct, arginfo_class_JobU_Client___construct, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Client, close, arginfo_class_JobU_Client_close, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Client, getQueue, arginfo_class_JobU_Client_getQueue, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Client, getQueueById, arginfo_class_JobU_Client_getQueueById, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Client, createQueue, arginfo_class_JobU_Client_createQueue, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_Queue_methods[] = {
+	ZEND_ME(JobU_Queue, __construct, arginfo_class_JobU_Queue___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(JobU_Queue, getId, arginfo_class_JobU_Queue_getId, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, getRevision, arginfo_class_JobU_Queue_getRevision, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, getName, arginfo_class_JobU_Queue_getName, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, setName, arginfo_class_JobU_Queue_setName, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, getState, arginfo_class_JobU_Queue_getState, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, getWeight, arginfo_class_JobU_Queue_getWeight, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, setWeight, arginfo_class_JobU_Queue_setWeight, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, getConcurrencyLimit, arginfo_class_JobU_Queue_getConcurrencyLimit, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, setConcurrencyLimit, arginfo_class_JobU_Queue_setConcurrencyLimit, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, getRecoveryPolicy, arginfo_class_JobU_Queue_getRecoveryPolicy, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, setRecoveryPolicy, arginfo_class_JobU_Queue_setRecoveryPolicy, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, getHistoryRetention, arginfo_class_JobU_Queue_getHistoryRetention, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, setHistoryRetention, arginfo_class_JobU_Queue_setHistoryRetention, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, getRunnableWaitWarning, arginfo_class_JobU_Queue_getRunnableWaitWarning, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, setRunnableWaitWarning, arginfo_class_JobU_Queue_setRunnableWaitWarning, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, getCreatedAt, arginfo_class_JobU_Queue_getCreatedAt, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, getUpdatedAt, arginfo_class_JobU_Queue_getUpdatedAt, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, getDeletedAt, arginfo_class_JobU_Queue_getDeletedAt, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, isDirty, arginfo_class_JobU_Queue_isDirty, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, isDeleted, arginfo_class_JobU_Queue_isDeleted, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, getDefaults, arginfo_class_JobU_Queue_getDefaults, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, defaults, arginfo_class_JobU_Queue_defaults, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, setDefaults, arginfo_class_JobU_Queue_setDefaults, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, save, arginfo_class_JobU_Queue_save, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, refresh, arginfo_class_JobU_Queue_refresh, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, discardChanges, arginfo_class_JobU_Queue_discardChanges, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, suspend, arginfo_class_JobU_Queue_suspend, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, resume, arginfo_class_JobU_Queue_resume, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Queue, delete, arginfo_class_JobU_Queue_delete, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -1108,6 +1283,21 @@ static zend_class_entry *register_class_JobU_Client(void)
 	zend_class_entry ce, *class_entry;
 
 	INIT_NS_CLASS_ENTRY(ce, "JobU", "Client", class_JobU_Client_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_Queue(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "Queue", class_JobU_Queue_methods);
 #if (PHP_VERSION_ID >= 80400)
 	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
 #else

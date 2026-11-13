@@ -3,8 +3,9 @@
 The optional `jobu` extension provides native string-backed enums, an exception
 hierarchy, immutable durations, secret references and schedules, mutable attributes
 and queue defaults, mutable CLI/HTTP payloads, and request-scoped `Client` connections.
-The constructor eagerly connects and handshakes; public resource and management
-methods remain deferred. A private synchronous bridge is exercised by tests.
+The constructor eagerly connects and handshakes. Queue lookup, creation, local
+edits and lifecycle operations are available through the synchronous bridge.
+Job resources and list/statistics pages remain later stages.
 It supports PHP 8.1+ with 64-bit integers in NTS mode
 on Linux/macOS. Runtime validation covers PHP 8.2–8.6 NTS; PHP 8.1 retains the
 minimum build/API contract but is not in the test matrix. macOS runtime coverage
@@ -342,7 +343,7 @@ $copy->clear('job.timeout'); // original defaults and views are unchanged
 `cli(): CliJobAttributes` and `http(): HttpJobAttributes` return cached mutable
 views: repeated calls return the same PHP object. A retained view keeps its parent
 alive. Replacing a defaults layer through the private resource adapter updates
-existing views in place. Public Queue/Job resource operations remain deferred.
+existing views in place. Queue resources use these adapters; Job resource operations remain deferred.
 
 Every suffix below supplies `getSuffix(): ?Type` and
 `setSuffix(Type $value): void`. Getters return null when the value is absent.
@@ -633,10 +634,81 @@ Null observation counts remain unknown; null next offset means EOF/no further
 slice. Metadata beyond PHP's signed integer range is rejected rather than
 rounded. Actual output RPCs and convenience tail selection remain later work.
 
+## Queue resources
+
+`Client::getQueue(string $name, bool $includeDeleted = false, ?Duration $timeout = null)`
+always selects a literal name, even a UUID-looking name or an `id:`/`name:` prefix.
+`getQueueById(string $id, bool $includeDeleted = false, ?Duration $timeout = null)`
+requires a canonical lowercase UUID. Both return a new cached `Queue` retaining
+its originating Client. Internal requests always use that stable UUID after rename.
+
+```php
+$queue = $client->createQueue(
+    name: 'emails', weight: 1, concurrencyLimit: 4,
+    recoveryPolicy: JobU\RecoveryPolicy::FailInterrupted,
+    defaults: new JobU\QueueDefaults(), historyRetention: null,
+    runnableWaitWarning: JobU\Duration::seconds(10),
+    idempotencyKey: null, timeout: null
+);
+$queue->defaults()->cli()->setTimeout(JobU\Duration::seconds(30));
+$queue->setName('outgoing');
+$queue->save();
+```
+
+Creation defaults weight/capacity to 1, recovery to FailInterrupted and defaults
+to an empty layer. It copies supplied configuration. An omitted idempotency key
+is generated once; reconnect repeats the same frozen request/key within one total
+deadline. Replay returns the original creation snapshot, which may be stale;
+call `refresh()` explicitly before editing it. Keys remain safe for replay only
+while the daemon retains their resource-bound records.
+
+Cached getters expose `getId`, `getRevision`, `getName`, `getState`, `getWeight`,
+`getConcurrencyLimit`, `getRecoveryPolicy`, `getHistoryRetention`,
+`getRunnableWaitWarning`, `getCreatedAt`, `getUpdatedAt`, `getDeletedAt`,
+`isDirty` and `isDeleted`. Dates are UTC `DateTimeImmutable`; only deletion time
+and retention are nullable. Getters perform no RPC, including after Client closure.
+
+Local setters are `setName(string)`, `setWeight(int)`, `setConcurrencyLimit(int)`,
+`setRecoveryPolicy(RecoveryPolicy)`, `setHistoryRetention(?Duration)` and
+`setRunnableWaitWarning(Duration)`. Names contain 1–128 UTF-8 bytes without ASCII
+controls or reserved deletion suffixes. Weight/capacity range from 1 through
+4294967295. Retention requires nonnegative whole seconds: null inherits daemon
+policy and zero is unlimited. Warning duration requires nonnegative milliseconds;
+zero disables warnings. Null warning at creation selects the ten-second default.
+Out-of-range or inexact duration conversions fail instead of rounding.
+
+`getDefaults()` returns a detached deep copy; `defaults()` returns the stable
+attached object. `setDefaults(QueueDefaults)` replaces the whole layer in place;
+an empty layer clears defaults on save. Issued CLI/HTTP views keep their identity
+across replacement, save, refresh and discard. Defaults affect future jobs only.
+
+`save(?Duration $timeout = null)` sends net changed fields and the accepted
+revision. A clean save performs no RPC. Conflicts and uncertain outcomes preserve
+edits and revision; no recovery policy is changed. `discardChanges(): void` restores
+the last accepted snapshot locally, including after Client closure.
+`refresh(bool $includeDeleted = false, ?Duration $timeout = null)` rejects dirty
+state and adopts a validated snapshot without replacing attached objects.
+
+`suspend`, `resume` and `delete` each accept `?Duration $timeout = null` and return
+void. They reject dirty/deleted state locally. Suspend/resume adopt returned
+snapshots; suspension may still be draining. Delete requires a fully suspended
+queue remotely. Its null reply marks `isDeleted()` true but preserves cached
+server fields and revision: it does not invent a deletion timestamp or token.
+`refresh(includeDeleted: true)` can then load retained historical state.
+All mutation, including retained defaults/view edits, is blocked after deletion.
+Detached configuration copies remain editable. Queue objects cannot be cloned or
+serialized, and PHP GC traces their Client/defaults/view ownership cycles.
+
+Stage 4.2 exercises `queue.stats` through the native typed bridge, including
+cursor-only continuation and historical UUIDs. The public
+`Queue::statistics(?StatisticsQuery $query = null, ?Duration $timeout = null): Page`
+remains stage 5.4 after Page in stage 4.4; no placeholder or temporary result
+shape is exposed. Queue job creation and lists also remain later stages.
+
 ## Private resource-state foundation
 
-Stage 4.1 adds the internal cache/dirty-state machinery; production `Queue` and
-`Job` classes and their lookup/creation methods remain later stages. The
+Stage 4.1 adds the internal cache/dirty-state machinery, used by the production
+`Queue` binding in stage 4.2. The `Job` resource remains later work. The
 fixture-only resource used by Embed tests is not registered by `jobu.so`.
 
 `ResourceState<Queue>` and `ResourceState<JobDefinition>` retain the originating
