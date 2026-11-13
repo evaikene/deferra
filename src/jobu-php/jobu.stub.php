@@ -687,3 +687,21 @@ final class Run
     /** Cached safe execution summary, or null while unavailable. No hidden fetch. */
     public function getResult(): ?ExecutionResult {}
 }
+
+/** Mutable page position retaining its Client. @template T @not-serializable */
+final class Page
+{
+    private function __construct() {}
+    /** Whether a prefetched page or continuation is available; never performs RPC. */
+    public function hasNext(): bool {}
+    /** Publish the prefetched first page, or fetch the continuation atomically.
+     * A failure preserves current items and position. Cursors are never restarted.
+     * @throws \OutOfBoundsException If no next page exists.
+     */
+    public function next(?Duration $timeout = null): void {}
+    /** Current items, or [] before the first next(); never performs RPC.
+     * Array edits are independent; contained objects retain identity.
+     * @return list<T>
+     */
+    public function items(): array {}
+}

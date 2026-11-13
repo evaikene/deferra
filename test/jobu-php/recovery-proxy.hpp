@@ -37,17 +37,19 @@ public:
         });
     }
 
-    std::string                                             drop_method;
-    int                                                     drops{0};
-    int                                                     connections{0};
-    bool                                                    incompatible{false};
-    bool                                                    silent{false};
-    bool                                                    close_after_response{false};
-    std::string                                             error_method;
-    std::optional<jb::core::JsonValue>                      response_error;
-    std::function<void()>                                   after_drop;
-    std::map<std::string, std::vector<jb::core::JsonValue>> requests;
-    std::vector<jb::core::JsonValue>                        dropped_results;
+    std::string                                                   drop_method;
+    int                                                           drops{0};
+    int                                                           connections{0};
+    bool                                                          incompatible{false};
+    bool                                                          silent{false};
+    bool                                                          close_after_response{false};
+    std::string                                                   error_method;
+    std::optional<jb::core::JsonValue>                            response_error;
+    std::function<void()>                                         after_drop;
+    /// Optional successful-reply fault injection for Page decode/boundary tests.
+    std::function<void(std::string const&, jb::core::JsonValue&)> transform_result;
+    std::map<std::string, std::vector<jb::core::JsonValue>>       requests;
+    std::vector<jb::core::JsonValue>                              dropped_results;
 
     auto stop_accepting() -> void { _listener.close(); }
 
@@ -138,6 +140,9 @@ private:
                 if (_proxy.response_error && _method == _proxy.error_method) {
                     fields.erase("result");
                     fields["error"] = *_proxy.response_error;
+                }
+                if (_proxy.transform_result && fields.contains("result")) {
+                    _proxy.transform_result(_method, fields.at("result"));
                 }
                 auto encoded = jb::core::serialize_json(json.value());
                 REQUIRE(encoded);

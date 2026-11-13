@@ -800,3 +800,38 @@ fetch details or resolve secrets. Run refresh/cancel, lookup/list APIs, attempts
 and output remain later implementation stages. Job and Run resources cannot be
 cloned or serialized. Closing the Client preserves cached reads and local edits;
 subsequent RPC operations fail locally.
+
+
+## Page foundation
+
+`JobU\Page` represents a mutable position in a paged result. Its private factory
+performs the first request eagerly; the returned Page starts **before** that
+prefetched page. Stage 4.4 supplies the Page foundation and private typed adapters.
+Public queue/job listing entry points arrive in stage 4.5, with history, secrets
+and statistics entry points in their respective later stages.
+
+- `hasNext(): bool` checks only local state. An empty first result returns false.
+- `next(?Duration $timeout = null): void` publishes the prefetched first page
+  without RPC. Later calls fetch the continuation using one operation deadline,
+  including any reconnect/retry. Calling it when `hasNext()` is false throws
+  `\OutOfBoundsException` and retains the last page.
+- `items(): array` returns `[]` before the first successful `next()`, otherwise
+  the current indexed collection. It performs no RPC. Editing the returned array
+  leaves Page's collection unchanged; contained objects retain their identities.
+
+A fetch or conversion failure preserves the current items and continuation.
+A successful empty continuation publishes `[]` and ends enumeration. Short pages
+may still have continuations: Page follows the returned boundary rather than
+comparing the item count to the requested limit. Listings are live reads, not
+frozen snapshots across requests.
+
+Queue/job UUID keysets repeat their original filters and limit. Secret name
+keysets repeat the limit. Opaque history/statistics continuations send only the
+cursor. Expired cursors, including those invalidated by daemon restart, raise
+`InvalidCursorException`; enumeration never silently restarts.
+
+Page strongly retains its originating Client and traces its items for PHP GC.
+Unsetting the caller's Client variable does not close a live Page's session.
+After explicit `Client::close()`, cached access and consumption of the prefetched
+buffer still work, while a subsequent fetch fails. Arrays or resource objects
+retained by the caller survive advancement. Page cannot be cloned or serialized.

@@ -3,6 +3,7 @@
 #include "client_binding.hpp"
 #include "http_payload_binding.hpp"
 #include "job_binding.hpp"
+#include "page_binding.hpp"
 #include "query_binding.hpp"
 #include "queue_binding.hpp"
 #include "request.hpp"
@@ -83,6 +84,9 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
         return FAILURE;
     }
     if (!jb::php::bind_job_class(register_class_JobU_Job()) || !jb::php::bind_run_class(register_class_JobU_Run())) {
+        return FAILURE;
+    }
+    if (!jb::php::bind_page_class(register_class_JobU_Page())) {
         return FAILURE;
     }
     auto* schedule      = register_class_JobU_Schedule();

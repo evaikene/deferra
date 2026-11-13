@@ -572,6 +572,11 @@ auto queue_state(zend_object* object) -> ::php::Result<ResourceState<jobu::Queue
     return &native.value()->state();
 }
 
+auto queue_to_php(::php::ValueView client, jobu::Queue value) -> ::php::Result<::php::Value>
+{
+    return make_queue(client, std::move(value));
+}
+
 auto bind_queue_class(zend_class_entry* queue) -> bool
 {
     return static_cast<bool>(Binding::bind(queue));

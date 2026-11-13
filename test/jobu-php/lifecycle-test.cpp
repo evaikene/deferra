@@ -4,6 +4,7 @@
 #include "http_payload_binding.hpp"
 #include "lifecycle-bindings.hpp"
 #include "operation.hpp"
+#include "page-bindings.hpp"
 #include "query_binding.hpp"
 #include "queue-test.hpp"
 #include "recovery-proxy.hpp"
@@ -1713,4 +1714,30 @@ TEST_CASE("Production queues preserve snapshots, identity and lifecycle", "[php]
         }
     }
     daemon.stop(*previous);
+}
+
+TEST_CASE("Prefetched pages preserve position, ownership and continuations", "[php][page]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Runtime                      runtime;
+    {
+        // Both daemon Process owners belong to the active request loop, so the
+        // restart can reap and launch children while the PHP Page remains alive.
+        auto anchor = jb::php::current_request()->create_session();
+        REQUIRE(anchor);
+        auto&  loop = *jb::php::current_request()->loop();
+        Daemon original;
+        Daemon replacement;
+        original.start(loop, directory.path());
+        jobu_php_test::test_pages((directory.path() / "daemon.sock").string(),
+                                  (directory.path() / "page-proxy.sock").string(),
+                                  [&] {
+                                      original.stop(loop);
+                                      replacement.start(loop, directory.path());
+                                  });
+        replacement.stop(loop);
+    }
+    runtime.restart(&host.value()->loop());
 }
