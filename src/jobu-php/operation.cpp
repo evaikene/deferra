@@ -82,6 +82,17 @@ auto Operation::bind(std::string name, Accepted (jobu::ControlClient::*method)(j
         std::nullopt};
 }
 
+auto Operation::bind(std::string name,
+                     Accepted (jobu::ControlClient::*method)(std::string_view, jobu::ControlCallOptions),
+                     std::string request) -> Operation
+{
+    return {std::move(name),
+            [method, request = std::move(request)](jobu::ControlClient& client, jobu::ControlCallOptions options) {
+                return (client.*method)(request, options);
+            },
+            std::nullopt};
+}
+
 auto Operation::name() const noexcept -> std::string const&
 {
     return _name;

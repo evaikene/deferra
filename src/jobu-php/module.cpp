@@ -18,14 +18,24 @@
 #include <phpcxx/zend.hpp>
 
 extern "C" {
+#include <Zend/zend_attributes.h>
 #include <Zend/zend_enum.h> // IWYU pragma: keep generated enum registration
 #include <Zend/zend_exceptions.h>
 #include <ext/standard/info.h>
 }
 
+#include <cstdint>
 #include <memory>
 #include <string_view>
 #include <utility>
+
+// gen_stub.php emits C attribute registration with a void* hash lookup. Keep
+// its output authoritative and supply only the C++ conversion at this boundary.
+static auto zend_add_parameter_attribute(void* function, std::uint32_t offset, zend_string* name, std::uint32_t argc)
+    -> zend_attribute*
+{
+    return zend_add_parameter_attribute(static_cast<zend_function*>(function), offset, name, argc);
+}
 
 #include "jobu_arginfo.h"
 

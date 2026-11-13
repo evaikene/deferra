@@ -110,6 +110,11 @@ foreach ([
 echo "reflection ok\n";
 
 foreach ([
+    [JobU\Client::class, 'setSecret', 'JobU\SecretMetadata', ['name', 'value', 'timeout'], ['string', 'string', '?JobU\Duration'], [null]],
+    [JobU\Client::class, 'listSecrets', 'JobU\Page', ['limit', 'timeout'], ['int', '?JobU\Duration'], [100, null]],
+    [JobU\Client::class, 'deleteSecret', 'void', ['name', 'timeout'], ['string', '?JobU\Duration'], [null]],
+    [JobU\Client::class, 'validateSchedule', 'void', ['schedule', 'timeout'], ['JobU\CronSchedule', '?JobU\Duration'], [null]],
+    [JobU\Client::class, 'nextScheduleOccurrences', 'array', ['schedule', 'after', 'count', 'timeout'], ['JobU\CronSchedule', 'DateTimeInterface', 'int', '?JobU\Duration'], [5, null]],
     [JobU\Queue::class, 'getJob', 'JobU\Job', ['id', 'timeout'], ['string', '?JobU\Duration'], [null]],
     [JobU\Queue::class, 'listRuns', 'JobU\Page', ['query', 'timeout'], ['?JobU\RunQuery', '?JobU\Duration'], [null, null]],
     [JobU\Job::class, 'getRun', 'JobU\Run', ['id', 'timeout'], ['string', '?JobU\Duration'], [null]],

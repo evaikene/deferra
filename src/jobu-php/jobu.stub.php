@@ -231,6 +231,27 @@ final class QueueDefaults
 /** Request-scoped synchronous Unix-socket client. @not-serializable */
 final class Client
 {
+    /** Set or rotate 0–65536 raw bytes under a canonical name of at most 128 bytes.
+     * Returns detached metadata only. A possibly transmitted mutation is never replayed.
+     */
+    public function setSecret(string $name, #[\SensitiveParameter] string $value, ?Duration $timeout = null): SecretMetadata {}
+    /** Prefetch metadata in ascending name order. Limit: 1–200; continuations are a live view.
+     * @return Page<SecretMetadata>
+     */
+    public function listSecrets(int $limit = 100, ?Duration $timeout = null): Page {}
+    /** Delete an unreferenced secret; missing/in-use errors propagate. Never replay an uncertain deletion. */
+    public function deleteSecret(string $name, ?Duration $timeout = null): void {}
+    /** Validate with the daemon's cron engine; omitted timezone uses its configured default. */
+    public function validateSchedule(CronSchedule $schedule, ?Duration $timeout = null): void {}
+    /** Preview 1–200 instants strictly after after, without changing the supplied schedule or date.
+     * @return list<\DateTimeImmutable> Strictly increasing UTC instants.
+     */
+    public function nextScheduleOccurrences(
+        CronSchedule $schedule,
+        \DateTimeInterface $after,
+        int $count = 5,
+        ?Duration $timeout = null
+    ): array {}
     /** Connect and validate the daemon eagerly; timeout defaults to ten seconds and must be positive. */
     public function __construct(string $socketPath, ?Duration $timeout = null) {}
     /** Idempotently close this session. Further operations fail locally. */

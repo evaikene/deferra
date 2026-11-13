@@ -43,6 +43,9 @@ public:
     std::chrono::milliseconds                                     history_reply_delay{0};
     /// Delay output and latest-attempt replies to verify a shared multi-read deadline.
     std::chrono::milliseconds                                     output_reply_delay{0};
+    /// Separate delays prove reconnect and administration share one deadline.
+    std::chrono::milliseconds                                     handshake_reply_delay{0};
+    std::chrono::milliseconds                                     administration_reply_delay{0};
     std::string                                                   drop_method;
     int                                                           drops{0};
     int                                                           connections{0};
@@ -166,6 +169,12 @@ private:
                 }
                 else if (_method == "attempt.output" || _method == "attempt.list") {
                     delay = _proxy.output_reply_delay;
+                }
+                else if (_method == "system.info") {
+                    delay = _proxy.handshake_reply_delay;
+                }
+                else if (_method == "secret.list" || _method == "schedule.validate" || _method == "schedule.next") {
+                    delay = _proxy.administration_reply_delay;
                 }
                 if (delay.count() > 0) {
                     // The synchronous client has at most one outstanding request

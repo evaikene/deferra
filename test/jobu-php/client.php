@@ -21,7 +21,7 @@ function clientThrows(string $type, callable $call): Throwable
 
 $clientClass = new ReflectionClass(JobU\Client::class);
 clientCheck($clientClass->isFinal(), 'Client is final');
-clientCheck(count($clientClass->getMethods()) === 8, 'connection, queue entry points and cross-queue lists');
+clientCheck(count($clientClass->getMethods()) === 13, 'connection, queue roots, cross-queue lists, secrets and cron helpers');
 $parameters = $clientClass->getConstructor()->getParameters();
 clientCheck(count($parameters) === 2, 'constructor parameter count');
 clientCheck($parameters[0]->getName() === 'socketPath' && (string)$parameters[0]->getType() === 'string', 'socket parameter');
