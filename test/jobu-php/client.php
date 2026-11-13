@@ -21,7 +21,7 @@ function clientThrows(string $type, callable $call): Throwable
 
 $clientClass = new ReflectionClass(JobU\Client::class);
 clientCheck($clientClass->isFinal(), 'Client is final');
-clientCheck(count($clientClass->getMethods()) === 2, 'only constructor and close are public');
+clientCheck(count($clientClass->getMethods()) === 5, 'constructor, close and queue entry points');
 $parameters = $clientClass->getConstructor()->getParameters();
 clientCheck(count($parameters) === 2, 'constructor parameter count');
 clientCheck($parameters[0]->getName() === 'socketPath' && (string)$parameters[0]->getType() === 'string', 'socket parameter');
@@ -71,5 +71,8 @@ if (isset($argv[1])) {
     $second->close();
     // A successfully initialized live client is also released during CLI shutdown.
     $remaining = new JobU\Client($argv[1]);
+    define('QUEUE_SOCKET', $argv[1]);
+    define('QUEUE_PREFIX', 'cli:');
+    require __DIR__ . '/queue.php';
 }
 echo "client contracts ok\n";

@@ -3,6 +3,7 @@
 #include "client_binding.hpp"
 #include "http_payload_binding.hpp"
 #include "query_binding.hpp"
+#include "queue_binding.hpp"
 #include "request.hpp"
 #include "result_binding.hpp"
 #include "value_binding.hpp"
@@ -74,6 +75,9 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
     register_class_JobU_OutcomeUnknownException(exception);
     register_class_JobU_UnsupportedFeatureException(exception);
     if (!jb::php::bind_client_classes(register_class_JobU_Duration(), register_class_JobU_Client())) {
+        return FAILURE;
+    }
+    if (!jb::php::bind_queue_class(register_class_JobU_Queue())) {
         return FAILURE;
     }
     auto* schedule      = register_class_JobU_Schedule();

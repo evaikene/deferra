@@ -5,6 +5,7 @@
 #include "lifecycle-bindings.hpp"
 #include "operation.hpp"
 #include "query_binding.hpp"
+#include "queue-test.hpp"
 #include "recovery-proxy.hpp"
 #include "request.hpp"
 #include "resource-bindings.hpp"
@@ -1689,6 +1690,25 @@ TEST_CASE("Resource caches preserve edits, attachments and client ownership", "[
         for (int request = 0; request != 2; ++request) {
             jobu_php_test::test_resource_state((directory.path() / "daemon.sock").string(),
                                                (directory.path() / "resource-proxy.sock").string());
+            runtime.restart(previous);
+        }
+    }
+    daemon.stop(*previous);
+}
+
+TEST_CASE("Production queues preserve snapshots, identity and lifecycle", "[php][lifecycle][queue]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    auto*                        previous = &host.value()->loop();
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(*previous, directory.path());
+    {
+        Runtime runtime;
+        for (int request = 0; request != 2; ++request) {
+            jobu_php_test::test_queues((directory.path() / "daemon.sock").string(),
+                                       (directory.path() / "queue-proxy.sock").string());
             runtime.restart(previous);
         }
     }

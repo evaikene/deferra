@@ -235,6 +235,74 @@ final class Client
     public function __construct(string $socketPath, ?Duration $timeout = null) {}
     /** Idempotently close this session. Further operations fail locally. */
     public function close(): void {}
+    /** Look up an exact literal name, including names that look like UUIDs. */
+    public function getQueue(string $name, bool $includeDeleted = false, ?Duration $timeout = null): Queue {}
+    /** Look up a canonical lowercase UUID. */
+    public function getQueueById(string $id, bool $includeDeleted = false, ?Duration $timeout = null): Queue {}
+    /** Copy defaults and create an active queue. Null retention inherits; null warning uses ten seconds.
+     * Omitted keys are generated once and retained across retries. Replay returns the original creation snapshot.
+     */
+    public function createQueue(
+        string $name,
+        int $weight = 1,
+        int $concurrencyLimit = 1,
+        RecoveryPolicy $recoveryPolicy = RecoveryPolicy::FailInterrupted,
+        ?QueueDefaults $defaults = null,
+        ?Duration $historyRetention = null,
+        ?Duration $runnableWaitWarning = null,
+        ?string $idempotencyKey = null,
+        ?Duration $timeout = null
+    ): Queue {}
+
+}
+
+/** Cached request-local resource. Getters and setters perform no RPC. @not-serializable */
+final class Queue
+{
+    private function __construct() {}
+    public function getId(): string {}
+    public function getRevision(): int {}
+    public function getName(): string {}
+    /** Exact UTF-8 name, 1–128 bytes, without controls or a reserved deletion suffix. */
+    public function setName(string $name): void {}
+    public function getState(): QueueState {}
+    public function getWeight(): int {}
+    /** Positive 32-bit unsigned scheduler weight. */
+    public function setWeight(int $weight): void {}
+    public function getConcurrencyLimit(): int {}
+    /** Positive 32-bit unsigned capacity. */
+    public function setConcurrencyLimit(int $concurrencyLimit): void {}
+    public function getRecoveryPolicy(): RecoveryPolicy {}
+    public function setRecoveryPolicy(RecoveryPolicy $recoveryPolicy): void {}
+    public function getHistoryRetention(): ?Duration {}
+    /** Null inherits; zero is unlimited; otherwise nonnegative whole seconds. */
+    public function setHistoryRetention(?Duration $historyRetention): void {}
+    public function getRunnableWaitWarning(): Duration {}
+    /** Nonnegative milliseconds; zero disables warnings. */
+    public function setRunnableWaitWarning(Duration $runnableWaitWarning): void {}
+    public function getCreatedAt(): \DateTimeImmutable {}
+    public function getUpdatedAt(): \DateTimeImmutable {}
+    public function getDeletedAt(): ?\DateTimeImmutable {}
+    public function isDirty(): bool {}
+    /** Local deletion is known immediately even when cached server fields predate delete. */
+    public function isDeleted(): bool {}
+    /** Detached deep copy, including any local edits. */
+    public function getDefaults(): QueueDefaults {}
+    /** Stable attached mutable object, retaining this Queue and its Client. */
+    public function defaults(): QueueDefaults {}
+    /** Replace the whole local layer in place; an empty layer clears overrides on save. */
+    public function setDefaults(QueueDefaults $defaults): void {}
+    /** Save only net edits with the accepted revision. Conflict/uncertainty preserves edits. */
+    public function save(?Duration $timeout = null): void {}
+    /** Reject dirty state. Explicitly allow retained historical snapshots with includeDeleted. */
+    public function refresh(bool $includeDeleted = false, ?Duration $timeout = null): void {}
+    /** Restore the last accepted snapshot in place, without RPC, even after Client closure. */
+    public function discardChanges(): void {}
+    /** Reject dirty/deleted state; adopt the returned snapshot without waiting for work to drain. */
+    public function suspend(?Duration $timeout = null): void {}
+    public function resume(?Duration $timeout = null): void {}
+    /** Requires a suspended queue remotely. Retain cached fields/revision and block further edits. */
+    public function delete(?Duration $timeout = null): void {}
 }
 
 /** Queue lifecycle state, including retained deleted queues. */
