@@ -122,6 +122,9 @@ foreach ([
     [JobU\Run::class, 'listAttempts', 'JobU\Page', ['limit', 'timeout'], ['int', '?JobU\Duration'], [100, null]],
     [JobU\AttemptSummary::class, 'load', 'JobU\Attempt', ['timeout'], ['?JobU\Duration'], [null]],
     [JobU\Attempt::class, 'refresh', 'void', ['timeout'], ['?JobU\Duration'], [null]],
+    [JobU\Run::class, 'getOutput', '?string', ['maxBytes', 'timeout'], ['int', '?JobU\Duration'], [4096, null]],
+    [JobU\Attempt::class, 'getOutput', '?string', ['maxBytes', 'timeout'], ['int', '?JobU\Duration'], [4096, null]],
+    [JobU\Attempt::class, 'readOutput', 'JobU\OutputChunk', ['channel', 'offset', 'length', 'timeout'], ['JobU\OutputChannel', 'int', 'int', '?JobU\Duration'], [0, 16384, null]],
     [JobU\Attempt::class, 'getResult', '?JobU\ExecutionResult', [], [], []],
 ] as [$class, $name, $return, $names, $types, $defaults]) {
     $m = new ReflectionMethod($class, $name);
@@ -135,13 +138,15 @@ foreach ([
 foreach ([JobU\RunSummary::class, JobU\AttemptSummary::class, JobU\Attempt::class] as $name) {
     $c = new ReflectionClass($name);
     check($c->isFinal() && $c->getConstructor()->isPrivate(), "$name construction");
-    check(!$c->hasMethod('getOutput') && !$c->hasMethod('readOutput'), "$name output deferred");
+    if ($name !== JobU\Attempt::class) {
+        check(!$c->hasMethod('getOutput') && !$c->hasMethod('readOutput'), "$name omits output");
+    }
 }
 foreach (['getAttributes', 'getPayload', 'getResult'] as $method) {
     check(!(new ReflectionClass(JobU\RunSummary::class))->hasMethod($method), "RunSummary omits $method");
 }
 check(!(new ReflectionClass(JobU\AttemptSummary::class))->hasMethod('getResult'), 'AttemptSummary omits result');
 
-foreach (['getJob', 'getRun', 'getAttempt', 'listAttempts'] as $method) {
+foreach (['getJob', 'getRun', 'getAttempt', 'listAttempts', 'getOutput', 'readOutput'] as $method) {
     check(!(new ReflectionClass(JobU\Client::class))->hasMethod($method), "Client omits $method");
 }

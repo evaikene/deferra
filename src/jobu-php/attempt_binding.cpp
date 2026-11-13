@@ -1,6 +1,7 @@
 #include "attempt_binding.hpp"
 
 #include "history_binding.hpp"
+#include "output_binding.hpp"
 #include "result_binding.hpp"
 #include "value_snapshot.hpp"
 
@@ -74,6 +75,21 @@ private:
 
 using Binding        = ::php::ObjectBinding<Attempt>;
 using SummaryBinding = ::php::ObjectBinding<AttemptSummary>;
+
+auto attempt_output(zend_execute_data* frame, bool precise) noexcept -> ::php::Result<::php::Value>
+{
+    auto start  = core::Clock::now();
+    auto native = Binding::get(Z_OBJ(frame->This));
+    if (!native) {
+        return native.error();
+    }
+    auto const&      attempt = *native.value();
+    jobu::AttemptKey key{.run_id = attempt.value().run_id, .attempt_number = attempt.value().attempt_number};
+    if (precise) {
+        return read_output(attempt.client(), key, attempt.type(), ::php::Arguments(frame), start);
+    }
+    return get_output(attempt.client(), key.run_id, key.attempt_number, attempt.type(), ::php::Arguments(frame), start);
+}
 
 auto prepare_attempt(jobu::AttemptDetails const& value, jobu::JobType type) -> ::php::Result<core::JsonValue>
 {
@@ -361,4 +377,14 @@ ZEND_METHOD(JobU_AttemptSummary, getOutcome)
 ZEND_METHOD(JobU_AttemptSummary, load)
 {
     jb::php::snapshot::return_value(jb::php::attempt_operation<jb::php::AttemptSummary>(execute_data), return_value);
+}
+
+ZEND_METHOD(JobU_Attempt, readOutput)
+{
+    jb::php::snapshot::return_value(jb::php::attempt_output(execute_data, true), return_value);
+}
+
+ZEND_METHOD(JobU_Attempt, getOutput)
+{
+    jb::php::snapshot::return_value(jb::php::attempt_output(execute_data, false), return_value);
 }

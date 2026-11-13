@@ -7,8 +7,8 @@ The constructor eagerly connects and handshakes. Queue lookup, creation, local
 edits and lifecycle operations are available through the synchronous bridge.
 Job creation, active Job resources and cached Run Now snapshots are also available.
 Queue/job definition lists and retained Run/Attempt history return prefetched pages.
-Run cancellation, explicit history loading and typed execution results are available.
-Output, secret/schedule management and statistics remain later stages.
+Run cancellation, explicit history loading, typed execution results and bounded output reads are available.
+Secret/schedule management and statistics remain later stages.
 It supports PHP 8.1+ with 64-bit integers in NTS mode
 on Linux/macOS. Runtime validation covers PHP 8.2–8.6 NTS; PHP 8.1 retains the
 minimum build/API contract but is not in the test matrix. macOS runtime coverage
@@ -636,7 +636,7 @@ internal. Offsets address retained bytes, excluding omitted content.
 bytes do not establish availability, and Lost may still contain retained bytes.
 Null observation counts remain unknown; null next offset means EOF/no further
 slice. Metadata beyond PHP's signed integer range is rejected rather than
-rounded. Actual output RPCs and convenience tail selection remain later work.
+rounded. Output operations are described below.
 
 ## Queue resources
 
@@ -803,7 +803,7 @@ exposes IDs, captured job revision, origin, runner/state, schedule ownership,
 priority, planned/runnable/optional start/completion timestamps, detached typed
 attributes/payload and nullable typed execution result. These getters do not
 fetch details or resolve secrets. Run refresh/cancel, history lookup/list APIs and
-attempts are described below; output APIs remain stage 5.2. Job and Run resources cannot be
+attempts and output operations are described below. Job and Run resources cannot be
 cloned or serialized. Closing the Client preserves cached reads and local edits;
 subsequent RPC operations fail locally.
 
@@ -869,9 +869,9 @@ while ($page->hasNext()) {
 
 All phase-4 Queue/Job lookup, creation, editing, lifecycle and definition-list
 entry points are available. The cached Run returned by `runNow()` is available;
-`Job::listRuns()` and full Run/Attempt APIs are available. Output remains stage 5.2,
-secret/schedule management stage 5.3, and `Queue::statistics()`/system statistics
-stage 5.4.
+`Job::listRuns()` and full Run/Attempt APIs, including output, are available.
+Secret/schedule management remains stage 5.3, and `Queue::statistics()`/system
+statistics remains stage 5.4.
 
 - `hasNext(): bool` checks only local state. An empty first result returns false.
 - `next(?Duration $timeout = null): void` publishes the prefetched first page
@@ -990,4 +990,55 @@ Client, reject cloning/serialization/dynamic properties, and remain request-loca
 Strict comparison (`===`) identifies a PHP instance; use ID getters (and attempt
 number) to compare record identity rather than relying on loose object comparison.
 Explicit Client closure leaves cached getters usable but prevents further RPCs.
-Output convenience and chunk readers remain deferred to stage 5.2.
+
+### Retained output
+
+```php
+$tail = $run->getOutput(maxBytes: 4096, timeout: JobU\Duration::seconds(2));
+$attempt = $run->getAttempt(1);
+$chunk = $attempt->readOutput(JobU\OutputChannel::Stderr, offset: 0, length: 16384);
+$bytes = $chunk->getData();
+```
+
+`Run::getOutput(int $maxBytes = 4096, ?Duration $timeout = null): ?string`
+selects the latest attempt once by largest attempt number. No attempts returns
+null. `Attempt::getOutput(int $maxBytes = 4096, ?Duration $timeout = null): ?string`
+uses that specific attempt. Both accept 1–65,536 bytes. For CLI they prefer
+non-empty retained stderr, otherwise stdout; channels are never concatenated.
+For HTTP they select the response body. If neither CLI channel provides bytes,
+confirmed empty capture returns `''` (including empty captured stderr with
+unavailable stdout); otherwise the result is null.
+
+The result is the last `min(maxBytes, retainedBytes)` raw bytes of the selected
+channel. Offsets address retained bytes, excluding omitted middle content, not
+original stream positions. A tail may start inside a UTF-8 character. NUL and
+other binary bytes are preserved; the extension does not parse application JSON.
+Partial, truncated or lost capture can still provide useful retained bytes.
+Lost capture without bytes is unavailable, rather than confirmed empty capture.
+Use `readOutput()` when capture status and loss/truncation metadata matter.
+
+`Attempt::readOutput(OutputChannel $channel, int $offset = 0, int $length = 16384,
+?Duration $timeout = null): OutputChunk` accepts offsets from 0 through
+`PHP_INT_MAX - 1` and lengths from 1 through 65,536. CLI accepts Stdout/Stderr;
+HTTP accepts Body/Headers. Wrong argument types raise `TypeError`; invalid local
+bounds or channel applicability raise `ValueError` before RPC. The daemon checks
+the offset against retained length: equality requests EOF, a larger offset is an
+error. Wire UTF-8/base64 decoding is internal, including chunks split within a
+UTF-8 character. Unknown total/omitted counts remain null.
+
+These operations neither wait for execution completion nor refresh cached
+Run/Attempt state. Incomplete attempts expose Pending, with no live output
+stream. A later call may observe completion. Convenience reads use bounded
+metadata probes and at most one tail fetch for the chosen channel. One total
+monotonic deadline, inherited from Client or explicitly overridden, includes
+latest-attempt discovery, all reads and reconnects. No timeout is reset between
+requests. Transport and daemon errors propagate; they never become empty output.
+
+Multi-read operations are not atomic snapshots. Completed retained output is
+immutable, but retention may delete the selected attempt between reads; that
+not-found error propagates without restarting selection. An attempt created
+after latest-attempt discovery does not replace the selected identity. Retained
+output remains readable after owner deletion while its history still exists.
+Explicit Client closure prevents further output RPCs; already returned strings
+and detached OutputChunk values remain usable. Summaries and Client have no
+output methods.

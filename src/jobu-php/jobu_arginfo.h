@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 7aacbcd930c4ebe317d9ab2917b599d70423d84f */
+ * Stub hash: ba8adf731e90a33cfdf9748c042668b26d14e27c */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Duration___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -732,6 +732,11 @@ ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Job_runNow, 0, 0, JobU
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_JobU_Run_getOutput, 0, 0, IS_STRING, 1)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, maxBytes, IS_LONG, 0, "4096")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Run_getAttempt, 0, 1, JobU\\Attempt, 0)
 	ZEND_ARG_TYPE_INFO(0, number, IS_LONG, 0)
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
@@ -838,6 +843,15 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_AttemptSummary_load, 0, 0, JobU\\Attempt, 0)
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
 ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Attempt_readOutput, 0, 1, JobU\\OutputChunk, 0)
+	ZEND_ARG_OBJ_INFO(0, channel, JobU\\OutputChannel, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, offset, IS_LONG, 0, "0")
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, length, IS_LONG, 0, "16384")
+	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, timeout, JobU\\Duration, 1, "null")
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_JobU_Attempt_getOutput arginfo_class_JobU_Run_getOutput
 
 #define arginfo_class_JobU_Attempt___construct arginfo_class_JobU_Duration___construct
 
@@ -1116,6 +1130,7 @@ ZEND_METHOD(JobU_Job, resume);
 ZEND_METHOD(JobU_Job, move);
 ZEND_METHOD(JobU_Job, delete);
 ZEND_METHOD(JobU_Job, runNow);
+ZEND_METHOD(JobU_Run, getOutput);
 ZEND_METHOD(JobU_Run, getAttempt);
 ZEND_METHOD(JobU_Run, refresh);
 ZEND_METHOD(JobU_Run, cancel);
@@ -1161,6 +1176,8 @@ ZEND_METHOD(JobU_AttemptSummary, getCompletedAt);
 ZEND_METHOD(JobU_AttemptSummary, getState);
 ZEND_METHOD(JobU_AttemptSummary, getOutcome);
 ZEND_METHOD(JobU_AttemptSummary, load);
+ZEND_METHOD(JobU_Attempt, readOutput);
+ZEND_METHOD(JobU_Attempt, getOutput);
 ZEND_METHOD(JobU_Attempt, __construct);
 ZEND_METHOD(JobU_Attempt, getRunId);
 ZEND_METHOD(JobU_Attempt, getNumber);
@@ -1526,6 +1543,7 @@ static const zend_function_entry class_JobU_Job_methods[] = {
 };
 
 static const zend_function_entry class_JobU_Run_methods[] = {
+	ZEND_ME(JobU_Run, getOutput, arginfo_class_JobU_Run_getOutput, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Run, getAttempt, arginfo_class_JobU_Run_getAttempt, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Run, refresh, arginfo_class_JobU_Run_refresh, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Run, cancel, arginfo_class_JobU_Run_cancel, ZEND_ACC_PUBLIC)
@@ -1583,6 +1601,8 @@ static const zend_function_entry class_JobU_AttemptSummary_methods[] = {
 };
 
 static const zend_function_entry class_JobU_Attempt_methods[] = {
+	ZEND_ME(JobU_Attempt, readOutput, arginfo_class_JobU_Attempt_readOutput, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Attempt, getOutput, arginfo_class_JobU_Attempt_getOutput, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Attempt, __construct, arginfo_class_JobU_Attempt___construct, ZEND_ACC_PRIVATE)
 	ZEND_ME(JobU_Attempt, getRunId, arginfo_class_JobU_Attempt_getRunId, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Attempt, getNumber, arginfo_class_JobU_Attempt_getNumber, ZEND_ACC_PUBLIC)

@@ -5,6 +5,7 @@
 #include "cli_payload_binding.hpp"
 #include "history_binding.hpp"
 #include "http_payload_binding.hpp"
+#include "output_binding.hpp"
 #include "resource_state.hpp"
 #include "result_binding.hpp"
 #include "value_snapshot.hpp"
@@ -74,6 +75,17 @@ private:
 };
 
 using SummaryBinding = ::php::ObjectBinding<RunSummary>;
+
+auto run_output(zend_execute_data* frame) noexcept -> ::php::Result<::php::Value>
+{
+    auto start  = core::Clock::now();
+    auto native = Binding::get(Z_OBJ(frame->This));
+    if (!native) {
+        return native.error();
+    }
+    auto const& run = *native.value();
+    return get_output(run.client(), run.value().id, {}, run.value().type, ::php::Arguments(frame), start);
+}
 
 auto prepare_run(jobu::RunDetails const& value) -> ::php::Result<core::JsonValue>
 {
@@ -560,4 +572,9 @@ ZEND_METHOD(JobU_Run, listAttempts)
 ZEND_METHOD(JobU_Run, getAttempt)
 {
     jb::php::snapshot::return_value(jb::php::get_run_attempt(execute_data), return_value);
+}
+
+ZEND_METHOD(JobU_Run, getOutput)
+{
+    jb::php::snapshot::return_value(jb::php::run_output(execute_data), return_value);
 }
