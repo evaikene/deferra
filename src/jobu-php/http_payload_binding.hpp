@@ -1,5 +1,7 @@
 #pragma once
 
+#include "resource_state.hpp"
+
 #include <jb/core/json.hpp>
 #include <phpcxx/result.hpp>
 #include <phpcxx/value.hpp>
@@ -17,9 +19,15 @@ auto http_payload_from_php(::php::ValueView value) -> ::php::Result<core::JsonVa
 /// Validate and replace all fields atomically, preserving the target identity and attachment.
 auto replace_http_payload(zend_object* target, ::php::ValueView source) -> ::php::Result<void>;
 
+/// Validate a detached/attached source and prepare notification-free restoration.
+/// The source is copied now; the target object and its attachment retain identity.
+auto prepare_http_payload_restore(zend_object* target, ::php::ValueView source) -> ::php::Result<ConfigurationRestore>;
+
 /// Attach once to a request-local owner retained and traced for GC. Notification runs
 /// only for actual edits and must not execute PHP or mutate the payload. Clones detach.
-auto attach_http_payload(zend_object* target, ::php::ValueView owner, std::function<void()> changed)
-    -> ::php::Result<void>;
+auto attach_http_payload(zend_object*           target,
+                         ::php::ValueView       owner,
+                         std::function<void()>  changed,
+                         ConfigurationEditCheck editable = {}) -> ::php::Result<void>;
 
 } // namespace jb::php

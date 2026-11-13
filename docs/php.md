@@ -632,3 +632,48 @@ bytes do not establish availability, and Lost may still contain retained bytes.
 Null observation counts remain unknown; null next offset means EOF/no further
 slice. Metadata beyond PHP's signed integer range is rejected rather than
 rounded. Actual output RPCs and convenience tail selection remain later work.
+
+## Private resource-state foundation
+
+Stage 4.1 adds the internal cache/dirty-state machinery; production `Queue` and
+`Job` classes and their lookup/creation methods remain later stages. The
+fixture-only resource used by Embed tests is not registered by `jobu.so`.
+
+`ResourceState<Queue>` and `ResourceState<JobDefinition>` retain the originating
+PHP Client and keep independent accepted and working native snapshots. The
+concrete binding traces its attached configuration objects as well as the
+state's Client edge. No Client-to-resource ownership edge is added. All state
+and Zend access remains on the originating request/thread; use the default
+non-cloneable, non-serializable `ObjectBinding` policy for connected resources.
+
+Setters track net differences from the accepted snapshot. Reverting a field
+removes its edit; job attributes track changed keys and produce a supplied-key
+patch, whereas queue defaults and payloads use full replacement. Intermediate
+attribute edits may be temporarily inconsistent across fields, so dirty tracking
+copies native values without whole-layer validation. Request construction
+validates the complete configuration before freezing a typed operation.
+
+A clean save returns without RPC. Dirty refresh and lifecycle guards fail
+locally with `UnsavedChangesException`. Save freezes the stable UUID, accepted
+revision and changed fields, and uses the existing operation/recovery bridge
+with one total deadline. A validated successful reply becomes the new baseline;
+conflicts, uncertain outcomes and conversion failures preserve all local edits
+and the old baseline/revision. There is no added replay or reconciliation policy.
+Discard restores the last accepted snapshot locally, even after Client closure.
+RPC operations continue to use the existing Client boundary.
+
+Attached attributes/defaults and CLI/HTTP payloads provide private prepared
+restoration adapters. Prepare every component before committing any component;
+commit moves native values into the existing objects/backing layers, without
+notifications, PHP callbacks or GC. The temporary restoration borrows its target,
+so it must not survive a PHP call or its target. Payload restoration accepts an
+already converted configuration source; concrete Job reply decoding belongs to
+the later Job resource stage. Ordinary edits preserve their existing notifications,
+merge/replacement semantics and detached clone behavior.
+
+An optional pre-commit edit guard lets an attached child reject edits after its
+resource is locally deleted. Setters recheck after conversions that can execute
+PHP. Clones detach both the owner and its guard/notification. Local deletion
+retains cached getters and the last received revision; a null delete reply does
+not fabricate a new token. Explicit historical refresh can use the shared cache
+path where the concrete resource API supports it.

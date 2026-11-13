@@ -7,6 +7,7 @@
 #include "query_binding.hpp"
 #include "recovery-proxy.hpp"
 #include "request.hpp"
+#include "resource-bindings.hpp"
 #include "result_binding.hpp"
 #include "support/temporary_directory.hpp"
 #include "value_binding.hpp"
@@ -1673,4 +1674,23 @@ TEST_CASE("PHP output snapshots preserve raw bytes and every availability distin
         publish(chunk);
         runtime.restart(nullptr);
     }
+}
+
+TEST_CASE("Resource caches preserve edits, attachments and client ownership", "[php][lifecycle][resource]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    auto*                        previous = &host.value()->loop();
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(*previous, directory.path());
+    {
+        Runtime runtime;
+        for (int request = 0; request != 2; ++request) {
+            jobu_php_test::test_resource_state((directory.path() / "daemon.sock").string(),
+                                               (directory.path() / "resource-proxy.sock").string());
+            runtime.restart(previous);
+        }
+    }
+    daemon.stop(*previous);
 }
