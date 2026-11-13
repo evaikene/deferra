@@ -1,4 +1,5 @@
 #include "lifecycle-bindings.hpp"
+#include "page-bindings.hpp"
 #include "resource-bindings.hpp"
 
 #include "client_binding.hpp"
@@ -176,7 +177,8 @@ auto register_classes() noexcept -> zend_result
     auto* client = register_class_JobUTestClient();
     auto* holder = register_class_JobUTestHolder();
     register_class_JobUTestBridge();
-    return ClientBinding::bind(client) && HolderBinding::bind(holder) && register_resource_classes() == SUCCESS
+    return ClientBinding::bind(client) && HolderBinding::bind(holder) && register_resource_classes() == SUCCESS &&
+                   register_page_classes() == SUCCESS
              ? SUCCESS
              : FAILURE;
 }

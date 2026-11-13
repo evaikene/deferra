@@ -66,7 +66,7 @@ foreach ($exceptions as $name) {
     }
 }
 
-$expectedClasses = array_map(fn(string $name): string => 'JobU\\' . $name, [...array_keys($enums), ...$exceptions, 'Duration', 'Client', 'SecretReference', 'Schedule', 'OnceSchedule', 'CronSchedule', 'JobAttributes', 'CliJobAttributes', 'HttpJobAttributes', 'QueueDefaults', 'CliPayload', 'HttpPayload', 'HttpHeader', 'TimeRange', 'RunQuery', 'StatisticsQuery', 'SystemInfo', 'SecretMetadata', 'ExecutionResult', 'CliExecutionResult', 'HttpExecutionResult', 'OutputChunk', 'Queue', 'Job', 'Run']);
+$expectedClasses = array_map(fn(string $name): string => 'JobU\\' . $name, [...array_keys($enums), ...$exceptions, 'Duration', 'Client', 'SecretReference', 'Schedule', 'OnceSchedule', 'CronSchedule', 'JobAttributes', 'CliJobAttributes', 'HttpJobAttributes', 'QueueDefaults', 'CliPayload', 'HttpPayload', 'HttpHeader', 'TimeRange', 'RunQuery', 'StatisticsQuery', 'SystemInfo', 'SecretMetadata', 'ExecutionResult', 'CliExecutionResult', 'HttpExecutionResult', 'OutputChunk', 'Queue', 'Job', 'Run', 'Page']);
 $actualClasses = $extension->getClassNames();
 sort($expectedClasses);
 sort($actualClasses);
@@ -81,4 +81,16 @@ check((string)$creation->getReturnType() === JobU\Queue::class, 'queue creation 
 check((string)$queue->getMethod('getHistoryRetention')->getReturnType() === '?JobU\\Duration', 'nullable retention');
 check((string)$queue->getMethod('getDeletedAt')->getReturnType() === '?DateTimeImmutable', 'nullable deletion date');
 check(!$queue->hasMethod('statistics') && !$queue->hasMethod('listJobs'), 'stage boundary');
+$page = new ReflectionClass(JobU\Page::class);
+check($page->isFinal() && $page->getConstructor()->isPrivate(), 'Page construction');
+check(array_map(fn($m) => $m->getName(), $page->getMethods()) === ['__construct', 'hasNext', 'next', 'items'], 'Page methods');
+check((string)$page->getMethod('hasNext')->getReturnType() === 'bool', 'Page hasNext return');
+check((string)$page->getMethod('items')->getReturnType() === 'array', 'Page items return');
+$next = $page->getMethod('next');
+check((string)$next->getReturnType() === 'void', 'Page next return');
+check($next->getNumberOfRequiredParameters() === 0 && $next->getNumberOfParameters() === 1, 'Page next arity');
+$timeout = $next->getParameters()[0];
+check($timeout->getName() === 'timeout' && (string)$timeout->getType() === '?JobU\\Duration' && $timeout->getDefaultValue() === null, 'Page timeout');
+check(!class_exists('JobUTestPages', false), 'fixture factories excluded');
+check(!(new ReflectionClass(JobU\Client::class))->hasMethod('listQueues'), 'public list APIs remain later work');
 echo "reflection ok\n";

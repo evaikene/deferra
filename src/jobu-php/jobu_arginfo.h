@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: c39e120156f2b26166dc48a180a0352c71c65c27 */
+ * Stub hash: 083e7a771fba6bc1c8ed90248528b8ceca07a4ef */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_JobU_Duration___construct, 0, 0, 0)
 ZEND_END_ARG_INFO()
@@ -730,6 +730,14 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_JobU_Run_getResult, 0, 0, JobU\\ExecutionResult, 1)
 ZEND_END_ARG_INFO()
 
+#define arginfo_class_JobU_Page___construct arginfo_class_JobU_Duration___construct
+
+#define arginfo_class_JobU_Page_hasNext arginfo_class_JobU_HttpHeader_isSensitive
+
+#define arginfo_class_JobU_Page_next arginfo_class_JobU_Queue_save
+
+#define arginfo_class_JobU_Page_items arginfo_class_JobU_CliPayload_getArguments
+
 ZEND_METHOD(JobU_Duration, __construct);
 ZEND_METHOD(JobU_Duration, getMilliseconds);
 ZEND_METHOD(JobU_Duration, milliseconds);
@@ -989,6 +997,10 @@ ZEND_METHOD(JobU_Run, getCompletedAt);
 ZEND_METHOD(JobU_Run, getAttributes);
 ZEND_METHOD(JobU_Run, getPayload);
 ZEND_METHOD(JobU_Run, getResult);
+ZEND_METHOD(JobU_Page, __construct);
+ZEND_METHOD(JobU_Page, hasNext);
+ZEND_METHOD(JobU_Page, next);
+ZEND_METHOD(JobU_Page, items);
 
 static const zend_function_entry class_JobU_Duration_methods[] = {
 	ZEND_ME(JobU_Duration, __construct, arginfo_class_JobU_Duration___construct, ZEND_ACC_PRIVATE)
@@ -1350,6 +1362,14 @@ static const zend_function_entry class_JobU_Run_methods[] = {
 	ZEND_ME(JobU_Run, getAttributes, arginfo_class_JobU_Run_getAttributes, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Run, getPayload, arginfo_class_JobU_Run_getPayload, ZEND_ACC_PUBLIC)
 	ZEND_ME(JobU_Run, getResult, arginfo_class_JobU_Run_getResult, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_JobU_Page_methods[] = {
+	ZEND_ME(JobU_Page, __construct, arginfo_class_JobU_Page___construct, ZEND_ACC_PRIVATE)
+	ZEND_ME(JobU_Page, hasNext, arginfo_class_JobU_Page_hasNext, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Page, next, arginfo_class_JobU_Page_next, ZEND_ACC_PUBLIC)
+	ZEND_ME(JobU_Page, items, arginfo_class_JobU_Page_items, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -2195,6 +2215,21 @@ static zend_class_entry *register_class_JobU_Run(void)
 	zend_class_entry ce, *class_entry;
 
 	INIT_NS_CLASS_ENTRY(ce, "JobU", "Run", class_JobU_Run_methods);
+#if (PHP_VERSION_ID >= 80400)
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
+#else
+	class_entry = zend_register_internal_class_ex(&ce, NULL);
+	class_entry->ce_flags |= ZEND_ACC_FINAL;
+#endif
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_JobU_Page(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "JobU", "Page", class_JobU_Page_methods);
 #if (PHP_VERSION_ID >= 80400)
 	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL);
 #else

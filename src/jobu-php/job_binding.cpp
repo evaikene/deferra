@@ -712,6 +712,11 @@ auto job_rpc(zend_execute_data* frame, std::string_view action) noexcept -> ::ph
 }
 } // namespace
 
+auto job_to_php(::php::ValueView client, jobu::JobDefinition value) -> ::php::Result<::php::Value>
+{
+    return make_job(client, std::move(value));
+}
+
 auto bind_job_class(zend_class_entry* entry) -> bool
 {
     entry->ce_flags |= ZEND_ACC_NO_DYNAMIC_PROPERTIES;
