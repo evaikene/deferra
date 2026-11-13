@@ -712,9 +712,17 @@ final class Job
     public function runNow(?string $idempotencyKey = null, ?Duration $timeout = null): Run {}
 }
 
-/** Complete cached run snapshot. Getters never fetch or wait for execution. @not-serializable */
+/** Complete cached run snapshot. Field getters never fetch or wait for execution. @not-serializable */
 final class Run
 {
+    /** Select the latest attempt once by largest number; no attempts returns null.
+     * Read up to maxBytes (1..65536) from the retained tail; default 4096 bytes.
+     * CLI prefers non-empty stderr, then stdout; HTTP reads body. Lost capture may retain bytes.
+     * Null means unavailable; an empty string means captured empty (including empty stderr when stdout is unavailable).
+     * No wait or cache refresh. All reads and reconnects share one total timeout.
+     */
+    public function getOutput(int $maxBytes = 4096, ?Duration $timeout = null): ?string {}
+
     /** Load this run's attempt by number, between 1 and PHP_INT_MAX. */
     public function getAttempt(int $number, ?Duration $timeout = null): Attempt {}
     /** Explicitly replace the cached snapshot; failure preserves it. */
@@ -793,6 +801,18 @@ final class AttemptSummary
 /** Cached attempt retaining its Client and trusted runner type. @not-serializable */
 final class Attempt
 {
+    /** Read retained bytes: offset 0..PHP_INT_MAX-1, length 1..65536.
+     * CLI accepts Stdout/Stderr; HTTP accepts Body/Headers. EOF offset is allowed.
+     * Preserves capture status, loss/truncation and nullable counts; never waits for completion.
+     */
+    public function readOutput(OutputChannel $channel, int $offset = 0, int $length = 16384, ?Duration $timeout = null): OutputChunk {}
+    /** Read up to maxBytes (1..65536) from the retained tail; default 4096 bytes.
+     * CLI prefers non-empty stderr, then stdout; HTTP reads body. Lost capture may retain bytes.
+     * Null means unavailable; an empty string means captured empty (including empty stderr when stdout is unavailable).
+     * No wait or cache refresh. All reads and reconnects share one total timeout.
+     */
+    public function getOutput(int $maxBytes = 4096, ?Duration $timeout = null): ?string {}
+
     private function __construct() {}
     public function getRunId(): string {}
     public function getNumber(): int {}

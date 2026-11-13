@@ -41,6 +41,8 @@ public:
 
     /// Delay each history detail reply to verify explicit history-operation deadlines.
     std::chrono::milliseconds                                     history_reply_delay{0};
+    /// Delay output and latest-attempt replies to verify a shared multi-read deadline.
+    std::chrono::milliseconds                                     output_reply_delay{0};
     std::string                                                   drop_method;
     int                                                           drops{0};
     int                                                           connections{0};
@@ -158,11 +160,18 @@ private:
                 REQUIRE(encoded);
                 auto frame = jb::rpc::frame_message(encoded.value());
                 REQUIRE(frame);
-                if (_proxy.history_reply_delay.count() > 0 && (_method == "attempt.get" || _method == "run.get")) {
+                auto delay = std::chrono::milliseconds{0};
+                if (_method == "attempt.get" || _method == "run.get") {
+                    delay = _proxy.history_reply_delay;
+                }
+                else if (_method == "attempt.output" || _method == "attempt.list") {
+                    delay = _proxy.output_reply_delay;
+                }
+                if (delay.count() > 0) {
                     // The synchronous client has at most one outstanding request
                     // on this link. The timer owns its bytes without blocking the loop.
                     _delayed_frame = frame.value();
-                    _reply_timer.start(_proxy.history_reply_delay);
+                    _reply_timer.start(delay);
                     continue;
                 }
                 CHECK(_downstream->write(frame.value()) == frame->size());
