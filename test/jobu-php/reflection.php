@@ -13,6 +13,7 @@ check($extension->getVersion() !== false && $extension->getVersion() !== '', 'ex
 check($extension->getFunctions() === [], 'no premature RPC functions');
 
 $enums = [
+    'RunCancellationDisposition' => ['Completed' => 'completed', 'Requested' => 'requested'],
     'QueueState' => ['Active' => 'active', 'Suspending' => 'suspending', 'Suspended' => 'suspended', 'Deleted' => 'deleted'],
     'JobState' => ['Active' => 'active', 'Suspending' => 'suspending', 'Suspended' => 'suspended', 'Deleted' => 'deleted',
         'Succeeded' => 'succeeded', 'Failed' => 'failed', 'Cancelled' => 'cancelled'],
@@ -66,7 +67,7 @@ foreach ($exceptions as $name) {
     }
 }
 
-$expectedClasses = array_map(fn(string $name): string => 'JobU\\' . $name, [...array_keys($enums), ...$exceptions, 'Duration', 'Client', 'SecretReference', 'Schedule', 'OnceSchedule', 'CronSchedule', 'JobAttributes', 'CliJobAttributes', 'HttpJobAttributes', 'QueueDefaults', 'CliPayload', 'HttpPayload', 'HttpHeader', 'TimeRange', 'RunQuery', 'StatisticsQuery', 'SystemInfo', 'SecretMetadata', 'ExecutionResult', 'CliExecutionResult', 'HttpExecutionResult', 'OutputChunk', 'Queue', 'Job', 'Run', 'Page']);
+$expectedClasses = array_map(fn(string $name): string => 'JobU\\' . $name, [...array_keys($enums), ...$exceptions, 'Duration', 'Client', 'SecretReference', 'Schedule', 'OnceSchedule', 'CronSchedule', 'JobAttributes', 'CliJobAttributes', 'HttpJobAttributes', 'QueueDefaults', 'CliPayload', 'HttpPayload', 'HttpHeader', 'TimeRange', 'RunQuery', 'StatisticsQuery', 'SystemInfo', 'SecretMetadata', 'ExecutionResult', 'CliExecutionResult', 'HttpExecutionResult', 'OutputChunk', 'Queue', 'Job', 'Run', 'RunSummary', 'Attempt', 'AttemptSummary', 'Page']);
 $actualClasses = $extension->getClassNames();
 sort($expectedClasses);
 sort($actualClasses);
@@ -107,3 +108,40 @@ foreach ([
 }
 
 echo "reflection ok\n";
+
+foreach ([
+    [JobU\Queue::class, 'getJob', 'JobU\Job', ['id', 'timeout'], ['string', '?JobU\Duration'], [null]],
+    [JobU\Queue::class, 'listRuns', 'JobU\Page', ['query', 'timeout'], ['?JobU\RunQuery', '?JobU\Duration'], [null, null]],
+    [JobU\Job::class, 'getRun', 'JobU\Run', ['id', 'timeout'], ['string', '?JobU\Duration'], [null]],
+    [JobU\Client::class, 'listRuns', 'JobU\Page', ['query', 'timeout'], ['?JobU\RunQuery', '?JobU\Duration'], [null, null]],
+    [JobU\Run::class, 'getAttempt', 'JobU\Attempt', ['number', 'timeout'], ['int', '?JobU\Duration'], [null]],
+    [JobU\Job::class, 'listRuns', 'JobU\Page', ['query', 'timeout'], ['?JobU\RunQuery', '?JobU\Duration'], [null, null]],
+    [JobU\RunSummary::class, 'load', 'JobU\Run', ['timeout'], ['?JobU\Duration'], [null]],
+    [JobU\Run::class, 'refresh', 'void', ['timeout'], ['?JobU\Duration'], [null]],
+    [JobU\Run::class, 'cancel', 'JobU\RunCancellationDisposition', ['timeout'], ['?JobU\Duration'], [null]],
+    [JobU\Run::class, 'listAttempts', 'JobU\Page', ['limit', 'timeout'], ['int', '?JobU\Duration'], [100, null]],
+    [JobU\AttemptSummary::class, 'load', 'JobU\Attempt', ['timeout'], ['?JobU\Duration'], [null]],
+    [JobU\Attempt::class, 'refresh', 'void', ['timeout'], ['?JobU\Duration'], [null]],
+    [JobU\Attempt::class, 'getResult', '?JobU\ExecutionResult', [], [], []],
+] as [$class, $name, $return, $names, $types, $defaults]) {
+    $m = new ReflectionMethod($class, $name);
+    $p = $m->getParameters();
+    check((string)$m->getReturnType() === $return, "$class::$name return");
+    check(array_map(fn($v) => $v->getName(), $p) === $names, "$class::$name names");
+    check(array_map(fn($v) => (string)$v->getType(), $p) === $types, "$class::$name types");
+    $optional = array_filter($p, fn($v) => $v->isOptional());
+    check(array_values(array_map(fn($v) => $v->getDefaultValue(), $optional)) === $defaults, "$class::$name defaults");
+}
+foreach ([JobU\RunSummary::class, JobU\AttemptSummary::class, JobU\Attempt::class] as $name) {
+    $c = new ReflectionClass($name);
+    check($c->isFinal() && $c->getConstructor()->isPrivate(), "$name construction");
+    check(!$c->hasMethod('getOutput') && !$c->hasMethod('readOutput'), "$name output deferred");
+}
+foreach (['getAttributes', 'getPayload', 'getResult'] as $method) {
+    check(!(new ReflectionClass(JobU\RunSummary::class))->hasMethod($method), "RunSummary omits $method");
+}
+check(!(new ReflectionClass(JobU\AttemptSummary::class))->hasMethod('getResult'), 'AttemptSummary omits result');
+
+foreach (['getJob', 'getRun', 'getAttempt', 'listAttempts'] as $method) {
+    check(!(new ReflectionClass(JobU\Client::class))->hasMethod($method), "Client omits $method");
+}

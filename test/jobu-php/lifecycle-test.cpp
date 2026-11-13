@@ -1,6 +1,7 @@
 #include "attribute_binding.hpp"
 #include "cli_payload_binding.hpp"
 #include "client.hpp"
+#include "history-test.hpp"
 #include "http_payload_binding.hpp"
 #include "lifecycle-bindings.hpp"
 #include "list-test.hpp"
@@ -1784,6 +1785,56 @@ TEST_CASE("Production CLI module lists typed definitions", "[php][list-cli]")
         .arguments  = {"-n",
                        "-dextension=" JOBU_PHP_MODULE,
                        JOBU_PHP_LIST_SCRIPT, (directory.path() / "daemon.sock").string()}
+    }));
+    REQUIRE(loop.run_until(Clock::now() + 10s, [&] { return exit.has_value(); }));
+    INFO(errors);
+    CHECK(errors.empty());
+    CHECK(exit->kind == jb::core::ProcessExitKind::Exited);
+    CHECK(exit->exit_code == 0);
+    daemon.stop(loop);
+}
+
+TEST_CASE("Public history preserves snapshots, typed results and ownership", "[php][history]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    auto*                        previous = &host.value()->loop();
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(*previous, directory.path());
+    {
+        Runtime runtime;
+        for (int request = 0; request != 2; ++request) {
+            jobu_php_test::test_history((directory.path() / "daemon.sock").string(),
+                                        (directory.path() / "history-proxy.sock").string());
+            runtime.restart(previous);
+        }
+    }
+    daemon.stop(*previous);
+}
+
+TEST_CASE("Production CLI module reads typed history", "[php][history-cli]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    auto&                        loop = host.value()->loop();
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(loop, directory.path());
+
+    jb::core::Process                    process;
+    jb::core::Object                     receiver;
+    std::optional<jb::core::ProcessExit> exit;
+    std::string                          errors;
+    process.standard_error.connect(&receiver, [&](jb::core::ByteBuffer const& bytes) {
+        errors.append(jb::core::as_string_view(bytes));
+    });
+    process.finished.connect(&receiver, [&](jb::core::ProcessExit const& value) { exit = value; });
+    REQUIRE(process.start({
+        .executable = JOBU_PHP_BINARY,
+        .arguments  = {"-n",
+                       "-dextension=" JOBU_PHP_MODULE,
+                       JOBU_PHP_HISTORY_SCRIPT, (directory.path() / "daemon.sock").string()}
     }));
     REQUIRE(loop.run_until(Clock::now() + 10s, [&] { return exit.has_value(); }));
     INFO(errors);

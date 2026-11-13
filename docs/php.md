@@ -6,8 +6,9 @@ and queue defaults, mutable CLI/HTTP payloads, and request-scoped `Client` conne
 The constructor eagerly connects and handshakes. Queue lookup, creation, local
 edits and lifecycle operations are available through the synchronous bridge.
 Job creation, active Job resources and cached Run Now snapshots are also available.
-Queue/job definition lists return prefetched pages. Statistics and full Run/Attempt
-management remain later stages.
+Queue/job definition lists and retained Run/Attempt history return prefetched pages.
+Run cancellation, explicit history loading and typed execution results are available.
+Output, secret/schedule management and statistics remain later stages.
 It supports PHP 8.1+ with 64-bit integers in NTS mode
 on Linux/macOS. Runtime validation covers PHP 8.2–8.6 NTS; PHP 8.1 retains the
 minimum build/API contract but is not in the test matrix. macOS runtime coverage
@@ -65,6 +66,7 @@ values match the wire vocabulary:
 | --- | --- |
 | `QueueState` | Active, Suspending, Suspended, Deleted |
 | `JobState` | Active, Suspending, Suspended, Deleted, Succeeded, Failed, Cancelled |
+| `RunCancellationDisposition` | Completed, Requested |
 | `RunState` | Scheduled, Running, RetryWait, Succeeded, Failed, Interrupted, Cancelled |
 | `AttemptState` | Pending, Running, Completed |
 | `AttemptOutcome` | Succeeded, Failed, Interrupted, Cancelled |
@@ -760,7 +762,10 @@ Create definitions through a clean, nondeleted Queue with `createCliJob()` or
 daemon materializes applicable defaults and commits the initial scheduled run.
 Suspended queues admit creation but prevent dispatch. Save or discard local queue
 changes before creating jobs, so unsaved defaults cannot be mistaken for persisted
-configuration. `Client::getJob($id)` accepts a canonical lowercase UUID.
+configuration. `Queue::getJob($id)` accepts a canonical lowercase UUID and returns
+only a Job belonging to that queue; a different parent raises `NotFoundException`.
+Lookup preserves local queue edits. Deleted jobs raise `NotFoundException`; use
+`listJobs(includeDeleted: true)` to read retained deleted definitions.
 
 Jobs expose cached identity, queue UUID, revision, nullable name, runner type,
 state, priority, schedule and timestamps. Getters never perform RPC. All returned
@@ -797,8 +802,8 @@ The Run returned here is a complete cached snapshot retaining its Client. It
 exposes IDs, captured job revision, origin, runner/state, schedule ownership,
 priority, planned/runnable/optional start/completion timestamps, detached typed
 attributes/payload and nullable typed execution result. These getters do not
-fetch details or resolve secrets. Run refresh/cancel, lookup/list APIs, attempts
-and output remain later implementation stages. Job and Run resources cannot be
+fetch details or resolve secrets. Run refresh/cancel, history lookup/list APIs and
+attempts are described below; output APIs remain stage 5.2. Job and Run resources cannot be
 cloned or serialized. Closing the Client preserves cached reads and local edits;
 subsequent RPC operations fail locally.
 
@@ -840,7 +845,7 @@ included, including suspended and terminal jobs. Both runner families are includ
 by default. `includeDeleted: true` permits soft-deleted definitions and selection
 of a retained deleted queue; a Deleted state filter alone does not enable that
 visibility. These methods list current retained definitions, not run or attempt
-history. Full history, secrets and statistics entry points remain later stages.
+history. Run/Attempt history is described below; secrets and statistics remain later stages.
 
 `Queue::listJobs()` uses its stable UUID and originating Client, including after
 rename. It permits dirty queues and leaves their edits and cached fields untouched.
@@ -864,7 +869,7 @@ while ($page->hasNext()) {
 
 All phase-4 Queue/Job lookup, creation, editing, lifecycle and definition-list
 entry points are available. The cached Run returned by `runNow()` is available;
-`Job::listRuns()` and full Run/Attempt APIs remain stage 5.1, output stage 5.2,
+`Job::listRuns()` and full Run/Attempt APIs are available. Output remains stage 5.2,
 secret/schedule management stage 5.3, and `Queue::statistics()`/system statistics
 stage 5.4.
 
@@ -893,3 +898,96 @@ Unsetting the caller's Client variable does not close a live Page's session.
 After explicit `Client::close()`, cached access and consumption of the prefetched
 buffer still work, while a subsequent fetch fails. Arrays or resource objects
 retained by the caller survive advancement. Page cannot be cloned or serialized.
+
+### Retained run and attempt history
+
+The public API follows resource ownership:
+
+| Owner | Lookup and enumeration |
+| --- | --- |
+| `Client` | Cross-queue `listJobs()` and `listRuns()`, plus queue creation and lookup |
+| `Queue` | `getJob($id)`, `listJobs()` and `listRuns()` within that queue |
+| `Job` | `getRun($id)` and `listRuns()` for that job |
+| `Run` | `getAttempt($number)` and `listAttempts()` for that run |
+
+`Job::getRun($id)` returns the same cached `Run` class used by `Job::runNow()`.
+A run belonging to another job raises `NotFoundException`. Lookup permits dirty
+or locally deleted jobs without changing their local state.
+
+`Client::listRuns(?RunQuery $query = null)`, `Queue::listRuns()` and
+`Job::listRuns()` return `Page<RunSummary>`. The query defaults to all retained
+runs within the receiver's scope with a limit of 100 (accepted range 1–200).
+Filters combine with AND. A Queue binds its stable UUID as `queueId`; a Job binds
+its UUID as `jobId`. A conflicting query ID raises `ValueError`, while an absent
+or matching ID is accepted. Other filters are preserved without changing the
+supplied query. No current-queue filter is inferred from the Job.
+
+History filters use the queue/job IDs in retained run snapshots. Terminal history
+keeps its original queue after a Job move; the daemon moves nonterminal runs
+and updates their captured revision together with the suspended definition.
+History remains readable for deleted owners while records are retained. Scoped
+listing permits dirty and locally deleted objects and never saves, refreshes or
+discards local edits. History does not require a live parent or an
+`includeDeleted` argument.
+
+```php
+$page = $job->listRuns(new JobU\RunQuery(
+    states: [JobU\RunState::Failed, JobU\RunState::Interrupted], limit: 25
+));
+while ($page->hasNext()) {
+    $page->next();
+    foreach ($page->items() as $summary) {
+        $run = $summary->load(); // explicit detail load
+        $result = $run->getResult(); // cached CliExecutionResult, HttpExecutionResult or null
+    }
+}
+```
+
+Run summaries expose identity, captured job revision, origin, runner type, state,
+schedule ownership, priority, planned/runnable times and nullable start/completion
+times. They omit attributes, payload, result and output. `load(?Duration $timeout
+= null): Run` creates a separate full resource; the original summary stays
+unchanged. Full Run configuration getters return detached copies of the captured
+template, including symbolic secret references.
+
+`Run::listAttempts(int $limit = 100)` returns `Page<AttemptSummary>`. Attempt
+summaries expose `getRunId()`, `getNumber()`, `getDueAt()`, nullable
+`getStartedAt()`/`getCompletedAt()`, `getState()` and nullable `getOutcome()`.
+They have no result or output getter. Attempts are ordered by descending number;
+the largest number is the latest attempt, regardless of timestamps or outcome.
+History pages use opaque cursor-only continuations, including after short pages;
+invalid or expired cursors raise `InvalidCursorException` without restarting.
+First-page prefetch, local first `next()`, and atomic continuation failure follow
+the normal Page contract.
+
+`Run::getAttempt(int $number)` and `AttemptSummary::load()` return a cached
+`Attempt`, adding `getResult(): ?ExecutionResult` to the summary getters.
+Attempt numbers range from 1 through `PHP_INT_MAX`. Results have the originating
+Run's immutable runner type: `CliExecutionResult` or `HttpExecutionResult`, or
+null when no result exists. Loading an attempt does not require a separate
+parent lookup. Cached result access never performs I/O.
+
+Summaries from cross-queue queries can still load retained details when their
+original Queue or Job is deleted. Callers do not need to reconstruct the parent
+object hierarchy to inspect that history.
+
+`Run::refresh()` and `Attempt::refresh()` replace their cached snapshots only
+after the complete reply has been validated. Failures preserve the previous
+cache. `Run::cancel()` returns `RunCancellationDisposition::Completed` or
+`RunCancellationDisposition::Requested` and atomically adopts the returned Run.
+`Requested` acknowledges an active executor's cancellation request; the returned
+snapshot can still be Running. Neither disposition causes PHP to wait for
+execution completion. Cancelling terminal work raises the daemon's state-conflict
+error. A possibly transmitted cancellation is not replayed automatically;
+`OutcomeUnknownException` preserves uncertainty, and an explicit later refresh
+can inspect the outcome. Cancellation does not refresh the owning Job.
+
+All history operations accept a final `?Duration $timeout = null`, inheriting the
+Client default when omitted. Getters perform no RPC, interpret no application
+JSON, and resolve no secrets. Results preserve unknown safe metadata through the
+existing generic accessor. Summary/resource instances retain and GC-trace their
+Client, reject cloning/serialization/dynamic properties, and remain request-local.
+Strict comparison (`===`) identifies a PHP instance; use ID getters (and attempt
+number) to compare record identity rather than relying on loose object comparison.
+Explicit Client closure leaves cached getters usable but prevents further RPCs.
+Output convenience and chunk readers remain deferred to stage 5.2.

@@ -1,4 +1,5 @@
 #include "job_binding.hpp"
+#include "history_binding.hpp"
 
 #include "attribute_binding.hpp"
 #include "cli_payload_binding.hpp"
@@ -367,7 +368,16 @@ auto get_job(zend_execute_data* frame) noexcept -> ::php::Result<::php::Value>
     if (!id) {
         return id.error();
     }
-    auto client = native_client(Z_OBJ(frame->This));
+    if (id.value().is_nil()) {
+        return snapshot::invalid("Job ID must not be nil");
+    }
+
+    auto queue = queue_state(Z_OBJ(frame->This));
+    if (!queue) {
+        return queue.error();
+    }
+    auto owner  = queue.value()->client();
+    auto client = native_client(Z_OBJ_P(owner.get()));
     if (!client) {
         return client.error();
     }
@@ -375,11 +385,12 @@ auto get_job(zend_execute_data* frame) noexcept -> ::php::Result<::php::Value>
     if (!deadline) {
         return deadline.error();
     }
+
     auto call = job_operation("job.get", &jobu::ControlClient::get_job, id.value());
     if (!call) {
         return call.error();
     }
-    auto reply = resource_call(::php::ValueView(&frame->This), deadline.value(), call.value());
+    auto reply = resource_call(owner, deadline.value(), call.value());
     if (!reply) {
         return reply.error();
     }
@@ -391,7 +402,15 @@ auto get_job(zend_execute_data* frame) noexcept -> ::php::Result<::php::Value>
     if (!identity) {
         return identity.error();
     }
-    return make_job(::php::ValueView(&frame->This), std::move(value).value());
+
+    // Lookup preserves the Queue's local state. The returned definition must
+    // belong to the receiver's stable identity, even if a Job has moved.
+    if (value.value().queue_id != queue.value()->current().id) {
+        ::php::raise({.kind = ::php::ErrorKind::Runtime, .message = "Job not found in this queue"},
+                     snapshot::entry("jobu\\notfoundexception"));
+        return ::php::pending_exception();
+    }
+    return make_job(owner, std::move(value).value());
 }
 
 auto create_job(zend_execute_data* frame, jobu::JobType type) noexcept -> ::php::Result<::php::Value>
@@ -402,6 +421,7 @@ auto create_job(zend_execute_data* frame, jobu::JobType type) noexcept -> ::php:
     if (!count) {
         return count.error();
     }
+
     auto queue = queue_state(Z_OBJ(frame->This));
     if (!queue) {
         return queue.error();
@@ -464,6 +484,7 @@ auto create_job(zend_execute_data* frame, jobu::JobType type) noexcept -> ::php:
     if (!deadline) {
         return deadline.error();
     }
+
     auto call = job_operation("job.create", &jobu::ControlClient::create_job, std::move(request));
     if (!call) {
         return call.error();
@@ -579,6 +600,63 @@ auto edit_job(zend_execute_data* frame, std::string_view field) noexcept -> ::ph
     return job.state().current().type == jobu::JobType::Cli
              ? replace_cli_payload(Z_OBJ_P(job.payload().get()), args.get(1))
              : replace_http_payload(Z_OBJ_P(job.payload().get()), args.get(1));
+}
+
+auto get_job_run(zend_execute_data* frame) noexcept -> ::php::Result<::php::Value>
+{
+    auto             start = core::Clock::now();
+    ::php::Arguments args(frame);
+    auto             count = args.count(1, 2);
+    if (!count) {
+        return count.error();
+    }
+    auto text = args.string(1);
+    if (!text) {
+        return text.error();
+    }
+    auto id = uuid_from_php(args.get(1));
+    if (!id) {
+        return id.error();
+    }
+    if (id.value().is_nil()) {
+        return snapshot::invalid("Run ID must not be nil");
+    }
+
+    auto native = Binding::get(Z_OBJ(frame->This));
+    if (!native) {
+        return native.error();
+    }
+    auto const& state    = native.value()->state();
+    auto        deadline = history_deadline(state.client(), args, 2, start);
+    if (!deadline) {
+        return deadline.error();
+    }
+
+    auto run = read_run_details(state.client(), id.value(), deadline.value());
+    if (!run) {
+        return run.error();
+    }
+
+    // Parent membership comes from the returned history snapshot. Do not look
+    // up the live Job: its retained runs remain readable after owner deletion.
+    if (run.value().job_id != state.current().id) {
+        ::php::raise({.kind = ::php::ErrorKind::Runtime, .message = "Run not found in this job"},
+                     snapshot::entry("jobu\\notfoundexception"));
+        return ::php::pending_exception();
+    }
+    return run_to_php(state.client(), std::move(run).value());
+}
+
+auto job_runs(zend_execute_data* frame) noexcept -> ::php::Result<::php::Value>
+{
+    auto start  = core::Clock::now();
+    auto native = Binding::get(Z_OBJ(frame->This));
+    if (!native) {
+        return native.error();
+    }
+    auto const& state = native.value()->state();
+    // History remains readable for dirty/deleted owners; it never applies local edits.
+    return list_run_history(state.client(), ::php::Arguments(frame), start, state.current().id);
 }
 
 auto job_rpc(zend_execute_data* frame, std::string_view action) noexcept -> ::php::Result<::php::Value>
@@ -724,7 +802,7 @@ auto bind_job_class(zend_class_entry* entry) -> bool
 }
 } // namespace jb::php
 
-ZEND_METHOD(JobU_Client, getJob)
+ZEND_METHOD(JobU_Queue, getJob)
 {
     jb::php::snapshot::return_value(jb::php::get_job(execute_data), return_value);
 }
@@ -935,4 +1013,14 @@ ZEND_METHOD(JobU_Job, delete)
 ZEND_METHOD(JobU_Job, runNow)
 {
     jb::php::snapshot::return_value(jb::php::job_rpc(execute_data, "runNow"), return_value);
+}
+
+ZEND_METHOD(JobU_Job, listRuns)
+{
+    jb::php::snapshot::return_value(jb::php::job_runs(execute_data), return_value);
+}
+
+ZEND_METHOD(JobU_Job, getRun)
+{
+    jb::php::snapshot::return_value(jb::php::get_job_run(execute_data), return_value);
 }

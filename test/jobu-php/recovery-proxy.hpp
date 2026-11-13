@@ -1,9 +1,11 @@
 #pragma once
 
+#include <chrono>
 #include <jb/core/event_loop.hpp>
 #include <jb/core/json.hpp>
 #include <jb/core/object.hpp>
 #include <jb/core/signal.hpp>
+#include <jb/core/timer.hpp>
 #include <jb/net/local_server.hpp>
 #include <jb/net/local_socket.hpp>
 #include <jb/rpc/framing.hpp>
@@ -37,6 +39,8 @@ public:
         });
     }
 
+    /// Delay each history detail reply to verify explicit history-operation deadlines.
+    std::chrono::milliseconds                                     history_reply_delay{0};
     std::string                                                   drop_method;
     int                                                           drops{0};
     int                                                           connections{0};
@@ -67,6 +71,12 @@ private:
             : _proxy(proxy)
             , _downstream(std::move(socket))
         {
+            _reply_timer.timeout.connect(&_receiver, [this] {
+                if (_downstream->state() == jb::net::LocalSocketState::Connected) {
+                    CHECK(_downstream->write(_delayed_frame) == _delayed_frame.size());
+                }
+                _delayed_frame.clear();
+            });
             _downstream->ready_read.connect(&_receiver, [this] { receive_request(); });
             _downstream->disconnected.connect(&_receiver, [this] { _upstream.abort(); });
             _upstream.disconnected.connect(&_receiver, [this] { _downstream->abort(); });
@@ -148,6 +158,13 @@ private:
                 REQUIRE(encoded);
                 auto frame = jb::rpc::frame_message(encoded.value());
                 REQUIRE(frame);
+                if (_proxy.history_reply_delay.count() > 0 && (_method == "attempt.get" || _method == "run.get")) {
+                    // The synchronous client has at most one outstanding request
+                    // on this link. The timer owns its bytes without blocking the loop.
+                    _delayed_frame = frame.value();
+                    _reply_timer.start(_proxy.history_reply_delay);
+                    continue;
+                }
                 CHECK(_downstream->write(frame.value()) == frame->size());
                 if (_proxy.close_after_response) {
                     // Drain the complete frame before EOF, in this same event-loop callback.
@@ -165,6 +182,8 @@ private:
         std::string                           _buffer;
         std::string                           _method;
         jb::core::Object                      _receiver;
+        jb::core::Timer                       _reply_timer;
+        std::string                           _delayed_frame;
     };
 
     std::string                        _upstream;

@@ -1,3 +1,4 @@
+#include "attempt_binding.hpp"
 #include "attribute_binding.hpp"
 #include "cli_payload_binding.hpp"
 #include "client_binding.hpp"
@@ -56,6 +57,7 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
     register_class_JobU_QueueState();
     register_class_JobU_JobState();
     register_class_JobU_RunState();
+    register_class_JobU_RunCancellationDisposition();
     register_class_JobU_AttemptState();
     register_class_JobU_AttemptOutcome();
     register_class_JobU_RetryMode();
@@ -84,6 +86,10 @@ auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number)
         return FAILURE;
     }
     if (!jb::php::bind_job_class(register_class_JobU_Job()) || !jb::php::bind_run_class(register_class_JobU_Run())) {
+        return FAILURE;
+    }
+    if (!jb::php::bind_run_summary_class(register_class_JobU_RunSummary()) ||
+        !jb::php::bind_attempt_classes(register_class_JobU_Attempt(), register_class_JobU_AttemptSummary())) {
         return FAILURE;
     }
     if (!jb::php::bind_page_class(register_class_JobU_Page())) {
