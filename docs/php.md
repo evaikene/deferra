@@ -8,7 +8,7 @@ edits and lifecycle operations are available through the synchronous bridge.
 Job creation, active Job resources and cached Run Now snapshots are also available.
 Queue/job definition lists and retained Run/Attempt history return prefetched pages.
 Run cancellation, explicit history loading, typed execution results and bounded output reads are available.
-Secret administration and cron helpers are implemented; statistics remains a later stage.
+Secret administration, cron helpers, explicit system information and typed retained statistics are available.
 It supports PHP 8.1+ with 64-bit integers in NTS mode
 on Linux/macOS. Runtime validation covers PHP 8.2–8.6 NTS; PHP 8.1 retains the
 minimum build/API contract but is not in the test matrix. macOS runtime coverage
@@ -144,8 +144,8 @@ replace its subsequent per-call outcome. Timeout or stopped-wait cleanup retires
 local observation only; it does not cancel remote work or prove rollback. A
 terminal failure already queued but not delivered at expiry is conservatively
 uncertain. The bridge implements reconnect/retry and operational exception
-translation; public `getSystemInfo()` remains later-stage work. There is no public raw
-RPC entry point. Test-only bindings exercise calls without adding placeholder APIs.
+translation; `Client::getSystemInfo()` uses the same typed read path. There is no public
+raw RPC entry point. Test-only bindings exercise calls without adding placeholder APIs.
 No C++ exception may unwind into Zend. Allocation failure remains fatal, and
 PHP bailout does not guarantee C++ stack cleanup.
 
@@ -703,11 +703,10 @@ All mutation, including retained defaults/view edits, is blocked after deletion.
 Detached configuration copies remain editable. Queue objects cannot be cloned or
 serialized, and PHP GC traces their Client/defaults/view ownership cycles.
 
-Stage 4.2 exercises `queue.stats` through the native typed bridge, including
-cursor-only continuation and historical UUIDs. The public
 `Queue::statistics(?StatisticsQuery $query = null, ?Duration $timeout = null): Page`
-remains stage 5.4 after Page in stage 4.4; no placeholder or temporary result
-shape is exposed. Queue job creation and definition lists are available.
+reads retained statistics by stable UUID, including for dirty or deleted queues.
+It leaves local edits and cached state untouched. See [system and statistics](#system-and-statistics)
+for typed groups, window metadata and cursor behavior.
 
 ## Private resource-state foundation
 
@@ -845,7 +844,7 @@ included, including suspended and terminal jobs. Both runner families are includ
 by default. `includeDeleted: true` permits soft-deleted definitions and selection
 of a retained deleted queue; a Deleted state filter alone does not enable that
 visibility. These methods list current retained definitions, not run or attempt
-history. Run/Attempt history and secret administration are described below; statistics remains a later stage.
+history. Run/Attempt history, secret administration and retained statistics are described below.
 
 `Queue::listJobs()` uses its stable UUID and originating Client, including after
 rename. It permits dirty queues and leaves their edits and cached fields untouched.
@@ -870,8 +869,7 @@ while ($page->hasNext()) {
 All phase-4 Queue/Job lookup, creation, editing, lifecycle and definition-list
 entry points are available. The cached Run returned by `runNow()` is available;
 `Job::listRuns()` and full Run/Attempt APIs, including output, are available.
-`Queue::statistics()`/system
-statistics remains stage 5.4.
+`Queue::statistics()` and `Client::systemStatistics()` return typed statistics pages.
 
 - `hasNext(): bool` checks only local state. An empty first result returns false.
 - `next(?Duration $timeout = null): void` publishes the prefetched first page
@@ -882,7 +880,7 @@ statistics remains stage 5.4.
   the current indexed collection. It performs no RPC. Editing the returned array
   leaves Page's collection unchanged; contained objects retain their identities.
 
-A fetch or conversion failure preserves the current items and continuation.
+A fetch or conversion failure preserves the current items, statistics metadata and continuation.
 A successful empty continuation publishes `[]` and ends enumeration. Short pages
 may still have continuations: Page follows the returned boundary rather than
 comparing the item count to the requested limit. Listings are live reads, not
@@ -893,7 +891,7 @@ keysets repeat the limit. Opaque history/statistics continuations send only the
 cursor. Expired cursors, including those invalidated by daemon restart, raise
 `InvalidCursorException`; enumeration never silently restarts.
 
-Page strongly retains its originating Client and traces its items for PHP GC.
+Page strongly retains its originating Client and traces its items and statistics metadata for PHP GC.
 Unsetting the caller's Client variable does not close a live Page's session.
 After explicit `Client::close()`, cached access and consumption of the prefetched
 buffer still work, while a subsequent fetch fails. Arrays or resource objects
@@ -1126,3 +1124,158 @@ preview reports `jobu.schedule.no_future_occurrence` or
 `jobu.schedule.out_of_range` when no representable occurrence can be found.
 See [cron semantics](cron.md) for the complete grammar. Helpers never create jobs
 or evaluate cron locally.
+
+
+## System and statistics
+
+`Client::getSystemInfo(?Duration $timeout = null): SystemInfo` explicitly reads
+current daemon metadata. It does not return the constructor's cached handshake.
+The detached immutable result exposes daemon version, API major/minor, sorted
+capabilities and `hasCapability(string $name): bool`. Its getters perform no RPC.
+
+`Client::systemStatistics(?StatisticsQuery $query = null, ?Duration $timeout = null): Page`
+reads across queues. `Queue::statistics()` has the same query/timeout signature and
+uses that resource's stable UUID. A supplied query `queueId` must match the Queue;
+a conflicting ID raises `ValueError` before any RPC. The input query stays unchanged.
+Queue-scoped reads work with dirty, renamed and retained deleted resources; they
+never save, refresh, or change pending edits. A purged/missing queue produces the
+normal daemon not-found error. `jobId` filters run history without looking up a live
+Job or inferring its current queue.
+
+A null query uses `StatisticsQuery` defaults: no identity/type/origin filters,
+`StatisticsGroupBy::None`, omitted window bounds and limit 100. All filters combine.
+Limits are 1–200 groups. The daemon resolves an omitted upper bound to its current
+UTC time, then an omitted lower bound to 24 hours before that upper bound. Windows
+are increasing, half-open and at most 31 days. PHP never substitutes its own clock
+for omitted bounds. A fully specified invalid range is rejected locally; invalid
+partially specified windows propagate the daemon's stable error code/category.
+
+```php
+$query = new JobU\StatisticsQuery(groupBy: JobU\StatisticsGroupBy::State, limit: 20);
+$page = $queue->statistics($query);
+$metadata = $page->getStatisticsMetadata();
+$window = $metadata->getWindow(); // Both bounds are resolved, even for empty results.
+
+while ($page->hasNext()) {
+    $page->next();
+    foreach ($page->items() as $group) {
+        echo $group->getKey()->value, ': ', $group->getRuns()->getTotal(), "\n";
+    }
+}
+```
+
+`Page::getStatisticsMetadata(): ?StatisticsMetadata` observes the prefetched/current
+batch without RPC. It is available before the first `next()` and for empty grouped
+results; other page sources return null. Metadata exposes `getWindow(): TimeRange`,
+`getGroupBy(): StatisticsGroupBy` and `getMeasurement(): StatisticsMeasurement`.
+Both window bounds return fresh UTC `DateTimeImmutable` values with microseconds.
+Successful continuation replaces items, metadata and cursor together. Failed
+transport, decoding or projection leaves all three untouched. Previously returned
+metadata and groups remain detached immutable snapshots and retain no Client.
+
+The Page still starts before its eagerly fetched first batch: `items()` initially
+returns `[]`, and its first successful `next()` performs no RPC. With no matching
+runs, ungrouped statistics has one zero-count group with a null key; grouped
+statistics has no groups and `hasNext()` is false, but metadata remains accessible.
+Short pages use the returned cursor, never the item count, to determine continuation.
+
+Each `StatisticsGroup` exposes these immutable typed values:
+
+| Method | Return type and meaning |
+| --- | --- |
+| `getKey()` | `string\|JobType\|RunOrigin\|RunState\|null`: canonical UUID for Queue/Job, backed enum for Type/Origin/State, null for None |
+| `getRuns()` | `StatisticsRunCounts`: `getTotal(): int`, `getStateCount(RunState): int`, `getTypeCount(JobType): int`, `getOriginCount(RunOrigin): int` |
+| `getAttempts()` | `StatisticsAttemptCounts`: `getTotal(): int`, `getStateCount(AttemptState): int`, `getOutcomeCount(AttemptOutcome): int`, `getRetries(): int` |
+| `getCapture()` | `StatisticsCaptureCounts`: `getTruncatedAttempts(): int`, `getLostAttempts(): int` |
+| `getScheduleLateness()` | `StatisticsDuration`: first run start minus planned time, once per run |
+| `getExecutionWallDuration()` | `StatisticsDuration`: completed attempt start/end differences |
+| `getRunnableWait()` | `?StatisticsDuration`: Complete terminal runs only, once per run across attempts; null when measurement is unavailable |
+| `getRunnableWaitCoverage()` | `StatisticsRunnableWaitCoverage`: `getComplete()`, `getPartial()`, `getUnmeasured()`, `getUnfinished()`, all returning int |
+
+Every enum counter is present, including zero. Counts retain integer precision;
+a response with a count above `PHP_INT_MAX` raises `ValueError` before publication.
+`StatisticsDuration` exposes `getSamples(): int`, `getAverageMilliseconds(): ?float`
+and `getMaximumMilliseconds(): ?float`. Fractional milliseconds are preserved;
+these aggregates do not use the integer `Duration` input class. No samples means
+zero samples and null average/maximum. A measured zero contributes a sample with
+`0.0` average/maximum. An unavailable runnable-wait measurement is null, distinct
+from an available measurement with no Complete terminal samples.
+
+`StatisticsMeasurement` exposes `getTiming(): string` (currently
+`wall_clock_derived`), `getRunnableWait(): string` (`monotonic_observed` or
+`unavailable`), and `getCapture(): string` (`persisted_output_flags`). The strings
+preserve daemon provenance, including future safe values. Coverage partitions
+runs into Complete, Partial, Unmeasured and Unfinished; its counters sum to run
+total. Partial lower bounds are excluded from duration samples. Missing capture
+rows prove neither successful capture nor a loss/truncation event.
+
+Runs enter the cohort by planned time. All retained attempts of those runs count,
+including retries outside the window. Reads neither checkpoint timing nor write
+history. The resolved window stays fixed for the cursor lifetime, while counts
+reflect live retained rows; retention can remove members between pages. This is
+not an all-time or frozen database snapshot.
+
+Initial reads and each continuation share one total operation deadline with any
+reconnect/replay. Null timeout uses the Client's configured timeout (10 seconds
+by default). Statistics and explicit system-info reads use existing safe-read
+recovery. Continuations send only the opaque cursor, including for Queue statistics;
+selectors, filters and limits are never repeated. Cursors expire five minutes
+after the initial page and can be invalidated earlier by eviction or restart.
+Expired or wrong-scope cursors raise `InvalidCursorException` without restarting
+enumeration. Configured response limits and service failures preserve normal
+JobU error categories/codes, including `jobu.response.too_large`.
+
+## Control API coverage audit
+
+The current daemon registers 30 capabilities. The statistics integration scenario
+checks the full advertised inventory, and the following mapping records the public
+PHP owner and behavior tests. Test paths below are relative to `test/jobu-php/`.
+The mapping deliberately keeps queue/job/run/attempt ownership in the public API.
+
+| Capability | Typed ControlClient method | Public PHP owner/method | Behavior tests |
+| --- | --- | --- | --- |
+| `system.info` | `get_system_info` | `Client::getSystemInfo`; constructor handshake | `statistics.php`, `statistics-test.cpp`, `bridge-test.cpp` |
+| `system.stats` | `system_statistics` | `Client::systemStatistics` | `statistics.php`, `statistics-test.cpp` |
+| `queue.create` | `create_queue` | `Client::createQueue` | `queue.php`, `queue-test.cpp` |
+| `queue.get` | `get_queue` (name and UUID overloads) | `Client::getQueue/getQueueById`, `Queue::refresh` | `queue.php`, `queue-test.cpp` |
+| `queue.list` | `list_queues` | `Client::listQueues` | `list.php`, `list-test.cpp` |
+| `queue.update` | `update_queue` | `Queue::save` | `queue.php`, `queue-test.cpp` |
+| `queue.suspend` | `suspend_queue` | `Queue::suspend` | `queue.php`, `queue-test.cpp` |
+| `queue.resume` | `resume_queue` | `Queue::resume` | `queue.php`, `queue-test.cpp` |
+| `queue.delete` | `delete_queue` | `Queue::delete` | `queue.php`, `queue-test.cpp` |
+| `queue.stats` | `queue_statistics` | `Queue::statistics` | `statistics.php`, `statistics-test.cpp` |
+| `job.create` | `create_job` | `Queue::createCliJob/createHttpJob` | `job.php`, `lifecycle-test.cpp` |
+| `job.get` | `get_job` | `Queue::getJob`, `Job::refresh` | `job.php`, `history.php`, `history-test.cpp` |
+| `job.list` | `list_jobs` | `Client::listJobs`, `Queue::listJobs` | `list.php`, `list-test.cpp` |
+| `job.update` | `update_job` | `Job::save` | `job.php`, `lifecycle-test.cpp` |
+| `job.suspend` | `suspend_job` | `Job::suspend` | `job.php`, `lifecycle-test.cpp` |
+| `job.resume` | `resume_job` | `Job::resume` | `job.php`, `lifecycle-test.cpp` |
+| `job.move` | `move_job` | `Job::move` | `job.php`, `history.php`, `history-test.cpp` |
+| `job.delete` | `delete_job` | `Job::delete` | `job.php`, `history.php` |
+| `job.run_now` | `run_now` | `Job::runNow` | `job.php`, `lifecycle-test.cpp` |
+| `run.get` | `get_run` | `Job::getRun`, `RunSummary::load`, `Run::refresh` | `history.php`, `history-test.cpp` |
+| `run.list` | `list_runs` | `Client/Queue/Job::listRuns` | `history.php`, `history-test.cpp` |
+| `run.cancel` | `cancel_run` | `Run::cancel` | `history.php`, `history-test.cpp` |
+| `attempt.get` | `get_attempt` | `Run::getAttempt`, `AttemptSummary::load`, `Attempt::refresh` | `history.php`, `history-test.cpp` |
+| `attempt.list` | `list_attempts` | `Run::listAttempts`; latest-attempt selection for output | `history.php`, `history-test.cpp`, `output-test.cpp` |
+| `attempt.output` | `read_attempt_output` | `Attempt::readOutput/getOutput`, `Run::getOutput` | `output.php`, `output-test.cpp` |
+| `secret.set` | `set_secret` | `Client::setSecret` | `secrets-schedules.php`, `secrets-schedules-test.cpp` |
+| `secret.list` | `list_secrets` | `Client::listSecrets` | `secrets-schedules.php`, `secrets-schedules-test.cpp` |
+| `secret.delete` | `delete_secret` | `Client::deleteSecret` | `secrets-schedules.php`, `secrets-schedules-test.cpp` |
+| `schedule.validate` | `validate_schedule` | `Client::validateSchedule` | `secrets-schedules.php`, `secrets-schedules-test.cpp` |
+| `schedule.next` | `next_schedule_occurrences` | `Client::nextScheduleOccurrences` | `secrets-schedules.php`, `secrets-schedules-test.cpp` |
+
+The remaining native methods are lifecycle machinery: `initialize()` drives the
+constructor/reconnect handshake; `cancel_call()` retires timed-out bridge calls;
+`close()` backs explicit Client closure and request shutdown. `bridge-test.cpp` and
+`lifecycle-test.cpp` cover acceptance, cancellation, deferred replies, deadlines,
+recovery and teardown. These need no protocol-level PHP escape hatch.
+
+Statistics PHP tests cover typed projection, windows, scoping, cursor-only requests,
+real eviction/restart, safe-read replay, total deadlines, metadata atomicity and
+close/request teardown. Existing native `statistics-service-test.cpp` supplies
+clock-controlled five-minute expiry, retained retries outside the cohort window,
+retention and measurement correctness. `jobud-runtime-test.cpp` checks configured
+statistics response budgets; the PHP proxy checks propagation of those errors.
+Reflection checks cover the public method/default/type contract. Final phase-6
+integration and packaging work remain separately gated.

@@ -19,6 +19,7 @@ using PageContinuation = std::variant<std::monostate, core::Uuid, std::string, j
 struct PageBatch {
     ::php::Value     items;
     PageContinuation continuation;
+    ::php::Value     statistics_metadata{::php::Value::null()};
 };
 
 /// Private native adapter owning its initial query. Captures must contain no Zend
@@ -36,6 +37,8 @@ public:
     auto has_next() const noexcept -> bool;
     /// Return a separate array reference, preserving contained object identities.
     auto items() const -> ::php::Value;
+    /// Metadata describes the prefetched/current batch even when its items are empty.
+    auto statistics_metadata() const -> ::php::Value;
     /// Requires has_next(); the PHP binding reports bounds errors before calling.
     auto next(core::TimePoint deadline) -> ::php::Result<void>;
 

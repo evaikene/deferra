@@ -67,7 +67,7 @@ foreach ($exceptions as $name) {
     }
 }
 
-$expectedClasses = array_map(fn(string $name): string => 'JobU\\' . $name, [...array_keys($enums), ...$exceptions, 'Duration', 'Client', 'SecretReference', 'Schedule', 'OnceSchedule', 'CronSchedule', 'JobAttributes', 'CliJobAttributes', 'HttpJobAttributes', 'QueueDefaults', 'CliPayload', 'HttpPayload', 'HttpHeader', 'TimeRange', 'RunQuery', 'StatisticsQuery', 'SystemInfo', 'SecretMetadata', 'ExecutionResult', 'CliExecutionResult', 'HttpExecutionResult', 'OutputChunk', 'Queue', 'Job', 'Run', 'RunSummary', 'Attempt', 'AttemptSummary', 'Page']);
+$expectedClasses = array_map(fn(string $name): string => 'JobU\\' . $name, [...array_keys($enums), ...$exceptions, 'Duration', 'Client', 'SecretReference', 'Schedule', 'OnceSchedule', 'CronSchedule', 'JobAttributes', 'CliJobAttributes', 'HttpJobAttributes', 'QueueDefaults', 'CliPayload', 'HttpPayload', 'HttpHeader', 'TimeRange', 'RunQuery', 'StatisticsQuery', 'SystemInfo', 'SecretMetadata', 'ExecutionResult', 'CliExecutionResult', 'HttpExecutionResult', 'OutputChunk', 'Queue', 'Job', 'Run', 'RunSummary', 'Attempt', 'AttemptSummary', 'Page', 'StatisticsGroup', 'StatisticsRunCounts', 'StatisticsAttemptCounts', 'StatisticsCaptureCounts', 'StatisticsDuration', 'StatisticsRunnableWaitCoverage', 'StatisticsMetadata', 'StatisticsMeasurement']);
 $actualClasses = $extension->getClassNames();
 sort($expectedClasses);
 sort($actualClasses);
@@ -81,10 +81,10 @@ check(array_map(fn($p) => $p->getName(), $creation->getParameters()) ===
 check((string)$creation->getReturnType() === JobU\Queue::class, 'queue creation return');
 check((string)$queue->getMethod('getHistoryRetention')->getReturnType() === '?JobU\\Duration', 'nullable retention');
 check((string)$queue->getMethod('getDeletedAt')->getReturnType() === '?DateTimeImmutable', 'nullable deletion date');
-check(!$queue->hasMethod('statistics') && $queue->hasMethod('listJobs'), 'stage boundary');
+check($queue->hasMethod('statistics') && $queue->hasMethod('listJobs'), 'stage boundary');
 $page = new ReflectionClass(JobU\Page::class);
 check($page->isFinal() && $page->getConstructor()->isPrivate(), 'Page construction');
-check(array_map(fn($m) => $m->getName(), $page->getMethods()) === ['__construct', 'hasNext', 'next', 'items'], 'Page methods');
+check(array_map(fn($m) => $m->getName(), $page->getMethods()) === ['__construct', 'hasNext', 'next', 'items', 'getStatisticsMetadata'], 'Page methods');
 check((string)$page->getMethod('hasNext')->getReturnType() === 'bool', 'Page hasNext return');
 check((string)$page->getMethod('items')->getReturnType() === 'array', 'Page items return');
 $next = $page->getMethod('next');
@@ -154,4 +154,19 @@ check(!(new ReflectionClass(JobU\AttemptSummary::class))->hasMethod('getResult')
 
 foreach (['getJob', 'getRun', 'getAttempt', 'listAttempts', 'getOutput', 'readOutput'] as $method) {
     check(!(new ReflectionClass(JobU\Client::class))->hasMethod($method), "Client omits $method");
+}
+
+foreach ([JobU\Client::class => 'systemStatistics', JobU\Queue::class => 'statistics'] as $owner => $name) {
+    $method = new ReflectionMethod($owner, $name);
+    check((string)$method->getReturnType() === JobU\Page::class, 'statistics Page return');
+    check(array_map(fn($p) => $p->getName(), $method->getParameters()) === ['query', 'timeout'], 'statistics parameter names');
+    check(array_map(fn($p) => (string)$p->getType(), $method->getParameters()) === ['?JobU\StatisticsQuery', '?JobU\Duration'], 'statistics parameter types');
+    check(array_map(fn($p) => $p->getDefaultValue(), $method->getParameters()) === [null, null], 'statistics defaults');
+}
+$method = new ReflectionMethod(JobU\Client::class, 'getSystemInfo');
+check((string)$method->getReturnType() === JobU\SystemInfo::class && $method->getParameters()[0]->getDefaultValue() === null, 'system information signature');
+check((string)$page->getMethod('getStatisticsMetadata')->getReturnType() === '?JobU\StatisticsMetadata', 'statistics metadata return');
+foreach (['StatisticsGroup', 'StatisticsRunCounts', 'StatisticsAttemptCounts', 'StatisticsCaptureCounts', 'StatisticsDuration', 'StatisticsRunnableWaitCoverage', 'StatisticsMetadata', 'StatisticsMeasurement'] as $name) {
+    $class = new ReflectionClass('JobU\\' . $name);
+    check($class->isFinal() && $class->getConstructor()->isPrivate(), "$name construction");
 }
