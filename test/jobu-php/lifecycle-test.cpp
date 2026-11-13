@@ -1,6 +1,7 @@
 #include "attribute_binding.hpp"
 #include "cli_payload_binding.hpp"
 #include "client.hpp"
+#include "history-test.hpp"
 #include "http_payload_binding.hpp"
 #include "lifecycle-bindings.hpp"
 #include "list-test.hpp"
@@ -146,7 +147,7 @@ auto evaluate(std::string_view expression) -> bool
 // Its Process owner reaps the child even if a test assertion interrupts the case.
 class Daemon {
 public:
-    auto start(EventLoop& loop, std::filesystem::path const& directory) -> void
+    auto start(EventLoop& loop, std::filesystem::path const& directory, bool execute_cli = false) -> void
     {
         _process.standard_error.connect(&_receiver, [this](jb::core::ByteBuffer const& bytes) {
             _log.append(jb::core::as_string_view(bytes));
@@ -159,6 +160,14 @@ public:
                                            (directory / "daemon.sock").string()};
         if (::geteuid() == 0) {
             arguments.emplace_back("--allow-root-daemon");
+            if (execute_cli) {
+                // Root daemon startup does not authorize child execution. Only
+                // explicitly opted-in, disposable test environments may do both.
+                auto const* enabled = std::getenv("JOBU_TEST_ALLOW_ROOT_CLI");
+                INFO("Root CLI execution requires JOBU_TEST_ALLOW_ROOT_CLI=1 in an isolated test environment");
+                REQUIRE((enabled && std::string_view{enabled} == "1"));
+                arguments.emplace_back("--allow-root-cli");
+            }
         }
         REQUIRE(_process.start({.executable = JOBUD_EXECUTABLE, .arguments = std::move(arguments)}));
         REQUIRE(loop.run_until(Clock::now() + 8s,
@@ -1784,6 +1793,56 @@ TEST_CASE("Production CLI module lists typed definitions", "[php][list-cli]")
         .arguments  = {"-n",
                        "-dextension=" JOBU_PHP_MODULE,
                        JOBU_PHP_LIST_SCRIPT, (directory.path() / "daemon.sock").string()}
+    }));
+    REQUIRE(loop.run_until(Clock::now() + 10s, [&] { return exit.has_value(); }));
+    INFO(errors);
+    CHECK(errors.empty());
+    CHECK(exit->kind == jb::core::ProcessExitKind::Exited);
+    CHECK(exit->exit_code == 0);
+    daemon.stop(loop);
+}
+
+TEST_CASE("Public history preserves snapshots, typed results and ownership", "[php][history]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    auto*                        previous = &host.value()->loop();
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(*previous, directory.path(), /*execute_cli=*/true);
+    {
+        Runtime runtime;
+        for (int request = 0; request != 2; ++request) {
+            jobu_php_test::test_history((directory.path() / "daemon.sock").string(),
+                                        (directory.path() / "history-proxy.sock").string());
+            runtime.restart(previous);
+        }
+    }
+    daemon.stop(*previous);
+}
+
+TEST_CASE("Production CLI module reads typed history", "[php][history-cli]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    auto&                        loop = host.value()->loop();
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(loop, directory.path(), /*execute_cli=*/true);
+
+    jb::core::Process                    process;
+    jb::core::Object                     receiver;
+    std::optional<jb::core::ProcessExit> exit;
+    std::string                          errors;
+    process.standard_error.connect(&receiver, [&](jb::core::ByteBuffer const& bytes) {
+        errors.append(jb::core::as_string_view(bytes));
+    });
+    process.finished.connect(&receiver, [&](jb::core::ProcessExit const& value) { exit = value; });
+    REQUIRE(process.start({
+        .executable = JOBU_PHP_BINARY,
+        .arguments  = {"-n",
+                       "-dextension=" JOBU_PHP_MODULE,
+                       JOBU_PHP_HISTORY_SCRIPT, (directory.path() / "daemon.sock").string()}
     }));
     REQUIRE(loop.run_until(Clock::now() + 10s, [&] { return exit.has_value(); }));
     INFO(errors);

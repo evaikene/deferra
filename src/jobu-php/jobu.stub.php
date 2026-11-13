@@ -258,8 +258,8 @@ final class Client
         int $limit = 100,
         ?Duration $timeout = null
     ): Page {}
-    /** Load a job by canonical UUID. */
-    public function getJob(string $id, ?Duration $timeout = null): Job {}
+    /** Eagerly fetch summaries across queues; null query uses limit 100. @return Page<RunSummary> */
+    public function listRuns(?RunQuery $query = null, ?Duration $timeout = null): Page {}
     /** Look up an exact literal name, including names that look like UUIDs. */
     public function getQueue(string $name, bool $includeDeleted = false, ?Duration $timeout = null): Queue {}
     /** Look up a canonical lowercase UUID. */
@@ -284,6 +284,14 @@ final class Client
 /** Cached request-local resource. Getters and setters perform no RPC. @not-serializable */
 final class Queue
 {
+    /** Load a nondeleted job belonging to this queue; a missing or out-of-scope ID raises NotFoundException.
+     * Preserves local edits. Use listJobs(includeDeleted: true) for retained deleted definitions.
+     */
+    public function getJob(string $id, ?Duration $timeout = null): Job {}
+    /** List retained runs in this queue, preserving local edits even after deletion.
+     * A supplied query queueId must match; other filters remain unchanged. @return Page<RunSummary>
+     */
+    public function listRuns(?RunQuery $query = null, ?Duration $timeout = null): Page {}
     /** Eagerly list persisted definitions by stable queue UUID, preserving any local edits.
      * Retained deleted queues require includeDeleted. Limit is 1–200. @return Page<Job>
      */
@@ -650,6 +658,14 @@ enum OutputStatus: string
 /** Cached job definition. Local edits require save; lifecycle calls reject dirty state. @not-serializable */
 final class Job
 {
+    /** Load a retained run belonging to this job; an ID outside this scope raises NotFoundException.
+     * Preserves local edits and permits retained deleted resources.
+     */
+    public function getRun(string $id, ?Duration $timeout = null): Run {}
+    /** List retained history by stable job ID, preserving local edits even after deletion.
+     * A supplied query jobId must match; other filters remain unchanged. @return Page<RunSummary>
+     */
+    public function listRuns(?RunQuery $query = null, ?Duration $timeout = null): Page {}
     private function __construct() {}
     public function getId(): string {}
     public function getQueueId(): string {}
@@ -699,6 +715,16 @@ final class Job
 /** Complete cached run snapshot. Getters never fetch or wait for execution. @not-serializable */
 final class Run
 {
+    /** Load this run's attempt by number, between 1 and PHP_INT_MAX. */
+    public function getAttempt(int $number, ?Duration $timeout = null): Attempt {}
+    /** Explicitly replace the cached snapshot; failure preserves it. */
+    public function refresh(?Duration $timeout = null): void {}
+    /** Adopt the returned snapshot and disposition, without waiting for terminal completion.
+     * A possibly transmitted cancellation is never automatically replayed.
+     */
+    public function cancel(?Duration $timeout = null): RunCancellationDisposition {}
+    /** Eager summaries with this run's trusted type; no run detail fetch. @return Page<AttemptSummary> */
+    public function listAttempts(int $limit = 100, ?Duration $timeout = null): Page {}
     private function __construct() {}
     public function getId(): string {}
     public function getJobId(): string {}
@@ -718,6 +744,66 @@ final class Run
     /** Detached deep copy of the original template; secrets remain symbolic. */
     public function getPayload(): CliPayload|HttpPayload {}
     /** Cached safe execution summary, or null while unavailable. No hidden fetch. */
+    public function getResult(): ?ExecutionResult {}
+}
+
+/** Management disposition; Requested does not mean execution has terminated. */
+enum RunCancellationDisposition: string
+{
+    case Completed = "completed";
+    case Requested = "requested";
+}
+
+/** Immutable list snapshot retaining its Client. Getters never fetch details. @not-serializable */
+final class RunSummary
+{
+    private function __construct() {}
+    public function getId(): string {}
+    public function getJobId(): string {}
+    public function getQueueId(): string {}
+    public function getJobRevision(): int {}
+    public function getPriority(): int {}
+    public function getOrigin(): RunOrigin {}
+    public function getType(): JobType {}
+    public function getState(): RunState {}
+    public function isScheduleOwned(): bool {}
+    public function getPlannedAt(): \DateTimeImmutable {}
+    public function getRunnableAt(): \DateTimeImmutable {}
+    public function getStartedAt(): ?\DateTimeImmutable {}
+    public function getCompletedAt(): ?\DateTimeImmutable {}
+    /** Read a new full Run without changing this summary. */
+    public function load(?Duration $timeout = null): Run {}
+}
+
+/** Immutable list snapshot retaining its Client; no result or output. @not-serializable */
+final class AttemptSummary
+{
+    private function __construct() {}
+    public function getRunId(): string {}
+    public function getNumber(): int {}
+    public function getDueAt(): \DateTimeImmutable {}
+    public function getStartedAt(): ?\DateTimeImmutable {}
+    public function getCompletedAt(): ?\DateTimeImmutable {}
+    public function getState(): AttemptState {}
+    public function getOutcome(): ?AttemptOutcome {}
+    /** Read a new Attempt without changing this summary. */
+    public function load(?Duration $timeout = null): Attempt {}
+}
+
+/** Cached attempt retaining its Client and trusted runner type. @not-serializable */
+final class Attempt
+{
+    private function __construct() {}
+    public function getRunId(): string {}
+    public function getNumber(): int {}
+    public function getDueAt(): \DateTimeImmutable {}
+    public function getStartedAt(): ?\DateTimeImmutable {}
+    public function getCompletedAt(): ?\DateTimeImmutable {}
+    public function getState(): AttemptState {}
+    public function getOutcome(): ?AttemptOutcome {}
+    /** Replace the snapshot explicitly; failure preserves all cached fields. */
+    public function refresh(?Duration $timeout = null): void {}
+    /** Cached typed safe metadata or null; never fetches or interprets application output. */
     public function getResult(): ?ExecutionResult {}
 }
 

@@ -35,7 +35,7 @@ foreach (['refresh', 'suspend', 'resume', 'delete', 'runNow'] as $method) {
 $j->save();
 queueCheck($j->getName() === null && $j->getPriority() === 10 && !$j->isDirty(), 'saved scalar fields');
 queueCheck($j->attributes() === $a && $j->payload() === $payload, 'save child identity');
-$stale = $c->getJob($j->getId());
+$stale = $q->getJob($j->getId());
 $j->setPriority(11); $j->save();
 $stale->setName('stale');
 queueThrows(JobU\RevisionConflictException::class, fn() => $stale->save());
