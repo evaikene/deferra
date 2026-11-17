@@ -1,4 +1,7 @@
-# php-cxx
+# php-cxx module-author guide
+
+This guide is for C++ developers implementing PHP modules. For applications using
+the JobU PHP module, see the [PHP API manual](php.md).
 
 `php-cxx` is an independent C++20 static library for implementing PHP extensions.
 Its public CMake target is `PhpCxx::PhpCxx`. It has no JobU, SQLite, fmt, or PHP
@@ -11,6 +14,337 @@ each extension can embed its own copy.
 an initialized PHP request. `<phpcxx/string.hpp>`, `<phpcxx/array.hpp>`, and
 `<phpcxx/value.hpp>` supply move-only Zend owners; `<phpcxx/views.hpp>` supplies
 their lightweight borrowed views.
+
+See the [root README](../README.md#build-and-install-php-cxx-independently) for
+building and installing the library, and the
+[development README](../src/php-cxx/README.md) for implementation and validation.
+
+## Contents
+
+- [Consume the library independently](#consume-the-library-independently)
+- [Complete extension example](#complete-extension-example)
+- [Public headers](#public-headers)
+- [Ownership and borrowed lifetimes](#ownership-and-borrowed-lifetimes)
+- [Read-only view operations](#read-only-view-operations)
+- [Results, extraction, and PHP errors](#results-extraction-and-php-errors)
+- [Native dates](#native-dates)
+- [Embedded native objects](#embedded-native-objects)
+- [Runtime and request lifetimes](#runtime-and-request-lifetimes)
+- [Portability boundary](#portability-boundary)
+
+## Consume the library independently
+
+Build and installation commands, PHP selection, and ABI requirements are in the
+[root README](../README.md#build-and-install-php-cxx-independently). An external
+CMake project can use the source tree:
+
+```cmake
+add_subdirectory(/path/to/deferra/src/php-cxx php-cxx)
+target_link_libraries(my_extension PRIVATE PhpCxx::PhpCxx)
+```
+
+Or consume an installed package:
+
+```cmake
+find_package(PhpCxx 0.1.0 EXACT CONFIG REQUIRED)
+target_link_libraries(my_extension PRIVATE PhpCxx::PhpCxx)
+```
+
+Select the consumer's `PHP_CONFIG` and pass the SDK prefix through
+`CMAKE_PREFIX_PATH`. The package requires the exact helper version and a matching
+PHP module API, debug mode, NTS/ZTS mode, and integer width. Consumers do not need
+the producer's source/build tree, JobU packages, or Embed.
+
+## Complete extension example
+
+This module exposes `demo_copy(string $bytes): string` and a final `DemoBox`
+class with `__construct(mixed $value)` and `get(): mixed`. The function demonstrates
+argument parsing and returning an owned binary string. The class stores a PHP value
+in native C++ state and reports its owned reference to Zend's cycle collector.
+
+Save the following files in one directory. The stub is the authoritative PHP
+signature and registration description; it is not a PHP implementation to load.
+Use PHP's `build/gen_stub.php` to generate `demo_arginfo.h` from it before compiling.
+The generator's PHP-Parser dependency must already be installed. The legacy annotation
+requests registration compatible with PHP 8.1+, even when generating with PHP 8.5.
+Keep the generated header with the module sources so ordinary consumers do not need
+the generator. See the [generation workflow](../src/php-cxx/README.md#generating-arginfo)
+for the development command. No build-time generation step is needed.
+
+### PHP declarations
+
+`demo.stub.php`:
+
+```php
+<?php
+
+/**
+ * @generate-class-entries
+ * @generate-legacy-arginfo 80100
+ */
+
+function demo_copy(string $bytes): string {}
+
+/** @not-serializable */
+final class DemoBox
+{
+    public function __construct(mixed $value) {}
+    public function get(): mixed {}
+}
+```
+
+### C++ implementation
+
+`demo.cpp`:
+
+```cpp
+#include <phpcxx/arguments.hpp>
+#include <phpcxx/exception.hpp>
+#include <phpcxx/object_binding.hpp>
+#include <phpcxx/string.hpp>
+#include <phpcxx/value.hpp>
+#include <phpcxx/zend.hpp>
+
+#include <utility>
+
+#include "demo_arginfo.h"
+
+namespace {
+
+class StoredValue {
+public:
+    explicit StoredValue(php::Value value) noexcept
+        : _value(std::move(value))
+    {}
+
+    auto value() const noexcept -> php::ValueView { return _value.view(); }
+
+    auto trace(php::GcVisitor& visitor) const noexcept -> void
+    {
+        // Zend must see the owned edge, including cycles back to this DemoBox.
+        visitor.add(_value.view());
+    }
+
+private:
+    php::Value _value;
+};
+
+using BoxBinding = php::ObjectBinding<StoredValue>;
+
+auto copy_bytes(zend_execute_data* execute_data, zval* return_value) noexcept -> void
+{
+    php::Arguments const arguments(execute_data);
+    auto                 count = arguments.count(1, 1);
+    if (!count) {
+        php::raise(count.error());
+        return;
+    }
+
+    auto bytes = arguments.string(1);
+    if (!bytes) {
+        php::raise(bytes.error());
+        return;
+    }
+
+    // Preserve embedded NUL bytes and transfer the new owned string to Zend.
+    auto result = php::String::create(bytes.value().bytes());
+    ZVAL_STR(return_value, result.release());
+}
+
+auto construct_box(zend_execute_data* execute_data) noexcept -> void
+{
+    php::Arguments const arguments(execute_data);
+    auto                 count = arguments.count(1, 1);
+    if (!count) {
+        php::raise(count.error());
+        return;
+    }
+
+    // Retain the argument before the call frame disappears. Native construction
+    // only takes ownership; it performs no PHP calls or recoverable work.
+    auto result = BoxBinding::construct(Z_OBJ(execute_data->This), php::Value::retain(arguments.get(1)));
+    if (!result) {
+        php::raise(result.error());
+    }
+}
+
+auto read_box(zend_execute_data* execute_data, zval* return_value) noexcept -> void
+{
+    php::Arguments const arguments(execute_data);
+    auto                 count = arguments.count(0, 0);
+    if (!count) {
+        php::raise(count.error());
+        return;
+    }
+
+    auto native = BoxBinding::get(Z_OBJ(execute_data->This));
+    if (!native) {
+        php::raise(native.error());
+        return;
+    }
+
+    // The active method keeps $this alive. Copy the value into the return slot;
+    // ownership inside StoredValue stays intact and object identity is preserved.
+    ZVAL_COPY(return_value, native.value()->value().get());
+}
+
+auto start_module([[maybe_unused]] int type, [[maybe_unused]] int module_number) noexcept -> zend_result
+{
+    // Register from generated arginfo first, then attach native storage handlers.
+    // No PHP execution frame exists here, so report startup failure directly.
+    auto result = BoxBinding::bind(register_class_DemoBox());
+    return result ? SUCCESS : FAILURE;
+}
+
+zend_module_entry module{.size                = sizeof(zend_module_entry),
+                         .zend_api            = ZEND_MODULE_API_NO,
+                         .zend_debug          = ZEND_DEBUG,
+                         .zts                 = USING_ZTS,
+                         .name                = "phpcxx_demo",
+                         .functions           = ext_functions,
+                         .module_startup_func = start_module,
+                         .version             = "0.1.0",
+                         .build_id            = ZEND_MODULE_BUILD_ID};
+
+} // namespace
+
+ZEND_FUNCTION(demo_copy)
+{
+    copy_bytes(execute_data, return_value);
+}
+
+ZEND_METHOD(DemoBox, __construct)
+{
+    construct_box(execute_data);
+}
+
+ZEND_METHOD(DemoBox, get)
+{
+    read_box(execute_data, return_value);
+}
+
+extern "C" ZEND_DLEXPORT auto get_module() -> zend_module_entry*
+{
+    return &module;
+}
+```
+
+The generated header declares the Zend callbacks, the `ext_functions` table, and
+`register_class_DemoBox()`. `ZEND_FUNCTION` and `ZEND_METHOD` provide the matching
+callbacks; `get_module()` is the exported entry point used by PHP's module loader.
+The module entry has static storage because Zend borrows it until module shutdown.
+No request-owned value is stored globally.
+
+The callbacks delegate to non-throwing implementations. Each failure returns to Zend
+after `php::raise()`; module startup instead returns `FAILURE`, since there is no
+active PHP call in which to raise an exception. `StoredValue` only takes ownership
+in its constructor. Its `trace()` method exposes the retained value without executing
+PHP or changing reference counts.
+
+`DemoBox::get()` copies the stored zval into the return slot. It preserves object
+identity, PHP reference semantics, and array copy-on-write. The class uses the default
+binding policy: cloning and serialization are rejected. Native state does not
+participate in `==` unless a comparison policy is supplied; see
+[embedded native objects](#embedded-native-objects).
+
+### CMake integration
+
+`CMakeLists.txt`:
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(PhpCxxDemo LANGUAGES CXX)
+
+find_package(PhpCxx 0.1.0 EXACT CONFIG REQUIRED)
+add_library(phpcxx_demo MODULE demo.cpp)
+target_link_libraries(phpcxx_demo PRIVATE PhpCxx::PhpCxx)
+set_target_properties(phpcxx_demo PROPERTIES
+    PREFIX ""
+    SUFFIX ".so"
+    CXX_EXTENSIONS OFF
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+if(APPLE)
+    target_link_options(phpcxx_demo PRIVATE "LINKER:-undefined,dynamic_lookup")
+endif()
+```
+
+`PhpCxx::PhpCxx` supplies the selected PHP headers and C++20 requirement. A loaded
+extension resolves Zend symbols from its PHP host; it does not link PHP Embed.
+The module uses hidden visibility with an explicitly exported `get_module()`.
+The macOS linker option expresses dynamic symbol resolution; it does not establish
+macOS runtime support. See the [portability boundary](#portability-boundary).
+
+### PHP usage and cycle collection
+
+`check.php`:
+
+```php
+<?php
+declare(strict_types=1);
+
+if (demo_copy("a\0b") !== "a\0b") {
+    throw new RuntimeException('Binary bytes were not preserved.');
+}
+
+$value = new stdClass();
+$box = new DemoBox($value);
+if ($box->get() !== $value) {
+    throw new RuntimeException('The stored object lost its identity.');
+}
+
+// Close a cycle through native storage, then prove Zend can collect it.
+$value->box = $box;
+$weak = WeakReference::create($value);
+unset($value, $box);
+gc_collect_cycles();
+if ($weak->get() !== null) {
+    throw new RuntimeException('The native-owned reference was not traced.');
+}
+
+echo "php-cxx demo ok\n";
+```
+
+Use the root README's [module build and load commands](../README.md#build-a-module-using-php-cxx)
+with these files and a matching installed helper. Successful execution prints
+`php-cxx demo ok`. The weak reference check demonstrates that the collector can follow
+the edge from native storage into the PHP object and reclaim the cycle.
+
+## Public headers
+
+All library symbols below are in namespace `php`. Include the header for the API you
+use; no umbrella header or extension-registration framework is required.
+
+| Header | Public API | Reference |
+| --- | --- | --- |
+| [`phpcxx/zend.hpp`](../src/php-cxx/include/phpcxx/zend.hpp) | Selected PHP/Zend C declarations | [Consumption](#consume-the-library-independently) |
+| [`phpcxx/build.hpp`](../src/php-cxx/include/phpcxx/build.hpp) | `BuildInfo`, `build_info()` | [Build metadata](#build-metadata) |
+| [`phpcxx/string.hpp`](../src/php-cxx/include/phpcxx/string.hpp) | `String` | [Owners](#owner-api) |
+| [`phpcxx/array.hpp`](../src/php-cxx/include/phpcxx/array.hpp) | `Array` | [Owners](#owner-api) |
+| [`phpcxx/value.hpp`](../src/php-cxx/include/phpcxx/value.hpp) | `Value` | [Owners](#owner-api) |
+| [`phpcxx/views.hpp`](../src/php-cxx/include/phpcxx/views.hpp) | `StringView`, `ArrayView`, `ValueView`, array entries and iterators | [Views](#view-api) |
+| [`phpcxx/error.hpp`](../src/php-cxx/include/phpcxx/error.hpp) | `ErrorKind`, `Error` | [Errors and results](#error-and-result-api) |
+| [`phpcxx/result.hpp`](../src/php-cxx/include/phpcxx/result.hpp) | `Result<T>`, `Result<void>` | [Errors and results](#error-and-result-api) |
+| [`phpcxx/arguments.hpp`](../src/php-cxx/include/phpcxx/arguments.hpp) | `Arguments` | [Arguments](#argument-api) |
+| [`phpcxx/conversion.hpp`](../src/php-cxx/include/phpcxx/conversion.hpp) | Checked extraction, numeric conversion, `Timestamp`, native dates | [Extraction](#checked-extraction-api), [dates](#date-api) |
+| [`phpcxx/exception.hpp`](../src/php-cxx/include/phpcxx/exception.hpp) | `has_exception()`, `pending_exception()`, `raise()` | [Exception bridge](#exception-api) |
+| [`phpcxx/object_binding.hpp`](../src/php-cxx/include/phpcxx/object_binding.hpp) | `GcVisitor`, `ObjectBindingPolicy<T>`, `ObjectBinding<T, Policy>` | [Bindings](#binding-api) |
+
+### Build metadata
+
+`build_info() noexcept -> BuildInfo const&` returns immutable metadata owned by this
+copy of the static library. The reference remains valid while the containing module
+or executable is loaded. This query is thread-safe and needs no initialized PHP
+request. It describes the compiled archive; it does not inspect or validate a running
+PHP host.
+
+| `BuildInfo` field | Type | Meaning |
+| --- | --- | --- |
+| `version_id` | `int` | Selected PHP headers' `major * 10000 + minor * 100 + patch` |
+| `module_api` | `int` | `ZEND_MODULE_API_NO`, distinct from PHP and helper package versions |
+| `debug` | `bool` | Whether the selected Zend build enables debug mode |
+| `zts` | `bool` | Whether the selected PHP build enables Zend Thread Safety |
+| `zend_long_size` | `unsigned int` | Size in bytes; supported installations use eight-byte PHP integers |
 
 ## Ownership and borrowed lifetimes
 
@@ -91,6 +425,28 @@ Destroying an object/resource value may invoke PHP cleanup code. Native
 destructors are non-throwing; PHP `zend_bailout()` can bypass C++ destructors.
 RAII is not a bailout recovery mechanism.
 
+### Owner API
+
+These three owners default-construct empty, delete copy construction/assignment, and
+support non-throwing moves. Self-move assignment leaves the owner unchanged. Use
+`retain()` or `duplicate()` when a second owner is required. The table omits
+`noexcept`: it applies to all listed operations except `String::create()`,
+`Array::create()`, all three `duplicate()` methods, and `Array::writable()`.
+Allocation failure is not a recoverable error contract.
+
+| Type | Static factories | Instance operations |
+| --- | --- | --- |
+| `String` | `create(std::string_view) -> String`; `adopt(zend_string*) -> String`; `retain(StringView) -> String` | `duplicate() const -> String`; `release() -> zend_string*`; `get() const -> zend_string const*`; `view() const& -> StringView`; explicit `operator bool() const` |
+| `Array` | `create() -> Array`; `adopt(zend_array*) -> Array`; `retain(ArrayView) -> Array` | `duplicate() const -> Array`; `release() -> zend_array*`; `get() const -> zend_array const*`; `view() const& -> ArrayView`; `writable() & -> zend_array*`; explicit `operator bool() const` |
+| `Value` | `null() -> Value`; `adopt(zval&) -> Value`; `retain(ValueView) -> Value` | `duplicate() const -> Value`; `release() -> zval`; `get() const -> zval const*`; `view() const& -> ValueView`; `is_initialized() const -> bool`; `is_null() const -> bool` |
+
+`get()` borrows raw read-only storage; it does not transfer ownership. `String` and
+`Array` use their boolean conversion to report pointer presence, including a valid
+empty value. `Value` has no boolean conversion: `is_initialized()` reports a value
+other than `IS_UNDEF`, and `is_null()` tests PHP null. Its `get()` always points to its
+internal slot, even when uninitialized. `view()` is deleted for rvalue owners, and
+`Array::writable()` is deleted for rvalues, to prevent borrowing from a temporary.
+
 ## Read-only view operations
 
 `StringView` exposes `data()`/`c_str()` (always zero-terminated, including for an
@@ -159,6 +515,53 @@ if (view.is_array()) {
     }
 }
 ```
+
+### View API
+
+Views are copyable borrows; constructing or copying one does not retain anything.
+`StringView(zend_string* = nullptr)` and `ArrayView(zend_array* = nullptr)` accept
+raw pointers but expose read-only access. `ValueView(zval const* = nullptr)` borrows
+a slot. Each constructor is explicit and `noexcept`.
+
+| Type | Basic operations |
+| --- | --- |
+| `StringView` | explicit `operator bool() const`; `get() -> zend_string const*`; `bytes() -> std::string_view`; `data()` / `c_str() -> char const*`; `size()` / `length() -> std::size_t`; `empty() -> bool` |
+| `ArrayView` | explicit `operator bool() const`; `get() -> zend_array const*`; `size() -> std::size_t`; `empty() -> bool`; `find(key)` / `operator[](key) -> ValueView`; `contains(key) -> bool`; keys are `zend_long` or `std::string_view` |
+| `ValueView` | `get() -> zval const*`; `type() -> int` (Zend's `IS_*` tag); `is_initialized() -> bool`; `dereference() -> ValueView`; type predicates, unchecked getters, fallback getters, and `is_truthy()` described above |
+
+Methods in this table are `const noexcept`. All `ValueView` predicates and getters
+are also `const noexcept` except `is_truthy() const`, which can invoke PHP handlers.
+`ValueView` has no boolean conversion; use the appropriate presence, type, or
+truthiness query. Its unchecked getter results are `bool`, `zend_long`, `double`,
+`StringView`, `ArrayView`, `zend_object const*`, and `zend_resource const*`, respectively.
+The three `_or` getters take and return the corresponding scalar type.
+
+`StringView` has the following additional `const noexcept` operations:
+
+| Operation | Parameters and result |
+| --- | --- |
+| `operator[]`, `front`, `back` | `operator[](std::size_t)` or no arguments; return `char const&` |
+| `begin`, `end`, `cbegin`, `cend` | No arguments; return `const_iterator`, an alias for `char const*` |
+| `rbegin`, `rend` | No arguments; return `const_reverse_iterator`, an alias for `std::reverse_iterator<const_iterator>` |
+| `compare`, `icompare` | `std::string_view` or `StringView`; return negative/zero/positive `int` |
+| `iequals` | `std::string_view` or `StringView`; returns `bool` |
+| `starts_with`, `ends_with`, `istarts_with`, `iends_with`, `contains` | `std::string_view`, `StringView`, or `char`; return `bool` |
+| `find` | Needle as `std::string_view`, `StringView`, or `char`; optional `std::size_t position = 0`; returns `std::size_t` |
+| `rfind` | Same needle types; optional `std::size_t position = npos`; returns `std::size_t` |
+
+The nonmember `operator==` supports two `StringView` values or one `StringView` and
+one `std::string_view` in either order. It is `noexcept` and compares bytes.
+`StringView::npos` is `std::string_view::npos`. `find` starts at the supplied offset;
+`rfind` finds the last match starting at or before its offset, following
+`std::string_view` search semantics.
+
+`ArrayView::Key` is `std::variant<zend_long, StringView>`.
+`ArrayView::Entry` contains `Key key` and `ValueView value`. Its input iterator,
+`ArrayView::Iterator` (also named `iterator` and `const_iterator`), supports default
+construction, `*`, `->`, prefix/postfix `++`, and `==`. Dereference returns an `Entry`
+by value. Arrow access uses a temporary `ArrowProxy`; do not retain a pointer obtained
+from it. Default iterators are absent-array end iterators, and end iterators from
+different arrays are unequal. Dereference and increment require a non-end iterator.
 
 ## Results, extraction, and PHP errors
 
@@ -243,6 +646,85 @@ if (!text) {
 // text.value() borrows the current argument; retain explicitly before storing it.
 ```
 
+### Error and result API
+
+`Error` is a value with `ErrorKind kind`, owned `std::string message`, and
+`std::uint32_t argument = 0`. Zero means no argument context; nonzero values are
+one-based argument numbers. Its `kind` and `message` should describe a recoverable
+failure without changing Zend's exception state.
+
+| `ErrorKind` | Meaning when raised |
+| --- | --- |
+| `Type` | `TypeError` |
+| `Value` | `ValueError` |
+| `ArgumentCount` | `ArgumentCountError` |
+| `Runtime` | `Exception`, or the supplied exception class |
+| `PendingException` | Preserve the existing Zend exception; create nothing |
+
+`Result<T>(T)` constructs success and `Result<T>(Error)` constructs failure, moving
+the supplied value. `Result<void>()` constructs success without a payload;
+`Result<void>(Error)` constructs failure. Copyability of `Result<T>` follows `T`.
+
+| Accessor | Result and precondition |
+| --- | --- |
+| explicit `operator bool() const noexcept` | `true` for success |
+| `value() & noexcept` | `T&`; requires success |
+| `value() const& noexcept` | `T const&`; requires success |
+| `value() && noexcept` | `T&&`; requires success; move into an owner before destroying the result |
+| `error() const& noexcept` | `Error const&`; requires failure and a live result |
+| `error() && noexcept` | `Error`; moves the failure out |
+
+`Result<void>` provides the same boolean and error accessors, but no `value()`.
+These containers need no PHP request themselves; a contained Zend owner or view still
+has its usual lifetime restrictions.
+
+### Argument API
+
+Construct `Arguments(zend_execute_data* frame) noexcept` only for the current internal
+call. All methods below are `const`. Typed methods return `Result` and require the
+caller to handle failure; they do not turn a returned error into a PHP exception.
+
+| Method | Return type |
+| --- | --- |
+| `size() noexcept` | `std::uint32_t` |
+| `get(std::uint32_t index) noexcept` | `ValueView` |
+| `count(std::uint32_t minimum, std::uint32_t maximum)` | `Result<void>`; requires `minimum <= maximum` |
+| `string(std::uint32_t index)` | `Result<StringView>` |
+| `boolean(std::uint32_t index)` | `Result<bool>` |
+| `integer(std::uint32_t index)` | `Result<zend_long>` |
+| `floating(std::uint32_t index)` | `Result<double>` |
+| `array(std::uint32_t index)` | `Result<ArrayView>` |
+| `object(std::uint32_t index, zend_class_entry const* expected)` | `Result<zend_object const*>`; `expected` identifies the required class/interface |
+
+### Checked extraction API
+
+Each `as_*` operation takes `ValueView value`. `as_object` additionally requires
+`zend_class_entry const* expected`. Their return types are `Result<StringView>`,
+`Result<bool>`, `Result<zend_long>`, `Result<double>`, `Result<ArrayView>`, and
+`Result<zend_object const*>`, in the order listed in the extraction table above.
+Use these exact-type operations for stored values, and `Arguments` when parsing a
+PHP call under Zend's weak/strict argument rules.
+
+| Numeric conversion | Return type |
+| --- | --- |
+| `checked_integer<T>(zend_long value)` | `Result<T>`; `T` must be a non-bool integral type |
+| `integer_from_double(double value)` | `Result<zend_long>` |
+| `double_from_integer(zend_long value) noexcept` | `double` |
+
+### Exception API
+
+| Function | Contract |
+| --- | --- |
+| `has_exception() noexcept -> bool` | Query the current request/thread's pending PHP exception |
+| `pending_exception() -> Error` | Create a marker; requires `has_exception()` to be true |
+| `raise(Error const& error, zend_class_entry* exception_class = nullptr) -> void` | Signal the error in an active PHP execution frame; preserve an existing exception |
+
+These functions operate within an initialized request on its execution thread.
+`raise()` returns normally to C++; it does not perform the caller's early return.
+After a Zend operation that can execute PHP, check for a pending exception before
+continuing successful work. Returning `pending_exception()` lets an outer callback
+propagate the failure without replacing it.
+
 ## Native dates
 
 `Timestamp` stores floor Unix seconds (`int64_t`) and microseconds (`int32_t`,
@@ -260,6 +742,23 @@ the resulting instant. `unix_microseconds()` checks the signed 64-bit range;
 negative values, without floating-point arithmetic. Date objects still obey the
 normal request/thread ownership rules. JobU schedules and durations are outside
 this independent helper.
+
+### Date API
+
+`Timestamp` has `std::int64_t seconds` and `std::int32_t microseconds`. Inputs must
+use normalized microseconds in the range 0–999999; conversion to PHP also requires
+an instant representable by PHP's native date implementation.
+
+| Function | Return type |
+| --- | --- |
+| `as_timestamp(ValueView value)` | `Result<Timestamp>` |
+| `datetime_immutable(Timestamp value)` | `Result<Value>` owning a PHP `DateTimeImmutable` |
+| `unix_microseconds(Timestamp value)` | `Result<std::int64_t>` |
+| `timestamp_from_microseconds(std::int64_t value) noexcept` | `Timestamp` |
+
+The integer-only timestamp functions need no PHP request. The two PHP date functions
+require a live request, may fail, and preserve existing PHP exceptions. Check their
+results before using the returned timestamp or owner.
 
 ## Embedded native objects
 
@@ -286,8 +785,7 @@ Call `Binding::bind(class_entry)` during module startup, after the authoritative
 stub-generated registration function returns the internal class entry. Check its
 `Result<void>`; nonordinary classes, custom allocators from another binding, and
 custom serialization handlers are rejected. The helper installs handlers without
-introducing a second registration system. Each template specialization has an
-immutable handler table with no class pointers or request state.
+introducing a second registration system.
 
 Zend allocation creates an **uninitialized native object** with valid standard
 properties. In the PHP constructor or a native factory, validate arguments and
@@ -301,40 +799,14 @@ native state returns an error. Neither operation implicitly retains the object.
 
 `T` need not be movable or standard-layout. Its constructor and destructor must
 be non-throwing, and its alignment cannot exceed `ZEND_MM_ALIGNMENT`; unsupported
-types fail compilation. One allocation contains a C++ storage prefix followed by
-Zend's object and variable-length property slots. There is no separate native
-allocation. Construction must not execute PHP, invoke GC, or publish partially
+types fail compilation. Construction must not execute PHP, invoke GC, or publish partially
 constructed state. Perform recoverable validation before construction, or use
 `Result`-based initialization after construction while an owner protects the
 object. A PHP constructor that raises after successful native construction leaves
 cleanup to the object's eventual `free_obj`; it does not manually destroy `T`.
 
-For example, native state retaining another PHP value can use the existing owner:
-
-```cpp
-class NativeState {
-public:
-    explicit NativeState(php::Value owner) noexcept : _owner(std::move(owner)) {}
-
-    auto trace(php::GcVisitor& visitor) const noexcept -> void
-    {
-        visitor.add(_owner.view());
-    }
-
-private:
-    php::Value _owner;
-};
-
-using Binding = php::ObjectBinding<NativeState>;
-// At MINIT: check Binding::bind(register_class_Example()).
-// Inside a non-throwing PHP constructor callback:
-auto initialized = Binding::construct(Z_OBJ(execute_data->This),
-                                      php::Value::retain(arguments.get(1)));
-if (!initialized) {
-    php::raise(initialized.error());
-    return;
-}
-```
+The [complete extension example](#complete-extension-example) demonstrates this
+lifecycle with a `StoredValue` owning a `php::Value` and an explicit GC trace method.
 
 Use `Value` to own an object/reference-valued zval, including results created with
 `object_init_ex`; no separate owning object wrapper is needed. Keep that owner
@@ -380,290 +852,64 @@ execution thread and request in both NTS and ZTS. No helper owner may survive
 request shutdown. Allocation failure remains process-fatal; no C++ exception may
 unwind through a Zend callback.
 
-## Select a PHP installation
+### Binding API
 
-PHP 8.1 or newer with development headers and 64-bit `zend_long` is required.
-The helper supports NTS and ZTS. Select one installation explicitly:
+`ObjectBinding<T, Policy = ObjectBindingPolicy<T>>` exposes three static entry points:
 
-```sh
-cmake -S src/php-cxx -B .bld/php-cxx-8.5 -G Ninja \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DPHP_CONFIG="$HOME/php/8.5/bin/php-config"
-cmake --build .bld/php-cxx-8.5
-ctest --test-dir .bld/php-cxx-8.5/test --output-on-failure
-```
+| Method | Result and lifetime |
+| --- | --- |
+| `bind(zend_class_entry* entry)` | `Result<void>`; call during module startup with the registered ordinary class |
+| `construct(zend_object* object, Args&&... args)` | `Result<T*>`; forwards arguments to a non-throwing native constructor, once per object |
+| `get(zend_object* object, zend_class_entry* expected = nullptr)` | `Result<T*>`; borrows initialized native state, optionally checking a class/interface |
 
-Use separate build directories for different PHP installations. Discovery runs
-`php-config` and compiles header probes; it does not execute PHP or require
-Embed. It records the selected CLI, extension directory, PHP version, module
-API, debug/ZTS mode, integer width, PHP link flags, and optional Embed paths.
-The PHP executable's link flags are metadata, not helper dependencies.
+`construct()` and `get()` require a live object; keep a PHP owner or active `$this`
+call alive throughout use of the returned pointer. No result owns or retains `T`.
 
-`BUILD_TESTING=OFF` disables tests and their CLI availability check.
-Tests cover the compiled ABI metadata, a small CLI-loadable consumer, independent build-tree
-consumption, relocated installation, discovery failures, and Zend ownership.
-Ownership, view, argument, conversion, exception, and native binding tests use the existing
-Catch2 dependency and matching optional Embed library in dedicated executables.
-The ownership/conversion and native binding harnesses each initialize one
-request. Their external owners die before shutdown; native binding accounting
-also checks objects deliberately retained in PHP globals until shutdown. The CLI
-and relocated consumers exercise the same generated fixtures.
+`GcVisitor::add(ValueView) const noexcept -> void` reports one owned PHP edge. The
+binding passes a visitor to the policy's trace hook. Its explicit
+`GcVisitor(zend_get_gc_buffer*) noexcept` constructor requires a non-null Zend GC
+buffer; module authors normally use the supplied visitor instead of constructing one.
 
-The lifecycle harness adds three complete runtime cycles, five request cycles
-within one runtime, and (in ZTS builds) two concurrent workers with three requests
-each. Each request exercises binary strings, array separation, conversions,
-exception preservation, native bindings, clone failures, GC cycles, and shutdown
-cleanup. User functions/classes and request globals must disappear between
-requests. Thread-local native counters must balance after every shutdown; no
-Zend pointers are retained to inspect them afterward. Barriers keep both ZTS
-requests active while checking distinct globals and pending exception state.
+| Policy member | Requirement |
+| --- | --- |
+| `static constexpr bool cloneable` | Required; `false` in the default policy |
+| `static trace(T const&, GcVisitor&) noexcept -> void` | Required; default forwards to `T::trace(GcVisitor&) const noexcept` |
+| `static clone(T const&) noexcept -> Result<T>` | Required only when `cloneable` is true; `T` must also be nothrow-movable |
+| `static compare(T const&, T const&) noexcept -> int` | Optional; native comparison before standard PHP properties |
 
-Two additional CTest cases run deliberate bailout and frameless-error scenarios
-in child processes. They require the expected bailout, a successful shutdown
-marker, and normal child exit; a crash or timeout fails the test. Their jump
-regions contain no C++ objects requiring destruction. These are narrow checks of
-host teardown, not a guarantee of recovery after arbitrary PHP failures.
+For a scalar-only state, an empty trace hook is appropriate. For a state containing
+`php::Value` owners, enumerate each owned edge as `StoredValue` does in the complete
+example. Borrowed pointers are not owned edges. A clone policy must choose whether to
+retain, duplicate, or independently reconstruct each owned value; C++ copy syntax
+cannot substitute for that decision.
 
-There are twelve helper checks. Missing Embed explicitly skips the six Embed
-checks; compilation and the six CLI/build/install checks remain enabled. Only
-test targets link Embed. Neither consumers nor production helper linkage acquire
-an Embed or thread-library dependency from these fixtures.
+## Runtime and request lifetimes
 
-The test-only `consumer/functions.stub.php` and `consumer/objects.stub.php` are
-authoritative for their checked-in `*_arginfo.h`, generated with PHP's
-`build/gen_stub.php`. The object stub requests PHP 8.1-compatible registration
-through `@generate-legacy-arginfo 80100`; generation uses the existing PHP 8.5
-generator and PHP-Parser installation. Normal builds
-and tests consume that header directly; they do not need PHP sources, a stub
-compiler, or a generated-header freshness check. The fixture deliberately uses
-`mixed` input so helper parsing is exercised rather than preempted by arginfo.
-
-To include the helper in a normal JobU build, use `-DJB_BUILD_PHP_CPP=ON` and
-the selected `PHP_CONFIG`. The option defaults to `OFF`; default configuration
-does not discover PHP or execute `php-config`. The [JobU PHP extension](php.md) is a separate optional target and install component.
-
-## Embed lifecycle and compatibility validation
-
-Runtime/module startup, request startup, and execution-thread initialization are
-different boundaries. `php_embed_init()` performs all startup work, including an
-initial request; `php_embed_shutdown()` shuts that request and the runtime down.
-For subsequent requests in the same runtime, pair `php_request_shutdown()` with
-`php_request_startup()` instead. Destroy external C++ owners before ending each
-request, and resolve pending exceptions before normal teardown.
+PHP's module loader owns runtime and request startup/shutdown. Register persistent
+functions/classes at module startup, and create request-owned values only within an
+active request. Destroy external C++ owners before request shutdown starts; bound
+objects release their native owners through Zend's normal object teardown. Module
+startup and shutdown are not substitutes for request lifetime boundaries.
 
 Register generated persistent functions/classes during module startup. Zend
 borrows a registered module entry until module shutdown, so its storage must
 outlive registration. Reinitialize its bookkeeping for a new runtime and restore
 any replaced SAPI callbacks. Never cache request class entries, zvals, views, or
-native pointers for reuse after shutdown. The fixture's lifecycle owner is
-private test support, not a production lifecycle API.
+native pointers for reuse after shutdown. The library supplies no production
+runtime lifecycle owner; an embedding host is responsible for these boundaries.
 
-For ZTS workers, initialize the process/module once before starting workers,
-attach each worker with `ts_resource(0)`, and run its request operations on that
-same thread. After its final request shutdown, call `ts_free_thread()` before
-joining all workers and shutting down the process runtime. Only native test
-results and synchronization cross threads. A passing ZTS helper test does not
-establish support for a ZTS JobU extension.
-
-The functional matrix is PHP 8.2–8.6 NTS plus PHP 8.5 ZTS. Use each installation's
-explicit `PHP_CONFIG` and a separate build directory, following the commands
-above; record the actual patch version, debug mode, and thread mode. PHP 8.1
-remains the minimum contract but is excluded from this execution matrix. The
-GCC 10 check below compiles the independent helper and public-template consumers
-for the same six ABIs, without running PHP or Embed.
-
-## Memory checks
-
-Use a separate sanitizer build. For example, with a compiler providing ASan,
-UBSan, and LeakSanitizer:
-
-```sh
-cmake -S src/php-cxx -B .bld/php-cxx-asan-8.5 -G Ninja \
-    -DCMAKE_BUILD_TYPE=Debug \
-    -DPHP_CONFIG="$HOME/php/8.5/bin/php-config" \
-    '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer'
-cmake --build .bld/php-cxx-asan-8.5 --target \
-    php-cxx-ownership-test php-cxx-conversion-test php-cxx-object-test \
-    php-cxx-lifecycle-test php-cxx-bailout-test
-USE_ZEND_ALLOC=0 ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 \
-    ctest --test-dir .bld/php-cxx-asan-8.5/test --output-on-failure \
-    -R 'php-cxx-(ownership|conversion|object|lifecycle)-test$'
-USE_ZEND_ALLOC=1 ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 \
-    ctest --test-dir .bld/php-cxx-asan-8.5/test --output-on-failure \
-    -R 'php-cxx-(bailout|fatal)-isolation-test$'
-```
-
-Repeat with PHP 8.5 ZTS and a distinct build directory. These commands instrument
-the helper and fixture code, including binding templates; an uninstrumented
-`libphp` does not gain compiler instrumentation. Disabling Zend's allocator for
-normal cases exposes individual Zend allocations to the memory checker. The
-bailout cases deliberately retain the Zend allocator: unclean shutdown may leave
-individual blocks for request-arena reclamation. Native destruction counters
-still apply, but this does not establish individual-allocation safety after a
-bailout. No test deliberately jumps over a live automatic C++ owner: doing so
-would violate C++ `longjmp` requirements, not just skip a convenient cleanup.
-LeakSanitizer also needs a host environment that permits its process inspection.
-
-Valgrind can exercise the shared conversion and object fixtures through a
-matching, **unsanitized** CLI module build:
-
-```sh
-USE_ZEND_ALLOC=0 valgrind --error-exitcode=97 --leak-check=full \
-    --show-leak-kinds=definite,indirect --errors-for-leak-kinds=definite,indirect \
-    "$HOME/php/8.2/bin/php" -n \
-    "-dextension=$PWD/.bld/php-cxx-8.2/test/php-cxx-module-test.so" \
-    test/php-cxx/consumer/objects-check.php
-```
-
-Repeat for `consumer/check.php` and matching ZTS paths. Inspect the complete
-report, including reachable blocks and the tool's default suppressions; no
-project suppression file is used. On the tested Linux installations, PHP CLI's
-built-in Valgrind string-comparison replacement works, while Embed's shared
-`libphp` reports uninitialized reads in its assembly `zend_string_equal_val`.
-Those Embed runs are not clean Valgrind evidence; the sanitizer lifecycle runs
-provide the corresponding checks. Do not silence that limitation with blanket
-suppressions or describe an uninstrumented runtime as fully sanitizer-validated.
+In ZTS, each owner and view belongs to one request on one execution thread. Do not
+transfer Zend values or native object pointers to worker threads. Native results
+without PHP ownership can cross threads using the application's synchronization.
+For host-side Embed and ZTS test setup, see the
+[development README](../src/php-cxx/README.md#native-storage-and-lifecycle-fixtures).
+Helper ZTS support does not establish support for a ZTS JobU extension.
 
 ## Portability boundary
 
 The helper's public API contains no JobU transport or POSIX types. It relies on
 the selected Zend ABI, allocator alignment, and C++20 support. Linux is the
-validated environment for this regression matrix. Windows and macOS execution
-are not established by these results; Windows compiler, PHP discovery,
+validated environment for the project's regression matrix. Windows and macOS
+execution are not established by these results; Windows compiler, PHP discovery,
 link/export, and Embed integration still require platform validation. Keep
 platform-specific JobU event-loop and socket adapters outside this library.
-
-## Consume the library independently
-
-An external CMake project can use the source tree:
-
-```cmake
-add_subdirectory(/path/to/deferra/src/php-cxx php-cxx)
-target_link_libraries(my_extension PRIVATE PhpCxx::PhpCxx)
-```
-
-Or install just the helper, then consume the package:
-
-```sh
-cmake --install .bld/php-cxx-8.5 --prefix /tmp/php-cxx-sdk \
-    --component PhpCxxDevelopment
-```
-
-```cmake
-find_package(PhpCxx 0.1.0 EXACT CONFIG REQUIRED)
-target_link_libraries(my_extension PRIVATE PhpCxx::PhpCxx)
-```
-
-Pass the install prefix through `CMAKE_PREFIX_PATH` and select the consumer's
-`PHP_CONFIG`. Installed exports rediscover PHP rather than retain the producer's
-PHP include paths. The module API, debug mode, NTS/ZTS mode, and integer width
-must match the archive; a mismatch requires a matching PHP installation or a
-separate library build. This unreleased package provides no cross-version C++
-ABI guarantee. The package version is distinct from the Zend module API:
-`find_package` requires the exact helper version, then checks the selected PHP
-module API, debug mode, thread mode and integer width. Archive consumers must also
-match architecture and the compiler's C++ ABI/runtime. Moving an SDK prefix does
-not make its archive portable between libc implementations or architectures.
-
-`PhpCxxDevelopment` remains separate from JobU's `Development` and `PhpExtension`
-components. It installs the PIC static archive, public headers and CMake files;
-it does not install a PHP runtime, an INI file or a shared helper library. Installed
-consumers rediscover their PHP headers through their own `PHP_CONFIG`, and do not
-need the producer's checkout/build tree, JobU packages or Embed. Keep SDK prefixes
-separate for incompatible PHP ABIs; installing two ABI variants at the same prefix
-would overwrite the archive and its compatibility metadata.
-
-## GCC 10 compilation check
-
-The helper must compile with GCC 10 and its standard-library headers, without
-C++20 ranges or concepts. Use the dedicated Ubuntu 22.04 image:
-
-```sh
-docker build -f containers/Dockerfile.php-cxx-gcc10 \
-    -t deferra-php-cxx:gcc10-ubuntu22.04 containers
-tools/php-cxx-gcc10 \
-    "$HOME/php/8.2/bin/php-config" \
-    "$HOME/php/8.3/bin/php-config" \
-    "$HOME/php/8.4/bin/php-config" \
-    "$HOME/php/8.5/bin/php-config" \
-    "$HOME/php/8.6/bin/php-config" \
-    "$HOME/php/8.5-zts/bin/php-config"
-```
-
-The wrapper mounts sources and selected PHP installations read-only and writes
-under `.bld-php-cxx-gcc10`, using the invoking user's UID/GID. It compiles the
-helper archive and consumer translation units. It runs no PHP, Embed, or
-functional tests. Functional tests use the normal host compiler and matching
-PHP installation. The existing JobU runtime is outside the GCC 10 check.
-
-## GitHub CI and public PHP versions
-
-The workflow in `.github/workflows/ci.yml` pins Ubuntu 26.04 and Alpine 3.24.
-The two native jobs build and test JobU once per distribution, with PHP disabled.
-Two separate PHP matrices build this helper and the [JobU module](php.md) against
-the public ZendPHP CLI, development, and Embed packages. Each row installs one
-PHP ABI and runs all helper and module checks, including relocated helper consumers. `PHPCXX_REQUIRE_EMBED=ON`
-makes a missing matching Embed installation a configuration failure; the CI
-runner also rejects missing or skipped checks. Ordinary helper consumers retain
-optional Embed discovery.
-
-**Edit only the `&php-versions` list in the `php-ubuntu` job to change the PHP
-matrix.** The `php-alpine` job references that list through `*php-versions`.
-Remove `'8.2'` from that one list when PHP 8.6 is released and ZendPHP withdraws
-public PHP 8.2 access. Package names and tool paths derive from each selected
-minor version; there is no second version list in the scripts. Package access
-failures fail the affected row instead of silently removing coverage. Patch
-updates within each minor version are accepted and the selected version/build
-mode is printed in the job log.
-
-`tools/ci/install-zendphp ubuntu|alpine VERSION` registers the pinned repository
-and its signing key and installs the selected ABI. It is intended for disposable
-root-owned CI environments, not an existing developer PHP installation. In
-particular, Alpine Embed packages share `/usr/lib/libphp.so`: use separate jobs
-or containers, never install several Embed versions into one environment.
-Ubuntu's versioned CLI selects its corresponding `libphpVERSION-zend.so` without
-falling back to another ABI's generic library.
-
-After installing the tools listed in the workflow, reproduce helper-only checks with:
-
-```sh
-# Ubuntu 26.04; use /usr/bin/php-config85zend on Alpine 3.24 instead.
-CCACHE_DIR="$PWD/.ccache" tools/ci/php-test 8.5 /usr/bin/php-config8.5-zend .bld/php
-```
-
-This three-argument command configures only `src/php-cxx`. CI adds the native SDK
-prefix as a fourth argument to build and test the module as well. Each
-matrix cache is scoped by distribution release, PHP minor, and compiler version.
-The workflow uploads CTest XML and failure logs for inspection. Local ZTS,
-sanitizer, and GCC 10 validation remain separate from this NTS package matrix.
-
-### Reusing the native SDK for the JobU module
-
-After each native job passes, `tools/ci/prepare-sdk` installs the existing
-`Development` component, relocates it, builds/runs the independent Client SDK
-consumer, and packages `jobu-sdk.tar.gz`. It recompiles no JobU library. The
-workflow publishes `jobu-sdk-ubuntu-26.04-x64` and `jobu-sdk-alpine-3.24-x64` as
-artifacts of that workflow run; the archives contain the `sdk/` prefix and its
-PIC static libraries, public headers, and CMake exports.
-
-The module's standalone build uses
-`find_package(JobU CONFIG REQUIRED COMPONENTS Client)` and links
-`JobU::jobu-client`, while building `php-cxx` and the module for the selected
-PHP ABI. Each PHP matrix depends on its corresponding native job, downloads the
-SDK artifact **from the same workflow run**, extracts it, and passes the relocated
-`sdk/` prefix through `CMAKE_PREFIX_PATH`. The consumer uses the matching
-distribution, architecture, compiler, and system-library environment. Never
-substitute a cached SDK from a different revision, mix glibc and musl artifacts,
-or configure the top-level project in each PHP row.
-
-```sh
-CCACHE_DIR="$PWD/.ccache" tools/ci/php-test 8.5 /usr/bin/php-config8.5-zend \
-    .bld/php /path/to/relocated/sdk
-```
-
-Configuration, module load, Reflection, exception, and process restart checks run alongside all
-twelve helper checks. CI rejects missing or skipped checks in either suite and
-uploads the compilation database to show which sources were rebuilt. Later
-daemon integration can reuse separately staged native outputs. The standalone
-helper remains independent of the SDK; its original three-argument test command
-and `src/php-cxx` entry point remain available.

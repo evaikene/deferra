@@ -117,6 +117,9 @@ running daemon.
 | [Cron schedules](cron.md) | Writing recurring schedules, understanding aliases and timezones, and previewing occurrences |
 | [Named secrets](secrets.md) | Supplying sensitive values and understanding storage, process, and output exposure |
 | [JSON-RPC protocol](protocol/README.md) | Writing a client for the local socket, including method fields, errors, and examples |
+| [PHP API manual](php.md) | Using the synchronous `jobu.so` API from PHP applications |
+| [Runnable PHP examples](../examples/jobu-php/README.md) | CLI/HTTP submission, cron, revision conflicts, pages, output, and reconnect |
+| [php-cxx module-author guide](php-cxx.md) | Writing PHP modules in C++ with the independent helper library |
 | [C++ control client](cpp-client.md) | Using the typed asynchronous client from a C++ application |
 
 JobU stores secret values as plaintext in its SQLite database. Protect the

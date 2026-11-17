@@ -1,7 +1,7 @@
 # Containerized Linux builds
 
 The independent PHP helper has a separate, compile-only GCC 10 environment;
-see [its build documentation](../docs/php-cxx.md#gcc-10-compilation-check).
+see [its build documentation](../src/php-cxx/README.md#gcc-10-compilation-check).
 
 The `tools/container` wrapper provides versioned Ubuntu and Alpine development
 environments. It builds images from one shared Dockerfile per distribution and
@@ -77,7 +77,7 @@ compiler or system-library changes.
 GitHub CI uses the same pinned Ubuntu 26.04 and Alpine 3.24 releases. Its PHP
 jobs install one public ZendPHP ABI per environment and build the helper and
 JobU PHP module against their same-run native SDK. See
-[the PHP CI documentation](../docs/php-cxx.md#github-ci-and-public-php-versions)
+[the PHP CI documentation](../src/php-cxx/README.md#github-ci-and-public-php-versions)
 for the shared version list, signed package installation, reproduction command,
-and [module build instructions](../docs/php.md) for SDK reuse. The ordinary development
+and [module build instructions](../README.md#build-and-load-the-jobu-php-module) for SDK reuse. The ordinary development
 images above continue to have no PHP dependency.
