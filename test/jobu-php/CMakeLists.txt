@@ -6,6 +6,22 @@ if(CMAKE_SOURCE_DIR STREQUAL jobu_php_source)
 endif()
 
 get_target_property(php_binary PhpCxx::PHP PHPCXX_PHP_BINARY)
+configure_file(install-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/install-test.cmake" @ONLY)
+add_test(NAME jobu-php-install-test COMMAND ${CMAKE_COMMAND}
+    "-Dtest_configuration=$<CONFIG>"
+    -P "${CMAKE_CURRENT_BINARY_DIR}/install-test.cmake")
+set_tests_properties(jobu-php-install-test PROPERTIES TIMEOUT 120)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Dynamic dependencies alone cannot reveal server code pulled from a static
+    # archive. Keep the linker's selected-member evidence for the packaging gate.
+    set(link_map "${CMAKE_CURRENT_BINARY_DIR}/jobu-php.map")
+    target_link_options(jobu-php PRIVATE "LINKER:-Map,${link_map}")
+    add_test(NAME jobu-php-linkage-test COMMAND ${CMAKE_COMMAND}
+        "-Dmodule=$<TARGET_FILE:jobu-php>" "-Dlink_map=${link_map}" "-Dreadelf=${CMAKE_READELF}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/linkage-test.cmake")
+endif()
+
 configure_file(configure-test.cmake.in "${CMAKE_CURRENT_BINARY_DIR}/configure-test.cmake" @ONLY)
 add_test(NAME jobu-php-configure-test COMMAND ${CMAKE_COMMAND}
     -P "${CMAKE_CURRENT_BINARY_DIR}/configure-test.cmake")

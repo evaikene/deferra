@@ -50,10 +50,16 @@ foreach(mode installed build-tree)
         -C "${test_configuration}" --output-on-failure)
 endforeach()
 
-file(GLOB_RECURSE exports "${fixture}/relocated/*/cmake/PhpCxx/PhpCxxTargets*.cmake")
+file(GLOB_RECURSE exports "${fixture}/relocated/*/cmake/PhpCxx/*.cmake")
 foreach(export IN LISTS exports)
     file(READ "${export}" content)
-    foreach(forbidden "@phpcxx_source@" "@phpcxx_build@" "${fixture}/prefix" "JobU::" "libphp." "sqlite")
+    set(forbidden_paths "@phpcxx_source@" "@phpcxx_build@" "${fixture}/prefix" "JobU::")
+    # Discovery legitimately mentions optional Embed. Only exported target
+    # requirements must exclude runtime libraries as well as producer paths.
+    if(export MATCHES "PhpCxxTargets")
+        list(APPEND forbidden_paths "libphp." "sqlite")
+    endif()
+    foreach(forbidden IN LISTS forbidden_paths)
         string(FIND "${content}" "${forbidden}" position)
         if(NOT position EQUAL -1)
             message(FATAL_ERROR "Installed export leaks ${forbidden}: ${export}")
@@ -164,15 +170,52 @@ write_fake_config()
 file(WRITE "${fake_prefix}/include/php.h"
     "#define PHP_VERSION_ID 80200\n#define ZEND_DEBUG 0\nusing zend_long = int;\n")
 check_discovery(narrow-integers "${fake_prefix}/php-config" "64-bit zend_long")
-file(WRITE "${fake_prefix}/include/php.h"
-    "#define PHP_VERSION_ID 80200\n#define ZEND_DEBUG 0\nusing zend_long = long long;\n")
-file(WRITE "${fake_prefix}/include/Zend/zend_modules.h" "#define ZEND_MODULE_API_NO 1\n")
-execute_process(COMMAND "@CMAKE_COMMAND@" -S "${fixture}/consumer" -B "${fixture}/wrong-abi"
+# Isolate each installed-archive ABI discriminator. Changing all fields at once
+# could conceal a missing check for debug or thread mode.
+file(GLOB installed_configs "${fixture}/relocated/*/cmake/PhpCxx/PhpCxxConfig.cmake")
+list(GET installed_configs 0 installed_config)
+file(READ "${installed_config}" config_contents)
+string(REGEX MATCH "set\\(PhpCxx_PHP_ABI \"([0-9;]+)\"\\)" abi_match "${config_contents}")
+if(NOT abi_match)
+    message(FATAL_ERROR "Installed helper does not advertise its PHP ABI")
+endif()
+set(archive_abi "${CMAKE_MATCH_1}")
+list(GET archive_abi 0 archive_api)
+list(GET archive_abi 1 archive_debug)
+list(GET archive_abi 2 archive_zts)
+foreach(field api debug zts)
+    set(api "${archive_api}")
+    set(debug "${archive_debug}")
+    set(zts "${archive_zts}")
+    if(field STREQUAL "api")
+        math(EXPR api "${api} + 1")
+    else()
+        math(EXPR ${field} "1 - ${${field}}")
+    endif()
+    set(zts_definition "")
+    if(zts)
+        set(zts_definition "#define ZTS 1\n")
+    endif()
+    file(WRITE "${fake_prefix}/include/php.h"
+        "#define PHP_VERSION_ID 80200\n#define ZEND_DEBUG ${debug}\n${zts_definition}using zend_long = long long;\n")
+    file(WRITE "${fake_prefix}/include/Zend/zend_modules.h" "#define ZEND_MODULE_API_NO ${api}\n")
+    execute_process(COMMAND "@CMAKE_COMMAND@" -S "${fixture}/consumer" -B "${fixture}/wrong-${field}"
+        -G "@CMAKE_GENERATOR@" "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+        "-DCMAKE_PREFIX_PATH=${fixture}/relocated" "-DPHP_CONFIG=${fake_prefix}/php-config"
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    file(WRITE "${fixture}/wrong-${field}.log" "${output}\n${error}")
+    if("${result}" STREQUAL "0" OR NOT "${output}\n${error}" MATCHES "PHP ABI mismatch")
+        message(FATAL_ERROR "Installed package did not reject ${field} mismatch: ${output}\n${error}")
+    endif()
+endforeach()
+
+execute_process(COMMAND "@CMAKE_COMMAND@" -S "${fixture}/consumer" -B "${fixture}/wrong-version"
     -G "@CMAKE_GENERATOR@" "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
-    "-DCMAKE_PREFIX_PATH=${fixture}/relocated" "-DPHP_CONFIG=${fake_prefix}/php-config"
+    "-DCMAKE_PREFIX_PATH=${fixture}/relocated" "-DPHP_CONFIG=@php_config@" -DPHPCXX_REQUIRED_VERSION=0.1.1
     RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
-if("${result}" STREQUAL "0" OR NOT "${output}\n${error}" MATCHES "PHP ABI mismatch")
-    message(FATAL_ERROR "Installed package did not reject a mismatching PHP ABI: ${output}\n${error}")
+file(WRITE "${fixture}/wrong-version.log" "${output}\n${error}")
+if("${result}" STREQUAL "0" OR NOT "${output}\n${error}" MATCHES "version: 0.1.0")
+    message(FATAL_ERROR "Installed package did not reject a different SDK version: ${output}\n${error}")
 endif()
 file(REMOVE "${fake_prefix}/include/Zend/zend_modules.h")
 check_discovery(missing-headers "${fake_prefix}/php-config" "usable installed PHP/Zend headers")

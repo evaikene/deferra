@@ -54,8 +54,64 @@ The SDK must match the source revision, distribution, architecture, compiler,
 and system libraries. Its `Client` component provides PIC static libraries and
 requires fmt; it does not import the SQLite backend or daemon. The module exports
 the PHP loader entry point and hides its own and linked archive implementation
-symbols. Release installation/packaging is deferred; use the explicit built
-module path for now.
+symbols. Production linkage excludes daemon/runtime, database backend and Embed
+implementation. Shared domain codecs from the Client SDK remain part of the module.
+
+## Install and enable
+
+Install the explicit `PhpExtension` component from either build entry point:
+
+```sh
+cmake --install .bld-php-module --component PhpExtension
+/path/to/php/bin/php --ri jobu
+```
+
+This installs `jobu.so` into the selected `php-config --extension-dir` and
+`jobu.ini` into `php-config --ini-dir`. The INI file contains
+`extension = jobu.so`; new PHP processes using that scan directory load the
+module automatically. Restart existing PHP-FPM or other persistent PHP workers
+after deployment. PHP must use that installation's extension directory and scan
+configuration; `php -n` deliberately disables INI loading.
+
+The component is excluded from ordinary full installation and from the existing
+Runtime/Development/Documentation archives. Select `--component PhpExtension`
+explicitly. It installs neither native applications nor the independent helper
+SDK, and does not create distribution-specific packages or modify a main php.ini.
+The installed `jobu.ini` is a package-owned file; reinstalling restores its directive.
+
+Use `JB_PHP_EXTENSION_DIR` and `JB_PHP_INI_DIR` at configuration time to override
+the destinations. Both accept absolute or prefix-relative directories, without
+parent traversal. An empty INI scan directory requires an explicit override and
+corresponding PHP scan configuration. A relative extension override likewise
+requires PHP's `extension_dir` to point to the deployed module directory.
+
+Absolute destinations from `php-config` are unaffected by `cmake --install
+--prefix`. Use `DESTDIR` to stage both files safely without writing into a live
+PHP installation:
+
+```sh
+DESTDIR="$PWD/.bld/php-package-root" \
+    cmake --install .bld-php-module --component PhpExtension
+```
+
+For prefix-relative packaging, configure for example
+`-DJB_PHP_EXTENSION_DIR=lib/php/modules -DJB_PHP_INI_DIR=etc/php/conf.d`, then use
+`--prefix /desired/prefix` at installation. `DESTDIR` may also stage that prefix.
+Deploy the staged tree at its intended paths; staging alone does not enable the
+module in the running system.
+
+Build one module per PHP module API, debug/release mode, NTS mode and 64-bit
+integer ABI. Zend checks compatibility when loading. The module version is the
+JobU software version; it is distinct from the daemon RPC API version. Match the
+native SDK revision, architecture, C++ runtime and system libraries as described
+above; neither the module nor the unreleased C++ SDK promises cross-version C++
+ABI compatibility. Relocation does not make a glibc artifact usable on musl.
+
+Packaging regressions stage and load the installed INI/module, check component
+isolation and destination overrides, and inspect Linux dynamic dependencies and
+selected static archive members. The helper's relocated consumer checks remain
+independent. CI requires these checks in every NTS row and rejects native source
+recompilation in standalone PHP builds.
 
 ## Implemented PHP surface
 

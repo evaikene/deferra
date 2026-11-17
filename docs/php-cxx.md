@@ -440,8 +440,7 @@ compiler, or a generated-header freshness check. The fixture deliberately uses
 
 To include the helper in a normal JobU build, use `-DJB_BUILD_PHP_CPP=ON` and
 the selected `PHP_CONFIG`. The option defaults to `OFF`; default configuration
-does not discover PHP or execute `php-config`. The JobU PHP extension is a
-separate, later-stage target.
+does not discover PHP or execute `php-config`. The [JobU PHP extension](php.md) is a separate optional target and install component.
 
 ## Embed lifecycle and compatibility validation
 
@@ -560,7 +559,19 @@ Pass the install prefix through `CMAKE_PREFIX_PATH` and select the consumer's
 PHP include paths. The module API, debug mode, NTS/ZTS mode, and integer width
 must match the archive; a mismatch requires a matching PHP installation or a
 separate library build. This unreleased package provides no cross-version C++
-ABI guarantee.
+ABI guarantee. The package version is distinct from the Zend module API:
+`find_package` requires the exact helper version, then checks the selected PHP
+module API, debug mode, thread mode and integer width. Archive consumers must also
+match architecture and the compiler's C++ ABI/runtime. Moving an SDK prefix does
+not make its archive portable between libc implementations or architectures.
+
+`PhpCxxDevelopment` remains separate from JobU's `Development` and `PhpExtension`
+components. It installs the PIC static archive, public headers and CMake files;
+it does not install a PHP runtime, an INI file or a shared helper library. Installed
+consumers rediscover their PHP headers through their own `PHP_CONFIG`, and do not
+need the producer's checkout/build tree, JobU packages or Embed. Keep SDK prefixes
+separate for incompatible PHP ABIs; installing two ABI variants at the same prefix
+would overwrite the archive and its compatibility metadata.
 
 ## GCC 10 compilation check
 

@@ -226,6 +226,8 @@ jobs:
             .bld/php/test/results.xml
             .bld/php/test/Testing/Temporary/LastTest.log
             .bld/php/test/php-cxx/build-contract-fixture/*.log
+            .bld/php/test/install-fixture/*.log
+            .bld/php/test/jobu-php.map.summary
             .bld/php/compile_commands.json
           include-hidden-files: true
           if-no-files-found: ignore
@@ -302,6 +304,8 @@ jobs:
             .bld/php/test/results.xml
             .bld/php/test/Testing/Temporary/LastTest.log
             .bld/php/test/php-cxx/build-contract-fixture/*.log
+            .bld/php/test/install-fixture/*.log
+            .bld/php/test/jobu-php.map.summary
             .bld/php/compile_commands.json
           include-hidden-files: true
           if-no-files-found: ignore

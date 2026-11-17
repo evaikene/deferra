@@ -112,3 +112,29 @@ workflow. Build/test native code once per environment and reuse its matching SDK
 across ABI rows. Record the exact source hashes, interpreter/build modes, SDK
 provenance, commands and JUnit counts. Sanitizer results must state which units
 were instrumented; imported SDKs and installed PHP are not implicitly covered.
+
+## Packaging regressions
+
+`jobu-php-install-test` installs the production `PhpExtension` component twice
+under a private `DESTDIR`, checks the two-file manifest, and loads JobU through
+its installed `jobu.ini`. An empty main INI and a private `PHP_INI_SCAN_DIR` keep
+the test independent of operator configuration; `extension_dir` selects the
+staged module. The layout fixture reuses the production installation function
+with a tiny generated module to cover absolute/relative overrides, ordinary
+install exclusion and rejected empty/parent-traversing destinations without
+rebuilding the native SDK. No test installs into the live PHP prefix.
+
+On Linux, `jobu-php-linkage-test` inspects the production ELF dependencies and a
+link map. The reviewed domain-codec member list distinguishes client support
+from server implementation inside the broad Jobu archive. No Db/backend/Embed
+archive members may be pulled into the module. Its compact map summary is retained
+with CI test evidence; the existing module check separately enforces the sole
+`get_module` export. This link-map check uses the GNU linker format exercised by
+the Linux matrix; it does not establish macOS linker/runtime coverage.
+
+The helper build-contract test additionally rejects each incompatible module
+API, debug mode and thread mode separately, as well as a different exact SDK
+version. Its existing narrow-integer, export-path, relocated-consumer and unsafe
+install-layout checks remain enabled. CI requires the new packaging checks and
+rejects compilation databases containing native production sources; only the PHP
+trees and their two existing shared test-support files are allowed.
