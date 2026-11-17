@@ -7,6 +7,7 @@ case "$1" in
     --include-dir) printf '%s\n' '@fake_prefix@/include' ;;
     --php-binary) printf '%s\n' '@fake_binary@' ;;
     --extension-dir) printf '%s\n' '@fake_prefix@/extensions' ;;
+    --ini-dir) printf '%s\n' '@fake_prefix@/conf.d' ;;
     --php-sapis) printf '%s\n' 'cli' ;;
     --ldflags|--libs) printf '\n' ;;
     *) exit 1 ;;

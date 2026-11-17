@@ -46,6 +46,9 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_property(TARGET jobu-php APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/exports.map")
 endif()
 
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/JobUPHPInstall.cmake")
+jobu_install_php_extension(jobu-php)
+
 if(BUILD_TESTING AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../test/jobu-php" test)
 endif()

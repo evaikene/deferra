@@ -1,0 +1,121 @@
+cmake_minimum_required(VERSION 3.20)
+
+# Validate before cleanup. DESTDIR contains absolute destinations, while relative
+# destinations are rooted at our synthetic prefix. Never touch the live PHP tree.
+set(extension_directory [==[@JB_PHP_EXTENSION_DIR@]==])
+set(ini_directory [==[@JB_PHP_INI_DIR@]==])
+foreach(directory extension_directory ini_directory)
+    if("${${directory}}" STREQUAL "" OR "${${directory}}" MATCHES "(^|/)[.][.](/|$)")
+        message(FATAL_ERROR "Unsafe PHP install-test destination: ${directory}")
+    endif()
+endforeach()
+set(fixture "@CMAKE_CURRENT_BINARY_DIR@/install-fixture")
+file(REMOVE_RECURSE "${fixture}")
+file(MAKE_DIRECTORY "${fixture}")
+set(configuration_arguments)
+if(NOT "${test_configuration}" STREQUAL "")
+    list(APPEND configuration_arguments --config "${test_configuration}")
+endif()
+
+function(run_checked label)
+    execute_process(COMMAND ${ARGN} RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    file(WRITE "${fixture}/${label}.log" "${output}\n${error}")
+    if(NOT "${result}" STREQUAL "0")
+        message(FATAL_ERROR "${label} failed; see ${fixture}/${label}.log\n${output}\n${error}")
+    endif()
+endfunction()
+
+function(staged_path output root directory filename)
+    if(IS_ABSOLUTE "${directory}")
+        set(${output} "${root}${directory}/${filename}" PARENT_SCOPE)
+    else()
+        set(${output} "${root}/php-install-prefix/${directory}/${filename}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+function(check_component root extension_directory ini_directory)
+    staged_path(module "${root}" "${extension_directory}" jobu.so)
+    staged_path(ini "${root}" "${ini_directory}" jobu.ini)
+    file(GLOB_RECURSE actual LIST_DIRECTORIES FALSE "${root}/*")
+    set(expected "${module}" "${ini}")
+    list(SORT actual)
+    list(SORT expected)
+    if(NOT actual STREQUAL expected)
+        message(FATAL_ERROR "Unexpected PhpExtension manifest: ${actual}; expected ${expected}")
+    endif()
+    file(READ "${ini}" contents)
+    if(NOT contents STREQUAL "extension = jobu.so\n")
+        message(FATAL_ERROR "Unexpected jobu.ini contents: ${contents}")
+    endif()
+endfunction()
+
+set(stage "${fixture}/stage")
+foreach(pass first repeated)
+    run_checked("install-${pass}" "@CMAKE_COMMAND@" -E env "DESTDIR=${stage}"
+        "@CMAKE_COMMAND@" --install "@CMAKE_BINARY_DIR@" --prefix /php-install-prefix
+        --component PhpExtension ${configuration_arguments})
+    check_component("${stage}" "${extension_directory}" "${ini_directory}")
+endforeach()
+staged_path(module "${stage}" "${extension_directory}" jobu.so)
+staged_path(ini "${stage}" "${ini_directory}" jobu.ini)
+# -n disables INI scanning, so select an empty main INI instead. Only the staged
+# scan directory enables JobU; no explicit extension loading option is passed.
+file(WRITE "${fixture}/php.ini" "")
+file(WRITE "${fixture}/check.php"
+    "<?php\nif (!extension_loaded('jobu') || phpversion('jobu') !== '@PROJECT_VERSION@') { exit(1); }\necho 'jobu.ini loaded', PHP_EOL;\n")
+get_filename_component(scan_directory "${ini}" DIRECTORY)
+get_filename_component(module_directory "${module}" DIRECTORY)
+run_checked(automatic-load "@CMAKE_COMMAND@" -E env "PHP_INI_SCAN_DIR=${scan_directory}"
+    "@php_binary@" -c "${fixture}/php.ini" "-dextension_dir=${module_directory}"
+    "${fixture}/check.php")
+file(READ "${fixture}/automatic-load.log" load_output)
+string(STRIP "${load_output}" load_output)
+if(NOT load_output STREQUAL "jobu.ini loaded")
+    message(FATAL_ERROR "PHP did not load cleanly through jobu.ini: ${load_output}")
+endif()
+
+# Both override forms use the same production rules. The tiny target makes these
+# checks independent of native SDK builds, and all hypothetical writes stay here.
+foreach(layout relative absolute)
+    set(build "${fixture}/${layout}")
+    set(extensions lib/php/modules)
+    set(inis etc/php/conf.d)
+    if(layout STREQUAL "absolute")
+        set(extensions "${fixture}/operator/modules")
+        set(inis "${fixture}/operator/conf.d")
+    endif()
+    run_checked("${layout}-configure" "@CMAKE_COMMAND@" -S "@CMAKE_CURRENT_SOURCE_DIR@/install-layout"
+        -B "${build}" -G "@CMAKE_GENERATOR@" "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+        "-DJOBU_PHP_INSTALL_MODULE=@jobu_php_source@/../../cmake/JobUPHPInstall.cmake"
+        "-DJB_PHP_EXTENSION_DIR=${extensions}" "-DJB_PHP_INI_DIR=${inis}")
+    run_checked("${layout}-build" "@CMAKE_COMMAND@" --build "${build}" ${configuration_arguments})
+    run_checked("${layout}-ordinary" "@CMAKE_COMMAND@" -E env "DESTDIR=${build}/ordinary"
+        "@CMAKE_COMMAND@" --install "${build}" --prefix /php-install-prefix ${configuration_arguments})
+    file(GLOB_RECURSE ordinary_files LIST_DIRECTORIES FALSE "${build}/ordinary/*")
+    if(ordinary_files OR EXISTS "${fixture}/operator")
+        message(FATAL_ERROR "Ordinary installation unexpectedly installed the PHP component")
+    endif()
+    run_checked("${layout}-component" "@CMAKE_COMMAND@" -E env "DESTDIR=${build}/stage"
+        "@CMAKE_COMMAND@" --install "${build}" --prefix /php-install-prefix
+        --component PhpExtension ${configuration_arguments})
+    check_component("${build}/stage" "${extensions}" "${inis}")
+endforeach()
+
+foreach(variable JB_PHP_EXTENSION_DIR JB_PHP_INI_DIR)
+    foreach(invalid empty parent)
+        set(value "")
+        if(invalid STREQUAL "parent")
+            set(value "../operator")
+        endif()
+        execute_process(COMMAND "@CMAKE_COMMAND@" -S "@CMAKE_CURRENT_SOURCE_DIR@/install-layout"
+            -B "${fixture}/${variable}-${invalid}" -G "@CMAKE_GENERATOR@"
+            "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@"
+            "-DJOBU_PHP_INSTALL_MODULE=@jobu_php_source@/../../cmake/JobUPHPInstall.cmake"
+            -DJB_PHP_EXTENSION_DIR=lib/php -DJB_PHP_INI_DIR=etc/php "-D${variable}=${value}"
+            RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+        file(WRITE "${fixture}/${variable}-${invalid}.log" "${output}\n${error}")
+        if("${result}" STREQUAL "0" OR NOT "${output}\n${error}" MATCHES "${variable} must be")
+            message(FATAL_ERROR "${variable} did not reject ${invalid}: ${output}\n${error}")
+        endif()
+    endforeach()
+endforeach()

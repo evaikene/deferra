@@ -57,6 +57,7 @@ required = {
 }
 if sys.argv[2] == '1':
     required.update({
+        'jobu-php-install-test', 'jobu-php-linkage-test',
         'jobu-php-configure-test', 'jobu-php-list-test', 'jobu-php-history-test', 'jobu-php-output-test', 'jobu-php-secrets-schedules-test', 'jobu-php-statistics-test',
         'jobu-php-module-test', 'jobu-php-reflection-test',
         'jobu-php-reflection-contract-test', 'jobu-php-cli-test', 'jobu-php-page-test',
@@ -69,3 +70,28 @@ if missing or skipped:
     raise SystemExit(f'Missing required checks: {sorted(missing)}; skipped checks: {skipped}')
 print(f'All {len(cases)} PHP checks executed without skips.')
 PY
+
+# A standalone PHP row may compile PHP-dependent fixtures, but must not silently
+# rebuild the native SDK/server after the shared native job has already done so.
+python3 - "$build/compile_commands.json" <<'BUILD'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path.cwd()
+allowed = [root / directory for directory in (
+    'src/php-cxx', 'src/jobu-php', 'test/php-cxx', 'test/jobu-php',
+)]
+# These existing shared fixtures are compiled into the PHP test drivers only.
+shared_fixtures = {root / 'test/support' / name for name in (
+    'temporary_directory.cpp', 'memory_io_device.cpp',
+)}
+commands = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if not commands:
+    raise SystemExit('The PHP compilation database is empty.')
+for command in commands:
+    source = (pathlib.Path(command['directory']) / command['file']).resolve()
+    if source not in shared_fixtures and not any(source.is_relative_to(directory) for directory in allowed):
+        raise SystemExit(f'Unexpected native source rebuilt by a PHP row: {source}')
+print(f'All {len(commands)} compilation entries are PHP-dependent sources.')
+BUILD
