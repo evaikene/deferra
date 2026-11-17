@@ -1,171 +1,125 @@
-# JobU PHP extension
+# JobU PHP API reference
 
-The optional `jobu` extension provides native string-backed enums, an exception
-hierarchy, immutable durations, secret references and schedules, mutable attributes
-and queue defaults, mutable CLI/HTTP payloads, and request-scoped `Client` connections.
-The constructor eagerly connects and handshakes. Queue lookup, creation, local
-edits and lifecycle operations are available through the synchronous bridge.
-Job creation, active Job resources and cached Run Now snapshots are also available.
-Queue/job definition lists and retained Run/Attempt history return prefetched pages.
-Run cancellation, explicit history loading, typed execution results and bounded output reads are available.
-Secret administration, cron helpers, explicit system information and typed retained statistics are available.
-It supports PHP 8.1+ with 64-bit integers in NTS mode
-on Linux/macOS. Runtime validation covers PHP 8.2–8.6 NTS; PHP 8.1 retains the
-minimum build/API contract but is not in the test matrix. macOS runtime coverage
-must be recorded separately. The independent [php-cxx helper](php-cxx.md) also
-supports ZTS; the JobU extension rejects ZTS during configuration.
+The `jobu.so` module exposes the `JobU` namespace for managing queues, scheduled
+CLI and HTTP jobs, execution history, output, secrets, and statistics from PHP.
+It talks synchronously to a local `jobud` daemon through a Unix-domain socket.
+PHP submits and manages work; the daemon executes the commands and HTTP requests.
 
-## Build and load
+This manual documents the current public v1 API. PHP 8.1+ with 64-bit integers
+and NTS is required. The tested runtime matrix is PHP 8.2–8.6 NTS on Linux;
+PHP 8.1 and macOS runtime execution are not covered by that matrix. See the
+[root README](../README.md#php-builds-and-installation) for building, installing,
+and enabling the module and for the complete compatibility matrix.
 
-PHP features default to off. Enabling the extension also builds the helper,
-without requiring `JB_BUILD_PHP_CPP=ON`:
+## Contents
 
-```sh
-cmake -S . -B .bld-php -DJB_BUILD_PHP_EXTENSION=ON \
-    -DPHP_CONFIG=/path/to/php/bin/php-config
-cmake --build .bld-php
-/path/to/php/bin/php -n -dextension="$PWD/.bld-php/src/jobu-php/jobu.so" --ri jobu
-ctest --test-dir .bld-php/test --output-on-failure
+- [Quick start](#quick-start)
+- [API conventions and connection lifetime](#php-api-overview)
+- [Exceptions](#exceptions) and [reconnect/retry behavior](#recovery-contract)
+- [Durations, secret references, and schedules](#immutable-value-primitives)
+- [Attributes and queue defaults](#mutable-attributes-and-queue-defaults)
+- [CLI payloads](#cli-payloads) and [HTTP payloads](#http-payload-configuration)
+- [Queries and result values](#queries-metadata-and-execution-results)
+- [Queues](#queue-resources) and [jobs](#jobs-and-manual-runs)
+- [Pages](#definition-lists-and-pages), [history](#retained-run-and-attempt-history), and [output](#retained-output)
+- [Secrets and cron helpers](#secrets-and-cron-helpers)
+- [System information and statistics](#system-and-statistics)
+- [Compatibility and limitations](#compatibility-and-limitations)
+- [Class index](#class-index), [class reference](#class-reference), and [enums](#enum-reference)
+
+## Quick start
+
+Runnable scripts for CLI/HTTP submission, cron, revisions, pages, output, and reconnect
+are in [examples/jobu-php](../examples/jobu-php/README.md).
+
+Enable the module and start a disposable test daemon using the
+[root instructions](../README.md#run-jobu). The PHP process needs permission to
+connect to its socket. Executables, working directories, and HTTP destinations
+are interpreted on the daemon's host with the daemon's execution permissions.
+
+Save this example as a PHP script and pass the test daemon's socket path as its
+first command-line argument. It creates a uniquely named queue and one CLI job.
+It leaves those resources in that test daemon for inspection; it does not delete
+or modify existing queues. `/usr/bin/printf` must exist on the daemon's host.
+
+```php
+<?php
+declare(strict_types=1);
+
+if (!extension_loaded('jobu')) {
+    throw new RuntimeException('Enable the jobu extension first.');
+}
+if ($argc !== 2) {
+    throw new InvalidArgumentException('Supply the test daemon socket path.');
+}
+
+$client = new JobU\Client($argv[1], timeout: JobU\Duration::seconds(5));
+try {
+    $queue = $client->createQueue(name: 'php-demo-' . bin2hex(random_bytes(6)));
+    $attributes = new JobU\CliJobAttributes();
+    $attributes->setOutputCapture('always');
+
+    $job = $queue->createCliJob(
+        payload: new JobU\CliPayload('/usr/bin/printf', ['%s\n', 'Hello from JobU']),
+        schedule: JobU\OnceSchedule::now(),
+        name: 'hello',
+        attributes: $attributes,
+    );
+
+    echo 'Queue: ', $queue->getName(), "\n";
+    echo 'Job: ', $job->getId(), "\n";
+} finally {
+    $client->close();
+}
 ```
 
-Use a separate build directory for each PHP ABI and select `PHP_CONFIG`
-explicitly. Its headers and CLI must belong to the same installation. PHP
-version, debug mode, thread mode, and integer width are discovered from the
-selected development files; configuration does not execute PHP or link Embed.
-Zend checks the module ABI when loading it. Neither the module nor the helper
-has a production Embed dependency. Embed is optional for production builds. The module lifecycle regression needs
-matching Embed and a matching built daemon; CI requires both to prevent skipped
-checks.
+Creation already schedules the initial run. Calling `runNow()` would add another
+run. Successful submission does not mean that execution has finished. Closing
+the Client ends the management connection and leaves the submitted work in the
+daemon. See [history](#retained-run-and-attempt-history) and
+[output](#retained-output) to inspect it using a new connection.
 
-To reuse a previously built native SDK, configure the standalone module entry
-point. This rebuilds only PHP-dependent sources and imports the Client SDK:
+Subsequent snippets demonstrate individual operations. Unless a snippet creates
+its own Client, assume `$client` is open, `$queue` is a Queue loaded through it,
+and `$job`, `$run`, or `$attempt` is the corresponding resource. Use a test daemon
+and synthetic values when trying examples that create or modify state.
 
-```sh
-cmake -S src/jobu-php -B .bld-php-module \
-    -DPHP_CONFIG=/path/to/php/bin/php-config \
-    -DCMAKE_PREFIX_PATH=/path/to/relocated/sdk \
-    -DJOBU_PHP_TEST_DAEMON=/path/to/matching/jobud
-cmake --build .bld-php-module
-/path/to/php/bin/php -n -dextension="$PWD/.bld-php-module/jobu.so" -m
-ctest --test-dir .bld-php-module/test --output-on-failure
-```
+## PHP API overview
 
-The SDK must match the source revision, distribution, architecture, compiler,
-and system libraries. Its `Client` component provides PIC static libraries and
-requires fmt; it does not import the SQLite backend or daemon. The module exports
-the PHP loader entry point and hides its own and linked archive implementation
-symbols. Production linkage excludes daemon/runtime, database backend and Embed
-implementation. Shared domain codecs from the Client SDK remain part of the module.
+All classes and enums are in namespace `JobU`. The [class index](#class-index)
+links to the exact public signatures; the sections below explain their behavior.
+Backed enums accept their documented string values through `from()` and
+`tryFrom()`. See [enum reference](#enum-reference) for every case and value.
 
-## Install and enable
+A PHP call waits for its management operation to complete. Creating a job or
+calling `runNow()` does not wait for the external command or HTTP request to
+finish. A successful mutation means the daemon accepted and committed the
+management change. Inspect run history and explicitly refresh snapshots to
+observe execution afterward.
 
-Install the explicit `PhpExtension` component from either build entry point:
-
-```sh
-cmake --install .bld-php-module --component PhpExtension
-/path/to/php/bin/php --ri jobu
-```
-
-This installs `jobu.so` into the selected `php-config --extension-dir` and
-`jobu.ini` into `php-config --ini-dir`. The INI file contains
-`extension = jobu.so`; new PHP processes using that scan directory load the
-module automatically. Restart existing PHP-FPM or other persistent PHP workers
-after deployment. PHP must use that installation's extension directory and scan
-configuration; `php -n` deliberately disables INI loading.
-
-The component is excluded from ordinary full installation and from the existing
-Runtime/Development/Documentation archives. Select `--component PhpExtension`
-explicitly. It installs neither native applications nor the independent helper
-SDK, and does not create distribution-specific packages or modify a main php.ini.
-The installed `jobu.ini` is a package-owned file; reinstalling restores its directive.
-
-Use `JB_PHP_EXTENSION_DIR` and `JB_PHP_INI_DIR` at configuration time to override
-the destinations. Both accept absolute or prefix-relative directories, without
-parent traversal. An empty INI scan directory requires an explicit override and
-corresponding PHP scan configuration. A relative extension override likewise
-requires PHP's `extension_dir` to point to the deployed module directory.
-
-Absolute destinations from `php-config` are unaffected by `cmake --install
---prefix`. Use `DESTDIR` to stage both files safely without writing into a live
-PHP installation:
-
-```sh
-DESTDIR="$PWD/.bld/php-package-root" \
-    cmake --install .bld-php-module --component PhpExtension
-```
-
-For prefix-relative packaging, configure for example
-`-DJB_PHP_EXTENSION_DIR=lib/php/modules -DJB_PHP_INI_DIR=etc/php/conf.d`, then use
-`--prefix /desired/prefix` at installation. `DESTDIR` may also stage that prefix.
-Deploy the staged tree at its intended paths; staging alone does not enable the
-module in the running system.
-
-Build one module per PHP module API, debug/release mode, NTS mode and 64-bit
-integer ABI. Zend checks compatibility when loading. The module version is the
-JobU software version; it is distinct from the daemon RPC API version. Match the
-native SDK revision, architecture, C++ runtime and system libraries as described
-above; neither the module nor the unreleased C++ SDK promises cross-version C++
-ABI compatibility. Relocation does not make a glibc artifact usable on musl.
-
-Packaging regressions stage and load the installed INI/module, check component
-isolation and destination overrides, and inspect Linux dynamic dependencies and
-selected static archive members. The helper's relocated consumer checks remain
-independent. CI requires these checks in every NTS row and rejects native source
-recompilation in standalone PHP builds.
-
-## Implemented PHP surface
-
-All types are in namespace `JobU`. Enum case names use PascalCase and backing
-values match the wire vocabulary:
-
-| Enum | Cases |
+| Kind of operation | Effect |
 | --- | --- |
-| `QueueState` | Active, Suspending, Suspended, Deleted |
-| `JobState` | Active, Suspending, Suspended, Deleted, Succeeded, Failed, Cancelled |
-| `RunCancellationDisposition` | Completed, Requested |
-| `RunState` | Scheduled, Running, RetryWait, Succeeded, Failed, Interrupted, Cancelled |
-| `AttemptState` | Pending, Running, Completed |
-| `AttemptOutcome` | Succeeded, Failed, Interrupted, Cancelled |
-| `RetryMode` | Blocking, Reschedule |
-| `RecoveryPolicy` | FailInterrupted, RetryInterrupted |
-| `JobType` | Cli, Http |
-| `OutputChannel` | Stdout, Stderr, Body, Headers |
+| Resource field getters, query/value getters, `Page::items()` and `hasNext()` | Local reads; no daemon request. |
+| Queue/Job setters and attached payload/default/attribute edits | Local changes, persisted only by `save()`. |
+| `discardChanges()` and a clean `save()` | Local operations. Discard restores the last accepted snapshot. |
+| Lookups, creation, lifecycle operations, `refresh()`, summary `load()`, output, secret and cron helpers, statistics | Synchronous daemon operations. Output helpers may make several requests under one timeout. |
+| List methods and `Page::next()` | Initial list call fetches eagerly; first `next()` publishes that buffer locally; later `next()` calls fetch continuations. |
 
-For example, `JobU\RunState::RetryWait->value` is `retry_wait`, and
-`JobU\JobType::from('cli')` returns `JobU\JobType::Cli`. Enums retain PHP's
-native `cases()`, `from()`, `tryFrom()`, and serialization behavior. An unfinished
-attempt's outcome is represented by null, not an extra enum case.
+Resources and pages retain their originating Client. Unsetting your Client
+variable does not close a connection still used by those objects. Explicit
+`close()` prevents further daemon calls; cached fields and detached values
+remain readable. Connections belong to one PHP request and are released at
+request shutdown. Create a new Client for a later request.
 
-`JobU\Exception` extends PHP's `\Exception`. Its direct subclasses are
-`ConnectionException`, `TimeoutException`, `NotFoundException`,
-`RevisionConflictException`, `InvalidCursorException`, `UnsavedChangesException`,
-`OutcomeUnknownException`, and `UnsupportedFeatureException`.
+Mutable configuration (`JobAttributes`, its CLI/HTTP subclasses, `QueueDefaults`,
+`CliPayload`, and `HttpPayload`) supports detached deep cloning. Immutable values,
+resources, summaries, and pages reject cloning. Extension-owned ordinary objects
+reject serialization; store IDs and application configuration instead. Enums
+retain PHP's native serialization and conversion behavior. Use `===` to compare
+PHP object identity and IDs to compare resource identity; value comparisons are
+explained with the relevant value types below.
 
-The inherited constructor accepts `message`, integer `code`, and `previous`.
-`getErrorCode(): ?string` and `getCategory(): ?string` read separate daemon
-metadata, initially null for user-created exceptions. `getCode()` keeps its
-standard integer meaning. Constructor and private operation failures populate stable error
-code/category metadata. `OutcomeUnknownException` additionally exposes
-`getOperation(): ?string` and `getIdempotencyKey(): ?string`; both default to null
-for user-created exceptions. Represented remote errors retain their numeric
-JSON-RPC code in `getCode()`. PHP `TypeError` and `ValueError`
-remain native engine errors. Exceptions and their subclasses reject serialization and
-unserialization, including user-defined serialization hooks.
-
-Registration happens during MINIT. Zend owns the registered classes and
-exception properties. RINIT creates a private request owner; its event loop is attached
-lazily when the first native session is created. Each session owns a separate
-socket, raw RPC client, and typed client. The request registry borrows sessions
-and holds no Zend references. All native and Zend access stays on the PHP
-calling thread; there is no worker thread or process-wide connection cache.
-
-RSHUTDOWN clears the active request pointer, closes and detaches every remaining
-session, then releases the loop and restores the previous thread binding.
-Session close first removes callback receivers, then destroys typed/raw clients
-and the socket. Cleanup is synchronous and does not dispatch pending work.
-Later native wrapper destruction is safe even when Zend frees object storage
-after RSHUTDOWN. Explicit close is idempotent and affects only that session.
-The loop stays attached until request shutdown, even after all sessions close.
+### Connecting and timeouts
 
 `new JobU\Client(string $socketPath, ?JobU\Duration $timeout = null)` eagerly
 connects to the Unix socket and completes `system.info`. It requires API major 1,
@@ -177,15 +131,34 @@ are rejected; reconstructing an already initialized object is also rejected.
 The default timeout is ten seconds. A custom constructor timeout becomes the
 client's default for future operations. It must be positive and representable
 by the monotonic clock. One absolute deadline covers all phases of an operation;
-connection, handshake, and typed-call waiting never receive fresh full budgets.
-Deadlines are cooperative: an executing native callback cannot be preempted.
-Nested waits and displaced loop bindings fail before submitting an RPC.
+connection, handshake, requests, and retries never receive fresh full budgets.
+A timeout stops the PHP wait; it does not cancel a submitted job or establish
+that a mutation was rolled back. Timeouts are cooperative and cannot interrupt
+an executing callback.
 
 `Duration::milliseconds(int)`, `seconds(int)`, `minutes(int)`, `hours(int)`, and
 `days(int)` create immutable signed durations with checked integer millisecond
 storage. Days are exactly 24 hours. Overflow raises `ValueError`; no floating-point
 time conversion is used. Zero/negative durations can be represented but are
 invalid as timeouts. Direct construction, cloning, and serialization are rejected.
+
+## Exceptions
+
+`JobU\Exception` extends PHP's `\Exception`. Its direct subclasses are
+`ConnectionException`, `TimeoutException`, `NotFoundException`,
+`RevisionConflictException`, `InvalidCursorException`, `UnsavedChangesException`,
+`OutcomeUnknownException`, and `UnsupportedFeatureException`.
+
+The inherited constructor accepts `message`, integer `code`, and `previous`.
+`getErrorCode(): ?string` and `getCategory(): ?string` read separate daemon
+metadata, initially null for user-created exceptions. `getCode()` keeps its
+standard integer meaning. Constructor and operation failures populate stable error
+code/category metadata. `OutcomeUnknownException` additionally exposes
+`getOperation(): ?string` and `getIdempotencyKey(): ?string`; both default to null
+for user-created exceptions. Represented remote errors retain their numeric
+JSON-RPC code in `getCode()`. PHP `TypeError` and `ValueError`
+remain native engine errors. Exceptions and their subclasses reject serialization and
+unserialization, including user-defined serialization hooks.
 
 Wrong argument types/ranges raise PHP `TypeError`/`ValueError`. Constructor
 connection/handshake failures raise `ConnectionException`, deadline expiry raises
@@ -194,26 +167,53 @@ connection/handshake failures raise `ConnectionException`, deadline expiry raise
 Messages omit socket paths and remote/backend detail; stable codes/categories are
 available through the existing getters. An already pending PHP exception wins.
 
-The private bridge wraps typed `ControlClient` calls, preserving owning replies,
-local/remote failures, and mutation uncertainty. A terminal notification does not
-replace its subsequent per-call outcome. Timeout or stopped-wait cleanup retires
-local observation only; it does not cancel remote work or prove rollback. A
-terminal failure already queued but not delivered at expiry is conservatively
-uncertain. The bridge implements reconnect/retry and operational exception
-translation; `Client::getSystemInfo()` uses the same typed read path. There is no public
-raw RPC entry point. Test-only bindings exercise calls without adding placeholder APIs.
-No C++ exception may unwind into Zend. Allocation failure remains fatal, and
-PHP bailout does not guarantee C++ stack cleanup.
+| Exception | Meaning and caller response |
+| --- | --- |
+| `JobU\Exception` | Other operational/domain failures. Inspect `getErrorCode()` and `getCategory()` for the reason. |
+| `ConnectionException` | Connection/handshake failure or a closed/unusable Client. Recreate a Client when needed. |
+| `TimeoutException` | The operation deadline expired. Do not infer rollback or execution cancellation. |
+| `NotFoundException` | Missing, purged, deleted where disallowed, or outside the receiving resource's scope. |
+| `RevisionConflictException` | Another writer changed the resource. Local edits remain; reconcile explicitly before trying again. |
+| `InvalidCursorException` | Listing continuation expired or became invalid. Starting a new listing is an application decision and may repeat items. |
+| `UnsavedChangesException` | Save or discard local edits before refreshing or performing the guarded action. |
+| `OutcomeUnknownException` | A mutation may have committed. Inspect state independently; keep any returned idempotency key. |
+| `UnsupportedFeatureException` | The daemon API or capabilities cannot support the operation. |
+
+PHP `TypeError`, `ValueError`, and `ArgumentCountError` describe invalid calls.
+`HttpPayload::setJsonBody()` can throw `JsonException` or propagate a callback's
+exception. Advancing an exhausted Page throws `OutOfBoundsException`. These are
+outside the `JobU\Exception` hierarchy.
+
+For example, handle an uncertain save without blindly resubmitting it. This
+function assumes the supplied Queue is editable and the caller will decide how
+to reconcile the pending name with a fresh independently loaded snapshot:
+
+```php
+function renameQueue(JobU\Queue $queue, string $name): void
+{
+    $queue->setName($name);
+
+    try {
+        $queue->save();
+    } catch (JobU\OutcomeUnknownException $error) {
+        // The edit stays pending, and the daemon may already have committed it.
+        echo 'Uncertain operation: ', $error->getOperation() ?? 'unknown', "\n";
+        throw $error;
+    }
+}
+```
+
+Avoid logging full exception traces containing application arguments when those
+arguments include secrets. See [secret trace behavior](#secrets-and-cron-helpers)
+for the PHP 8.1 limitation and PHP 8.2+ parameter redaction.
 
 ## Recovery contract
 
-Recovery currently lives behind the private typed bridge and test-only bindings;
-public management/resource methods will use it as those APIs are implemented.
-Each operation owns frozen request parameters. Replacement connections repeat the
-API/capability handshake and replace the whole socket/raw/typed-client bundle.
-They never revive a terminal native client. All attempts, reconnect delays, and
-internal reads share the original monotonic deadline. A per-call Duration override
-does not change the client's default. Reconnect waits use bounded event-loop timers.
+Public management and resource methods reconnect after recoverable transport
+failures according to the policy below. Retries preserve the original request
+parameters and repeat the daemon compatibility check. All attempts, reconnect
+delays, and internal reads share one operation deadline. A per-call Duration
+override does not change the client's default.
 
 | Operation after transport loss | Replay policy |
 | --- | --- |
@@ -223,11 +223,9 @@ does not change the client's default. Reconnect waits use bounded event-loop tim
 | Queue/job creation and Run Now | Repeat identical parameters with the original idempotency key |
 | Save, move, delete, run cancellation, secret changes, other mutations | Never replay after possible transmission |
 
-Creation and Run Now receive an automatically generated, OS-random key unless
-one was supplied. The same key survives every in-call retry. Automatic keys combine
-two freshly seeded UUIDv7 values (148 random bits, 72 UTF-8 bytes), using the existing
-SDK generator. Explicit keys remain unchanged; the bridge validates the 1–128 UTF-8 byte contract
-before sending.
+Creation and Run Now receive a randomly generated idempotency key unless one
+was supplied. The same key survives every in-call retry. Explicit keys remain
+unchanged and must contain 1–128 UTF-8 bytes.
 Daemon idempotency records last only as long as their associated retained resources;
 replay safety is not a promise of permanent key retention.
 
@@ -245,68 +243,6 @@ and represented post-commit `jobu.response.too_large` mutation errors become
 `OutcomeUnknownException`. Error messages omit submitted values, peer text, socket
 paths, and backend detail. Stable code/category metadata remains available, and an
 already pending PHP exception is preserved.
-
-## Stub maintenance and validation
-
-`src/jobu-php/jobu.stub.php` is authoritative. Generate and commit
-`jobu_arginfo.h` when changing that surface, using PHP's `build/gen_stub.php` and
-its matching PHP-Parser installation. The stub requests class entries and
-PHP 8.1-compatible registration through `@generate-legacy-arginfo 80100`:
-
-```sh
-/path/to/php-8.5/bin/php -n -dextension=tokenizer \
-    /path/to/php-8.5-source/build/gen_stub.php src/jobu-php/jobu.stub.php
-```
-
-Generation is a maintainer operation. Normal CMake builds and CI consume the
-committed header without PHP sources, a generator, or a freshness check. Diagnose
-the generated header through `module.cpp` with the selected ABI, and format only
-handwritten C++.
-
-CTest runs configuration rejection, module listing/information, Reflection and enum contracts, exception
-behavior, and repeated child-process load/shutdown checks. An additional Embed
-regression runs the production module hooks through three runtime lifetimes
-with five requests each. It checks two connected sessions, close-one/use-other,
-strong resource-to-client ownership, GC cycles, partial construction, pending
-work, late native wrapper destruction, and reentrancy rejection. Linux also
-checks descriptor accounting. This models reused PHP-FPM request boundaries;
-it is not a claim of testing an actual PHP-FPM deployment.
-
-Bridge tests additionally cover immediate/deferred replies, capability/version
-rejection, constructor errors, one remaining deadline, pre-acceptance and remote
-failures, timeout/stopped-wait cleanup, late replies, terminal mutation uncertainty,
-and reentrancy. Recovery tests drop successful real-daemon replies before forwarding
-them, compare replay parameters and keys, and assert committed resource identity
-and single-transmission saves. They also cover restart, incompatible replacement
-peers, terminal deadlines, next-call recovery, per-call overrides, exception
-metadata/redaction, and independent clients. The real module is also loaded by a separate PHP CLI process
-against the same-build daemon. Reused-runtime tests exercise production Client
-construction, independent sessions, Duration conversions, and request teardown.
-
-The fixture classes and their generated arginfo are linked only into the test
-executable. The production module exports no test API and does not link Embed.
-Integrated builds use the `jobud` target. Standalone tests take
-`JOBU_PHP_TEST_DAEMON`; missing Embed or daemon produces explicit skips for
-lifecycle/bridge checks, which the CI gate rejects. The lifecycle regression
-covers normal request shutdown, not arbitrary recovery after Zend bailout or a process kill.
-Standalone module tests also run the independent helper suite, including
-relocated helper consumers.
-
-The Ubuntu 26.04 and Alpine 3.24 PHP CI rows consume their native job's SDK from
-**the same workflow run**. The archive also contains `fixtures/jobud`, staged
-from that native build outside the installed Client SDK. PHP rows install the
-existing daemon's runtime library dependencies and pass its path to the lifecycle
-test. Each row rebuilds only helper/module/test sources.
-The single `&php-versions` list in `.github/workflows/ci.yml` controls both
-matrices. After extracting the matching archive, reproduce a row with:
-
-```sh
-CCACHE_DIR="$PWD/.ccache" tools/ci/php-test 8.5 \
-    /usr/bin/php-config8.5-zend .bld/php /path/to/sdk
-```
-
-On Alpine use `/usr/bin/php-config85zend`. Omitting the SDK argument retains
-helper-only validation. Both modes reject missing or skipped required checks.
 
 ## Immutable value primitives
 
@@ -335,7 +271,7 @@ Absolute once schedules copy a `DateTimeInterface` instant. Date getters return
 fresh UTC `DateTimeImmutable` values with exact microsecond precision. Values outside
 the native system clock range raise `ValueError` instead of overflowing; this range
 can be narrower than PHP's date range. Symbolic `now` remains unresolved until daemon
-job creation and is rejected by the replacement-schedule adapter.
+job creation and cannot be used with `Job::setSchedule()`.
 
 `CronSchedule::getExpression(): string` preserves the expression. `getTimezone():
 ?DateTimeZone` returns a fresh timezone object, or null for an unresolved daemon
@@ -349,8 +285,7 @@ the resolved timezone.
 Duration, SecretReference, and the concrete schedules reject cloning, serialization,
 dynamic properties, and repeated initialization. Ordinary invalid arguments use
 native PHP `TypeError`/`ValueError`; pending PHP exceptions are preserved. UUIDs remain
-canonical lowercase strings, validated by a private adapter for future resource
-methods. There is no public UUID wrapper or validation function.
+canonical lowercase strings, validated by resource and query methods. There is no public UUID wrapper or validation function.
 
 ### Value comparison
 
@@ -402,8 +337,7 @@ $copy->clear('job.timeout'); // original defaults and views are unchanged
 
 `cli(): CliJobAttributes` and `http(): HttpJobAttributes` return cached mutable
 views: repeated calls return the same PHP object. A retained view keeps its parent
-alive. Replacing a defaults layer through the private resource adapter updates
-existing views in place. Queue resources use these adapters; Job resource operations remain deferred.
+alive. `Queue::setDefaults()` updates existing views in place.
 
 Every suffix below supplies `getSuffix(): ?Type` and
 `setSuffix(Type $value): void`. Getters return null when the value is absent.
@@ -421,7 +355,7 @@ mixed setters use definition-directed type checks. Numbers allow integer widenin
 | All JobAttributes | RetryMultiplier | float | retry.multiplier |
 | All JobAttributes | RetryMode | RetryMode | retry.mode |
 | All JobAttributes | RetryStrategy | string | retry.strategy |
-| CLI | RetryExitCodes | list<string> | cli.retry_exit_codes |
+| CLI | RetryExitCodes | `list<string>` | cli.retry_exit_codes |
 | CLI | TerminationGrace | Duration | cli.termination_grace |
 | CLI | StdoutLimit | int | output.stdout_limit |
 | CLI | StderrLimit | int | output.stderr_limit |
@@ -431,21 +365,53 @@ mixed setters use definition-directed type checks. Numbers allow integer widenin
 | HTTP | MaxRedirects | int | http.max_redirects |
 | HTTP | HttpBodyLimit | int | output.http_body_limit |
 | HTTP | HttpHeadersLimit | int | output.http_headers_limit |
-| HTTP | RetryErrors | list<string> | http.retry_errors |
-| HTTP | RetryStatuses | list<string> | http.retry_statuses |
+| HTTP | RetryErrors | `list<string>` | http.retry_errors |
+| HTTP | RetryStatuses | `list<string>` | http.retry_statuses |
 
 `OutputCapture` accepts `none`, `on_error` or `always`; `RetryStrategy` accepts
 `fixed` or `exponential`. Generic `get/set('retry.mode', ...)` uses `blocking` or
 `reschedule` strings; typed methods use the existing `RetryMode` enum.
 `IdempotencyKey` is the HTTP execution policy boolean, not a management RPC key.
-The standard registry remains authoritative for numeric bounds and retry selectors.
+The accepted bounds and built-in defaults are listed below. These defaults are
+materialized when the daemon accepts a new job: built-in values are overlaid
+by daemon defaults, queue defaults, and then explicit job attributes, in that order. A newly constructed partial attribute object still
+returns null for every absent value.
+
+| Attribute suffix | Accepted values | Built-in default |
+| --- | --- | --- |
+| Timeout | 1 millisecond–30 days | 120 seconds |
+| RetryInitialDelay | 0–24 hours | 0 milliseconds |
+| RetryMaxDelay | 0–30 days; at least the initial delay | 24 hours |
+| RetryMaxAttempts | 1–100, including the first attempt | 1 |
+| RetryJitter | Finite number from 0 through 1 | 0.0 |
+| RetryMultiplier | Finite number from 1 through 100 | 2.0 |
+| RetryMode | `RetryMode::Blocking` or `RetryMode::Reschedule` | Reschedule |
+| RetryStrategy | `fixed` or `exponential` | `fixed` |
+| OutputCapture | `none`, `on_error`, or `always` | `on_error` |
+| TerminationGrace | 0–300,000 milliseconds | 5 seconds |
+| StdoutLimit / StderrLimit / HttpBodyLimit | 0–67,108,864 bytes | 1,048,576 bytes each |
+| HttpHeadersLimit | 0–4,194,304 bytes | 65,536 bytes |
+| FollowRedirects / IdempotencyKey | Boolean | false |
+| TlsVerify | Boolean | true |
+| MaxRedirects | 0–20; positive when redirects are enabled | 5 |
+| RetryExitCodes | List of exit-code selectors, e.g. `['1', '3-5']`; at most 64 normalized selectors | `['0-255']` |
+| RetryStatuses | List of HTTP status selectors, e.g. `['429', '500-599']` | `['408', '429', '500-599']` |
+| RetryErrors | List of supported HTTP error names | `['resolve', 'connect', 'tls_handshake', 'timeout', 'send', 'receive']` |
+
+Selectors use decimal codes or inclusive ranges: 0–255 for CLI and 100–599 for
+HTTP. Invalid or overlapping retry selectors are rejected. Supported HTTP retry
+error names are `resolve`, `connect`, `tls_handshake`, `tls_verification`,
+`timeout`, `send`, `receive`, `redirect`, and `protocol`.
+`Blocking` holds queue capacity during the retry delay; `Reschedule` releases it.
+Retry criteria apply to failed executions and remain subject to the maximum
+attempt count. Output limits bound retained bytes and do not redact secrets.
 
 A setter validates its individual value before changing anything. Partial local
 edits may temporarily violate cross-field relationships, such as initial retry
-delay exceeding maximum delay. The private submission/export and merge/replacement
-adapters check those relationships before accepting the complete supplied layer.
+delay exceeding maximum delay. Submission, merging attributes, and replacing
+configuration check those relationships before accepting the complete supplied layer.
 They never materialize defaults; effective configuration validation remains the
-daemon's responsibility. Failed edits or failed adapter validation preserve the
+daemon's responsibility. Failed edits or failed configuration validation preserve the
 previous layer. Merge copies every supplied attribute key, while defaults
 replacement copies the entire supplied layer, preserving attached object identity.
 
@@ -456,7 +422,7 @@ cached views. Returned arrays cannot mutate the original configuration. Comparis
 uses visible attribute names and values in canonical name order, independent of
 insertion order or attachment; `===` still tests identity. All four classes reject
 serialization and repeated initialization. Internal classes disallow dynamic
-properties. References stay within the owning PHP request and are traced for GC.
+properties. These objects remain local to the owning PHP request.
 
 ## CLI payloads
 
@@ -507,12 +473,11 @@ with `unsetEnvironment(string $name)`, or remove it with
 `[A-Za-z_][A-Za-z0-9_]*`; injected `JOBU_JOB_ID`, `JOBU_RUN_ID`, and `JOBU_ATTEMPT`
 are reserved. `PATH` and all `JOBU_*` entries cannot hold secret references.
 
-A bare executable may be edited before its PATH is supplied. Complete native
-export requires an explicit literal PATH of at most 256 absolute nonempty
+A bare executable may be edited before its PATH is supplied. Submission requires an explicit literal PATH of at most 256 absolute nonempty
 directories, bounded candidate paths, and the protocol's 256 KiB serialized and
 prepared-request limits. No process environment fills missing values. The daemon
 remains authoritative and rechecks secret-dependent bytes after resolution.
-Public job submission methods are still deferred.
+Submit CLI jobs with `Queue::createCliJob()`.
 
 Cloning deep-copies the payload and detaches it from any owner. Equality compares
 native values, ignoring environment insertion order and exit-code input order;
@@ -525,8 +490,8 @@ object debugging do not expose submitted argument/environment values.
 ## HTTP payload configuration
 
 `HttpPayload` is a local mutable request template. It performs no RPC and never
-resolves a `SecretReference`. The native duplicate-header prerequisite preserves
-ordered, repeated header names through admission and execution.
+resolves a `SecretReference`. Ordered, repeated header names are preserved
+through submission and execution.
 
 ```php
 $payload = new JobU\HttpPayload('https://example.test/events', method: 'POST');
@@ -576,7 +541,7 @@ the payload; those nested edits survive even if the outer operation fails. The
 outer operation validates current state after callbacks and does not overwrite
 unrelated nested edits. JSON body and optional header insertion commit together.
 Known header counts/bytes and body bounds are checked locally; complete serialized
-payload size is checked by the private submission/replacement adapter. The daemon
+payload size is checked when submitting or replacing the payload. The daemon
 remains authoritative for resolved secret bytes and effective execution limits.
 
 Cloning `HttpPayload` makes a detached deep copy, including all headers. Comparison
@@ -587,11 +552,11 @@ headers and references do not alias mutable input state. Both classes reject
 serialization, dynamic properties and repeated construction. Type mismatches use
 `TypeError`, invalid values use `ValueError`, and JSON errors retain PHP semantics.
 
-Private attachment/replacement adapters preserve attached identity, trace the
-owner for GC, and notify only for actual local changes. Public Job resources,
-revision tracking and saving remain later-stage work.
+Use `Queue::createHttpJob()` to submit HTTP jobs. Edit an existing job through
+`Job::payload()` or `Job::setPayload()` and persist those edits with `Job::save()`.
+Attached payload identity is preserved across replacement, save, refresh, and discard.
 
-### Queries, metadata and execution results
+## Queries, metadata and execution results
 
 `TimeRange`, `RunQuery` and `StatisticsQuery` are immutable, detached inputs.
 Construct them with named arguments; all getters are local. They own copies of
@@ -637,9 +602,8 @@ the daemon will choose its current UTC time for the upper bound and 24 hours
 before that for the lower bound. Construction never reads the server or
 substitutes the PHP clock.
 
-The following final result classes have private constructors. Native adapters
-create detached snapshots; public Client/resource methods that return them
-are implemented in later stages. No result getter performs RPC.
+The following final result classes have private constructors. Client and resource
+methods return these detached snapshots. No result getter performs RPC.
 
 | Class | Getters |
 | --- | --- |
@@ -757,59 +721,14 @@ server fields and revision: it does not invent a deletion timestamp or token.
 `refresh(includeDeleted: true)` can then load retained historical state.
 All mutation, including retained defaults/view edits, is blocked after deletion.
 Detached configuration copies remain editable. Queue objects cannot be cloned or
-serialized, and PHP GC traces their Client/defaults/view ownership cycles.
+serialized. Retained defaults and views keep their resource and Client alive.
 
 `Queue::statistics(?StatisticsQuery $query = null, ?Duration $timeout = null): Page`
 reads retained statistics by stable UUID, including for dirty or deleted queues.
 It leaves local edits and cached state untouched. See [system and statistics](#system-and-statistics)
 for typed groups, window metadata and cursor behavior.
 
-## Private resource-state foundation
-
-Stage 4.1 adds the internal cache/dirty-state machinery, used by the production
-`Queue` binding in stage 4.2. The `Job` resource remains later work. The
-fixture-only resource used by Embed tests is not registered by `jobu.so`.
-
-`ResourceState<Queue>` and `ResourceState<JobDefinition>` retain the originating
-PHP Client and keep independent accepted and working native snapshots. The
-concrete binding traces its attached configuration objects as well as the
-state's Client edge. No Client-to-resource ownership edge is added. All state
-and Zend access remains on the originating request/thread; use the default
-non-cloneable, non-serializable `ObjectBinding` policy for connected resources.
-
-Setters track net differences from the accepted snapshot. Reverting a field
-removes its edit; job attributes track changed keys and produce a supplied-key
-patch, whereas queue defaults and payloads use full replacement. Intermediate
-attribute edits may be temporarily inconsistent across fields, so dirty tracking
-copies native values without whole-layer validation. Request construction
-validates the complete configuration before freezing a typed operation.
-
-A clean save returns without RPC. Dirty refresh and lifecycle guards fail
-locally with `UnsavedChangesException`. Save freezes the stable UUID, accepted
-revision and changed fields, and uses the existing operation/recovery bridge
-with one total deadline. A validated successful reply becomes the new baseline;
-conflicts, uncertain outcomes and conversion failures preserve all local edits
-and the old baseline/revision. There is no added replay or reconciliation policy.
-Discard restores the last accepted snapshot locally, even after Client closure.
-RPC operations continue to use the existing Client boundary.
-
-Attached attributes/defaults and CLI/HTTP payloads provide private prepared
-restoration adapters. Prepare every component before committing any component;
-commit moves native values into the existing objects/backing layers, without
-notifications, PHP callbacks or GC. The temporary restoration borrows its target,
-so it must not survive a PHP call or its target. Payload restoration accepts an
-already converted configuration source; concrete Job reply decoding belongs to
-the later Job resource stage. Ordinary edits preserve their existing notifications,
-merge/replacement semantics and detached clone behavior.
-
-An optional pre-commit edit guard lets an attached child reject edits after its
-resource is locally deleted. Setters recheck after conversions that can execute
-PHP. Clones detach both the owner and its guard/notification. Local deletion
-retains cached getters and the last received revision; a null delete reply does
-not fabricate a new token. Explicit historical refresh can use the shared cache
-path where the concrete resource API supports it.
-
-### Jobs and manual runs
+## Jobs and manual runs
 
 Create definitions through a clean, nondeleted Queue with `createCliJob()` or
 `createHttpJob()`. Both accept named `payload`, `schedule`, `name`, `priority`,
@@ -821,6 +740,12 @@ configuration. `Queue::getJob($id)` accepts a canonical lowercase UUID and retur
 only a Job belonging to that queue; a different parent raises `NotFoundException`.
 Lookup preserves local queue edits. Deleted jobs raise `NotFoundException`; use
 `listJobs(includeDeleted: true)` to read retained deleted definitions.
+
+Job names are null or UTF-8 strings of at most 256 bytes without NUL; empty
+strings are allowed and null clears the name. Priority is a signed 32-bit integer
+(−2,147,483,648 through 2,147,483,647),
+defaulting to zero. The daemon requires a suspended job for a move. Deletion
+requires a suspended or terminal job with no nonterminal work.
 
 Jobs expose cached identity, queue UUID, revision, nullable name, runner type,
 state, priority, schedule and timestamps. Getters never perform RPC. All returned
@@ -863,10 +788,61 @@ cloned or serialized. Closing the Client preserves cached reads and local edits;
 subsequent RPC operations fail locally.
 
 
+### HTTP and recurring jobs
+
+This example assumes a test HTTP service at the supplied URL. Creating the job
+schedules its first cron occurrence; `setJsonBody()` only prepares the request.
+The response is available later as retained bytes, without automatic JSON parsing.
+
+```php
+$payload = new JobU\HttpPayload('http://127.0.0.1:8080/tasks', method: 'POST');
+$payload->setJsonBody(['task' => 'daily-report']);
+
+$schedule = new JobU\CronSchedule('0 9 * * MON-FRI', new DateTimeZone('Europe/Tallinn'));
+$client->validateSchedule($schedule);
+
+$job = $queue->createHttpJob(
+    payload: $payload,
+    schedule: $schedule,
+    name: 'weekday-report',
+);
+```
+
+### Revision conflicts and explicit reconciliation
+
+Each lookup returns an independent cached resource. This example starts with a
+queue of weight 1, loads it twice, and demonstrates a competing update:
+
+```php
+$first = $client->getQueueById($queue->getId());
+$second = $client->getQueueById($queue->getId());
+$first->setWeight(2);
+$first->save();
+
+$second->setWeight(3);
+try {
+    $second->save();
+} catch (JobU\RevisionConflictException $error) {
+    $intendedWeight = $second->getWeight(); // Still 3: the failed save kept the edit.
+    $second->discardChanges();
+    $second->refresh();
+
+    echo 'Current weight: ', $second->getWeight(), "\n";
+    echo 'Proposed weight: ', $intendedWeight, "\n";
+    // Decide whether to reapply the proposal after inspecting the current state.
+}
+```
+
+`discardChanges()` restores the previous local baseline, so call `refresh()`
+afterward to read the competing edit. Refreshing a dirty object directly raises
+`UnsavedChangesException`. The same rules apply to Jobs. If a save instead raises
+`OutcomeUnknownException`, independently load the resource to inspect the
+possibly committed update before choosing which edits to retain.
+
 ## Definition lists and pages
 
-`JobU\Page` represents a mutable position in a paged result. Its private factory
-performs the first request eagerly; the returned Page starts **before** that
+`JobU\Page` represents a mutable position in a paged result. Listing methods
+perform the first request eagerly; the returned Page starts **before** that
 prefetched page. The public definition-list entry points are:
 
 ```php
@@ -922,11 +898,6 @@ while ($page->hasNext()) {
 }
 ```
 
-All phase-4 Queue/Job lookup, creation, editing, lifecycle and definition-list
-entry points are available. The cached Run returned by `runNow()` is available;
-`Job::listRuns()` and full Run/Attempt APIs, including output, are available.
-`Queue::statistics()` and `Client::systemStatistics()` return typed statistics pages.
-
 - `hasNext(): bool` checks only local state. An empty first result returns false.
 - `next(?Duration $timeout = null): void` publishes the prefetched first page
   without RPC. Later calls fetch the continuation using one operation deadline,
@@ -942,12 +913,11 @@ may still have continuations: Page follows the returned boundary rather than
 comparing the item count to the requested limit. Listings are live reads, not
 frozen snapshots across requests.
 
-Queue/job UUID keysets repeat their original filters and limit. Secret name
-keysets repeat the limit. Opaque history/statistics continuations send only the
-cursor. Expired cursors, including those invalidated by daemon restart, raise
+Queue/job listings advance by UUID and secret listings advance by name.
+Run/attempt history and statistics use server-managed continuation cursors. Expired cursors, including those invalidated by daemon restart, raise
 `InvalidCursorException`; enumeration never silently restarts.
 
-Page strongly retains its originating Client and traces its items and statistics metadata for PHP GC.
+Page strongly retains its originating Client and current items.
 Unsetting the caller's Client variable does not close a live Page's session.
 After explicit `Client::close()`, cached access and consumption of the prefetched
 buffer still work, while a subsequent fetch fails. Arrays or resource objects
@@ -1039,13 +1009,17 @@ can inspect the outcome. Cancellation does not refresh the owning Job.
 All history operations accept a final `?Duration $timeout = null`, inheriting the
 Client default when omitted. Getters perform no RPC, interpret no application
 JSON, and resolve no secrets. Results preserve unknown safe metadata through the
-existing generic accessor. Summary/resource instances retain and GC-trace their
+existing generic accessor. Summary/resource instances retain their
 Client, reject cloning/serialization/dynamic properties, and remain request-local.
 Strict comparison (`===`) identifies a PHP instance; use ID getters (and attempt
 number) to compare record identity rather than relying on loose object comparison.
 Explicit Client closure leaves cached getters usable but prevents further RPCs.
 
 ### Retained output
+
+For a Run with at least one retained attempt, read a bounded tail or inspect a
+specific attempt’s capture metadata. Attempt 1 must still exist for this example;
+use `listAttempts()` to discover retained attempts when their numbers are unknown.
 
 ```php
 $tail = $run->getOutput(maxBytes: 4096, timeout: JobU\Duration::seconds(2));
@@ -1106,7 +1080,7 @@ configured at construction). One monotonic deadline covers argument conversion,
 connection, handshake, request and any safe reconnect/replay.
 
 ```php
-$metadata = $client->setSecret(name: 'service.token', value: $token);
+$metadata = $client->setSecret(name: 'demo.token', value: 'synthetic-example-token');
 $page = $client->listSecrets(limit: 100);
 while ($page->hasNext()) {
     $page->next();
@@ -1114,7 +1088,7 @@ while ($page->hasNext()) {
         echo $secret->getName(), "\n";
     }
 }
-$client->deleteSecret('service.unused');
+$client->deleteSecret($metadata->getName()); // The example has not referenced this secret.
 
 $cron = new JobU\CronSchedule('@daily', new DateTimeZone('Europe/Tallinn'));
 $client->validateSchedule($cron);
@@ -1125,7 +1099,7 @@ $times = $client->nextScheduleOccurrences(
 );
 ```
 
-`setSecret(string $name, string $value, ?Duration $timeout = null): SecretMetadata`
+`setSecret(string $name, #[\SensitiveParameter] string $value, ?Duration $timeout = null): SecretMetadata`
 sets or rotates 0–65,536 raw bytes, including empty strings, NUL and non-UTF-8
 bytes. Encoding is handled internally by the SDK. Names have at most 128 bytes
 and consist of lowercase dot-separated segments; each segment starts with a
@@ -1157,7 +1131,9 @@ PHP 8.2+ redacts in the extension call's exception-trace frame. This does not
 redact values deliberately logged by application code or passed to its own
 unmarked wrapper parameters. PHP 8.1 does not implement this trace-redaction
 attribute; use `zend.exception_ignore_args=1` when collecting exception traces
-there. Secret use by executed commands and captured output follows the daemon's
+there if your application requires that protection. The module does not change
+PHP exception-trace settings. Secret use by executed commands and captured output
+follows the daemon's
 [named-secret exposure contract](secrets.md).
 
 `validateSchedule(CronSchedule $schedule, ?Duration $timeout = null): void`
@@ -1274,64 +1250,1049 @@ not an all-time or frozen database snapshot.
 Initial reads and each continuation share one total operation deadline with any
 reconnect/replay. Null timeout uses the Client's configured timeout (10 seconds
 by default). Statistics and explicit system-info reads use existing safe-read
-recovery. Continuations send only the opaque cursor, including for Queue statistics;
-selectors, filters and limits are never repeated. Cursors expire five minutes
+recovery. Continuation preserves the original selection and resolved window, including
+for Queue statistics. Cursors expire five minutes
 after the initial page and can be invalidated earlier by eviction or restart.
 Expired or wrong-scope cursors raise `InvalidCursorException` without restarting
 enumeration. Configured response limits and service failures preserve normal
 JobU error categories/codes, including `jobu.response.too_large`.
 
-## Control API coverage audit
+## Compatibility and limitations
 
-The current daemon registers 30 capabilities. The statistics integration scenario
-checks the full advertised inventory, and the following mapping records the public
-PHP owner and behavior tests. Test paths below are relative to `test/jobu-php/`.
-The mapping deliberately keeps queue/job/run/attempt ownership in the public API.
+The public method names, parameter names/defaults, return types, and enum values
+in the reference below describe the current v1 surface. Use resource-scoped
+lookups: `Queue::getJob()`, `Job::getRun()`, and `Run::getAttempt()`. Cross-queue
+run summaries can be loaded directly through `RunSummary::load()`.
 
-| Capability | Typed ControlClient method | Public PHP owner/method | Behavior tests |
-| --- | --- | --- | --- |
-| `system.info` | `get_system_info` | `Client::getSystemInfo`; constructor handshake | `statistics.php`, `statistics-test.cpp`, `bridge-test.cpp` |
-| `system.stats` | `system_statistics` | `Client::systemStatistics` | `statistics.php`, `statistics-test.cpp` |
-| `queue.create` | `create_queue` | `Client::createQueue` | `queue.php`, `queue-test.cpp` |
-| `queue.get` | `get_queue` (name and UUID overloads) | `Client::getQueue/getQueueById`, `Queue::refresh` | `queue.php`, `queue-test.cpp` |
-| `queue.list` | `list_queues` | `Client::listQueues` | `list.php`, `list-test.cpp` |
-| `queue.update` | `update_queue` | `Queue::save` | `queue.php`, `queue-test.cpp` |
-| `queue.suspend` | `suspend_queue` | `Queue::suspend` | `queue.php`, `queue-test.cpp` |
-| `queue.resume` | `resume_queue` | `Queue::resume` | `queue.php`, `queue-test.cpp` |
-| `queue.delete` | `delete_queue` | `Queue::delete` | `queue.php`, `queue-test.cpp` |
-| `queue.stats` | `queue_statistics` | `Queue::statistics` | `statistics.php`, `statistics-test.cpp` |
-| `job.create` | `create_job` | `Queue::createCliJob/createHttpJob` | `job.php`, `lifecycle-test.cpp` |
-| `job.get` | `get_job` | `Queue::getJob`, `Job::refresh` | `job.php`, `history.php`, `history-test.cpp` |
-| `job.list` | `list_jobs` | `Client::listJobs`, `Queue::listJobs` | `list.php`, `list-test.cpp` |
-| `job.update` | `update_job` | `Job::save` | `job.php`, `lifecycle-test.cpp` |
-| `job.suspend` | `suspend_job` | `Job::suspend` | `job.php`, `lifecycle-test.cpp` |
-| `job.resume` | `resume_job` | `Job::resume` | `job.php`, `lifecycle-test.cpp` |
-| `job.move` | `move_job` | `Job::move` | `job.php`, `history.php`, `history-test.cpp` |
-| `job.delete` | `delete_job` | `Job::delete` | `job.php`, `history.php` |
-| `job.run_now` | `run_now` | `Job::runNow` | `job.php`, `lifecycle-test.cpp` |
-| `run.get` | `get_run` | `Job::getRun`, `RunSummary::load`, `Run::refresh` | `history.php`, `history-test.cpp` |
-| `run.list` | `list_runs` | `Client/Queue/Job::listRuns` | `history.php`, `history-test.cpp` |
-| `run.cancel` | `cancel_run` | `Run::cancel` | `history.php`, `history-test.cpp` |
-| `attempt.get` | `get_attempt` | `Run::getAttempt`, `AttemptSummary::load`, `Attempt::refresh` | `history.php`, `history-test.cpp` |
-| `attempt.list` | `list_attempts` | `Run::listAttempts`; latest-attempt selection for output | `history.php`, `history-test.cpp`, `output-test.cpp` |
-| `attempt.output` | `read_attempt_output` | `Attempt::readOutput/getOutput`, `Run::getOutput` | `output.php`, `output-test.cpp` |
-| `secret.set` | `set_secret` | `Client::setSecret` | `secrets-schedules.php`, `secrets-schedules-test.cpp` |
-| `secret.list` | `list_secrets` | `Client::listSecrets` | `secrets-schedules.php`, `secrets-schedules-test.cpp` |
-| `secret.delete` | `delete_secret` | `Client::deleteSecret` | `secrets-schedules.php`, `secrets-schedules-test.cpp` |
-| `schedule.validate` | `validate_schedule` | `Client::validateSchedule` | `secrets-schedules.php`, `secrets-schedules-test.cpp` |
-| `schedule.next` | `next_schedule_occurrences` | `Client::nextScheduleOccurrences` | `secrets-schedules.php`, `secrets-schedules-test.cpp` |
+| Boundary | Current behavior |
+| --- | --- |
+| PHP and platform | PHP 8.1+, 64-bit integers, NTS. Linux/macOS target; runtime tests cover Linux PHP 8.2–8.6 NTS. See the root compatibility matrix. |
+| Daemon compatibility | API major 1, minor 7 or newer, with the required v1 capabilities. Connection validates compatibility eagerly. |
+| Connection transport | Local Unix-domain socket; no TCP/TLS/authenticated remote session API. |
+| Lifetime | One PHP request; no persistent cross-request or cross-thread Client. JobU ZTS is unsupported. |
+| Execution model | CLI and HTTP jobs run through the daemon. No PHP callback runner, wait-for-completion method, or live output stream. |
+| Scheduling | Once and Cron schedules. `ManualSchedule` is unavailable; creation schedules an initial run and `runNow()` adds a separate run. |
+| Output | Bounded binary strings and capture metadata. No automatic interpretation of application JSON/JSON-RPC responses. |
+| Resources | Cached snapshots with explicit refresh and revision-checked edits. No job runner-type conversion, automatic resource serialization, or raw RPC escape hatch. |
+| Secrets | Symbolic references and write/metadata/delete operations; no read-back of secret values. PHP 8.1 lacks SensitiveParameter trace redaction; the module does not change PHP settings. |
+| Windows | No JobU runtime target. |
 
-The remaining native methods are lifecycle machinery: `initialize()` drives the
-constructor/reconnect handshake; `cancel_call()` retires timed-out bridge calls;
-`close()` backs explicit Client closure and request shutdown. `bridge-test.cpp` and
-`lifecycle-test.cpp` cover acceptance, cancellation, deferred replies, deadlines,
-recovery and teardown. These need no protocol-level PHP escape hatch.
+Management operation idempotency and HTTP execution idempotency are separate.
+The optional key on creation/Run Now protects that management request while the
+daemon retains its record. `HttpJobAttributes::setIdempotencyKey(true)` controls
+the outgoing HTTP request's idempotency header; it does not make every remote
+service or side effect automatically safe to replay.
 
-Statistics PHP tests cover typed projection, windows, scoping, cursor-only requests,
-real eviction/restart, safe-read replay, total deadlines, metadata atomicity and
-close/request teardown. Existing native `statistics-service-test.cpp` supplies
-clock-controlled five-minute expiry, retained retries outside the cohort window,
-retention and measurement correctness. `jobud-runtime-test.cpp` checks configured
-statistics response budgets; the PHP proxy checks propagation of those errors.
-Reflection checks cover the public method/default/type contract. Final phase-6
-integration and packaging work remain separately gated.
+## Class index
+
+- **Connections and resources:** [Client](#client), [Queue](#queue), [Job](#job), [Run](#run), [Attempt](#attempt), [RunSummary](#runsummary), [AttemptSummary](#attemptsummary), [Page](#page).
+- **Values and schedules:** [Duration](#duration), [SecretReference](#secretreference), [Schedule](#schedule), [OnceSchedule](#onceschedule), [CronSchedule](#cronschedule).
+- **Attributes and payloads:** [JobAttributes](#jobattributes), [CliJobAttributes](#clijobattributes), [HttpJobAttributes](#httpjobattributes), [QueueDefaults](#queuedefaults), [CliPayload](#clipayload), [HttpPayload](#httppayload), [HttpHeader](#httpheader).
+- **Queries and results:** [TimeRange](#timerange), [RunQuery](#runquery), [StatisticsQuery](#statisticsquery), [SystemInfo](#systeminfo), [SecretMetadata](#secretmetadata), [ExecutionResult](#executionresult), [CliExecutionResult](#cliexecutionresult), [HttpExecutionResult](#httpexecutionresult), [OutputChunk](#outputchunk).
+- **Statistics:** [StatisticsGroup](#statisticsgroup), [StatisticsRunCounts](#statisticsruncounts), [StatisticsAttemptCounts](#statisticsattemptcounts), [StatisticsCaptureCounts](#statisticscapturecounts), [StatisticsDuration](#statisticsduration), [StatisticsRunnableWaitCoverage](#statisticsrunnablewaitcoverage), [StatisticsMetadata](#statisticsmetadata), [StatisticsMeasurement](#statisticsmeasurement).
+- **Exceptions:** [Exception](#exception), [ConnectionException](#connectionexception), [TimeoutException](#timeoutexception), [NotFoundException](#notfoundexception), [RevisionConflictException](#revisionconflictexception), [InvalidCursorException](#invalidcursorexception), [UnsavedChangesException](#unsavedchangesexception), [OutcomeUnknownException](#outcomeunknownexception), [UnsupportedFeatureException](#unsupportedfeatureexception).
+- **Enums:** [AttemptOutcome](#attemptoutcome), [AttemptState](#attemptstate), [JobState](#jobstate), [JobType](#jobtype), [OutputChannel](#outputchannel), [OutputStatus](#outputstatus), [QueueState](#queuestate), [RecoveryPolicy](#recoverypolicy), [RetryMode](#retrymode), [RunCancellationDisposition](#runcancellationdisposition), [RunOrigin](#runorigin), [RunState](#runstate), [StatisticsGroupBy](#statisticsgroupby).
+
+## Class reference
+
+All unqualified JobU type names below are in `JobU`; `DateTimeInterface`,
+`DateTimeImmutable`, and `DateTimeZone` are PHP built-ins. Signatures show exact
+parameter names, types, and defaults for named-argument calls. `?T` means `T|null`.
+Collections use PHP arrays; their element types are described in the Behavior column or
+the linked topic. `Page<T>` in prose describes its item type, not PHP runtime generic
+syntax.
+
+Tables list methods declared by each class. Inherited methods are linked to the base
+class; enum conversion methods and inherited PHP Exception methods retain PHP behavior.
+Constructor rows are written as `__construct(...)`; call them with `new`. Methods marked
+`static` are called on the class. A class without a public constructor is obtained
+through the listed factory/resource operations.
+
+All local edits and value construction may reject invalid types or values before
+changing state. Daemon operations can raise the [documented exceptions](#exceptions).
+Unless noted otherwise, a nullable timeout inherits the Client default and is a single
+total operation deadline. Limits, ownership, null/empty distinctions, revision behavior,
+and specific errors are defined in each linked behavior topic.
+
+### Client
+
+Owns a request-local management connection. Construct it with the daemon socket path.
+Global administration and cross-queue queries belong here; queue/job/run/attempt detail
+lookups belong to their resource owners.
+
+Final class. Behavior: [php api overview](#php-api-overview).
+
+| Signature | Behavior |
+| --- | --- |
+| `setSecret(string $name, #[\SensitiveParameter] string $value, ?Duration $timeout = null): SecretMetadata` | Daemon mutation; 0–65,536 bytes. Value is SensitiveParameter on PHP 8.2+. |
+| `listSecrets(int $limit = 100, ?Duration $timeout = null): Page` | Daemon read; returns `Page<SecretMetadata>`, ascending names, limit 1–200. |
+| `deleteSecret(string $name, ?Duration $timeout = null): void` | Daemon mutation; requires the secret to be unreferenced. |
+| `validateSchedule(CronSchedule $schedule, ?Duration $timeout = null): void` | Daemon read; returns normally on success, throws on invalid cron. |
+| `nextScheduleOccurrences(CronSchedule $schedule, \DateTimeInterface $after, int $count = 5, ?Duration $timeout = null): array` | Daemon read; `list<DateTimeImmutable>`, 1–200 instants strictly later than the supplied timestamp. |
+| `__construct(string $socketPath, ?Duration $timeout = null)` | Connect and validate compatibility; establish the default timeout. |
+| `close(): void` | Close locally and permanently; idempotent, no cancellation of submitted work. |
+| `getSystemInfo(?Duration $timeout = null): SystemInfo` | Daemon read; returns a fresh detached SystemInfo. |
+| `systemStatistics(?StatisticsQuery $query = null, ?Duration $timeout = null): Page` | Daemon read; returns `Page<StatisticsGroup>` across queues. |
+| `listQueues(?QueueState $state = null, bool $includeDeleted = false, int $limit = 100, ?Duration $timeout = null): Page` | Daemon read; returns `Page<Queue>`. Limit 1–200. |
+| `listJobs(?string $queueName = null, ?string $queueId = null, ?JobState $state = null, ?JobType $type = null, bool $includeDeleted = false, int $limit = 100, ?Duration $timeout = null): Page` | Daemon read; returns `Page<Job>`. At most one queue selector; limit 1–200. |
+| `listRuns(?RunQuery $query = null, ?Duration $timeout = null): Page` | Daemon read; returns `Page<RunSummary>` across queues. |
+| `getQueue(string $name, bool $includeDeleted = false, ?Duration $timeout = null): Queue` | Daemon read; literal name lookup, optionally including retained deleted queues. |
+| `getQueueById(string $id, bool $includeDeleted = false, ?Duration $timeout = null): Queue` | Daemon read; stable UUID lookup. |
+| `createQueue(string $name, int $weight = 1, int $concurrencyLimit = 1, RecoveryPolicy $recoveryPolicy = RecoveryPolicy::FailInterrupted, ?QueueDefaults $defaults = null, ?Duration $historyRetention = null, ?Duration $runnableWaitWarning = null, ?string $idempotencyKey = null, ?Duration $timeout = null): Queue` | Daemon mutation; copies defaults; generated/explicit replay key. |
+
+### Queue
+
+Cached queue obtained from Client creation, lookup, or queue pages. Setters edit local
+state. Creation and lifecycle calls reject dirty/deleted queues; scoped reads preserve
+local edits.
+
+Final class. No public constructor. Behavior: [queue resources](#queue-resources).
+
+| Signature | Behavior |
+| --- | --- |
+| `statistics(?StatisticsQuery $query = null, ?Duration $timeout = null): Page` | Daemon read; `Page<StatisticsGroup>` scoped to this queue; preserves local edits. |
+| `getJob(string $id, ?Duration $timeout = null): Job` | Daemon read; job must belong to this queue and be nondeleted. |
+| `listRuns(?RunQuery $query = null, ?Duration $timeout = null): Page` | Daemon read; `Page<RunSummary>` scoped to this queue; preserves local edits. |
+| `listJobs(?JobState $state = null, ?JobType $type = null, bool $includeDeleted = false, int $limit = 100, ?Duration $timeout = null): Page` | Daemon read; `Page<Job>` scoped to this queue, limit 1–200. |
+| `createCliJob(CliPayload $payload, Schedule $schedule, ?string $name = null, int $priority = 0, ?JobAttributes $attributes = null, ?string $idempotencyKey = null, ?Duration $timeout = null): Job` | Daemon mutation; creates definition and initial run, copies inputs. |
+| `createHttpJob(HttpPayload $payload, Schedule $schedule, ?string $name = null, int $priority = 0, ?JobAttributes $attributes = null, ?string $idempotencyKey = null, ?Duration $timeout = null): Job` | Daemon mutation; creates definition and initial run, copies inputs. |
+| `getId(): string` | Local cached field; never fetches or refreshes. |
+| `getRevision(): int` | Local cached field; never fetches or refreshes. |
+| `getName(): string` | Local cached field; never fetches or refreshes. |
+| `setName(string $name): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getState(): QueueState` | Local cached field; never fetches or refreshes. |
+| `getWeight(): int` | Local cached field; never fetches or refreshes. |
+| `setWeight(int $weight): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getConcurrencyLimit(): int` | Local cached field; never fetches or refreshes. |
+| `setConcurrencyLimit(int $concurrencyLimit): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getRecoveryPolicy(): RecoveryPolicy` | Local cached field; never fetches or refreshes. |
+| `setRecoveryPolicy(RecoveryPolicy $recoveryPolicy): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getHistoryRetention(): ?Duration` | Local value; null inherits daemon policy, zero means unlimited. |
+| `setHistoryRetention(?Duration $historyRetention): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getRunnableWaitWarning(): Duration` | Local value; zero disables the warning. |
+| `setRunnableWaitWarning(Duration $runnableWaitWarning): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getCreatedAt(): \DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getUpdatedAt(): \DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getDeletedAt(): ?\DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `isDirty(): bool` | Local check for net changes from the accepted snapshot. |
+| `isDeleted(): bool` | Local deletion knowledge; cached state/timestamps can predate a delete reply. |
+| `getDefaults(): QueueDefaults` | Local detached deep copy, including pending edits. |
+| `defaults(): QueueDefaults` | Local attached mutable defaults; stable identity. |
+| `setDefaults(QueueDefaults $defaults): void` | Local replacement of the entire defaults layer, preserving attached identity. |
+| `save(?Duration $timeout = null): void` | Revision-checked daemon mutation when dirty; clean save is local. Failure preserves edits. |
+| `refresh(bool $includeDeleted = false, ?Duration $timeout = null): void` | Daemon read replacing the snapshot; rejects dirty state and preserves attached identity. |
+| `discardChanges(): void` | Local restoration of the last accepted snapshot, including after Client closure. |
+| `suspend(?Duration $timeout = null): void` | Daemon mutation; may return while draining; rejects dirty/deleted state. |
+| `resume(?Duration $timeout = null): void` | Daemon mutation; rejects dirty/deleted state; adopts the returned snapshot. |
+| `delete(?Duration $timeout = null): void` | Daemon mutation; marks locally deleted after success, retaining cached fields/revision. |
+
+### Job
+
+Cached definition obtained from Queue creation/lookup or job pages. The runner type is
+fixed. Setters edit locally; save and lifecycle calls obey dirty-state, deletion, and
+revision rules.
+
+Final class. No public constructor. Behavior: [jobs and manual
+runs](#jobs-and-manual-runs).
+
+| Signature | Behavior |
+| --- | --- |
+| `getRun(string $id, ?Duration $timeout = null): Run` | Daemon read; retained run must belong to this job. |
+| `listRuns(?RunQuery $query = null, ?Duration $timeout = null): Page` | Daemon read; `Page<RunSummary>` for this job, including retained deleted owners. |
+| `getId(): string` | Local cached field; never fetches or refreshes. |
+| `getQueueId(): string` | Local cached field; never fetches or refreshes. |
+| `getRevision(): int` | Local cached field; never fetches or refreshes. |
+| `getName(): ?string` | Local nullable display name; null means unnamed. |
+| `getPriority(): int` | Local cached field; never fetches or refreshes. |
+| `getState(): JobState` | Local cached field; never fetches or refreshes. |
+| `getType(): JobType` | Local cached field; never fetches or refreshes. |
+| `getCreatedAt(): \DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getUpdatedAt(): \DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getDeletedAt(): ?\DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getSchedule(): Schedule` | Local cached field; never fetches or refreshes. |
+| `getAttributes(): JobAttributes` | Local detached copy of typed attributes. |
+| `attributes(): JobAttributes` | Local attached mutable attributes; stable identity. |
+| `getPayload(): CliPayload\|HttpPayload` | Local detached copy; secret references remain symbolic. |
+| `payload(): CliPayload\|HttpPayload` | Local attached mutable payload; stable identity. |
+| `isDirty(): bool` | Local check for net changes from the accepted snapshot. |
+| `isDeleted(): bool` | Local deletion knowledge; cached state/timestamps can predate a delete reply. |
+| `setName(?string $name): void` | Local edit; null clears, otherwise UTF-8 without NUL, at most 256 bytes. |
+| `setPriority(int $priority): void` | Local edit; signed 32-bit integer. |
+| `setSchedule(Schedule $schedule): void` | Local replacement; creation-only symbolic now is rejected. |
+| `setAttributes(JobAttributes $attributes): void` | Local merge of every supplied key; omitted keys remain unchanged. |
+| `setPayload(CliPayload\|HttpPayload $payload): void` | Local replacement of every payload field; runner type must match. |
+| `save(?Duration $timeout = null): void` | Revision-checked daemon mutation when dirty; clean save is local. Failure preserves edits. |
+| `refresh(?Duration $timeout = null): void` | Daemon read replacing the snapshot; rejects dirty state and preserves attached identity. |
+| `discardChanges(): void` | Local restoration of the last accepted snapshot, including after Client closure. |
+| `suspend(?Duration $timeout = null): void` | Daemon mutation; may return while draining; rejects dirty/deleted state. |
+| `resume(?Duration $timeout = null): void` | Daemon mutation; rejects dirty/deleted state; adopts the returned snapshot. |
+| `move(Queue $queue, ?Duration $timeout = null): void` | Daemon mutation with revision; destination must be clean, nondeleted, same Client. |
+| `delete(?Duration $timeout = null): void` | Daemon mutation; marks locally deleted after success, retaining cached fields/revision. |
+| `runNow(?string $idempotencyKey = null, ?Duration $timeout = null): Run` | Daemon mutation; keyed additional manual run, no execution wait or Job refresh. |
+
+### Run
+
+Cached execution snapshot obtained from Job::runNow(), Job::getRun(), or
+RunSummary::load(). Field getters and result access are local; output methods read
+retained bytes without refreshing the snapshot.
+
+Final class. No public constructor. Behavior: [retained run and attempt
+history](#retained-run-and-attempt-history).
+
+| Signature | Behavior |
+| --- | --- |
+| `getOutput(int $maxBytes = 4096, ?Duration $timeout = null): ?string` | Daemon reads; latest-attempt tail, 1–65,536 bytes; no snapshot refresh. |
+| `getAttempt(int $number, ?Duration $timeout = null): Attempt` | Daemon read; attempt number 1–PHP_INT_MAX within this run. |
+| `refresh(?Duration $timeout = null): void` | Daemon read replacing the cached snapshot; failure preserves it. |
+| `cancel(?Duration $timeout = null): RunCancellationDisposition` | Daemon mutation; adopts returned snapshot/disposition without waiting for termination. |
+| `listAttempts(int $limit = 100, ?Duration $timeout = null): Page` | Daemon read; `Page<AttemptSummary>`, descending number, limit 1–200. |
+| `getId(): string` | Local cached field; never fetches or refreshes. |
+| `getJobId(): string` | Local cached field; never fetches or refreshes. |
+| `getQueueId(): string` | Local cached field; never fetches or refreshes. |
+| `getJobRevision(): int` | Local cached field; never fetches or refreshes. |
+| `getPriority(): int` | Local cached field; never fetches or refreshes. |
+| `getOrigin(): RunOrigin` | Local cached field; never fetches or refreshes. |
+| `getType(): JobType` | Local cached field; never fetches or refreshes. |
+| `getState(): RunState` | Local cached field; never fetches or refreshes. |
+| `isScheduleOwned(): bool` | Local cached field; never fetches or refreshes. |
+| `getPlannedAt(): \DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getRunnableAt(): \DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getStartedAt(): ?\DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getCompletedAt(): ?\DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getAttributes(): JobAttributes` | Local detached copy of typed attributes. |
+| `getPayload(): CliPayload\|HttpPayload` | Local detached copy; secret references remain symbolic. |
+| `getResult(): ?ExecutionResult` | Local CliExecutionResult/HttpExecutionResult or null while unavailable. |
+
+### Attempt
+
+Cached attempt obtained from Run::getAttempt() or AttemptSummary::load(). Identify it by
+run ID and attempt number. Result getters read the cache; output methods read retained
+capture.
+
+Final class. No public constructor. Behavior: [retained run and attempt
+history](#retained-run-and-attempt-history).
+
+| Signature | Behavior |
+| --- | --- |
+| `readOutput(OutputChannel $channel, int $offset = 0, int $length = 16384, ?Duration $timeout = null): OutputChunk` | Daemon read; retained-byte offset 0–PHP_INT_MAX−1, length 1–65,536. |
+| `getOutput(int $maxBytes = 4096, ?Duration $timeout = null): ?string` | Daemon reads; this attempt’s tail, 1–65,536 bytes; no snapshot refresh. |
+| `getRunId(): string` | Local cached field; never fetches or refreshes. |
+| `getNumber(): int` | Local cached field; never fetches or refreshes. |
+| `getDueAt(): \DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getStartedAt(): ?\DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getCompletedAt(): ?\DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getState(): AttemptState` | Local cached field; never fetches or refreshes. |
+| `getOutcome(): ?AttemptOutcome` | Local cached field; never fetches or refreshes. |
+| `refresh(?Duration $timeout = null): void` | Daemon read replacing the cached snapshot; failure preserves it. |
+| `getResult(): ?ExecutionResult` | Local CliExecutionResult/HttpExecutionResult or null while unavailable. |
+
+### RunSummary
+
+Immutable item from a run Page. It retains its Client and exposes only listed fields.
+load() creates a separate full Run; it does not update the summary.
+
+Final class. No public constructor. Behavior: [retained run and attempt
+history](#retained-run-and-attempt-history).
+
+| Signature | Behavior |
+| --- | --- |
+| `getId(): string` | Local cached field; never fetches or refreshes. |
+| `getJobId(): string` | Local cached field; never fetches or refreshes. |
+| `getQueueId(): string` | Local cached field; never fetches or refreshes. |
+| `getJobRevision(): int` | Local cached field; never fetches or refreshes. |
+| `getPriority(): int` | Local cached field; never fetches or refreshes. |
+| `getOrigin(): RunOrigin` | Local cached field; never fetches or refreshes. |
+| `getType(): JobType` | Local cached field; never fetches or refreshes. |
+| `getState(): RunState` | Local cached field; never fetches or refreshes. |
+| `isScheduleOwned(): bool` | Local cached field; never fetches or refreshes. |
+| `getPlannedAt(): \DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getRunnableAt(): \DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getStartedAt(): ?\DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getCompletedAt(): ?\DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `load(?Duration $timeout = null): Run` | Daemon read returning a new full resource; the summary remains unchanged. |
+
+### AttemptSummary
+
+Immutable item from Run::listAttempts(). It retains its Client and has no result/output
+accessors. load() creates a separate full Attempt.
+
+Final class. No public constructor. Behavior: [retained run and attempt
+history](#retained-run-and-attempt-history).
+
+| Signature | Behavior |
+| --- | --- |
+| `getRunId(): string` | Local cached field; never fetches or refreshes. |
+| `getNumber(): int` | Local cached field; never fetches or refreshes. |
+| `getDueAt(): \DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getStartedAt(): ?\DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getCompletedAt(): ?\DateTimeImmutable` | Local cached field; never fetches or refreshes. |
+| `getState(): AttemptState` | Local cached field; never fetches or refreshes. |
+| `getOutcome(): ?AttemptOutcome` | Local cached field; never fetches or refreshes. |
+| `load(?Duration $timeout = null): Attempt` | Daemon read returning a new full resource; the summary remains unchanged. |
+
+### Page
+
+A list method returns Page positioned before its eagerly fetched first batch. It is
+advanced explicitly and is not a PHP Iterator/Traversable. items() is a list of the
+source-specific item type; previously returned items remain usable.
+
+Final class. No public constructor. Behavior: [definition lists and
+pages](#definition-lists-and-pages).
+
+| Signature | Behavior |
+| --- | --- |
+| `hasNext(): bool` | Local check for buffered page or continuation. |
+| `next(?Duration $timeout = null): void` | First advance is local; later advances fetch atomically. Throws if exhausted. |
+| `items(): array` | Local list of current items; [] before first next(). Array edits are independent. |
+| `getStatisticsMetadata(): ?StatisticsMetadata` | Local buffered/current metadata; null for non-statistics sources. |
+
+### Duration
+
+Immutable signed millisecond duration. Use the static factories; days are fixed 24-hour
+intervals. Checked overflow raises ValueError. Negative/zero values are representable,
+but timeouts must be positive.
+
+Final class. No public constructor. Behavior: [immutable value
+primitives](#immutable-value-primitives).
+
+| Signature | Behavior |
+| --- | --- |
+| `getMilliseconds(): int` | Local exact signed millisecond count. |
+| `static milliseconds(int $value): Duration` | Local immutable factory; checked conversion to integer milliseconds. |
+| `static seconds(int $value): Duration` | Local immutable factory; checked conversion to integer milliseconds. |
+| `static minutes(int $value): Duration` | Local immutable factory; checked conversion to integer milliseconds. |
+| `static hours(int $value): Duration` | Local immutable factory; checked conversion to integer milliseconds. |
+| `static days(int $value): Duration` | Local immutable factory; checked conversion to integer milliseconds. |
+
+### SecretReference
+
+Immutable symbolic secret name. Construction validates the name locally; no getter
+resolves or returns the underlying secret.
+
+Final class. Behavior: [immutable value primitives](#immutable-value-primitives).
+
+| Signature | Behavior |
+| --- | --- |
+| `__construct(string $name)` | Local construction; copies supplied inputs. See the constraints above. |
+| `getName(): string` | Local value; no daemon request. |
+
+### Schedule
+
+Abstract schedule base with no public methods of its own. Use OnceSchedule or
+CronSchedule; custom schedule implementations are not supported inputs.
+
+Abstract class. Behavior: [immutable value primitives](#immutable-value-primitives).
+
+### OnceSchedule
+
+Immutable absolute instant, or creation-only symbolic now. Copies the input instant;
+getAt() returns a fresh UTC date or null for symbolic now.
+
+Inherits [Schedule](#schedule). Final class. Behavior: [immutable value
+primitives](#immutable-value-primitives).
+
+| Signature | Behavior |
+| --- | --- |
+| `__construct(\DateTimeInterface $at)` | Local construction; copies supplied inputs. See the constraints above. |
+| `static now(): OnceSchedule` | Local immutable factory; symbolic marker accepted only at job creation. |
+| `isNow(): bool` | Local value; no daemon request. |
+| `getAt(): ?\DateTimeImmutable` | Local fresh UTC DateTimeImmutable, or null for symbolic now. |
+
+### CronSchedule
+
+Immutable cron expression and optional named timezone. Construction is local. Use Client
+helpers to validate grammar and preview occurrences; null timezone means the daemon
+default.
+
+Inherits [Schedule](#schedule). Final class. Behavior: [secrets and cron
+helpers](#secrets-and-cron-helpers).
+
+| Signature | Behavior |
+| --- | --- |
+| `__construct(string $expression, ?\DateTimeZone $timezone = null)` | Local construction; copies supplied inputs. See the constraints above. |
+| `getExpression(): string` | Local value; no daemon request. |
+| `getTimezone(): ?\DateTimeZone` | Local fresh DateTimeZone, or null for unresolved daemon default. |
+
+### JobAttributes
+
+Partial local attribute layer supporting common and runner-specific names. Absent values
+return null. Typed subclasses restrict runner applicability. Mutable and cloneable;
+attached edits mark the owning resource dirty.
+
+Behavior: [mutable attributes and queue
+defaults](#mutable-attributes-and-queue-defaults).
+
+| Signature | Behavior |
+| --- | --- |
+| `__construct()` | Local construction; copies supplied inputs. See the constraints above. |
+| `get(string $name): mixed` | Local supplied attribute value, or null if absent; unknown names raise ValueError. |
+| `has(string $name): bool` | Local presence check; unknown/inapplicable names raise ValueError. |
+| `set(string $name, mixed $value): void` | Validate and edit one local attribute; see the attribute names, types, and bounds in the linked topic. |
+| `getTimeout(): ?Duration` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setTimeout(Duration $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getOutputCapture(): ?string` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setOutputCapture(string $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getRetryInitialDelay(): ?Duration` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setRetryInitialDelay(Duration $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getRetryMaxDelay(): ?Duration` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setRetryMaxDelay(Duration $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getRetryMaxAttempts(): ?int` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setRetryMaxAttempts(int $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getRetryJitter(): ?float` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setRetryJitter(float $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getRetryMultiplier(): ?float` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setRetryMultiplier(float $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getRetryMode(): ?RetryMode` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setRetryMode(RetryMode $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getRetryStrategy(): ?string` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setRetryStrategy(string $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+
+### CliJobAttributes
+
+Adds CLI-specific typed accessors to JobAttributes. Inherits its constructor, generic
+operations, and common typed accessors. Also returned as the attached CLI view of
+QueueDefaults.
+
+Inherits [JobAttributes](#jobattributes). Final class. Behavior: [mutable attributes and
+queue defaults](#mutable-attributes-and-queue-defaults).
+
+| Signature | Behavior |
+| --- | --- |
+| `getRetryExitCodes(): ?array` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setRetryExitCodes(array $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getTerminationGrace(): ?Duration` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setTerminationGrace(Duration $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getStdoutLimit(): ?int` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setStdoutLimit(int $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getStderrLimit(): ?int` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setStderrLimit(int $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+
+### HttpJobAttributes
+
+Adds HTTP-specific typed accessors to JobAttributes. Inherits its constructor, generic
+operations, and common typed accessors. Also returned as the attached HTTP view of
+QueueDefaults.
+
+Inherits [JobAttributes](#jobattributes). Final class. Behavior: [mutable attributes and
+queue defaults](#mutable-attributes-and-queue-defaults).
+
+| Signature | Behavior |
+| --- | --- |
+| `getFollowRedirects(): ?bool` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setFollowRedirects(bool $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getIdempotencyKey(): ?bool` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setIdempotencyKey(bool $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getTlsVerify(): ?bool` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setTlsVerify(bool $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getMaxRedirects(): ?int` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setMaxRedirects(int $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getHttpBodyLimit(): ?int` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setHttpBodyLimit(int $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getHttpHeadersLimit(): ?int` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setHttpHeadersLimit(int $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getRetryErrors(): ?array` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setRetryErrors(array $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getRetryStatuses(): ?array` | Local supplied attribute, or null if absent; see the attribute table. |
+| `setRetryStatuses(array $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+
+### QueueDefaults
+
+Partial defaults layer shared by its CLI and HTTP views. Common attributes set through
+either view are visible through both. clear() removes one override; replacing queue
+defaults replaces the whole layer.
+
+Final class. Behavior: [mutable attributes and queue
+defaults](#mutable-attributes-and-queue-defaults).
+
+| Signature | Behavior |
+| --- | --- |
+| `__construct()` | Local construction; copies supplied inputs. See the constraints above. |
+| `get(string $name): mixed` | Local supplied attribute value, or null if absent; unknown names raise ValueError. |
+| `has(string $name): bool` | Local presence check; unknown/inapplicable names raise ValueError. |
+| `set(string $name, mixed $value): void` | Validate and edit one local attribute; see the attribute names, types, and bounds in the linked topic. |
+| `clear(string $name): void` | Local override removal; an absent known name is a no-op. |
+| `cli(): CliJobAttributes` | Local shared CLI view; repeated calls return the same object. |
+| `http(): HttpJobAttributes` | Local shared HTTP view; repeated calls return the same object. |
+
+### CliPayload
+
+Mutable CLI template. Construction parses a command and appends literal arguments. Local
+setters never execute it; defaults are directory /, no arguments/environment overrides,
+and expected exit code 0. Clones detach from any Job.
+
+Final class. Behavior: [cli payloads](#cli-payloads).
+
+| Signature | Behavior |
+| --- | --- |
+| `__construct(string $command, array $arguments = [])` | Local construction; copies supplied inputs. See the constraints above. |
+| `setCommand(string $command, array $arguments = []): void` | Local atomic replacement of executable/arguments; preserves other fields. |
+| `getExecutable(): string` | Local value; no daemon request. |
+| `setExecutable(string $executable): void` | Local literal executable replacement; preserves arguments. |
+| `getArguments(): array` | Local `list<string\|SecretReference>`, in argv order. |
+| `setArguments(array $arguments): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `addArgument(string\|SecretReference $argument): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getEnvironment(): array` | Local `array<string,string\|SecretReference\|null>`; null entries explicitly unset variables. |
+| `setEnvironment(string $name, string\|SecretReference $value): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `unsetEnvironment(string $name): void` | Local explicit removal marker for execution. |
+| `clearEnvironment(string $name): void` | Local removal of the payload override, distinct from an explicit unset. |
+| `getWorkingDirectory(): string` | Local value; no daemon request. |
+| `setWorkingDirectory(string $directory): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getExpectedExitCodes(): array` | Local sorted `list<int>`; defaults to [0]. |
+| `setExpectedExitCodes(array $codes): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+
+### HttpPayload
+
+Mutable HTTP template. Defaults are GET, no headers/body, and expected statuses 200–299.
+Body bytes and ordered duplicate headers are preserved. Clones detach from any Job.
+
+Final class. Behavior: [http payload configuration](#http-payload-configuration).
+
+| Signature | Behavior |
+| --- | --- |
+| `__construct(string $url, string $method = 'GET')` | Local construction; copies supplied inputs. See the constraints above. |
+| `getUrl(): string` | Local value; no daemon request. |
+| `setUrl(string $url): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getMethod(): string` | Local value; no daemon request. |
+| `setMethod(string $method): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `addHeader(string $name, string\|SecretReference $value, bool $sensitive = false): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getHeaders(): array` | Local `list<HttpHeader>`; detached snapshots in insertion order. |
+| `clearHeader(string $name): void` | Local removal of every case-insensitive match; preserves other header order. |
+| `setBody(string\|SecretReference $body): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `getBody(): string\|SecretReference\|null` | Local binary string or symbolic reference; null means absent, distinct from empty. |
+| `clearBody(): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+| `setJsonBody(mixed $value): void` | Local JSON encoding/body update; may throw JsonException or callback exceptions. |
+| `getExpectedStatuses(): array` | Local `list<string>` of status selectors; defaults to ['200-299']. |
+| `setExpectedStatuses(array $statuses): void` | Local edit; see field-specific constraints in the linked behavior topic. |
+
+### HttpHeader
+
+Immutable detached item returned by HttpPayload::getHeaders(). Sensitivity controls
+forwarding; literal values remain readable and SecretReference values remain symbolic.
+
+Final class. No public constructor. Behavior: [http payload
+configuration](#http-payload-configuration).
+
+| Signature | Behavior |
+| --- | --- |
+| `getName(): string` | Local value; no daemon request. |
+| `getValue(): string\|SecretReference` | Local value; no daemon request. |
+| `isSensitive(): bool` | Local value; no daemon request. |
+
+### TimeRange
+
+Immutable half-open interval: include from, exclude to. Bounds may be null; if both
+exist, from must precede to. Copies dates and returns fresh UTC dates.
+
+Final class. Behavior: [queries metadata and execution
+results](#queries-metadata-and-execution-results).
+
+| Signature | Behavior |
+| --- | --- |
+| `__construct(?\DateTimeInterface $from = null, ?\DateTimeInterface $to = null)` | Local construction; copies supplied inputs. See the constraints above. |
+| `getFrom(): ?\DateTimeImmutable` | Local value; no daemon request. |
+| `getTo(): ?\DateTimeImmutable` | Local value; no daemon request. |
+
+### RunQuery
+
+Immutable filters combined with AND. state and states are mutually exclusive; states is
+null or a nonempty distinct list of RunState values. Null ranges become unbounded
+TimeRange values. Scoped listings validate receiver IDs.
+
+Final class. Behavior: [queries metadata and execution
+results](#queries-metadata-and-execution-results).
+
+| Signature | Behavior |
+| --- | --- |
+| `__construct(?string $queueId = null, ?string $jobId = null, ?RunState $state = null, ?array $states = null, ?RunOrigin $origin = null, ?JobType $type = null, ?TimeRange $planned = null, ?TimeRange $started = null, ?TimeRange $completed = null, int $limit = 100)` | Local construction; copies supplied inputs. See the constraints above. |
+| `getQueueId(): ?string` | Local value; no daemon request. |
+| `getJobId(): ?string` | Local value; no daemon request. |
+| `getState(): ?RunState` | Local value; no daemon request. |
+| `getStates(): ?array` | Local null or `list<RunState>`; independent copied selection. |
+| `getOrigin(): ?RunOrigin` | Local value; no daemon request. |
+| `getType(): ?JobType` | Local value; no daemon request. |
+| `getPlanned(): TimeRange` | Local value; no daemon request. |
+| `getStarted(): TimeRange` | Local value; no daemon request. |
+| `getCompleted(): TimeRange` | Local value; no daemon request. |
+| `getLimit(): int` | Local value; no daemon request. |
+
+### StatisticsQuery
+
+Immutable filters for retained run statistics. A supplied window is at most 31 days. The
+daemon resolves omitted bounds when queried. Scoped Queue statistics requires a matching
+or absent queueId.
+
+Final class. Behavior: [system and statistics](#system-and-statistics).
+
+| Signature | Behavior |
+| --- | --- |
+| `__construct(?string $queueId = null, ?string $jobId = null, ?JobType $type = null, ?RunOrigin $origin = null, ?TimeRange $planned = null, StatisticsGroupBy $groupBy = StatisticsGroupBy::None, int $limit = 100)` | Local construction; copies supplied inputs. See the constraints above. |
+| `getQueueId(): ?string` | Local value; no daemon request. |
+| `getJobId(): ?string` | Local value; no daemon request. |
+| `getType(): ?JobType` | Local value; no daemon request. |
+| `getOrigin(): ?RunOrigin` | Local value; no daemon request. |
+| `getPlanned(): TimeRange` | Local value; no daemon request. |
+| `getGroupBy(): StatisticsGroupBy` | Local value; no daemon request. |
+| `getLimit(): int` | Local value; no daemon request. |
+
+### SystemInfo
+
+Detached immutable daemon version/API/capability snapshot returned by
+Client::getSystemInfo(). All getters are local. Capabilities are a sorted unique list of
+strings.
+
+Final class. No public constructor. Behavior: [system and
+statistics](#system-and-statistics).
+
+| Signature | Behavior |
+| --- | --- |
+| `getDaemonVersion(): string` | Local value; no daemon request. |
+| `getApiMajor(): int` | Local value; no daemon request. |
+| `getApiMinor(): int` | Local value; no daemon request. |
+| `getCapabilities(): array` | Local sorted unique `list<string>`. |
+| `hasCapability(string $name): bool` | Local exact capability-name check. |
+
+### SecretMetadata
+
+Detached immutable name and UTC timestamps from setSecret() or listSecrets(). It
+contains no secret bytes, preview, digest, or value length.
+
+Final class. No public constructor. Behavior: [secrets and cron
+helpers](#secrets-and-cron-helpers).
+
+| Signature | Behavior |
+| --- | --- |
+| `getName(): string` | Local value; no daemon request. |
+| `getCreatedAt(): \DateTimeImmutable` | Local value; no daemon request. |
+| `getUpdatedAt(): \DateTimeImmutable` | Local value; no daemon request. |
+
+### ExecutionResult
+
+Abstract base of safe cached execution metadata. Obtain a concrete subclass from
+Run::getResult() or Attempt::getResult(). Optional typed observations can be null;
+generic access preserves safe unknown fields. This is not the application response body.
+
+Abstract class. No public constructor. Behavior: [queries metadata and execution
+results](#queries-metadata-and-execution-results).
+
+| Signature | Behavior |
+| --- | --- |
+| `getType(): JobType` | Local value; no daemon request. |
+| `getOutcome(): ?string` | Local nullable runner vocabulary string; not an AttemptOutcome enum. |
+| `getReason(): ?string` | Local value; no daemon request. |
+| `getErrorCode(): ?string` | Local value; no daemon request. |
+| `getOutcomeUnknown(): ?bool` | Local nullable execution metadata, separate from management OutcomeUnknownException. |
+| `has(string $field): bool` | Local presence test; distinguishes absent fields from explicit null. |
+| `get(string $field): mixed` | Local copied safe value; missing returns null; objects become stdClass, arrays become lists. |
+| `getCapturedBytes(OutputChannel $channel): ?int` | Local value; no daemon request. |
+| `getTotalBytes(OutputChannel $channel): ?int` | Local value; no daemon request. |
+| `isTruncated(OutputChannel $channel): ?bool` | Local value; no daemon request. |
+
+### CliExecutionResult
+
+Immutable CLI result. Inherits ExecutionResult accessors. Exit code, signal, and
+capture-loss observations are nullable; the presence of a result does not guarantee a
+normal process exit.
+
+Inherits [ExecutionResult](#executionresult). Final class. Behavior: [queries metadata
+and execution results](#queries-metadata-and-execution-results).
+
+| Signature | Behavior |
+| --- | --- |
+| `getExitCode(): ?int` | Local value; no daemon request. |
+| `getSignal(): ?int` | Local value; no daemon request. |
+| `getCaptureLost(): ?bool` | Local value; no daemon request. |
+
+### HttpExecutionResult
+
+Immutable HTTP result. Inherits ExecutionResult accessors. Transport failures may have
+no status; absent optional observations remain null.
+
+Inherits [ExecutionResult](#executionresult). Final class. Behavior: [queries metadata
+and execution results](#queries-metadata-and-execution-results).
+
+| Signature | Behavior |
+| --- | --- |
+| `getStatus(): ?int` | Local value; no daemon request. |
+| `getDuration(): ?Duration` | Local value; no daemon request. |
+| `getRedirects(): ?int` | Local value; no daemon request. |
+| `getTlsVerified(): ?bool` | Local value; no daemon request. |
+| `getErrorCategory(): ?string` | Local value; no daemon request. |
+| `getRetryAfterAccepted(): ?bool` | Local value; no daemon request. |
+| `getRetryAfterClamped(): ?bool` | Local value; no daemon request. |
+
+### OutputChunk
+
+Detached immutable slice from Attempt::readOutput(). Data is binary-safe. Read status,
+loss, truncation, and byte counts together; an empty string alone does not establish
+captured-empty output.
+
+Final class. No public constructor. Behavior: [retained output](#retained-output).
+
+| Signature | Behavior |
+| --- | --- |
+| `getRunId(): string` | Local value; no daemon request. |
+| `getAttemptNumber(): int` | Local value; no daemon request. |
+| `getChannel(): OutputChannel` | Local value; no daemon request. |
+| `getStatus(): OutputStatus` | Local value; no daemon request. |
+| `getOffset(): int` | Local value; no daemon request. |
+| `getBytesReturned(): int` | Local value; no daemon request. |
+| `getNextOffset(): ?int` | Local next retained-byte offset, or null at EOF/no further slice. |
+| `getRetainedBytes(): int` | Local value; no daemon request. |
+| `getTotalBytes(): ?int` | Local value; no daemon request. |
+| `getOmittedBytes(): ?int` | Local value; no daemon request. |
+| `isTruncated(): bool` | Local value; no daemon request. |
+| `isCaptureLost(): bool` | Local value; no daemon request. |
+| `getData(): string` | Local raw bytes, including NUL. |
+
+### StatisticsGroup
+
+Detached immutable item from systemStatistics() or Queue::statistics(). The key type
+depends on groupBy; None uses null, Queue/Job use UUID strings, and Type/Origin/State
+use their enums.
+
+Final class. No public constructor. Behavior: [system and
+statistics](#system-and-statistics).
+
+| Signature | Behavior |
+| --- | --- |
+| `getKey(): string\|JobType\|RunOrigin\|RunState\|null` | Local grouping key: UUID, backed enum, or null for ungrouped statistics. |
+| `getRuns(): StatisticsRunCounts` | Local value; no daemon request. |
+| `getAttempts(): StatisticsAttemptCounts` | Local value; no daemon request. |
+| `getCapture(): StatisticsCaptureCounts` | Local value; no daemon request. |
+| `getScheduleLateness(): StatisticsDuration` | Local value; no daemon request. |
+| `getExecutionWallDuration(): StatisticsDuration` | Local value; no daemon request. |
+| `getRunnableWait(): ?StatisticsDuration` | Local duration aggregate; null if measurement is unavailable. |
+| `getRunnableWaitCoverage(): StatisticsRunnableWaitCoverage` | Local value; no daemon request. |
+
+### StatisticsRunCounts
+
+Retained run totals and counters returned by StatisticsGroup::getRuns(). Every enum
+category has a counter, including zero.
+
+Final class. No public constructor. Behavior: [system and
+statistics](#system-and-statistics).
+
+| Signature | Behavior |
+| --- | --- |
+| `getTotal(): int` | Local value; no daemon request. |
+| `getStateCount(RunState $state): int` | Local value; no daemon request. |
+| `getTypeCount(JobType $type): int` | Local value; no daemon request. |
+| `getOriginCount(RunOrigin $origin): int` | Local value; no daemon request. |
+
+### StatisticsAttemptCounts
+
+Counts all retained attempts for the selected runs, including retries outside the
+selected planned-time window. Returned by StatisticsGroup::getAttempts().
+
+Final class. No public constructor. Behavior: [system and
+statistics](#system-and-statistics).
+
+| Signature | Behavior |
+| --- | --- |
+| `getTotal(): int` | Local value; no daemon request. |
+| `getStateCount(AttemptState $state): int` | Local value; no daemon request. |
+| `getOutcomeCount(AttemptOutcome $outcome): int` | Local value; no daemon request. |
+| `getRetries(): int` | Local value; no daemon request. |
+
+### StatisticsCaptureCounts
+
+Persisted truncation/loss event counts from StatisticsGroup::getCapture(). A missing
+output row proves neither event.
+
+Final class. No public constructor. Behavior: [system and
+statistics](#system-and-statistics).
+
+| Signature | Behavior |
+| --- | --- |
+| `getTruncatedAttempts(): int` | Local value; no daemon request. |
+| `getLostAttempts(): int` | Local value; no daemon request. |
+
+### StatisticsDuration
+
+Sample count and fractional milliseconds from a StatisticsGroup duration getter. No
+samples means zero samples and null average/maximum; a measured zero has a sample and
+0.0 values.
+
+Final class. No public constructor. Behavior: [system and
+statistics](#system-and-statistics).
+
+| Signature | Behavior |
+| --- | --- |
+| `getSamples(): int` | Local value; no daemon request. |
+| `getAverageMilliseconds(): ?float` | Local value; no daemon request. |
+| `getMaximumMilliseconds(): ?float` | Local value; no daemon request. |
+
+### StatisticsRunnableWaitCoverage
+
+Mutually exclusive Complete, Partial, Unmeasured, and Unfinished run counts, summing to
+the run total. Only Complete terminal runs supply runnable-wait duration samples.
+
+Final class. No public constructor. Behavior: [system and
+statistics](#system-and-statistics).
+
+| Signature | Behavior |
+| --- | --- |
+| `getComplete(): int` | Local value; no daemon request. |
+| `getPartial(): int` | Local value; no daemon request. |
+| `getUnmeasured(): int` | Local value; no daemon request. |
+| `getUnfinished(): int` | Local value; no daemon request. |
+
+### StatisticsMetadata
+
+Detached context from Page::getStatisticsMetadata(), available before first next() and
+for empty statistics pages. Its window bounds are resolved; the window stays fixed
+during continuation.
+
+Final class. No public constructor. Behavior: [system and
+statistics](#system-and-statistics).
+
+| Signature | Behavior |
+| --- | --- |
+| `getWindow(): TimeRange` | Local value; no daemon request. |
+| `getGroupBy(): StatisticsGroupBy` | Local value; no daemon request. |
+| `getMeasurement(): StatisticsMeasurement` | Local value; no daemon request. |
+
+### StatisticsMeasurement
+
+Provenance from StatisticsMetadata::getMeasurement(). Timing currently reports
+wall_clock_derived; runnable wait reports monotonic_observed or unavailable; capture
+reports persisted_output_flags. Future safe strings remain readable.
+
+Final class. No public constructor. Behavior: [system and
+statistics](#system-and-statistics).
+
+| Signature | Behavior |
+| --- | --- |
+| `getTiming(): string` | Local value; no daemon request. |
+| `getRunnableWait(): string` | Local value; no daemon request. |
+| `getCapture(): string` | Local value; no daemon request. |
+
+### Exception
+
+Base operational error; extends PHP \Exception and inherits its constructor,
+getMessage(), integer getCode(), getPrevious(), and trace methods. JobU string error
+metadata is separate from that integer code.
+
+Behavior: [exceptions](#exceptions).
+
+| Signature | Behavior |
+| --- | --- |
+| `getErrorCode(): ?string` | Local stable daemon error string, or null when unavailable. |
+| `getCategory(): ?string` | Local stable daemon category, or null when unavailable. |
+
+### ConnectionException
+
+Connection or handshake failure, including use of an explicitly closed or unusable
+Client.
+
+Inherits [Exception](#exception). Behavior: [exceptions](#exceptions).
+
+### TimeoutException
+
+The operation deadline expired. This does not cancel external work or prove rollback.
+
+Inherits [Exception](#exception). Behavior: [exceptions](#exceptions).
+
+### NotFoundException
+
+The requested resource is missing, purged, deleted where disallowed, or outside the
+receiving resource scope.
+
+Inherits [Exception](#exception). Behavior: [exceptions](#exceptions).
+
+### RevisionConflictException
+
+The accepted revision is stale. A failed save preserves local edits and the old
+revision.
+
+Inherits [Exception](#exception). Behavior: [exceptions](#exceptions).
+
+### InvalidCursorException
+
+A history/statistics continuation is expired, evicted, restarted away, or otherwise
+invalid. Enumeration is not restarted automatically.
+
+Inherits [Exception](#exception). Behavior: [exceptions](#exceptions).
+
+### UnsavedChangesException
+
+A guarded refresh or lifecycle action was attempted with pending edits. Save or discard
+first.
+
+Inherits [Exception](#exception). Behavior: [exceptions](#exceptions).
+
+### OutcomeUnknownException
+
+A mutation may have committed. Retains its operation and original idempotency key when
+available; use independent observations for reconciliation.
+
+Inherits [Exception](#exception). Behavior: [exceptions](#exceptions).
+
+| Signature | Behavior |
+| --- | --- |
+| `getOperation(): ?string` | Local stable operation name, or null for a user-created exception. |
+| `getIdempotencyKey(): ?string` | Local original key, or null when unavailable. Retain for reconciliation. |
+
+### UnsupportedFeatureException
+
+The daemon API version or capabilities do not support the requested operation.
+
+Inherits [Exception](#exception). Behavior: [exceptions](#exceptions).
+
+## Enum reference
+
+All enums below are string-backed and cannot be subclassed. Use `Case->name` for its PHP
+case name and `Case->value` for its backing string. Each supports `static cases():
+array` (a list of that enum's cases), `static from(int|string $value): static`, and
+`static tryFrom(int|string $value): ?static`. Use the documented strings for these
+string-backed enums. An unknown string makes `from()` throw ValueError and `tryFrom()`
+return null; PHP's normal strict/weak scalar rules apply. An unfinished attempt's
+outcome is null, not an additional enum case.
+
+```php
+$type = JobU\JobType::from('cli');
+echo $type->name, ': ', $type->value, "\n"; // Cli: cli
+$unknown = JobU\JobType::tryFrom('custom'); // null
+```
+
+### AttemptOutcome
+
+Terminal attempt outcome; unfinished attempts return null.
+
+| Case | Backing string |
+| --- | --- |
+| `Succeeded` | `succeeded` |
+| `Failed` | `failed` |
+| `Interrupted` | `interrupted` |
+| `Cancelled` | `cancelled` |
+
+### AttemptState
+
+Attempt lifecycle state; use AttemptOutcome for a completed attempt’s result.
+
+| Case | Backing string |
+| --- | --- |
+| `Pending` | `pending` |
+| `Running` | `running` |
+| `Completed` | `completed` |
+
+### JobState
+
+Job definition lifecycle state, including terminal one-shot definitions.
+
+| Case | Backing string |
+| --- | --- |
+| `Active` | `active` |
+| `Suspending` | `suspending` |
+| `Suspended` | `suspended` |
+| `Deleted` | `deleted` |
+| `Succeeded` | `succeeded` |
+| `Failed` | `failed` |
+| `Cancelled` | `cancelled` |
+
+### JobType
+
+Immutable runner family; Jobs cannot change type.
+
+| Case | Backing string |
+| --- | --- |
+| `Cli` | `cli` |
+| `Http` | `http` |
+
+### OutputChannel
+
+CLI uses Stdout/Stderr; HTTP uses Body/Headers.
+
+| Case | Backing string |
+| --- | --- |
+| `Stdout` | `stdout` |
+| `Stderr` | `stderr` |
+| `Body` | `body` |
+| `Headers` | `headers` |
+
+### OutputStatus
+
+Capture availability. Lost may still include retained bytes; Pending is not a live
+stream.
+
+| Case | Backing string |
+| --- | --- |
+| `Available` | `available` |
+| `Pending` | `pending` |
+| `NotCaptured` | `not_captured` |
+| `Lost` | `lost` |
+
+### QueueState
+
+Queue lifecycle state. Suspending can mean work is still draining.
+
+| Case | Backing string |
+| --- | --- |
+| `Active` | `active` |
+| `Suspending` | `suspending` |
+| `Suspended` | `suspended` |
+| `Deleted` | `deleted` |
+
+### RecoveryPolicy
+
+Daemon restart treatment of interrupted attempts.
+
+| Case | Backing string |
+| --- | --- |
+| `FailInterrupted` | `fail_interrupted` |
+| `RetryInterrupted` | `retry_interrupted` |
+
+### RetryMode
+
+Blocking holds queue capacity during a retry wait; Reschedule releases it.
+
+| Case | Backing string |
+| --- | --- |
+| `Blocking` | `blocking` |
+| `Reschedule` | `reschedule` |
+
+### RunCancellationDisposition
+
+Completed acknowledges completed cancellation; Requested may still leave the cached Run
+running.
+
+| Case | Backing string |
+| --- | --- |
+| `Completed` | `completed` |
+| `Requested` | `requested` |
+
+### RunOrigin
+
+Scheduled runs versus additional runs created with runNow().
+
+| Case | Backing string |
+| --- | --- |
+| `Scheduled` | `scheduled` |
+| `Manual` | `manual` |
+
+### RunState
+
+Execution lifecycle state; RetryWait is distinct from active execution.
+
+| Case | Backing string |
+| --- | --- |
+| `Scheduled` | `scheduled` |
+| `Running` | `running` |
+| `RetryWait` | `retry_wait` |
+| `Succeeded` | `succeeded` |
+| `Failed` | `failed` |
+| `Interrupted` | `interrupted` |
+| `Cancelled` | `cancelled` |
+
+### StatisticsGroupBy
+
+Selects statistics grouping and the resulting StatisticsGroup key type.
+
+| Case | Backing string |
+| --- | --- |
+| `None` | `none` |
+| `Queue` | `queue` |
+| `Job` | `job` |
+| `Type` | `type` |
+| `Origin` | `origin` |
+| `State` | `state` |

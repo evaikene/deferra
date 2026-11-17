@@ -24,7 +24,7 @@ The behavior suites remain separate from signature equality. The following map
 covers all public owners; method-by-method review must account for dynamic calls
 such as the typed getter/setter table in `attributes.php`, rather than searching
 only for literal method calls. The native operation map is in
-[`docs/php.md`](../../docs/php.md#control-api-coverage-audit).
+[extension development README](../../src/jobu-php/README.md#control-api-coverage-audit).
 
 | Public owner | Behavior assertions | Execution |
 | --- | --- | --- |
