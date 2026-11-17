@@ -27,6 +27,15 @@ namespace jobu_php_test {
 /// Links remain owned until fixture teardown, including from inside callbacks.
 class RecoveryProxy final {
 public:
+    enum class ReplyFault {
+        None,
+        TruncatedHeader,
+        TruncatedBody,
+        InvalidHeader,
+        InvalidJson,
+        CompleteThenEof,
+    };
+
     RecoveryProxy(std::string const& endpoint, std::string upstream)
         : _upstream(std::move(upstream))
     {
@@ -61,6 +70,13 @@ public:
     std::function<void(std::string const&, jb::core::JsonValue&)> transform_result;
     std::map<std::string, std::vector<jb::core::JsonValue>>       requests;
     std::vector<jb::core::JsonValue>                              dropped_results;
+    /// Consume one wire fault only after receiving the selected daemon reply.
+    /// Unlike result transforms, these bytes pass through the client's decoder.
+    std::string                                                   fault_method;
+    ReplyFault                                                    reply_fault{ReplyFault::None};
+    unsigned                                                      faults_injected{0};
+    /// Count timer completion even when the client has already closed its socket.
+    unsigned                                                      delayed_replies_retired{0};
 
     auto stop_accepting() -> void { _listener.close(); }
 
@@ -79,6 +95,7 @@ private:
             , _downstream(std::move(socket))
         {
             _reply_timer.timeout.connect(&_receiver, [this] {
+                ++_proxy.delayed_replies_retired;
                 if (_downstream->state() == jb::net::LocalSocketState::Connected) {
                     CHECK(_downstream->write(_delayed_frame) == _delayed_frame.size());
                 }
@@ -105,6 +122,38 @@ private:
         }
 
     private:
+        auto inject_reply_fault(std::string frame) -> void
+        {
+            auto const fault = std::exchange(_proxy.reply_fault, ReplyFault::None);
+            ++_proxy.faults_injected;
+            switch (fault) {
+                case ReplyFault::TruncatedHeader:
+                    frame = "Content-Length:";
+                    break;
+                case ReplyFault::TruncatedBody:
+                    frame.resize(frame.size() - 1);
+                    break;
+                case ReplyFault::InvalidHeader:
+                    frame = "Content-Length: PRIVATE-wire-marker\r\n\r\n";
+                    break;
+                case ReplyFault::InvalidJson: {
+                    auto malformed = jb::rpc::frame_message("{\"PRIVATE-wire-marker\":");
+                    REQUIRE(malformed);
+                    frame = std::move(malformed).value();
+                    break;
+                }
+                case ReplyFault::CompleteThenEof:
+                    break;
+                case ReplyFault::None:
+                    FAIL("A wire fault must be armed before injection");
+            }
+
+            // Drain the chosen bytes before closing: abort() could discard the
+            // prefix and accidentally reduce a decoder test to an ordinary EOF.
+            CHECK(_downstream->write(frame) == frame.size());
+            _downstream->disconnect_from_server();
+        }
+
         auto receive_request() -> void
         {
             auto frames = _requests.append(_downstream->read_all());
@@ -165,6 +214,10 @@ private:
                 REQUIRE(encoded);
                 auto frame = jb::rpc::frame_message(encoded.value());
                 REQUIRE(frame);
+                if (_proxy.reply_fault != ReplyFault::None && _method == _proxy.fault_method) {
+                    inject_reply_fault(std::move(frame).value());
+                    return;
+                }
                 auto delay = std::chrono::milliseconds{0};
                 if (_method == "attempt.get" || _method == "run.get") {
                     delay = _proxy.history_reply_delay;

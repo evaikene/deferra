@@ -12,6 +12,7 @@
 #include "query_binding.hpp"
 #include "queue-test.hpp"
 #include "recovery-proxy.hpp"
+#include "reliability-test.hpp"
 #include "request.hpp"
 #include "resource-bindings.hpp"
 #include "result_binding.hpp"
@@ -243,6 +244,35 @@ TEST_CASE("Production resource graphs are isolated across requests and module sh
         CHECK(descriptor_count() == descriptors);
     }
     daemon.stop(*previous);
+}
+
+TEST_CASE("Faulted production sessions remain isolated through request shutdown", "[php][recovery][reliability]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    auto*                        previous = &host.value()->loop();
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(*previous, directory.path());
+    auto const descriptors = descriptor_count();
+    {
+        Runtime    runtime;
+        auto const runtime_descriptors = descriptor_count();
+        for (int request = 0; request != 3; ++request) {
+            INFO(request);
+            jobu_php_test::test_reliability((directory.path() / "daemon.sock").string(),
+                                            (directory.path() / "reliability.sock").string());
+            runtime.restart(previous);
+            CHECK(descriptor_count() == runtime_descriptors);
+        }
+    }
+    CHECK(jb::php::current_request() == nullptr);
+    CHECK(EventLoop::current() == previous);
+    CHECK(descriptor_count() == descriptors);
+    daemon.stop(*previous);
+    for (auto const* marker : {"PRIVATE-secret-marker", "PRIVATE-wire-marker", "PRIVATE-backend-marker"}) {
+        CHECK(daemon.log().find(marker) == std::string::npos);
+    }
 }
 
 TEST_CASE("Request shutdown detaches late native wrappers and discards pending work", "[php][lifecycle]")

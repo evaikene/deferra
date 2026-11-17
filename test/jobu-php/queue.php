@@ -106,10 +106,14 @@ $peer = $c->getQueueById($id);
 $peer->setWeight(6); $peer->save();
 $revision = $q->getRevision();
 $q->setWeight(5);
+$cli->setTimeout(Duration::seconds(17));
 queueThrows(JobU\RevisionConflictException::class, fn() => $q->save());
 queueCheck($q->getWeight() === 5 && $q->getRevision() === $revision && $q->isDirty(), 'conflict preserves edits');
+queueCheck($q->defaults() === $root && $root->cli() === $cli && $root->http() === $http
+    && $cli->getTimeout() == Duration::seconds(17), 'conflict preserves attached defaults');
 $q->discardChanges(); $q->refresh();
-queueCheck($q->getWeight() === 6 && $q->defaults() === $root, 'refresh adopts');
+queueCheck($q->getWeight() === 6 && $q->defaults() === $root && $root->cli() === $cli
+    && $root->http() === $http && !$cli->has('job.timeout'), 'refresh adopts in place');
 
 // Coercion may edit another field; the outer setter must preserve that change.
 $name = new class($q) {

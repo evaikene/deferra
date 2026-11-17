@@ -66,6 +66,41 @@ shutdown. The existing fixture-only lifecycle and per-feature cases remain.
 Separate CLI processes and reused Embed requests do not establish real FPM
 coverage or arbitrary Zend bailout recovery.
 
+## Reliability and safety regressions
+
+The required bridge/recovery check also selects the `[reliability]` case in
+`lifecycle-test.cpp`. Its scenarios live in `reliability-test.cpp` and reuse the
+real daemon and `recovery-proxy.hpp`. One-shot faults drain a truncated header,
+truncated body, malformed header, malformed JSON, or complete success frame
+before EOF. Unlike transformed JSON results, these faults exercise the client's
+wire decoder. Tests distinguish retryable incomplete EOF from surfaced decoder
+errors, check frozen keyed-create replay, and verify unsafe updates transmit
+once even when the daemon committed. Peer reads establish persisted effects.
+
+Queue/job tests retain attached defaults/views, attributes and payloads through
+conflict and uncertain-save errors. They verify edits and old revisions survive,
+discard restores the previous snapshot, and explicit refresh reconciles in place.
+Output and Page cases combine reconnect handshakes with subsequent reads under
+one total deadline. A delayed Page reply is drained after timeout to verify that
+it cannot publish new items or revive the unusable client; explicit close also
+prevents further requests.
+
+Synthetic secret markers are checked against direct PHP 8.2+ exception traces,
+native debug output, metadata, and captured daemon diagnostics after transport
+and decoder failures. A separate injected remote error tests backend-message
+redaction, not reachability of that error in the stock daemon. Application
+wrappers may retain their own arguments; PHP 8.1's accepted lack of
+SensitiveParameter redaction remains outside this tested matrix.
+
+The fault scenarios repeat across three Embed requests, including failed
+construction, GC release, independent clients and live faulted resources at
+request shutdown. Linux descriptor checks use the initialized-runtime baseline
+and then the original host baseline after module shutdown. The existing PHP 8.5
+ZTS helper-only lifecycle test supplies concurrent thread/request and pending
+exception isolation; no Zend references cross threads or requests. JobU remains
+NTS-only. Focused sanitizer validation records instrumentation boundaries rather
+than treating installed PHP or imported SDK archives as instrumented.
+
 Without Embed, CLI, restart and Reflection checks still run; the Embed checks
 explicitly skip. Without a matching daemon, daemon-dependent checks explicitly
 skip. CI promises both dependencies and rejects either situation. Alpine root

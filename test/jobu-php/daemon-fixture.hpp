@@ -80,6 +80,9 @@ public:
         CHECK(_exit->exit_code == 0);
     }
 
+    /// Captured daemon stderr, complete after stop() has reaped the process.
+    auto log() const -> std::string const& { return _log; }
+
 private:
     std::string                          _log;
     std::optional<jb::core::ProcessExit> _exit;
