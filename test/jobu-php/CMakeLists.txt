@@ -18,11 +18,12 @@ foreach(scenario reflection exceptions client values attributes cli-payload http
     add_test(NAME jobu-php-${scenario}-test COMMAND "${php_binary}" -n
         "-dextension=$<TARGET_FILE:jobu-php>" "${CMAKE_CURRENT_SOURCE_DIR}/${scenario}.php")
 endforeach()
-add_test(NAME jobu-php-restart-test COMMAND ${CMAKE_COMMAND}
+add_test(NAME jobu-php-reflection-contract-test COMMAND ${CMAKE_COMMAND}
     "-Dphp_binary=${php_binary}" "-Dmodule=$<TARGET_FILE:jobu-php>"
-    -P "${CMAKE_CURRENT_SOURCE_DIR}/restart-test.cmake")
+    "-Dstub=${jobu_php_source}/jobu.stub.php" "-Doutput_dir=${CMAKE_CURRENT_BINARY_DIR}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/reflection-contract-test.cmake")
 set_tests_properties(jobu-php-module-test jobu-php-reflection-test
-    jobu-php-exceptions-test jobu-php-client-test jobu-php-values-test jobu-php-attributes-test jobu-php-cli-payload-test jobu-php-http-payload-test jobu-php-queries-test jobu-php-restart-test PROPERTIES
+    jobu-php-exceptions-test jobu-php-client-test jobu-php-values-test jobu-php-attributes-test jobu-php-cli-payload-test jobu-php-http-payload-test jobu-php-queries-test jobu-php-reflection-contract-test PROPERTIES
     TIMEOUT 30 FAIL_REGULAR_EXPRESSION "Warning:;Fatal error:;memory leaks detected")
 
 # The test executable embeds the real module hooks plus fixture-only classes.
@@ -34,6 +35,42 @@ if(TARGET jobud)
     set(jobu_php_test_daemon "$<TARGET_FILE:jobud>")
 elseif(JOBU_PHP_TEST_DAEMON AND EXISTS "${JOBU_PHP_TEST_DAEMON}")
     set(jobu_php_test_daemon "${JOBU_PHP_TEST_DAEMON}")
+endif()
+
+# Production CLI integration must remain available without Embed. Both drivers
+# reuse the same native daemon fixture and selected PHP ABI, but only the Embed
+# driver links Zend or registers fixture-only PHP classes.
+if(jobu_php_test_daemon)
+    find_package(Catch2 CONFIG REQUIRED)
+    if(TARGET JobU::jobu-client)
+        set(jobu_php_test_client JobU::jobu-client)
+    else()
+        set(jobu_php_test_client jobu-client)
+    endif()
+    add_executable(jobu-php-cli-test cli-test.cpp "${CMAKE_CURRENT_LIST_DIR}/../support/temporary_directory.cpp")
+    target_link_libraries(jobu-php-cli-test PRIVATE ${jobu_php_test_client} Catch2::Catch2WithMain)
+    target_include_directories(jobu-php-cli-test PRIVATE "${CMAKE_CURRENT_LIST_DIR}/..")
+    target_compile_definitions(jobu-php-cli-test PRIVATE
+        JOBUD_EXECUTABLE="${jobu_php_test_daemon}"
+        JOBU_PHP_BINARY="${php_binary}"
+        JOBU_PHP_MODULE="$<TARGET_FILE:jobu-php>"
+        JOBU_PHP_SCENARIOS="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_dependencies(jobu-php-cli-test jobu-php)
+    if(TARGET jobud)
+        add_dependencies(jobu-php-cli-test jobud)
+    endif()
+    add_test(NAME jobu-php-cli-test COMMAND jobu-php-cli-test "[production-cli]")
+    add_test(NAME jobu-php-restart-test COMMAND ${CMAKE_COMMAND}
+        "-Ddriver=$<TARGET_FILE:jobu-php-cli-test>"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/restart-test.cmake")
+    set_tests_properties(jobu-php-cli-test jobu-php-restart-test PROPERTIES TIMEOUT 120
+        FAIL_REGULAR_EXPRESSION "memory leaks detected;Warning:;Fatal error:")
+else()
+    foreach(scenario cli restart)
+        add_test(NAME jobu-php-${scenario}-test COMMAND ${CMAKE_COMMAND} -E echo
+            "SKIP: PHP CLI integration requires JOBU_PHP_TEST_DAEMON (or the jobud target)")
+        set_tests_properties(jobu-php-${scenario}-test PROPERTIES SKIP_REGULAR_EXPRESSION "SKIP: PHP CLI")
+    endforeach()
 endif()
 
 if(php_embed_found AND jobu_php_test_daemon)
@@ -50,6 +87,7 @@ if(php_embed_found AND jobu_php_test_daemon)
         Catch2::Catch2WithMain "${php_embed_library}")
     target_include_directories(jobu-php-lifecycle-test PRIVATE "${jobu_php_source}" "${CMAKE_CURRENT_LIST_DIR}/..")
     target_compile_definitions(jobu-php-lifecycle-test PRIVATE
+        JOBU_PHP_CONNECTED_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/connected-lifecycle.php"
         JOBU_PHP_VERSION="${PROJECT_VERSION}"
         JOBUD_EXECUTABLE="${jobu_php_test_daemon}"
         JOBU_PHP_BINARY="${php_binary}"
@@ -91,7 +129,7 @@ else()
 endif()
 
 if(TARGET jobu-php-lifecycle-test)
-    add_test(NAME jobu-php-list-test COMMAND jobu-php-lifecycle-test "[list],[list-cli]")
+    add_test(NAME jobu-php-list-test COMMAND jobu-php-lifecycle-test "[list]")
     set_tests_properties(jobu-php-list-test PROPERTIES TIMEOUT 120 FAIL_REGULAR_EXPRESSION "memory leaks detected;Warning:;Fatal error:")
 else()
     add_test(NAME jobu-php-list-test COMMAND ${CMAKE_COMMAND} -E echo
@@ -100,7 +138,7 @@ else()
 endif()
 
 if(TARGET jobu-php-lifecycle-test)
-    add_test(NAME jobu-php-history-test COMMAND jobu-php-lifecycle-test "[history],[history-cli]")
+    add_test(NAME jobu-php-history-test COMMAND jobu-php-lifecycle-test "[history]")
     set_tests_properties(jobu-php-history-test PROPERTIES TIMEOUT 120 FAIL_REGULAR_EXPRESSION "memory leaks detected;Warning:;Fatal error:")
 else()
     add_test(NAME jobu-php-history-test COMMAND ${CMAKE_COMMAND} -E echo
@@ -109,7 +147,7 @@ else()
 endif()
 
 if(TARGET jobu-php-lifecycle-test)
-    add_test(NAME jobu-php-output-test COMMAND jobu-php-lifecycle-test "[output],[output-cli]")
+    add_test(NAME jobu-php-output-test COMMAND jobu-php-lifecycle-test "[output]")
     set_tests_properties(jobu-php-output-test PROPERTIES TIMEOUT 120 FAIL_REGULAR_EXPRESSION "memory leaks detected;Warning:;Fatal error:")
 else()
     add_test(NAME jobu-php-output-test COMMAND ${CMAKE_COMMAND} -E echo
@@ -118,7 +156,7 @@ else()
 endif()
 
 if(TARGET jobu-php-lifecycle-test)
-    add_test(NAME jobu-php-secrets-schedules-test COMMAND jobu-php-lifecycle-test "[secrets-schedules],[secrets-schedules-cli]")
+    add_test(NAME jobu-php-secrets-schedules-test COMMAND jobu-php-lifecycle-test "[secrets-schedules]")
     set_tests_properties(jobu-php-secrets-schedules-test PROPERTIES TIMEOUT 120 FAIL_REGULAR_EXPRESSION "memory leaks detected;Warning:;Fatal error:")
 else()
     add_test(NAME jobu-php-secrets-schedules-test COMMAND ${CMAKE_COMMAND} -E echo
@@ -127,7 +165,7 @@ else()
 endif()
 
 if(TARGET jobu-php-lifecycle-test)
-    add_test(NAME jobu-php-statistics-test COMMAND jobu-php-lifecycle-test "[statistics],[statistics-cli]")
+    add_test(NAME jobu-php-statistics-test COMMAND jobu-php-lifecycle-test "[statistics]")
     set_tests_properties(jobu-php-statistics-test PROPERTIES TIMEOUT 120 FAIL_REGULAR_EXPRESSION "memory leaks detected;Warning:;Fatal error:")
 else()
     add_test(NAME jobu-php-statistics-test COMMAND ${CMAKE_COMMAND} -E echo

@@ -1,6 +1,7 @@
 #include "attribute_binding.hpp"
 #include "cli_payload_binding.hpp"
 #include "client.hpp"
+#include "daemon-fixture.hpp"
 #include "history-test.hpp"
 #include "http_payload_binding.hpp"
 #include "lifecycle-bindings.hpp"
@@ -49,12 +50,10 @@
 #include <fmt/format.h>
 
 #include <chrono> // IWYU pragma: keep duration literals
-#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -71,6 +70,7 @@ namespace {
 using namespace std::chrono_literals;
 using jb::core::Clock;
 using jb::core::EventLoop;
+using jobu_php_test::Daemon;
 
 // Embed replaces additional_functions. As in the helper lifecycle fixture,
 // register through SAPI startup and reconstruct Zend's mutable module entry
@@ -147,67 +147,6 @@ auto evaluate(std::string_view expression) -> bool
     return status == SUCCESS && !exception && owner.view().is_true();
 }
 
-// The daemon lives on a dormant host loop while PHP attaches each request loop.
-// Its Process owner reaps the child even if a test assertion interrupts the case.
-class Daemon {
-public:
-    auto
-    start(EventLoop& loop, std::filesystem::path const& directory, bool execute_cli = false, bool cron_default = false)
-        -> void
-    {
-        _process.standard_error.connect(&_receiver, [this](jb::core::ByteBuffer const& bytes) {
-            _log.append(jb::core::as_string_view(bytes));
-        });
-        _process.finished.connect(&_receiver, [this](jb::core::ProcessExit const& value) { _exit = value; });
-        std::vector<std::string> arguments{"--no-config",
-                                           "--database",
-                                           (directory / "daemon.sqlite").string(),
-                                           "--socket",
-                                           (directory / "daemon.sock").string()};
-        if (cron_default) {
-            auto          config = directory / "cron.conf";
-            std::ofstream stream(config);
-            stream << "schedule.default_timezone = Europe/Tallinn\n";
-            stream.close();
-            arguments.erase(arguments.begin());
-            arguments.emplace_back("--config");
-            arguments.push_back(config.string());
-        }
-        if (::geteuid() == 0) {
-            arguments.emplace_back("--allow-root-daemon");
-            if (execute_cli) {
-                // Root daemon startup does not authorize child execution. Only
-                // explicitly opted-in, disposable test environments may do both.
-                auto const* enabled = std::getenv("JOBU_TEST_ALLOW_ROOT_CLI");
-                INFO("Root CLI execution requires JOBU_TEST_ALLOW_ROOT_CLI=1 in an isolated test environment");
-                REQUIRE((enabled && std::string_view{enabled} == "1"));
-                arguments.emplace_back("--allow-root-cli");
-            }
-        }
-        REQUIRE(_process.start({.executable = JOBUD_EXECUTABLE, .arguments = std::move(arguments)}));
-        REQUIRE(loop.run_until(Clock::now() + 8s,
-                               [this] { return _exit || _log.find("jobud.ready") != std::string::npos; }));
-        INFO(_log);
-        REQUIRE_FALSE(_exit);
-    }
-
-    auto stop(EventLoop& loop) -> void
-    {
-        REQUIRE(_process.process_id());
-        REQUIRE(::kill(static_cast<pid_t>(*_process.process_id()), SIGTERM) == 0);
-        REQUIRE(loop.run_until(Clock::now() + 8s, [this] { return _exit.has_value(); }));
-        INFO(_log);
-        CHECK(_exit->kind == jb::core::ProcessExitKind::Exited);
-        CHECK(_exit->exit_code == 0);
-    }
-
-private:
-    std::string                          _log;
-    std::optional<jb::core::ProcessExit> _exit;
-    jb::core::Object                     _receiver;
-    jb::core::Process                    _process;
-};
-
 // Linux exposes descriptor accounting without reaching into socket internals.
 // Other platforms still exercise native lifetime and thread-binding assertions.
 auto descriptor_count() -> std::size_t
@@ -259,6 +198,48 @@ TEST_CASE("PHP module isolates repeated requests and independent connected sessi
         CHECK(jb::php::current_request() == nullptr);
         CHECK(EventLoop::current() == previous);
         CHECK(jobu_php_test::live_clients() == 0);
+        CHECK(descriptor_count() == descriptors);
+    }
+    daemon.stop(*previous);
+}
+
+TEST_CASE("Production resource graphs are isolated across requests and module shutdown", "[php][lifecycle][connected]")
+{
+    auto host = jb::core::ScopedEventLoop::create();
+    REQUIRE(host);
+    auto*                        previous = &host.value()->loop();
+    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
+    Daemon                       daemon;
+    daemon.start(*previous, directory.path(), /*execute_cli=*/true);
+    auto const descriptors = descriptor_count();
+
+    // Exercise module startup/shutdown as well as multiple RINIT/RSHUTDOWN pairs.
+    // No Zend reference or class entry from an old runtime is retained by C++.
+    for (int module = 0; module != 3; ++module) {
+        {
+            Runtime    runtime;
+            // PHP may own process resources such as an OPcache lock until
+            // module shutdown. Requests must return to the initialized runtime
+            // baseline; complete runtimes must return to the host baseline.
+            auto const runtime_descriptors = descriptor_count();
+            for (int request = 0; request != 3; ++request) {
+                INFO(module);
+                INFO(request);
+                REQUIRE(jb::php::current_request());
+                CHECK(jb::php::current_request()->loop() == nullptr);
+                auto endpoint = (directory.path() / "daemon.sock").string();
+                zend_register_string_constant("JOBU_TEST_SOCKET",
+                                              sizeof("JOBU_TEST_SOCKET") - 1,
+                                              endpoint.c_str(),
+                                              CONST_CS,
+                                              0);
+                REQUIRE(evaluate("(function () { return include '" JOBU_PHP_CONNECTED_SCRIPT "'; })()"));
+                runtime.restart(previous);
+                CHECK(descriptor_count() == runtime_descriptors);
+            }
+        }
+        CHECK(jb::php::current_request() == nullptr);
+        CHECK(EventLoop::current() == previous);
         CHECK(descriptor_count() == descriptors);
     }
     daemon.stop(*previous);
@@ -392,37 +373,6 @@ TEST_CASE("Production constructor translates terminal and timed-out handshakes",
                         expected);
         REQUIRE(evaluate(expression));
     }
-}
-
-TEST_CASE("Production CLI module connects to the same-build daemon", "[php][bridge]")
-{
-    auto host = jb::core::ScopedEventLoop::create();
-    REQUIRE(host);
-    auto&                        loop = host.value()->loop();
-    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
-    Daemon                       daemon;
-    daemon.start(loop, directory.path());
-
-    jb::core::Process                    process;
-    jb::core::Object                     receiver;
-    std::optional<jb::core::ProcessExit> exit;
-    std::string                          errors;
-    process.standard_error.connect(&receiver, [&](jb::core::ByteBuffer const& bytes) {
-        errors.append(jb::core::as_string_view(bytes));
-    });
-    process.finished.connect(&receiver, [&](jb::core::ProcessExit const& value) { exit = value; });
-    REQUIRE(process.start({
-        .executable = JOBU_PHP_BINARY,
-        .arguments  = {"-n",
-                       "-dextension=" JOBU_PHP_MODULE,
-                       JOBU_PHP_CLIENT_SCRIPT, (directory.path() / "daemon.sock").string()}
-    }));
-    REQUIRE(loop.run_until(Clock::now() + 10s, [&] { return exit.has_value(); }));
-    INFO(errors);
-    CHECK(errors.empty());
-    CHECK(exit->kind == jb::core::ProcessExitKind::Exited);
-    CHECK(exit->exit_code == 0);
-    daemon.stop(loop);
 }
 
 TEST_CASE("Production native Client safely outlives request shutdown", "[php][lifecycle]")
@@ -1786,37 +1736,6 @@ TEST_CASE("Public definition lists preserve filters, resources and ownership", "
     daemon.stop(*previous);
 }
 
-TEST_CASE("Production CLI module lists typed definitions", "[php][list-cli]")
-{
-    auto host = jb::core::ScopedEventLoop::create();
-    REQUIRE(host);
-    auto&                        loop = host.value()->loop();
-    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
-    Daemon                       daemon;
-    daemon.start(loop, directory.path());
-
-    jb::core::Process                    process;
-    jb::core::Object                     receiver;
-    std::optional<jb::core::ProcessExit> exit;
-    std::string                          errors;
-    process.standard_error.connect(&receiver, [&](jb::core::ByteBuffer const& bytes) {
-        errors.append(jb::core::as_string_view(bytes));
-    });
-    process.finished.connect(&receiver, [&](jb::core::ProcessExit const& value) { exit = value; });
-    REQUIRE(process.start({
-        .executable = JOBU_PHP_BINARY,
-        .arguments  = {"-n",
-                       "-dextension=" JOBU_PHP_MODULE,
-                       JOBU_PHP_LIST_SCRIPT, (directory.path() / "daemon.sock").string()}
-    }));
-    REQUIRE(loop.run_until(Clock::now() + 10s, [&] { return exit.has_value(); }));
-    INFO(errors);
-    CHECK(errors.empty());
-    CHECK(exit->kind == jb::core::ProcessExitKind::Exited);
-    CHECK(exit->exit_code == 0);
-    daemon.stop(loop);
-}
-
 TEST_CASE("Public history preserves snapshots, typed results and ownership", "[php][history]")
 {
     auto host = jb::core::ScopedEventLoop::create();
@@ -1834,37 +1753,6 @@ TEST_CASE("Public history preserves snapshots, typed results and ownership", "[p
         }
     }
     daemon.stop(*previous);
-}
-
-TEST_CASE("Production CLI module reads typed history", "[php][history-cli]")
-{
-    auto host = jb::core::ScopedEventLoop::create();
-    REQUIRE(host);
-    auto&                        loop = host.value()->loop();
-    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
-    Daemon                       daemon;
-    daemon.start(loop, directory.path(), /*execute_cli=*/true);
-
-    jb::core::Process                    process;
-    jb::core::Object                     receiver;
-    std::optional<jb::core::ProcessExit> exit;
-    std::string                          errors;
-    process.standard_error.connect(&receiver, [&](jb::core::ByteBuffer const& bytes) {
-        errors.append(jb::core::as_string_view(bytes));
-    });
-    process.finished.connect(&receiver, [&](jb::core::ProcessExit const& value) { exit = value; });
-    REQUIRE(process.start({
-        .executable = JOBU_PHP_BINARY,
-        .arguments  = {"-n",
-                       "-dextension=" JOBU_PHP_MODULE,
-                       JOBU_PHP_HISTORY_SCRIPT, (directory.path() / "daemon.sock").string()}
-    }));
-    REQUIRE(loop.run_until(Clock::now() + 10s, [&] { return exit.has_value(); }));
-    INFO(errors);
-    CHECK(errors.empty());
-    CHECK(exit->kind == jb::core::ProcessExitKind::Exited);
-    CHECK(exit->exit_code == 0);
-    daemon.stop(loop);
 }
 
 TEST_CASE("Public output preserves bytes, capture evidence and total deadlines", "[php][output]")
@@ -1886,37 +1774,6 @@ TEST_CASE("Public output preserves bytes, capture evidence and total deadlines",
     daemon.stop(*previous);
 }
 
-TEST_CASE("Production CLI module reads retained output", "[php][output-cli]")
-{
-    auto host = jb::core::ScopedEventLoop::create();
-    REQUIRE(host);
-    auto&                        loop = host.value()->loop();
-    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
-    Daemon                       daemon;
-    daemon.start(loop, directory.path(), /*execute_cli=*/true);
-
-    jb::core::Process                    process;
-    jb::core::Object                     receiver;
-    std::optional<jb::core::ProcessExit> exit;
-    std::string                          errors;
-    process.standard_error.connect(&receiver, [&](jb::core::ByteBuffer const& bytes) {
-        errors.append(jb::core::as_string_view(bytes));
-    });
-    process.finished.connect(&receiver, [&](jb::core::ProcessExit const& value) { exit = value; });
-    REQUIRE(process.start({
-        .executable = JOBU_PHP_BINARY,
-        .arguments  = {"-n",
-                       "-dextension=" JOBU_PHP_MODULE,
-                       JOBU_PHP_OUTPUT_SCRIPT, (directory.path() / "daemon.sock").string()}
-    }));
-    REQUIRE(loop.run_until(Clock::now() + 10s, [&] { return exit.has_value(); }));
-    INFO(errors);
-    CHECK(errors.empty());
-    CHECK(exit->kind == jb::core::ProcessExitKind::Exited);
-    CHECK(exit->exit_code == 0);
-    daemon.stop(loop);
-}
-
 TEST_CASE("Public secrets and schedules preserve administration contracts", "[php][secrets-schedules]")
 {
     auto host = jb::core::ScopedEventLoop::create();
@@ -1936,37 +1793,6 @@ TEST_CASE("Public secrets and schedules preserve administration contracts", "[ph
     daemon.stop(*previous);
 }
 
-TEST_CASE("Production CLI module manages secrets and previews schedules", "[php][secrets-schedules-cli]")
-{
-    auto host = jb::core::ScopedEventLoop::create();
-    REQUIRE(host);
-    auto&                        loop = host.value()->loop();
-    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
-    Daemon                       daemon;
-    daemon.start(loop, directory.path(), /*execute_cli=*/false, /*cron_default=*/true);
-
-    jb::core::Process                    process;
-    jb::core::Object                     receiver;
-    std::optional<jb::core::ProcessExit> exit;
-    std::string                          errors;
-    process.standard_error.connect(&receiver, [&](jb::core::ByteBuffer const& bytes) {
-        errors.append(jb::core::as_string_view(bytes));
-    });
-    process.finished.connect(&receiver, [&](jb::core::ProcessExit const& value) { exit = value; });
-    REQUIRE(process.start({
-        .executable = JOBU_PHP_BINARY,
-        .arguments  = {"-n",
-                       "-dextension=" JOBU_PHP_MODULE,
-                       JOBU_PHP_ADMIN_SCRIPT, (directory.path() / "daemon.sock").string()}
-    }));
-    REQUIRE(loop.run_until(Clock::now() + 10s, [&] { return exit.has_value(); }));
-    INFO(errors);
-    CHECK(errors.empty());
-    CHECK(exit->kind == jb::core::ProcessExitKind::Exited);
-    CHECK(exit->exit_code == 0);
-    daemon.stop(loop);
-}
-
 TEST_CASE("Public statistics preserve metadata, scoped pages and recovery", "[php][statistics]")
 {
     auto host = jb::core::ScopedEventLoop::create();
@@ -1984,37 +1810,6 @@ TEST_CASE("Public statistics preserve metadata, scoped pages and recovery", "[ph
         }
     }
     daemon.stop(*previous);
-}
-
-TEST_CASE("Production CLI module reads typed statistics", "[php][statistics-cli]")
-{
-    auto host = jb::core::ScopedEventLoop::create();
-    REQUIRE(host);
-    auto&                        loop = host.value()->loop();
-    jb::test::TemporaryDirectory directory{std::filesystem::perms::owner_all};
-    Daemon                       daemon;
-    daemon.start(loop, directory.path(), /*execute_cli=*/false, /*cron_default=*/true);
-
-    jb::core::Process                    process;
-    jb::core::Object                     receiver;
-    std::optional<jb::core::ProcessExit> exit;
-    std::string                          errors;
-    process.standard_error.connect(&receiver, [&](jb::core::ByteBuffer const& bytes) {
-        errors.append(jb::core::as_string_view(bytes));
-    });
-    process.finished.connect(&receiver, [&](jb::core::ProcessExit const& value) { exit = value; });
-    REQUIRE(process.start({
-        .executable = JOBU_PHP_BINARY,
-        .arguments  = {"-n",
-                       "-dextension=" JOBU_PHP_MODULE,
-                       JOBU_PHP_STATISTICS_SCRIPT, (directory.path() / "daemon.sock").string()}
-    }));
-    REQUIRE(loop.run_until(Clock::now() + 10s, [&] { return exit.has_value(); }));
-    INFO(errors);
-    CHECK(errors.empty());
-    CHECK(exit->kind == jb::core::ProcessExitKind::Exited);
-    CHECK(exit->exit_code == 0);
-    daemon.stop(loop);
 }
 
 TEST_CASE("Statistics cursors remain invalid after daemon restart", "[php][statistics]")
