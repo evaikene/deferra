@@ -36,12 +36,24 @@ $j->save();
 queueCheck($j->getName() === null && $j->getPriority() === 10 && !$j->isDirty(), 'saved scalar fields');
 queueCheck($j->attributes() === $a && $j->payload() === $payload, 'save child identity');
 $stale = $q->getJob($j->getId());
+$staleAttributes = $stale->attributes(); $stalePayload = $stale->payload();
+$staleRevision = $stale->getRevision();
+$oldAttributes = $stale->getAttributes(); $oldPayload = $stale->getPayload();
 $j->setPriority(11); $j->save();
 $stale->setName('stale');
+$staleAttributes->setTimeout(JobU\Duration::seconds(29));
+$stalePayload->addArgument('conflicting-argument');
 queueThrows(JobU\RevisionConflictException::class, fn() => $stale->save());
-queueCheck($stale->isDirty() && $stale->getName() === 'stale', 'conflict preserves edits');
-$stale->discardChanges(); $stale->refresh();
-queueCheck($stale->getPriority() === 11, 'explicit refresh');
+queueCheck($stale->isDirty() && $stale->getName() === 'stale' && $stale->getRevision() === $staleRevision
+    && $stale->attributes() === $staleAttributes && $stale->payload() === $stalePayload
+    && $staleAttributes->getTimeout() == JobU\Duration::seconds(29)
+    && $stalePayload->getArguments() === ['conflicting-argument'], 'conflict preserves attached edits');
+$stale->discardChanges();
+queueCheck($stale->getAttributes() == $oldAttributes && $stale->getPayload() == $oldPayload
+    && $stale->getRevision() === $staleRevision, 'discard restores conflict baseline');
+$stale->refresh();
+queueCheck($stale->getPriority() === 11 && $stale->attributes() === $staleAttributes
+    && $stale->payload() === $stalePayload, 'explicit refresh preserves attachments');
 queueThrows(ValueError::class, fn() => $j->setSchedule(JobU\OnceSchedule::now()));
 queueThrows(ValueError::class, fn() => $j->setPriority(2147483648));
 $j->setSchedule(new JobU\CronSchedule('* * * * *'));

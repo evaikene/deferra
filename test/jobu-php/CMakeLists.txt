@@ -75,7 +75,7 @@ endif()
 
 if(php_embed_found AND jobu_php_test_daemon)
     find_package(Catch2 CONFIG REQUIRED)
-    add_executable(jobu-php-lifecycle-test lifecycle-test.cpp lifecycle-bindings.cpp bridge-test.cpp resource-bindings.cpp resource-state-test.cpp queue-test.cpp page-bindings.cpp page-test.cpp list-test.cpp history-test.cpp output-test.cpp secrets-schedules-test.cpp statistics-test.cpp
+    add_executable(jobu-php-lifecycle-test lifecycle-test.cpp lifecycle-bindings.cpp bridge-test.cpp reliability-test.cpp resource-bindings.cpp resource-state-test.cpp queue-test.cpp page-bindings.cpp page-test.cpp list-test.cpp history-test.cpp output-test.cpp secrets-schedules-test.cpp statistics-test.cpp
         "${jobu_php_source}/module.cpp" "${jobu_php_source}/request.cpp"
         "${jobu_php_source}/value_binding.cpp" "${jobu_php_source}/attribute_binding.cpp" "${jobu_php_source}/cli_payload_binding.cpp" "${jobu_php_source}/http_payload_binding.cpp"
         "${jobu_php_source}/query_binding.cpp" "${jobu_php_source}/result_binding.cpp" "${jobu_php_source}/value_snapshot.cpp" "${jobu_php_source}/resource_state.cpp" "${jobu_php_source}/queue_binding.cpp" "${jobu_php_source}/job_binding.cpp" "${jobu_php_source}/run_binding.cpp" "${jobu_php_source}/attempt_binding.cpp" "${jobu_php_source}/history_binding.cpp" "${jobu_php_source}/output_binding.cpp" "${jobu_php_source}/page_state.cpp" "${jobu_php_source}/page_binding.cpp" "${jobu_php_source}/list_binding.cpp" "${jobu_php_source}/secret_binding.cpp" "${jobu_php_source}/schedule_binding.cpp" "${jobu_php_source}/statistics_binding.cpp"

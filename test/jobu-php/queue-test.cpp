@@ -170,11 +170,19 @@ auto test_queues(std::string const& endpoint, std::string const& proxy_endpoint)
     before            = proxy.requests["queue.update"].size();
     run(R"PHP(
         $q = $GLOBALS['queueResource']; $revision = $q->getRevision();
+        $root = $q->defaults(); $cli = $root->cli(); $http = $root->http();
+        $baseline = $q->getDefaults();
         $q->setWeight(8); $q->defaults()->cli()->setTimeout(JobU\Duration::seconds(5));
         queueThrows(JobU\OutcomeUnknownException::class, fn() => $q->save());
         queueCheck($q->isDirty() && $q->getRevision() === $revision && $q->getWeight() === 8, 'uncertain save');
-        $q->discardChanges(); $q->refresh();
+        queueCheck($q->defaults() === $root && $root->cli() === $cli && $root->http() === $http
+            && $cli->getTimeout() == JobU\Duration::seconds(5), 'uncertain defaults identity and edits');
+        $q->discardChanges();
+        queueCheck($q->getDefaults() == $baseline && $q->getRevision() === $revision, 'discard retains old baseline');
+        $q->refresh();
         queueCheck($q->getWeight() === 8 && !$q->isDirty(), 'explicit reconciliation');
+        queueCheck($q->defaults() === $root && $root->cli() === $cli && $root->http() === $http
+            && $cli->getTimeout() == JobU\Duration::seconds(5), 'reconciled defaults identity');
         return true;
     )PHP");
     CHECK(proxy.requests["queue.update"].size() == before + 1);
@@ -294,18 +302,30 @@ auto test_queues(std::string const& endpoint, std::string const& proxy_endpoint)
     before            = proxy.requests["job.update"].size();
     run(R"PHP(
         $j = $GLOBALS['faultJob']; $revision = $j->getRevision();
+        $attributes = $j->attributes(); $payload = $j->payload();
+        $baselineAttributes = $j->getAttributes(); $baselinePayload = $j->getPayload();
         $j->setPriority(7); $j->attributes()->setTimeout(JobU\Duration::seconds(19));
+        $payload->addArgument('uncertain-argument');
         queueThrows(JobU\OutcomeUnknownException::class, fn() => $j->save());
         queueCheck($j->isDirty() && $j->getRevision() === $revision, 'uncertain job preserves baseline');
-        $j->discardChanges(); $j->refresh();
+        queueCheck($j->attributes() === $attributes && $j->payload() === $payload
+            && $attributes->getTimeout() == JobU\Duration::seconds(19)
+            && $payload->getArguments() === ['uncertain-argument'], 'uncertain job keeps attached edits');
+        $j->discardChanges();
+        queueCheck($j->getAttributes() == $baselineAttributes && $j->getPayload() == $baselinePayload
+            && $j->getRevision() === $revision, 'job discard restores old baseline');
+        $j->refresh();
         queueCheck($j->getPriority() === 7, 'job explicit reconciliation');
+        queueCheck($j->attributes() === $attributes && $j->payload() === $payload
+            && $payload->getArguments() === ['uncertain-argument']
+            && $attributes->getTimeout() == JobU\Duration::seconds(19), 'job reconciliation preserves attachments');
         return true;
     )PHP");
     CHECK(proxy.requests["job.update"].size() == before + 1);
     auto const& patch = proxy.requests["job.update"][before].as_object();
     CHECK(patch.contains("priority"));
     CHECK(patch.contains("attributes"));
-    CHECK_FALSE(patch.contains("payload"));
+    CHECK(patch.contains("payload"));
     CHECK_FALSE(patch.contains("schedule"));
     CHECK_FALSE(patch.contains("type"));
     CHECK(patch.at("attributes").as_object().size() == 1);

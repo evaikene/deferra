@@ -233,6 +233,40 @@ auto deadline_checks(RecoveryProxy& proxy) -> void
         proxy.output_reply_delay = std::chrono::milliseconds(0);
     }
 }
+
+auto reconnect_deadline_checks(RecoveryProxy& proxy) -> void
+{
+    for (auto const* target : {"run", "attempt"}) {
+        run(R"PHP(
+            $c = new JobU\Client(OUTPUT_SOCKET);
+            $p = $c->listRuns(new JobU\RunQuery(jobId: $GLOBALS['outputRun']->getJobId(), states: [JobU\RunState::Succeeded]));
+            $p->next();
+            $r = $p->items()[0]->load();
+            $GLOBALS['combinedClient'] = $c;
+            $GLOBALS['combinedRun'] = $r;
+            $GLOBALS['combinedAttempt'] = $r->getAttempt(1);
+            return true;
+        )PHP");
+        proxy.disconnect();
+        proxy.handshake_reply_delay = std::chrono::milliseconds(180);
+        proxy.output_reply_delay    = std::chrono::milliseconds(180);
+        auto reads                  = proxy.requests["attempt.output"].size();
+        auto lists                  = proxy.requests["attempt.list"].size();
+        run("outputThrows(JobU\\TimeoutException::class, fn() => $GLOBALS['" +
+            std::string(target == std::string_view("run") ? "combinedRun" : "combinedAttempt") +
+            "']->getOutput(timeout: JobU\\Duration::milliseconds(300))); return true;");
+        // Reconnect consumes enough budget that only the first output step may
+        // be sent. A fresh budget per read would incorrectly complete this call.
+        CHECK(proxy.requests["attempt.list"].size() == lists + (target == std::string_view("run") ? 1 : 0));
+        CHECK(proxy.requests["attempt.output"].size() == reads + (target == std::string_view("run") ? 0 : 1));
+        proxy.handshake_reply_delay = std::chrono::milliseconds(0);
+        proxy.output_reply_delay    = std::chrono::milliseconds(0);
+        run(R"PHP(
+            outputThrows(JobU\ConnectionException::class, fn() => $GLOBALS['combinedClient']->getSystemInfo());
+            return true;
+        )PHP");
+    }
+}
 } // namespace
 
 auto test_output(std::string const& endpoint, std::string const& proxy_endpoint) -> void
@@ -251,5 +285,6 @@ auto test_output(std::string const& endpoint, std::string const& proxy_endpoint)
     capture_checks(proxy);
     failure_checks(proxy);
     deadline_checks(proxy);
+    reconnect_deadline_checks(proxy);
 }
 } // namespace jobu_php_test
