@@ -1,4 +1,7 @@
 add_subdirectory(core)
+if(JB_BUILD_TUI)
+    add_subdirectory(tui)
+endif()
 add_subdirectory(net)
 add_subdirectory(db)
 add_subdirectory(rpc)
