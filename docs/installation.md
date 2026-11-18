@@ -306,6 +306,7 @@ use in another shared library. No PHP bindings or stable binary ABI are promised
 | Package component | Imported targets | Additional requirements |
 | --- | --- | --- |
 | Core (default when omitted) | `JobU::core` | fmt |
+| Tui | `JobU::tui` | Core and `JB_BUILD_TUI=ON` in the producer |
 | Net | `JobU::net` | Core |
 | Db | `JobU::db` | Core |
 | Rpc | `JobU::rpc` | Core |
@@ -347,6 +348,73 @@ from its new prefix. Absolute GNUInstallDirs destinations outside that prefix
 are not relocatable. SDK relocation does not rewrite compiled daemon/client
 operational defaults. See [the client guide](cpp-client.md) to build the installed
 example and supply its endpoint explicitly.
+
+### TUI SDK
+
+The experimental `jb::tui` library provides a headless C++20 widget tree with
+geometry, visibility, and typed notifications. The `JB_BUILD_TUI` CMake option
+defaults to `OFF`. These commands build the library and stage the SDK in a
+private prefix.
+
+```sh
+cmake -S . -B .bld-tui -G Ninja -DCMAKE_BUILD_TYPE=Debug -DJB_BUILD_TUI=ON
+cmake --build .bld-tui
+cmake --install .bld-tui --component Development --prefix "$PWD/.bld-tui/sdk"
+```
+
+A separate consumer can find the staged SDK through `CMAKE_PREFIX_PATH` and
+link `JobU::tui`.
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(tui_example LANGUAGES CXX)
+find_package(JobU CONFIG REQUIRED COMPONENTS Tui)
+add_executable(tui_example main.cpp)
+target_link_libraries(tui_example PRIVATE JobU::tui)
+```
+
+```cpp
+#include <jb/tui/application.hpp>
+#include <jb/tui/geometry.hpp>
+#include <jb/tui/widget.hpp>
+
+int main()
+{
+    jb::tui::Application app{0, nullptr};
+    jb::tui::Widget root;
+    root.set_geometry({.x = 2, .y = 1, .width = 30, .height = 10});
+
+    auto* child = new jb::tui::Widget{&root};
+    child->set_geometry({.x = 3, .y = 2, .width = 8, .height = 1});
+    if (!child->show() || !root.show()) {
+        return 1;
+    }
+
+    auto const expected = jb::tui::Rect{.x = 5, .y = 3, .width = 8, .height = 1};
+    return app.main_widget() == &root && child->is_visible_to_root() && child->screen_rect() == expected ? 0 : 1;
+}
+```
+
+- **Ownership.** Construct the application before its widgets and use them on
+  its thread. A parent owns its heap-allocated children. Use `set_parent()` to
+  move a widget between parents or detach it. The application borrows its main
+  widget. Showing an ordinary root registers it and fails if another root is
+  registered. Call `hide()` to change visibility and `set_main_widget(nullptr)`
+  to release registration.
+- **Geometry.** `<jb/tui/geometry.hpp>` defines signed terminal-cell `Point`,
+  `Size`, `Rect`, and `Margins` values. `geometry()` is parent-relative and
+  `rect()` starts at the widget's local origin. `screen_rect()` adds ancestor
+  offsets and saturates the final coordinates at `int` limits. Widget geometry
+  changes emit `geometry_changed` before dispatching Move and Resize events in
+  that order for the components that changed.
+- **Visibility.** Widgets start hidden. `visible()` reports the local flag and
+  `is_visible_to_root()` checks the entire ancestor chain. `visible_changed`
+  reports local changes. Show events reach parents before descendants and Hide
+  events reach descendants before parents when effective visibility changes.
+- **Events.** Include `<jb/tui/events.hpp>` to access the notification types
+  from the protected widget handlers. These events are synchronous. Keep the
+  widget alive through geometry callbacks and use `delete_later()` to request
+  destruction from a callback.
 
 ## Operational paths
 

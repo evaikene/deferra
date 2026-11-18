@@ -14,6 +14,14 @@ if(TARGET jobu-php)
     add_subdirectory(jobu-php)
 endif()
 if(TARGET tui)
+    add_executable(tui-application-test tui-application-test.cpp)
+    target_link_libraries(tui-application-test PRIVATE tui Catch2::Catch2WithMain)
+    add_test(NAME tui-application-test COMMAND tui-application-test)
+
+    add_executable(tui-events-test tui-events-test.cpp)
+    target_link_libraries(tui-events-test PRIVATE tui Catch2::Catch2WithMain)
+    add_test(NAME tui-events-test COMMAND tui-events-test)
+
     add_executable(tui-geometry-test tui-geometry-test.cpp)
     target_link_libraries(tui-geometry-test PRIVATE tui Catch2::Catch2WithMain)
     add_test(NAME tui-geometry-test COMMAND tui-geometry-test)
@@ -21,6 +29,10 @@ if(TARGET tui)
     add_executable(tui-smoke-test sdk-consumer/tui.cpp)
     target_link_libraries(tui-smoke-test PRIVATE JobU::tui)
     add_test(NAME tui-smoke-test COMMAND tui-smoke-test)
+
+    add_executable(tui-widget-test tui-widget-test.cpp)
+    target_link_libraries(tui-widget-test PRIVATE tui Catch2::Catch2WithMain)
+    add_test(NAME tui-widget-test COMMAND tui-widget-test)
 endif()
 
 # Installation is checked in a fresh private prefix. No deployment identities or

@@ -2,9 +2,14 @@
 
 #include "application.hpp"
 #include "event_thread.hpp"
+#include "logging.hpp"
 #include "support/fake_event_loop_backend.hpp"
+#include "support/operational_log_capture.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+
+#include <memory>
+#include <vector>
 
 using namespace jb::core;
 
@@ -23,6 +28,16 @@ public:
     }
 
     ~Testable() override { --object_counter; }
+};
+
+class TeardownObject : public Object {
+public:
+
+    using Object::Object;
+
+    ~TeardownObject() override { emit(tearing_down); }
+
+    Signal<> tearing_down;
 };
 
 } // anonymous namespace
@@ -353,4 +368,95 @@ TEST_CASE("Object delete_later can be retried after wakeup failure", "[core][obj
     CHECK_NOTHROW(object->delete_later());
     CHECK(fake.loop->process_events(EventFlag::Tasks) == ProcessEventsResult::Stopped);
     CHECK(object_counter == 0);
+}
+
+TEST_CASE("Object rejects ownership cycles through an owner in teardown", "[core][object]")
+{
+    jb::test::OperationalLogGuard logs;
+    logs.capture->set_level(LogLevel::Fatal);
+
+    Object root;
+    auto*  branch = new Object{&root};
+    auto*  child  = new Object{branch};
+    CHECK_FALSE(root.set_parent(&root));
+    CHECK_FALSE(root.set_parent(child));
+
+    branch->destroyed.connect(child, [&root, branch, child]() -> void {
+        CHECK(child->parent() == branch);
+        CHECK_FALSE(root.set_parent(child));
+        CHECK(root.parent() == nullptr);
+        CHECK(root.children() == std::vector<Object*>{branch});
+        CHECK(branch->children() == std::vector<Object*>{child});
+    });
+    delete branch;
+
+    CHECK(root.children().empty());
+    CHECK(logs.capture->records().size() == 3);
+}
+
+TEST_CASE("Object can release a child during its destroyed signal", "[core][object]")
+{
+    jb::test::OperationalLogGuard logs;
+    logs.capture->set_level(LogLevel::Fatal);
+
+    auto                    owner          = std::make_unique<Object>();
+    auto*                   original_owner = owner.get();
+    auto*                   child          = new Object{original_owner};
+    std::unique_ptr<Object> detached;
+
+    owner->destroyed.connect(child, [original_owner, child, &detached]() -> void {
+        CHECK(child->parent() == original_owner);
+        auto* candidate = new Object;
+        CHECK_FALSE(candidate->set_parent(original_owner));
+        CHECK(candidate->parent() == nullptr);
+        if (!candidate->parent()) {
+            delete candidate;
+        }
+
+        CHECK(child->set_parent(nullptr));
+        if (!child->parent()) {
+            detached.reset(child);
+        }
+    });
+    owner.reset();
+
+    REQUIRE(detached);
+    CHECK(detached->parent() == nullptr);
+    CHECK(logs.capture->records().size() == 1);
+}
+
+TEST_CASE("Object rejects transfers after recursive deletion is committed", "[core][object]")
+{
+    jb::test::OperationalLogGuard logs;
+    logs.capture->set_level(LogLevel::Fatal);
+
+    Object           destination;
+    std::vector<int> destroyed;
+    auto             owner          = std::make_unique<Object>();
+    auto*            original_owner = owner.get();
+    auto*            first          = new TeardownObject{original_owner};
+    auto*            later          = new Object{original_owner};
+    first->destroyed.connect([&destroyed]() -> void { destroyed.push_back(1); });
+    later->destroyed.connect([&destroyed]() -> void { destroyed.push_back(2); });
+
+    first->tearing_down.connect(later, [first, later, original_owner, &destination]() -> void {
+        // Core cleared the first link before its subclass destructor. The
+        // later sibling still points to the owner but is already claimed too.
+        CHECK(first->parent() == nullptr);
+        CHECK(later->parent() == original_owner);
+        CHECK(original_owner->children().empty());
+
+        CHECK_FALSE(first->set_parent(nullptr));
+        CHECK_FALSE(first->set_parent(&destination));
+        CHECK_FALSE(later->set_parent(nullptr));
+        CHECK_FALSE(later->set_parent(&destination));
+
+        CHECK(first->parent() == nullptr);
+        CHECK(later->parent() == original_owner);
+        CHECK(destination.children().empty());
+    });
+    owner.reset();
+
+    CHECK(destroyed == std::vector{1, 2});
+    CHECK(logs.capture->records().size() == 4);
 }

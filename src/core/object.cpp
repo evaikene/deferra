@@ -7,6 +7,7 @@
 #include "thread_context.hpp"
 
 #include <algorithm>
+#include <mutex>
 
 namespace jb::core {
 
@@ -35,9 +36,11 @@ void Object::init_common(Object* parent)
 
 Object::~Object()
 {
+    _d->deletion_committed = true;
+
     // --- 1. mark this object as dead
     {
-        std::lock_guard lock{_d->lifetime->event_loop_mx};
+        std::scoped_lock lock{_d->lifetime->event_loop_mx};
         _d->lifetime->alive.store(false, std::memory_order_release);
         _d->lifetime->event_loop = nullptr;
     }
@@ -45,7 +48,7 @@ Object::~Object()
     // --- 2. deactivate all connections where this Object is the receiver.
     //        This prevents slots from firing on a half-destroyed object.
     {
-        std::lock_guard<std::mutex> lock{_d->connections_mx};
+        std::scoped_lock lock{_d->connections_mx};
         for (auto& weak : _d->connections) {
             if (auto c = weak.lock()) {
                 c->deactivate();
@@ -61,6 +64,12 @@ Object::~Object()
     {
         std::vector<Object*> children;
         children.swap(_d->children);
+
+        // A child destructor can try to move a later sibling. Claim the entire
+        // list before any destructor runs, even for children still linked here.
+        for (auto* child : children) {
+            child->_d->deletion_committed = true;
+        }
 
         for (auto* child : children) {
             child->_d->parent = nullptr;
@@ -83,8 +92,8 @@ Object::~Object()
 
 void Object::delete_later()
 {
-    auto            lifetime = _d->lifetime;
-    std::lock_guard lock{lifetime->event_loop_mx};
+    auto             lifetime = _d->lifetime;
+    std::scoped_lock lock{lifetime->event_loop_mx};
     if (!lifetime->alive.load(std::memory_order_acquire)) {
         return;
     }
@@ -112,31 +121,55 @@ auto Object::parent() const -> Object*
 
 auto Object::set_parent(Object* parent) -> bool
 {
-    if (parent == _d->parent) {
-        return true; // no-op
-    }
-
-    // new parent must live in the same thread
-    if (parent && (thread_ctx() != parent->thread_ctx())) {
-        log_fatal("Object::set_parent: parent must live in the same thread");
+    // Core may already have cleared the parent link for recursive deletion.
+    if (_d->deletion_committed) {
+        log_fatal("Object::set_parent: this object is committed to deletion");
         return false;
     }
 
-    // unlink from current parent
-    if (_d->parent) {
-        auto& siblings = _d->parent->_d->children;
-        auto  it       = std::ranges::find(siblings, this);
-        if (it != siblings.end()) {
-            siblings.erase(it);
+    auto* old_parent = _d->parent;
+    if (parent == old_parent) {
+        return true;
+    }
+
+    if (parent) {
+        if (thread_ctx() != parent->thread_ctx()) {
+            log_fatal("Object::set_parent: parent must live in the same thread");
+            return false;
+        }
+        if (parent->_d->deletion_committed) {
+            log_fatal("Object::set_parent: new parent is committed to deletion");
+            return false;
+        }
+
+        for (auto* ancestor = parent; ancestor; ancestor = ancestor->_d->parent) {
+            if (ancestor == this) {
+                log_fatal("Object::set_parent: parent must be outside this object's subtree");
+                return false;
+            }
         }
     }
 
+    auto old_position = std::vector<Object*>::iterator{};
+    if (old_parent) {
+        auto& siblings = old_parent->_d->children;
+        old_position   = std::ranges::find(siblings, this);
+        if (old_position == siblings.end()) {
+            log_fatal("Object::set_parent: current parent does not list this child");
+            return false;
+        }
+    }
+
+    // Prepare the new owner's slot before releasing the old ownership.
+    if (parent) {
+        parent->_d->children.push_back(this);
+    }
+    if (old_parent) {
+        old_parent->_d->children.erase(old_position);
+    }
     _d->parent = parent;
 
     if (parent) {
-        parent->_d->children.push_back(this);
-
-        // inherit event loop from new parent
         move_to_event_loop(parent->event_loop());
     }
 
@@ -187,7 +220,7 @@ auto Object::d_ptr() const noexcept -> void*
 
 void Object::register_connection(std::shared_ptr<priv::ConnectionBase> const& conn)
 {
-    std::lock_guard<std::mutex> lock{_d->connections_mx};
+    std::scoped_lock lock{_d->connections_mx};
 
     // opportunistically sweep expired entries to keep the list compact
     auto const range = std::ranges::remove_if(_d->connections, [](auto const& w) -> bool { return w.expired(); });
@@ -217,7 +250,7 @@ auto Object::move_to_thread_impl(EventThread* event_thread) -> bool
     auto* event_loop = event_thread->as_event_loop();
     _d->event_loop   = event_loop;
     {
-        std::lock_guard lock{_d->lifetime->event_loop_mx};
+        std::scoped_lock lock{_d->lifetime->event_loop_mx};
         _d->lifetime->event_loop = event_loop;
     }
 
@@ -233,7 +266,7 @@ void Object::move_to_event_loop(EventLoop* new_loop)
 {
     _d->event_loop = new_loop;
     {
-        std::lock_guard lock{_d->lifetime->event_loop_mx};
+        std::scoped_lock lock{_d->lifetime->event_loop_mx};
         _d->lifetime->event_loop = new_loop;
     }
 

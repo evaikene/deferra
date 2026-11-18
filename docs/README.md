@@ -121,6 +121,7 @@ running daemon.
 | [Runnable PHP examples](../examples/jobu-php/README.md) | CLI/HTTP submission, cron, revision conflicts, pages, output, and reconnect |
 | [php-cxx module-author guide](php-cxx.md) | Writing PHP modules in C++ with the independent helper library |
 | [C++ control client](cpp-client.md) | Using the typed asynchronous client from a C++ application |
+| [C++ TUI SDK](installation.md#tui-sdk) | Building the experimental headless widget library and using its public API |
 
 JobU stores secret values as plaintext in its SQLite database. Protect the
 database and its copies, and review the [secret guide](secrets.md) before

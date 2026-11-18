@@ -44,6 +44,9 @@ struct ObjectPrivate {
     /// Direct children (insertion order)
     std::vector<Object*> children;
 
+    /// Set when destruction starts or a parent claims this object for recursive deletion.
+    bool deletion_committed = false;
+
     /// Event loop this object lives on with thread affinity
     EventLoop* event_loop = nullptr;
 
