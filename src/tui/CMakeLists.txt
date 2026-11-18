@@ -1,4 +1,4 @@
-add_library(tui STATIC tui.cpp)
+add_library(tui STATIC geometry.cpp)
 target_compile_features(tui PUBLIC cxx_std_20)
 target_link_libraries(tui PUBLIC core)
 
