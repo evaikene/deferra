@@ -13,6 +13,11 @@ endif()
 if(TARGET jobu-php)
     add_subdirectory(jobu-php)
 endif()
+if(TARGET tui)
+    add_executable(tui-smoke-test sdk-consumer/tui.cpp)
+    target_link_libraries(tui-smoke-test PRIVATE JobU::tui)
+    add_test(NAME tui-smoke-test COMMAND tui-smoke-test)
+endif()
 
 # Installation is checked in a fresh private prefix. No deployment identities or
 # service-manager access are required. The SDK gate uses independent consumers.

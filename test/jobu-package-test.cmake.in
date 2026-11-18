@@ -81,6 +81,7 @@ set(configure_arguments -S "${producer_source}" -B "${producer}" -G "@CMAKE_GENE
     "-DJB_JOBU_SYSTEMD_PROFILE=${systemd_profile}"
     -DBUILD_TESTING=OFF -DJB_BUILD_EXAMPLES=OFF -DJB_PACKAGE_REMAP_PATHS=ON
     "-DJB_BUILD_SQLITE_DRIVER=@JB_BUILD_SQLITE_DRIVER@"
+    "-DJB_BUILD_TUI=@JB_BUILD_TUI@"
     "-DCMAKE_INSTALL_BINDIR=${binary_directory}" "-DCMAKE_INSTALL_LIBDIR=${library_directory}"
     "-DCMAKE_INSTALL_INCLUDEDIR=${include_directory}" "-DCMAKE_INSTALL_DATADIR=${data_directory}"
     "-DCMAKE_INSTALL_DOCDIR=${documentation_directory}")

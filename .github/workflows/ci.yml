@@ -46,7 +46,7 @@ jobs:
             ccache-v2-ubuntu-26.04-
 
       - name: Configure
-        run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DJB_BUILD_TUI=ON
 
       - name: Build
         run: |
@@ -122,7 +122,7 @@ jobs:
             ccache-v2-alpine-3.24-
 
       - name: Configure
-        run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        run: cmake -S . -B .bld -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DJB_BUILD_TUI=ON
 
       - name: Build
         run: |

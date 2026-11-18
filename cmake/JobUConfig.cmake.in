@@ -6,8 +6,9 @@ set(_JobU_installed_components "@JOBU_SDK_COMPONENTS@")
 
 # This order is topological. Component selection controls dependency discovery;
 # loading Core must not even search for optional backends or producer-only JSON.
-set(_JobU_components Core Net Db Rpc Jobu Client SQLite HTTP CLI)
+set(_JobU_components Core Tui Net Db Rpc Jobu Client SQLite HTTP CLI)
 set(_JobU_dependencies_Core "")
+set(_JobU_dependencies_Tui Core)
 set(_JobU_dependencies_Net Core)
 set(_JobU_dependencies_Db Core)
 set(_JobU_dependencies_Rpc Core)
