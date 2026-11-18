@@ -86,16 +86,19 @@ public:
     /// @return Parent of this Object (can be nullptr if no parent)
     [[nodiscard]] auto parent() const -> Object*;
 
-    /// Re-parents this Object
-    /// @param[in] parent New parent
-    /// @return True if the parent was changed successfully; false otherwise
+    /// Reparents this Object.
+    /// @param[in] parent New owner on the same thread, or nullptr to detach
+    /// @return True on a successful change or a valid same-parent call
     ///
-    /// Removes this Object from the old parent's child list and appends it to
-    /// the new parent's. Pass nullptr to make this a root Object.
+    /// The new owner must be outside this object's subtree. A successful transfer
+    /// appends the object to the new owner's children and inherits its event loop.
     ///
-    /// If `parent` is not null, inherits the new parent's event loop.
+    /// A child can leave its owner during the owner's destroyed signal. Once
+    /// core claims the remaining children for recursive deletion, their ownership
+    /// is fixed. Destruction also closes an object to incoming transfers.
     ///
-    /// Note that `parent` must be created in the same thread as this Object.
+    /// Rejected transfers log a fatal error and return false if execution
+    /// continues, preserving parentage and event-loop affinity.
     auto set_parent(Object* parent) -> bool;
 
     /// Dispatches an event to this object.
